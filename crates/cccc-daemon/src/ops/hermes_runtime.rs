@@ -65,16 +65,18 @@ pub(super) fn ensure_for_actor(
         "--command".into(),
         command[0].clone(),
     ];
-    if command.len() > 1 {
-        argv.push("--args".into());
-        argv.extend(command[1..].iter().cloned());
-    }
+    // `hermes mcp add` requires --args to be the last option: everything
+    // after it is taken literally as the server command's argv.
     argv.push("--env".into());
     argv.extend([
         format!("CCCC_HOME={}", home.root().display()),
         "CCCC_GROUP_ID=${CCCC_GROUP_ID}".into(),
         "CCCC_ACTOR_ID=${CCCC_ACTOR_ID}".into(),
     ]);
+    if command.len() > 1 {
+        argv.push("--args".into());
+        argv.extend(command[1..].iter().cloned());
+    }
     let values = env
         .iter()
         .map(|(key, value)| (key.as_str(), value.clone()))
@@ -205,16 +207,16 @@ fn prepare(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         "--command".into(),
         command[0].clone(),
     ];
-    if command.len() > 1 {
-        argv.push("--args".into());
-        argv.extend(command[1..].iter().cloned());
-    }
     argv.push("--env".into());
     argv.extend([
         format!("CCCC_HOME={}", home.root().display()),
         "CCCC_GROUP_ID=g_probe".into(),
         "CCCC_ACTOR_ID=hermes-probe".into(),
     ]);
+    if command.len() > 1 {
+        argv.push("--args".into());
+        argv.extend(command[1..].iter().cloned());
+    }
     let cwd = string_arg(request, "cwd").map(PathBuf::from);
     let result = with_exclusive_lock(&home.daemon_dir().join("hermes-runtime-setup.lock"), || {
         run(
