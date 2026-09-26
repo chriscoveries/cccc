@@ -1,4 +1,5 @@
 use crate::RuntimeError;
+use crate::activity::{ActivitySnapshot, ActivityTracker};
 use crate::output::HistoryPage;
 use crate::output_reader::OutputReader;
 use crate::process_tree::OwnedProcessTree;
@@ -48,6 +49,7 @@ pub struct Session {
     attachments: AttachmentRegistry,
     history: SessionHistory,
     reader: Option<OutputReader>,
+    activity: ActivityTracker,
 }
 
 impl Session {
@@ -112,12 +114,14 @@ impl Session {
             spec.cols,
             spec.rows,
         )?;
+        let activity = ActivityTracker::default();
         let reader = OutputReader::start(
             format!("cccc-runtime:{}:{}", spec.group_id, spec.actor_id),
             reader,
             history.clone(),
             Arc::clone(&writer),
             Arc::clone(&input_gate),
+            activity.clone(),
         )?;
         Ok(Self {
             status: SessionStatus {
@@ -137,6 +141,7 @@ impl Session {
             attachments: AttachmentRegistry::default(),
             history,
             reader: Some(reader),
+            activity,
         })
     }
 
@@ -174,6 +179,14 @@ impl Session {
             return Err(RuntimeError::NotFound(status.group_id, status.actor_id));
         }
         Ok(Arc::clone(&self.writer))
+    }
+
+    pub(crate) fn activity_tracker(&self) -> ActivityTracker {
+        self.activity.clone()
+    }
+
+    pub fn activity(&self) -> ActivitySnapshot {
+        self.activity.snapshot()
     }
 
     pub(crate) fn input_gate(&self) -> Arc<Mutex<()>> {

@@ -123,20 +123,34 @@ fn actor_lifecycle_controls_terminal_process() {
         json!({"group_id":group_id,"actor_id":"peer1","by":"user"}),
     );
     assert_eq!(restarted.result["event"]["kind"], "actor.restart");
-    let working = call(
-        &home,
-        "actor_list",
-        json!({"group_id":group_id,"by":"user"}),
-    );
+    // The restarted process prints a short "Working" banner. PTY liveness is
+    // measured from output volume, not screen text, so a few dozen bytes with
+    // no delivery read as quiet once observed (unknown until then).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let working = loop {
+        let listed = call(
+            &home,
+            "actor_list",
+            json!({"group_id":group_id,"by":"user"}),
+        );
+        if listed.result["actors"][0]["effective_working_reason"] != "pty_running_state_unknown"
+            || std::time::Instant::now() >= deadline
+        {
+            break listed;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
     assert_eq!(working.result["actors"][0]["running"], true);
     assert_eq!(
         working.result["actors"][0]["effective_working_state"],
-        "waiting"
+        "idle"
     );
     assert_eq!(
         working.result["actors"][0]["effective_working_reason"],
-        "pty_running_state_unknown"
+        "pty_output_quiet"
     );
+    assert!(working.result["actors"][0]["idle_seconds"].is_u64());
+    assert!(working.result["actors"][0]["effective_working_updated_at"].is_string());
     let stopped = call(
         &home,
         "actor_stop",
