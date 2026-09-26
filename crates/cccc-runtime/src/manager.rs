@@ -83,6 +83,15 @@ pub fn status(group_id: &str, actor_id: &str) -> Result<SessionStatus, RuntimeEr
     with_session(group_id, actor_id, |session| Ok(session.status()))
 }
 
+/// Observed terminal activity of a live session. A restart creates a new
+/// session, so counters never carry over from a previous process.
+pub fn activity(
+    group_id: &str,
+    actor_id: &str,
+) -> Result<crate::activity::ActivitySnapshot, RuntimeError> {
+    with_session(group_id, actor_id, |session| Ok(session.activity()))
+}
+
 pub fn stop(group_id: &str, actor_id: &str) -> Result<SessionStatus, RuntimeError> {
     let key = (group_id.to_owned(), actor_id.to_owned());
     let session = sessions()
@@ -204,10 +213,10 @@ pub fn submit_sequence_interruptible(
         return Ok(false);
     }
     let session = lookup(group_id, actor_id)?;
-    let gate = session
-        .lock()
-        .map_err(|_| RuntimeError::Poisoned)?
-        .input_gate();
+    let (gate, activity) = {
+        let session = session.lock().map_err(|_| RuntimeError::Poisoned)?;
+        (session.input_gate(), session.activity_tracker())
+    };
     let Some(_guard) = lock_interruptibly(&gate, &|| cancelled.load(Ordering::Acquire))? else {
         return Ok(false);
     };
@@ -234,6 +243,9 @@ pub fn submit_sequence_interruptible(
             return Ok(false);
         }
     }
+    // Only completed deliveries count as input; raw writes, attached
+    // keystrokes and automatic terminal query replies do not.
+    activity.record_input();
     Ok(true)
 }
 
