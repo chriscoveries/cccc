@@ -1,3 +1,4 @@
+mod activity;
 mod cancellation;
 mod command;
 mod command_output;
@@ -37,6 +38,7 @@ mod transcript_archive;
 mod transcript_files;
 mod transcript_reader;
 
+pub use activity::{ACTIVITY_RETENTION, ActivityInstant, ActivitySnapshot};
 pub use command::{
     DEEPSEEK_ACP_APP_PACKAGE, DEEPSEEK_ACP_APP_VERSION, DEEPSEEK_ACP_PACKAGE,
     DEEPSEEK_ACP_SDK_VERSION, DEEPSEEK_ACP_VERSION, DEEPSEEK_LLM_ADAPTER_PACKAGE,
@@ -56,8 +58,8 @@ pub use history_access::{
     history_since, retained_history, retained_history_tail,
 };
 pub use manager::{
-    reap, resize, start, start_with_history, status, stop, stop_all, stop_if_started_at, submit,
-    submit_interruptible, submit_sequence_interruptible, wait_for_input_ready, write,
+    activity, reap, resize, start, start_with_history, status, stop, stop_all, stop_if_started_at,
+    submit, submit_interruptible, submit_sequence_interruptible, wait_for_input_ready, write,
 };
 pub use output::HistoryPage;
 pub use process_tree::{OwnedProcessTree, force_terminate_owned};
