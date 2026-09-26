@@ -10,7 +10,7 @@ mod grok;
 mod grok_tests;
 mod opencode;
 pub use claude::{
-    prepare_managed as prepare_claude_managed_session,
+    fail_managed as fail_claude_managed_session, prepare_managed as prepare_claude_managed_session,
     record_managed as record_claude_managed_session,
 };
 pub use grok::{
