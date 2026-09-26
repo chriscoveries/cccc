@@ -1,4 +1,5 @@
 use crate::RuntimeError;
+use crate::activity::ActivityTracker;
 use crate::pty_input::SharedPtyWriter;
 use crate::session_history::SessionHistory;
 use crate::terminal_response_writer::{TerminalResponseSender, TerminalResponseWriter};
@@ -23,13 +24,19 @@ impl OutputReader {
         history: SessionHistory,
         writer: SharedPtyWriter,
         input_gate: Arc<Mutex<()>>,
+        activity: ActivityTracker,
     ) -> std::io::Result<Self> {
         let (response_writer, response_sender) =
             TerminalResponseWriter::start(format!("{name}:responses"), writer, input_gate)?;
         let (finished_tx, finished) = mpsc::channel();
         let reader_response_sender = response_sender.clone();
         let handle = match std::thread::Builder::new().name(name).spawn(move || {
-            copy_output(reader.as_mut(), &history, &reader_response_sender);
+            copy_output(
+                reader.as_mut(),
+                &history,
+                &reader_response_sender,
+                &activity,
+            );
             reader_response_sender.close();
             let _ = history.seal_output();
             let _ = finished_tx.send(());
@@ -75,6 +82,7 @@ fn copy_output(
     reader: &mut dyn Read,
     history: &SessionHistory,
     response_sender: &TerminalResponseSender,
+    activity: &ActivityTracker,
 ) {
     let mut buffer = [0_u8; 8192];
     let mut history_error_reported = false;
@@ -82,6 +90,7 @@ fn copy_output(
         if count == 0 {
             break;
         }
+        activity.record_output(count);
         match history.push_with_terminal_responses(&buffer[..count]) {
             Ok(outcome) => {
                 response_sender.enqueue(outcome.terminal_responses);
@@ -188,6 +197,7 @@ mod tests {
             SessionHistory::new(None).expect("history"),
             shared_writer(&written, false),
             Arc::new(Mutex::new(())),
+            crate::activity::ActivityTracker::default(),
         )
         .expect("reader");
 
@@ -222,6 +232,7 @@ mod tests {
             history.clone(),
             shared_writer(&written, false),
             Arc::new(Mutex::new(())),
+            crate::activity::ActivityTracker::default(),
         )
         .expect("reader");
 
@@ -246,6 +257,7 @@ mod tests {
             history,
             shared_writer(&written, false),
             Arc::new(Mutex::new(())),
+            crate::activity::ActivityTracker::default(),
         )
         .expect("reader");
 
@@ -267,6 +279,7 @@ mod tests {
             history.clone(),
             shared_writer(&written, false),
             Arc::clone(&input_gate),
+            crate::activity::ActivityTracker::default(),
         )
         .expect("reader");
 
@@ -298,6 +311,7 @@ mod tests {
             history.clone(),
             shared_writer(&written, true),
             Arc::new(Mutex::new(())),
+            crate::activity::ActivityTracker::default(),
         )
         .expect("reader");
 
