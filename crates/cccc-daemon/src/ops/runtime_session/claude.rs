@@ -113,6 +113,36 @@ pub fn record_managed(
     write(home, group_id, actor_id, &document)
 }
 
+pub fn fail_managed(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    error: &str,
+) -> std::io::Result<()> {
+    if !resume_enabled() {
+        return Ok(());
+    }
+    let Ok(mut document) = read(home, group_id, actor_id) else {
+        return Ok(());
+    };
+    if string(&document, "kind") != "runtime_session"
+        || string(&document, "transport") != MANAGED_TRANSPORT
+    {
+        return Ok(());
+    }
+    let failure_count = document
+        .get("failure_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let truncated: String = error.chars().take(512).collect();
+    document.insert("status".into(), json!("resume_failed"));
+    document.insert("resume_eligible".into(), json!(false));
+    document.insert("last_resume_error".into(), json!(truncated));
+    document.insert("failure_count".into(), json!(failure_count + 1));
+    document.insert("updated_at".into(), json!(utc_now()));
+    write(home, group_id, actor_id, &document)
+}
+
 fn identity_fingerprint(
     command: &[String],
     environment: &BTreeMap<String, String>,
@@ -210,6 +240,90 @@ mod tests {
             )
             .expect("changed provider configuration")
             .is_none()
+        );
+    }
+
+    #[test]
+    fn fail_managed_poisons_receipt_and_blocks_resume() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("initialize");
+        let group = GroupStore::new(home.clone())
+            .expect("store")
+            .create("Claude resume failure", "")
+            .expect("group");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let command = vec!["claude".into(), "--model".into(), "sonnet".into()];
+        let environment = BTreeMap::new();
+        let session_id = "52b41c61-e23c-4b7c-8b60-809c347451b5";
+        record_managed(
+            &home,
+            &group.group_id,
+            "claude-1",
+            &workspace,
+            &command,
+            &environment,
+            session_id,
+            false,
+        )
+        .expect("record session");
+
+        fail_managed(
+            &home,
+            &group.group_id,
+            "claude-1",
+            "copied a requested session",
+        )
+        .expect("record failure");
+        let stored = read(&home, &group.group_id, "claude-1").expect("receipt");
+        assert_eq!(stored["status"], "resume_failed");
+        assert_eq!(stored["resume_eligible"], false);
+        assert_eq!(stored["failure_count"], 1);
+        assert_eq!(stored["last_resume_error"], "copied a requested session");
+        assert!(
+            prepare_managed(
+                &home,
+                &group.group_id,
+                "claude-1",
+                &workspace,
+                &command,
+                &environment,
+            )
+            .expect("poisoned prepare")
+            .is_none()
+        );
+
+        fail_managed(&home, &group.group_id, "claude-1", "again").expect("second failure");
+        let stored = read(&home, &group.group_id, "claude-1").expect("receipt");
+        assert_eq!(stored["failure_count"], 2);
+        assert_eq!(stored["last_resume_error"], "again");
+
+        // A fresh successful launch rewrites the receipt as usable.
+        let fresh_id = "8b1a9953-c461-44d4-97c5-9a2d21d11d6f";
+        record_managed(
+            &home,
+            &group.group_id,
+            "claude-1",
+            &workspace,
+            &command,
+            &environment,
+            fresh_id,
+            false,
+        )
+        .expect("record fresh session");
+        assert_eq!(
+            prepare_managed(
+                &home,
+                &group.group_id,
+                "claude-1",
+                &workspace,
+                &command,
+                &environment,
+            )
+            .expect("fresh prepare")
+            .as_deref(),
+            Some(fresh_id)
         );
     }
 

@@ -79,23 +79,58 @@ impl AnalystSession {
         } else {
             requested_session_id
         };
-        let prepared = claude::prepare(
-            home,
-            &command,
-            &environment,
-            &binding.root,
-            &settings_key,
-            purpose,
-            mcp_server,
-        )?;
-        let launched = claude::launch(
-            prepared,
-            &binding.root,
-            &generation,
-            purpose,
-            resume_session_id.as_deref(),
-        )
-        .await?;
+        let mut requested = resume_session_id;
+        let launched = loop {
+            let prepared = claude::prepare(
+                home,
+                &command,
+                &environment,
+                &binding.root,
+                &settings_key,
+                purpose,
+                mcp_server.clone(),
+            )?;
+            match claude::launch(
+                prepared,
+                &binding.root,
+                &generation,
+                purpose,
+                requested.as_deref(),
+            )
+            .await
+            {
+                Ok(launched) => break launched,
+                Err(error) => {
+                    // A failed managed resume must not leave the receipt
+                    // resume-eligible, or every restart retries the same
+                    // doomed session. Poison it and retry once fresh.
+                    if let Some((group_id, actor_id)) = actor
+                        && requested.is_some()
+                    {
+                        requested = None;
+                        if let Err(record_error) =
+                            super::super::runtime_session::fail_claude_managed_session(
+                                home,
+                                group_id,
+                                actor_id,
+                                &error.to_string(),
+                            )
+                        {
+                            tracing::warn!(
+                                %record_error, %group_id, %actor_id,
+                                "failed to invalidate Claude managed session"
+                            );
+                        }
+                        tracing::warn!(
+                            %error, %group_id, %actor_id,
+                            "Claude managed resume failed; retrying with a fresh session"
+                        );
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        };
         if let Some((group_id, actor_id)) = actor
             && let Err(error) = super::super::runtime_session::record_claude_managed_session(
                 home,
