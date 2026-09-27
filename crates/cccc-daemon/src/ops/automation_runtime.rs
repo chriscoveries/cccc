@@ -8,6 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::dispatch::dispatch;
 use crate::ops::{actor_delivery, actor_runtime, actor_runtime_status, group_runtime};
 
+/// The identity a scheduled rule signs its lifecycle calls with. Automation is not a person: it
+/// must not be able to clear an RS-3 park through the operator path, and its ledger events should
+/// say `system` rather than claim to be the user.
+const AUTOMATION_BY: &str = "system";
+
 pub fn prepare_exited() -> BTreeMap<String, Vec<cccc_runtime::SessionStatus>> {
     let exited = match actor_runtime::reap_exited() {
         Ok(exited) => exited,
@@ -158,7 +163,7 @@ fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
                     succeeded = call(
                         home,
                         "group_start",
-                        json!({"group_id":group_id,"by":"user"}),
+                        json!({"group_id":group_id,"by":AUTOMATION_BY}),
                     );
                 }
                 if cancelled.load(Ordering::Acquire) {
@@ -168,7 +173,7 @@ fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
                     succeeded = call(
                         home,
                         op,
-                        json!({"group_id":group_id,"state":state,"by":"user"}),
+                        json!({"group_id":group_id,"state":state,"by":AUTOMATION_BY,"rule_id":rule_id}),
                     );
                 }
                 if succeeded {
@@ -200,7 +205,7 @@ fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
                     succeeded |= call(
                         home,
                         op,
-                        json!({"group_id":group_id,"actor_id":actor_id,"by":"user"}),
+                        json!({"group_id":group_id,"actor_id":actor_id,"by":AUTOMATION_BY,"rule_id":rule_id}),
                     );
                 }
                 if succeeded {

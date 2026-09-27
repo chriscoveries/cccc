@@ -87,6 +87,22 @@ fn restore_group(home: &HomeLayout, store: &GroupStore, group_id: &str) -> Resul
             );
             continue;
         }
+        // RS-3: a daemon restart is not an operator. Restoring a parked Actor here would relaunch
+        // exactly what the park exists to stop, and would erase the reason the next `actor_list`
+        // shows. A Waiting Actor is deferred instead: the next delivery or rule wakes it once the
+        // delay has elapsed, and an operator start clears a park.
+        if let Some(refusal) =
+            crate::ops::actor_restart_backoff::refusal(home, &group.group_id, &actor.id)
+        {
+            tracing::info!(
+                group_id = %group.group_id,
+                actor_id = %actor.id,
+                code = refusal.code(),
+                message = %refusal.message(),
+                "skipped boot restore for a backing-off or parked Actor"
+            );
+            continue;
+        }
         match actor_runtime::apply(home, &group, &actor.id, "actor.restore") {
             Ok(status) => {
                 record_respawn(home, &group, actor, status.as_ref());
@@ -172,6 +188,10 @@ fn deepseek_restore_blocked(home: &HomeLayout, group: &cccc_core::GroupDoc, acto
 #[cfg(test)]
 mod tests {
     use super::{deepseek_restore_blocked, record_respawn, should_restore_actor};
+
+    fn running(group_id: &str, actor_id: &str) -> bool {
+        cccc_runtime::status(group_id, actor_id).is_ok_and(|status| status.running)
+    }
     use cccc_contracts::{Actor, ActorRuntime, GroupState, RunnerKind};
     use cccc_core::ledger;
     use cccc_core::{GroupStore, HomeLayout};
@@ -210,6 +230,108 @@ mod tests {
         assert_eq!(respawn.data["runtime"], json!("opencode"));
         assert_eq!(respawn.data["pid"], json!(4242));
         assert_eq!(respawn.data["started_at"], json!("2026-09-27T21:30:00Z"));
+    }
+
+    /// A daemon restart is not an operator. Restoring a parked Actor here would relaunch exactly
+    /// what the park exists to stop, and would clear the reason the next `actor_list` shows.
+    #[test]
+    fn a_parked_actor_is_not_restored_on_boot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("parked restore", "").expect("group");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        store
+            .mutate(&group.group_id, |doc| {
+                let mut actor = Actor::new("peer1");
+                actor.runner = RunnerKind::Pty;
+                actor.command = vec!["sh".into(), "-c".into(), "sleep 30".into()];
+                actor.default_scope_key = "fixture".into();
+                doc.actors.push(actor);
+                doc.active_scope_key = "fixture".into();
+                doc.scopes.push(cccc_core::group::Scope {
+                    scope_key: "fixture".into(),
+                    url: workspace.to_string_lossy().into_owned(),
+                    label: String::new(),
+                    git_remote: String::new(),
+                });
+                doc.running = true;
+                doc.state = GroupState::Active;
+                Ok(())
+            })
+            .expect("add actor");
+        for _ in 0..crate::ops::actor_restart_backoff::MAX_FAST_FAILURES {
+            crate::ops::actor_restart_backoff::record_fast_failure(
+                &home,
+                &group.group_id,
+                "peer1",
+                Some(1),
+                "boom",
+            )
+            .expect("fast failure");
+        }
+
+        super::restore_running(&home).expect("restore");
+
+        assert!(
+            !running(&group.group_id, "peer1"),
+            "boot restore must not relaunch a parked Actor"
+        );
+        assert!(
+            crate::ops::actor_restart_backoff::load(&home, &group.group_id, "peer1")
+                .expect("state")
+                .parked(),
+            "the park and its reason survive the daemon restart"
+        );
+    }
+
+    /// A Waiting Actor is deferred rather than parked: the next delivery or rule wakes it once the
+    /// delay has elapsed, so boot restore must not hold it either.
+    #[test]
+    fn an_actor_inside_the_backoff_window_is_deferred_on_boot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("deferred restore", "").expect("group");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        store
+            .mutate(&group.group_id, |doc| {
+                let mut actor = Actor::new("peer1");
+                actor.runner = RunnerKind::Pty;
+                actor.command = vec!["sh".into(), "-c".into(), "sleep 30".into()];
+                actor.default_scope_key = "fixture".into();
+                doc.actors.push(actor);
+                doc.active_scope_key = "fixture".into();
+                doc.scopes.push(cccc_core::group::Scope {
+                    scope_key: "fixture".into(),
+                    url: workspace.to_string_lossy().into_owned(),
+                    label: String::new(),
+                    git_remote: String::new(),
+                });
+                doc.running = true;
+                doc.state = GroupState::Active;
+                Ok(())
+            })
+            .expect("add actor");
+        for _ in 0..2 {
+            crate::ops::actor_restart_backoff::record_fast_failure(
+                &home,
+                &group.group_id,
+                "peer1",
+                Some(1),
+                "boom",
+            )
+            .expect("fast failure");
+        }
+
+        super::restore_running(&home).expect("restore");
+
+        assert!(
+            !running(&group.group_id, "peer1"),
+            "a deferred Actor waits for the delay instead of being launched early"
+        );
     }
 
     /// A headless restore has no session status, so it records the transition

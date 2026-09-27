@@ -185,24 +185,15 @@ fn process_managed_batch(
 /// is backing off or parked — that is exactly the hot loop the backoff exists to stop. A manual
 /// start goes through `actor_runtime::apply` and is never gated here; it clears the park instead.
 fn automation_may_launch(home: &cccc_core::HomeLayout, group_id: &str, actor_id: &str) -> bool {
-    use crate::ops::actor_restart_backoff::Gate;
-    match crate::ops::actor_restart_backoff::gate(home, group_id, actor_id) {
-        Gate::Allow => true,
-        Gate::Wait { delay, .. } => {
+    match crate::ops::actor_restart_backoff::refusal(home, group_id, actor_id) {
+        None => true,
+        Some(refusal) => {
             tracing::debug!(
                 %group_id,
                 %actor_id,
-                delay_ms = delay.as_millis() as u64,
-                "holding the automatic relaunch until the restart backoff elapses"
-            );
-            false
-        }
-        Gate::Parked { reason } => {
-            tracing::info!(
-                %group_id,
-                %actor_id,
-                %reason,
-                "not relaunching a parked Actor; a manual start clears the park"
+                code = refusal.code(),
+                message = %refusal.message(),
+                "holding the automatic relaunch"
             );
             false
         }

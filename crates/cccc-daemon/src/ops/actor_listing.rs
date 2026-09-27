@@ -45,6 +45,13 @@ pub(super) fn list(
                     &group.group_id,
                     &actor.id,
                 ));
+                // RS-3: parked plus the reason, so an operator or a watchdog can see why an Actor
+                // is not coming up on its own instead of clearing the park through the start path.
+                object.extend(super::actor_restart_backoff::actor_fields(
+                    home,
+                    &group.group_id,
+                    &actor.id,
+                ));
                 object.insert("running".into(), Value::Bool(status.running));
                 object.insert(
                     "pid".into(),

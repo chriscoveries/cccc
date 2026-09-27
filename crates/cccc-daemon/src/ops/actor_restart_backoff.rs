@@ -62,13 +62,8 @@ impl RestartState {
 pub(crate) enum Gate {
     Allow,
     /// Automatic restarts are held until `at_ms`; a manual start ignores this.
-    Wait {
-        at_ms: i64,
-        delay: Duration,
-    },
-    Parked {
-        reason: String,
-    },
+    Wait { at_ms: i64, delay: Duration },
+    Parked { reason: String },
 }
 
 #[must_use]
@@ -95,7 +90,9 @@ pub(crate) fn is_fast_failure(started_at: &str, now_ms: i64) -> bool {
     }
 }
 
-/// What automation may do with an actor that is not running.
+/// What automation may do with an actor that is not running. Tests read the gate through
+/// [`refusal`], which is the shape every caller uses.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn gate(home: &HomeLayout, group_id: &str, actor_id: &str) -> Gate {
     let state = load(home, group_id, actor_id).unwrap_or_default();
@@ -158,13 +155,12 @@ pub(crate) fn record_fast_failure(
 }
 
 /// The first completed turn proves the launch worked: clear the failure count and any park.
-pub(crate) fn record_first_turn(
-    home: &HomeLayout,
-    group_id: &str,
-    actor_id: &str,
-) -> io::Result<()> {
+pub(crate) fn record_first_turn(home: &HomeLayout, group_id: &str, actor_id: &str) -> io::Result<()> {
     let state = load(home, group_id, actor_id)?;
-    if state.consecutive_fast_failures == 0 && state.next_restart_at.is_none() && !state.parked() {
+    if state.consecutive_fast_failures == 0
+        && state.next_restart_at.is_none()
+        && !state.parked()
+    {
         return Ok(());
     }
     let cleared = RestartState::default();
@@ -257,12 +253,10 @@ fn to_document(state: &RestartState, pending_event: Option<&Value>) -> Map<Strin
         ("next_restart_at_ms".into(), json!(state.next_restart_at)),
         (
             "next_restart_at".into(),
-            json!(
-                state
-                    .next_restart_at
-                    .and_then(chrono::DateTime::from_timestamp_millis)
-                    .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-            ),
+            json!(state
+                .next_restart_at
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))),
         ),
         ("last_exit_code".into(), json!(state.last_exit_code)),
         ("last_exit_stderr".into(), json!(state.last_exit_stderr)),
@@ -323,11 +317,13 @@ fn clear_pending_event(path: &std::path::Path) -> io::Result<()> {
 }
 
 /// Replay a state write whose ledger append did not complete before the crash.
-fn recover_pending_event(home: &HomeLayout, group_id: &str, actor_id: &str, document: &Value) {
-    let Some(pending) = document
-        .get("pending_event")
-        .filter(|value| value.is_object())
-    else {
+fn recover_pending_event(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    document: &Value,
+) {
+    let Some(pending) = document.get("pending_event").filter(|value| value.is_object()) else {
         return;
     };
     let Ok(event) = serde_json::from_value::<Event>(pending.clone()) else {
@@ -408,6 +404,95 @@ fn state_path(home: &HomeLayout, group_id: &str, actor_id: &str) -> io::Result<P
         .join(format!("{actor_id}.json")))
 }
 
+/// Why an automatic launch is refused, if it is. Every automatic path — message delivery,
+/// scheduled rules, boot restore — asks this instead of re-deriving the rule, so RS-3 has one
+/// gate rather than one gate per door.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// The backoff has not elapsed yet; the launch is deferred, not cancelled.
+    Waiting {
+        delay: Duration,
+        next_restart_at: String,
+    },
+    /// Five consecutive fast failures: automation does not retry until an operator starts it.
+    Parked { reason: String },
+}
+
+impl Refusal {
+    #[must_use]
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Waiting { .. } => "actor_restart_backoff",
+            Self::Parked { .. } => "actor_parked",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Waiting {
+                delay,
+                next_restart_at,
+            } => format!(
+                "automatic restart held for {}ms by the restart backoff (next at {next_restart_at})",
+                delay.as_millis()
+            ),
+            Self::Parked { reason } => {
+                format!("actor is parked ({reason}); an explicit operator start clears it")
+            }
+        }
+    }
+}
+
+/// `None` when automation may launch. An operator start never calls this: it clears the epoch.
+#[must_use]
+pub(crate) fn refusal(home: &HomeLayout, group_id: &str, actor_id: &str) -> Option<Refusal> {
+    let state = load(home, group_id, actor_id).unwrap_or_default();
+    match gate_state(&state, now_ms()) {
+        Gate::Allow => None,
+        Gate::Wait { at_ms, delay } => Some(Refusal::Waiting {
+            delay,
+            next_restart_at: display_instant(at_ms),
+        }),
+        Gate::Parked { reason } => Some(Refusal::Parked { reason }),
+    }
+}
+
+/// The parked state for actor listings: RS.md requires `parked` plus the reason to be visible, and
+/// a watchdog that cannot see a park will clear it blindly through the operator path.
+#[must_use]
+pub(crate) fn actor_fields(home: &HomeLayout, group_id: &str, actor_id: &str) -> Map<String, Value> {
+    let state = load(home, group_id, actor_id).unwrap_or_default();
+    Map::from_iter([
+        ("parked".into(), Value::Bool(state.parked())),
+        (
+            "parked_reason".into(),
+            if state.parked_reason.is_empty() {
+                Value::Null
+            } else {
+                Value::String(state.parked_reason)
+            },
+        ),
+        (
+            "restart_next_at".into(),
+            state
+                .next_restart_at
+                .map(|ms| Value::String(display_instant(ms)))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "consecutive_fast_failures".into(),
+            Value::from(state.consecutive_fast_failures),
+        ),
+    ])
+}
+
+fn display_instant(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 fn safe_actor_id(actor_id: &str) -> bool {
     actor_id
         .bytes()
@@ -441,27 +526,20 @@ mod tests {
     #[test]
     fn the_first_failure_is_recorded_but_not_held_back() {
         assert_eq!(hold_delay(0), None);
-        assert_eq!(
-            hold_delay(1),
-            None,
-            "the ordinary crash-and-wake path is not delayed"
-        );
+        assert_eq!(hold_delay(1), None, "the ordinary crash-and-wake path is not delayed");
         assert_eq!(hold_delay(2), Some(Duration::from_secs(2)));
         assert_eq!(hold_delay(3), Some(Duration::from_secs(4)));
         assert_eq!(hold_delay(4), Some(Duration::from_secs(8)));
         assert_eq!(hold_delay(5), Some(Duration::from_secs(16)));
-        assert_eq!(
-            hold_delay(50),
-            Some(Duration::from_secs(30)),
-            "the cap holds"
-        );
+        assert_eq!(hold_delay(50), Some(Duration::from_secs(30)), "the cap holds");
     }
 
     #[test]
     fn fast_failures_delay_then_park_with_visible_reason() {
         let (_temp, home, group_id) = fixture();
-        let first = record_fast_failure(&home, &group_id, "peer1", Some(1), "provider exited")
-            .expect("record first failure");
+        let first =
+            record_fast_failure(&home, &group_id, "peer1", Some(1), "provider exited")
+                .expect("record first failure");
         assert_eq!(first.consecutive_fast_failures, 1);
         assert!(
             first.next_restart_at.is_none(),
@@ -473,21 +551,20 @@ mod tests {
             "a single failure leaves automation free to wake the actor"
         );
         for expected in 2..MAX_FAST_FAILURES {
-            let state = record_fast_failure(&home, &group_id, "peer1", Some(1), "provider exited")
-                .expect("record fast failure");
+            let state =
+                record_fast_failure(&home, &group_id, "peer1", Some(1), "provider exited")
+                    .expect("record fast failure");
             assert_eq!(state.consecutive_fast_failures, expected);
             assert!(!state.parked(), "not parked before the cap");
             assert!(state.next_restart_at.is_some_and(|at| at > now_ms()));
         }
-        let parked = record_fast_failure(&home, &group_id, "peer1", Some(1), "provider exited")
-            .expect("record parking failure");
+        let parked =
+            record_fast_failure(&home, &group_id, "peer1", Some(1), "provider exited")
+                .expect("record parking failure");
         assert_eq!(parked.consecutive_fast_failures, MAX_FAST_FAILURES);
         assert!(parked.parked());
         assert_eq!(parked.parked_reason, "consecutive_fast_failures=5");
-        assert_eq!(
-            parked.next_restart_at, None,
-            "a parked actor has no next restart"
-        );
+        assert_eq!(parked.next_restart_at, None, "a parked actor has no next restart");
 
         match gate(&home, &group_id, "peer1") {
             Gate::Parked { reason } => assert_eq!(reason, "consecutive_fast_failures=5"),
@@ -498,11 +575,7 @@ mod tests {
             .into_iter()
             .filter(|event| event.kind == "actor.parked")
             .collect::<Vec<_>>();
-        assert_eq!(
-            parked_events.len(),
-            1,
-            "one parking event, not one per attempt"
-        );
+        assert_eq!(parked_events.len(), 1, "one parking event, not one per attempt");
         assert_eq!(parked_events[0].by, "system");
         assert_eq!(parked_events[0].data["actor_id"], json!("peer1"));
         assert_eq!(parked_events[0].data["exit_code"], json!(1));
@@ -529,19 +602,12 @@ mod tests {
         for _ in 0..MAX_FAST_FAILURES {
             record_fast_failure(&home, &group_id, "peer1", Some(1), "boom").expect("failure");
         }
-        assert!(matches!(
-            gate(&home, &group_id, "peer1"),
-            Gate::Parked { .. }
-        ));
+        assert!(matches!(gate(&home, &group_id, "peer1"), Gate::Parked { .. }));
 
         record_first_turn(&home, &group_id, "peer1").expect("first turn");
 
         let state = load(&home, &group_id, "peer1").expect("load");
-        assert_eq!(
-            state,
-            RestartState::default(),
-            "a working launch clears the epoch"
-        );
+        assert_eq!(state, RestartState::default(), "a working launch clears the epoch");
         assert_eq!(gate(&home, &group_id, "peer1"), Gate::Allow);
     }
 
@@ -557,10 +623,7 @@ mod tests {
             .into_iter()
             .find(|event| event.kind == "actor.unparked")
             .expect("unpark event");
-        assert_eq!(
-            unparked.data["previous_parked_reason"],
-            json!("consecutive_fast_failures=5")
-        );
+        assert_eq!(unparked.data["previous_parked_reason"], json!("consecutive_fast_failures=5"));
 
         // The new epoch counts from zero, so four more failures delay instead of parking.
         for _ in 0..4 {
@@ -614,10 +677,7 @@ mod tests {
         assert_eq!(state.consecutive_fast_failures, MAX_FAST_FAILURES);
         assert_eq!(state.parked_reason, "consecutive_fast_failures=5");
         assert_eq!(state.last_exit_code, Some(9));
-        assert!(matches!(
-            gate(&restarted, &group_id, "peer1"),
-            Gate::Parked { .. }
-        ));
+        assert!(matches!(gate(&restarted, &group_id, "peer1"), Gate::Parked { .. }));
     }
 
     #[test]
@@ -699,10 +759,7 @@ mod tests {
     #[test]
     fn unknown_actor_state_is_empty_rather_than_an_error() {
         let (_temp, home, group_id) = fixture();
-        assert_eq!(
-            load(&home, &group_id, "nobody").expect("load"),
-            RestartState::default()
-        );
+        assert_eq!(load(&home, &group_id, "nobody").expect("load"), RestartState::default());
         assert_eq!(gate(&home, &group_id, "nobody"), Gate::Allow);
         assert!(state_path(&home, &group_id, "../escape").is_err());
     }

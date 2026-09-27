@@ -174,10 +174,30 @@ pub fn is_structured(actor: &Actor) -> bool {
         && (actor.runner == RunnerKind::Headless || actor.runtime.is_web_model())
 }
 
-pub fn start_group(home: &HomeLayout, group: &GroupDoc) -> Result<Vec<SessionStatus>, OpError> {
+/// Start every enabled Actor. `respect_restart_backoff` is set when the caller is automation: a
+/// parked or backing-off Actor is skipped rather than relaunched, because a Group start fired by a
+/// rule is still automation and must not clear a park behind RS-3's back.
+pub fn start_group(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    respect_restart_backoff: bool,
+) -> Result<Vec<SessionStatus>, OpError> {
     let mut statuses = Vec::new();
     let mut started_actor_ids = Vec::new();
     for actor in group.actors.iter().filter(|actor| actor.enabled) {
+        if respect_restart_backoff
+            && let Some(refusal) =
+                super::actor_restart_backoff::refusal(home, &group.group_id, &actor.id)
+        {
+            tracing::info!(
+                group_id = %group.group_id,
+                actor_id = %actor.id,
+                code = refusal.code(),
+                message = %refusal.message(),
+                "skipping an automated Group start for a backing-off or parked Actor"
+            );
+            continue;
+        }
         let was_running = actor_is_running(group, actor);
         match apply(home, group, &actor.id, "actor.start") {
             Ok(status) => {

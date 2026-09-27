@@ -631,7 +631,10 @@ fn running(home: &HomeLayout, request: &DaemonRequest, value: bool) -> OpResult 
             .map_err(OpError::io)?;
     }
     let runtimes = if value {
-        actor_runtime::start_group(home, &group)?
+        // A rule-driven group start is automation: it honours the RS-3 gate for every Actor in the
+        // Group, while an operator's group start does not.
+        let automated = is_automation_requester(&string_arg(request, "by").unwrap_or_default());
+        actor_runtime::start_group(home, &group, automated)?
     } else {
         if group.actors.iter().any(|a| a.runtime.is_web_model()) {
             cccc_core::web_model_connectors::interrupt_automatic_pairings(
@@ -667,6 +670,12 @@ fn load(home: &HomeLayout, request: &DaemonRequest) -> Result<GroupDoc, OpError>
     store(home)?
         .load(&required_arg(request, "group_id")?)
         .map_err(OpError::not_found)
+}
+
+/// Whether a Group lifecycle request came from automation rather than from a person. Kept in step
+/// with the Actor-side predicate so a rule cannot clear a park through either door.
+fn is_automation_requester(requester: &str) -> bool {
+    matches!(requester.trim(), "system" | "automation")
 }
 
 fn authorize(group: &GroupDoc, request: &DaemonRequest) -> Result<(), OpError> {
