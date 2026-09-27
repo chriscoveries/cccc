@@ -102,6 +102,7 @@ interface UIState {
   canAccessGlobalSettings: boolean | null;
   workspaceFileViewerGroupId: string;
   sseStatus: "connected" | "connecting" | "disconnected";
+  sseError: SSEErrorDetail | null;
 
   // Actions
   setActiveTab: (tab: string) => void;
@@ -144,6 +145,14 @@ interface UIState {
   setWebReadOnly: (v: boolean) => void;
   setCanAccessGlobalSettings: (v: boolean | null) => void;
   setSSEStatus: (v: "connected" | "connecting" | "disconnected") => void;
+  setSSEError: (v: SSEErrorDetail | null) => void;
+}
+
+export interface SSEErrorDetail {
+  /** The connection that failed, e.g. "realtime socket (global, ledger)". */
+  endpoint: string;
+  /** When the transport will next retry (epoch ms), if one is scheduled. */
+  nextRetryAt: number | null;
 }
 
 let errorTimeoutId: number | null = null;
@@ -356,6 +365,7 @@ export const useUIStore = create<UIState>((set) => ({
   canAccessGlobalSettings: null,
   workspaceFileViewerGroupId: "",
   sseStatus: "disconnected" as const,
+  sseError: null as SSEErrorDetail | null,
 
   // Actions
   setActiveTab: (tab) => set({ activeTab: tab }),
@@ -536,4 +546,5 @@ export const useUIStore = create<UIState>((set) => ({
   setWebReadOnly: (v) => set({ webReadOnly: v }),
   setCanAccessGlobalSettings: (v) => set({ canAccessGlobalSettings: v }),
   setSSEStatus: (v) => set({ sseStatus: v }),
+  setSSEError: (v) => set({ sseError: v }),
 }));
