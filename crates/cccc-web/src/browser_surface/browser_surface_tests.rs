@@ -865,6 +865,7 @@ fn classifies_only_group_owned_browser_sessions() {
     assert_eq!(session_actor("g_one::presentation"), None);
 }
 
+mod idle_timeout;
 mod local_page_tests;
 mod resource_cleanup;
 

@@ -42,6 +42,19 @@ use tokio::task::JoinHandle;
 
 const BROWSER_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Retire a web-model browser process after this much CDP silence: nothing drives
+/// its pages, so the next use re-opens the surface on demand. Tune the fleet with
+/// CCCC_BROWSER_IDLE_SECS.
+pub(crate) const DEFAULT_BROWSER_IDLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15 * 60);
+
+pub(crate) fn browser_idle_timeout() -> std::time::Duration {
+    std::env::var("CCCC_BROWSER_IDLE_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map_or(DEFAULT_BROWSER_IDLE_TIMEOUT, std::time::Duration::from_secs)
+}
+
 pub(crate) fn system_browser_path() -> Option<PathBuf> {
     system_browser::find_system_browser().map(|(path, _)| path)
 }
@@ -187,6 +200,47 @@ impl BrowserSurfaces {
                 !self.sessions.lock().await.contains_key(&key)
                     && self.closed_pages.lock().await.get(&key) == Some(&generation)
             };
+            if same_owner {
+                closed += usize::from(self.close_key_locked(&key).await?);
+            }
+        }
+        Ok(closed)
+    }
+
+    /// Close surfaces whose browser process has been CDP-idle for `ttl`. The
+    /// process is what costs memory while nothing drives it, and the next use
+    /// re-opens the surface, so retiring an idle one is safe.
+    pub async fn close_idle(&self, ttl: std::time::Duration) -> Result<usize> {
+        let candidates = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .iter()
+                .map(|(key, session)| {
+                    (
+                        key.clone(),
+                        Arc::clone(&session.owner),
+                        session.page.target_id().clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut stale = Vec::new();
+        for (key, owner, target) in candidates {
+            if owner.read().await.idle_for() >= ttl {
+                stale.push((key, target));
+            }
+        }
+        let mut closed = 0;
+        for (key, target) in stale {
+            let operation = self.key_operation(&key).await;
+            let _guard = operation.lock().await;
+            // A replacement opened after the snapshot owns its own lifecycle.
+            let same_owner = self
+                .sessions
+                .lock()
+                .await
+                .get(&key)
+                .is_some_and(|session| session.page.target_id() == &target);
             if same_owner {
                 closed += usize::from(self.close_key_locked(&key).await?);
             }
@@ -525,6 +579,9 @@ impl BrowserSurfaces {
             None
         };
         let new_owner = owner.is_none();
+        // The slot key names the owning Actor ("web-model::<group>::<actor>"), so
+        // the spawned process can carry that identity from the very first byte.
+        let actor_id = session_actor(key).map(|(_, actor_id)| actor_id);
         let owner = match owner {
             Some(owner) => owner,
             None => {
@@ -536,6 +593,7 @@ impl BrowserSurfaces {
                         mode,
                         shared_browser,
                         storage_state,
+                        actor_id,
                     )
                     .await?,
                 ));
