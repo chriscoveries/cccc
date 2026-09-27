@@ -31,10 +31,22 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// First delay after a failed restart, doubling thereafter.
-const RESPAWN_BACKOFF_BASE: Duration = Duration::from_millis(250);
-/// Ceiling on the delay. Same cap as `actor_delivery::DEFERRED_RETRY_MAX`:
-/// bounded means bounded, and a cap keeps recovery from feeling like an outage.
-const RESPAWN_BACKOFF_MAX: Duration = Duration::from_secs(4);
+///
+/// 5s, NOT the 250ms of `actor_delivery::deferred_retry_delay`, and the reason
+/// is the evidence rather than taste: the measured hot loop relaunches about
+/// every 5s (126 exits in 20m45s, minimum interval 4.998s). A delay below that
+/// floor does not space the relaunches out at all — the next message arrives
+/// before the wait elapses, so the loop is unchanged and the code only looks
+/// like a fix. The first delay has to clear the observed cadence to do anything.
+const RESPAWN_BACKOFF_BASE: Duration = Duration::from_secs(5);
+/// Ceiling on the delay, matching the daemon's existing ceiling for a
+/// REPEATEDLY failing background task (`membership::restore::MAX_BACKOFF`).
+///
+/// This is deliberately the 60s ceiling and not `deferred_retry_delay`'s 4s
+/// `DEFERRED_RETRY_MAX`: that one bounds a retry of a single operation, whereas
+/// this bounds a restart loop that has already failed many times. A cap below
+/// the natural cadence would be the same mistake as a too-small base.
+const RESPAWN_BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// Uptime after which the actor is considered healthy and the count resets.
 /// Comfortably longer than a process-start, so an actor that comes up and stays
 /// up clears its history rather than carrying a penalty into later crashes.
@@ -63,6 +75,8 @@ pub fn respawn_backoff_delay(failures: u32) -> Duration {
     if failures == 0 {
         return Duration::ZERO;
     }
+    // 5s, 10s, 20s, 40s, then capped at 60s. The exponent is clamped before the
+    // shift so a long-failing actor cannot overflow the multiply.
     let exponent = failures.saturating_sub(1).min(4);
     let delay = RESPAWN_BACKOFF_BASE * (1_u32 << exponent);
     delay.min(RESPAWN_BACKOFF_MAX)
@@ -136,13 +150,28 @@ mod tests {
 
     #[test]
     fn the_delay_doubles_then_caps() {
-        assert_eq!(respawn_backoff_delay(1), Duration::from_millis(250));
-        assert_eq!(respawn_backoff_delay(2), Duration::from_millis(500));
-        assert_eq!(respawn_backoff_delay(3), Duration::from_millis(1_000));
-        assert_eq!(respawn_backoff_delay(4), Duration::from_millis(2_000));
-        // 250*2^4 = 4000ms, exactly the cap; beyond it stays capped.
+        assert_eq!(respawn_backoff_delay(1), Duration::from_secs(5));
+        assert_eq!(respawn_backoff_delay(2), Duration::from_secs(10));
+        assert_eq!(respawn_backoff_delay(3), Duration::from_secs(20));
+        assert_eq!(respawn_backoff_delay(4), Duration::from_secs(40));
         assert_eq!(respawn_backoff_delay(5), RESPAWN_BACKOFF_MAX);
         assert_eq!(respawn_backoff_delay(u32::MAX), RESPAWN_BACKOFF_MAX);
+    }
+
+    /// The first delay must exceed the measured relaunch cadence, or it cannot
+    /// space the loop out at all: the next message arrives before the wait
+    /// elapses and the code only looks like a fix.
+    ///
+    /// The measured loop: 126 exits in 20m45s, minimum interval 4.998s. This
+    /// test fails if anyone lowers the base under that floor.
+    #[test]
+    fn the_first_delay_clears_the_measured_relaunch_cadence() {
+        const MEASURED_MIN_INTERVAL: Duration = Duration::from_millis(4_998);
+        assert!(
+            respawn_backoff_delay(1) > MEASURED_MIN_INTERVAL,
+            "the first delay must exceed the observed ~5s cadence, otherwise the \
+             loop is unchanged: measured minimum interval was 4.998s"
+        );
     }
 
     #[test]
