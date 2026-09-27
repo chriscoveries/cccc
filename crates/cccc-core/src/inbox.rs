@@ -376,22 +376,13 @@ fn load_raw(home: &HomeLayout, group_id: &str) -> io::Result<InboxState> {
 }
 
 fn load(home: &HomeLayout, group_id: &str) -> io::Result<InboxState> {
-    let mut state = load_raw(home, group_id)?;
-    if let Some(pending) = load_pending(home, group_id)?
-        && pending_has_fact(home, group_id, &pending)?
-    {
-        let current = state
-            .cursors
-            .get(&pending.actor_id)
-            .map(String::as_str)
-            .unwrap_or_default();
-        if !cursor_covers(home, group_id, current, &pending.target.event_id)? {
-            state
-                .cursors
-                .insert(pending.actor_id, pending.target.event_id);
-        }
-    }
-    Ok(state)
+    // The stored cursor is ground truth. A pending read whose ledger fact
+    // exists only proves the daemon WROTE a mail.read event — not that the
+    // batch reached the caller (crash between ledger::append and the
+    // response). Adopting its target here would silently pass unreturned
+    // mail (j-pi-1 defect, 27 Sep). Recovery — which re-delivers — lives in
+    // consume_unread via recover_pending_locked.
+    load_raw(home, group_id)
 }
 
 fn load_pending(home: &HomeLayout, group_id: &str) -> io::Result<Option<PendingRead>> {
@@ -420,27 +411,6 @@ fn pending_has_fact(home: &HomeLayout, group_id: &str, pending: &PendingRead) ->
                 && event.data.get("event_id").and_then(Value::as_str)
                     == Some(pending.target.event_id.as_str())
         })
-    })
-}
-
-fn cursor_covers(
-    home: &HomeLayout,
-    group_id: &str,
-    current_event_id: &str,
-    target_event_id: &str,
-) -> io::Result<bool> {
-    if current_event_id == target_event_id {
-        return Ok(true);
-    }
-    if current_event_id.is_empty() {
-        return Ok(false);
-    }
-    let ledger_path = GroupStore::new(home.clone())?.ledger_path(group_id)?;
-    ledger::inspect(&ledger_path, |_, positions| {
-        positions
-            .get(current_event_id)
-            .zip(positions.get(target_event_id))
-            .is_some_and(|(current, target)| current >= target)
     })
 }
 
@@ -485,26 +455,53 @@ fn recover_pending_locked(home: &HomeLayout, group_id: &str) -> io::Result<()> {
     if !pending_has_fact(home, group_id, &pending)? {
         return clear_pending(home, group_id);
     }
-    let mut state = load_raw(home, group_id)?;
+    // The fact exists, so a previous consume appended mail.read. Where the
+    // stored cursor sits relative to (expected, target] tells us what crashed:
+    //   current == expected           — save never ran: batch never returned.
+    //                                   Clear pending; the main read below
+    //                                   recomputes from expected and the batch
+    //                                   is delivered again.
+    //   expected < current <= target  — save ran, response may not have
+    //                                   arrived: rewind to expected so the
+    //                                   read re-delivers (a duplicate beats a
+    //                                   silent loss; the cursor must never
+    //                                   pass an unreturned item).
+    //   current > target              — a LATER read already advanced past:
+    //                                   pending is stale leftover, clear only.
+    let ledger_path = GroupStore::new(home.clone())?.ledger_path(group_id)?;
     let current = stored_cursor_record(home, group_id, &pending.actor_id)?;
-    if cursor_covers(home, group_id, &current.event_id, &pending.target.event_id)? {
-        return clear_pending(home, group_id);
+    if current.event_id != pending.expected.event_id {
+        let (cur_pos, tgt_pos) = ledger::inspect(&ledger_path, |_, positions| {
+            (
+                positions.get(&current.event_id).copied(),
+                positions.get(&pending.target.event_id).copied(),
+            )
+        })?;
+        match (cur_pos, tgt_pos) {
+            (Some(c), Some(t)) if c > t => return clear_pending(home, group_id),
+            (Some(_), Some(_)) => {
+                // saved-but-possibly-undelivered: rewind to the pre-read cursor
+                let mut state = load_raw(home, group_id)?;
+                state.cursors.insert(
+                    pending.actor_id.clone(),
+                    pending.expected.event_id.clone(),
+                );
+                save(
+                    home,
+                    group_id,
+                    &state,
+                    &pending.actor_id,
+                    &pending.expected.ts,
+                )?;
+                return clear_pending(home, group_id);
+            }
+            _ => {
+                return Err(io::Error::other(
+                    "pending Mail read cursor changed concurrently",
+                ))
+            }
+        }
     }
-    if current.event_id != pending.expected.event_id || current.ts != pending.expected.ts {
-        return Err(io::Error::other(
-            "pending Mail read cursor changed concurrently",
-        ));
-    }
-    state
-        .cursors
-        .insert(pending.actor_id.clone(), pending.target.event_id.clone());
-    save(
-        home,
-        group_id,
-        &state,
-        &pending.actor_id,
-        &pending.target.ts,
-    )?;
     clear_pending(home, group_id)
 }
 
@@ -661,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn ledger_committed_pending_read_recovers_without_replaying_mail() {
+    fn ledger_committed_pending_read_redelivers_unreturned_mail() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
         let store = GroupStore::new(home.clone()).expect("store");
@@ -706,29 +703,40 @@ mod tests {
         )
         .expect("pending marker");
 
-        assert!(
+        // A pending marker with a committed mail.read fact proves the daemon
+        // wrote the event — not that the batch reached the caller (the crash
+        // window is between ledger::append and the response). The cursor must
+        // not pass the unreturned item: it stays unread, and the next consume
+        // re-delivers it (j-pi-1 defect, 27 Sep).
+        assert_eq!(
             list_unread(&home, &group, "peer1", 10)
                 .expect("effective unread")
-                .is_empty()
-        );
-        assert_eq!(
-            cursor_details(&home, &group.group_id, "peer1").expect("effective cursor"),
-            (
-                message.id.clone(),
-                message.ts.clone(),
-                "2026-08-22T00:00:00Z".into()
-            )
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![message.id.as_str()]
         );
 
         let recovered =
             consume_unread(&home, &group, "peer1", "peer1", 10).expect("recover pending read");
-        assert!(recovered.messages.is_empty());
-        assert!(recovered.read_event.is_none());
+        assert_eq!(
+            recovered
+                .messages
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![message.id.as_str()]
+        );
         assert_eq!(recovered.cursor_event_id, message.id);
         assert!(
             !pending_path(&home, &group.group_id)
                 .expect("pending path")
                 .exists()
+        );
+        assert!(
+            list_unread(&home, &group, "peer1", 10)
+                .expect("unread after redelivery")
+                .is_empty()
         );
         let read_count = ledger::inspect(&ledger_path, |events, _| {
             events
@@ -737,7 +745,7 @@ mod tests {
                 .count()
         })
         .expect("read ledger");
-        assert_eq!(read_count, 1);
+        assert_eq!(read_count, 2);
     }
 
     #[test]
