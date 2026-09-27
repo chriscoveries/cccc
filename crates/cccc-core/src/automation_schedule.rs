@@ -149,6 +149,21 @@ fn dow_index(value: &str) -> Option<usize> {
         .map(|day| day % 7)
 }
 
+/// The POSIX value a day-of-week atom stands for, BEFORE the `% 7` collapse.
+///
+/// `0` and `7` are both Sunday in POSIX, so a range whose endpoints only differ
+/// by that aliasing (`0-7`) is a whole-week range, not a one-day range. Reading
+/// the raw numbers lets the range branch tell "same day" (`7-7`) from
+/// "every day" (`0-7`); after the collapse both look like `0` and the range
+/// would silently become Sunday only.
+fn dow_index_raw(value: &str) -> Option<usize> {
+    let lower = value.to_ascii_lowercase();
+    if DOW_NAMES.iter().any(|name| *name == lower) {
+        return None;
+    }
+    lower.parse::<usize>().ok().filter(|day| *day <= 7)
+}
+
 fn dow_name(index: usize) -> &'static str {
     DOW_NAMES[index % 7]
 }
@@ -163,6 +178,23 @@ fn posix_dow_atom(atom: &str) -> String {
     }
     match base.split_once('-') {
         Some((start, end)) => {
+            // Compare the RAW POSIX numbers first: `0` and `7` are both Sunday,
+            // so `0-7` is a whole-week range that the `% 7` collapse in
+            // `dow_index` would otherwise flatten into a single day (Sunday).
+            // Only when the raw endpoints are genuinely equal (`7-7`) is this
+            // the one-day case; when the raw pair spans all seven days, the
+            // POSIX reading is "every day" and the name form below would
+            // otherwise win with `a == b -> sun`.
+            if let (Some(raw_start), Some(raw_end)) = (dow_index_raw(start), dow_index_raw(end)) {
+                if raw_start == raw_end {
+                    return dow_name(dow_index(start).unwrap_or(0)).to_owned();
+                }
+                let span = (raw_end + 7 - raw_start) % 7;
+                if span == 0 {
+                    // raw_start != raw_end but a full week apart (0-7).
+                    return DOW_NAMES.join(",");
+                }
+            }
             let (a, b) = (dow_index(start), dow_index(end));
             match (a, b) {
                 (Some(a), Some(b)) if a == b => dow_name(a).to_owned(),
@@ -217,7 +249,7 @@ fn expand_dow_step(base: &str, step: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_due, next_fire_at, parse_cron_schedule};
+    use super::{is_due, next_fire_at, parse_cron_schedule, posix_dow_field};
     use chrono::{Datelike, TimeZone, Utc, Weekday};
     use serde_json::json;
 
@@ -272,6 +304,44 @@ mod tests {
         let trigger = cron_trigger("0 9 * * mon-fri");
         let next = next_fire_at(Some(&trigger), None, now).unwrap();
         assert_eq!(next.weekday(), Weekday::Mon);
+    }
+
+    /// `0-7` is a whole-week range in POSIX, not a one-day range: `0` and `7`
+    /// are both Sunday, so the range spans every day. Before the raw-endpoint
+    /// comparison the `% 7` collapse made both ends `0` and the expression
+    /// became Sunday only.
+    #[test]
+    fn cron_day_of_week_zero_to_seven_is_every_day() {
+        for expression in ["0 9 * * 0-7", "0 9 * * 7-0"] {
+            let trigger = cron_trigger(expression);
+            // Every day of a week must be reachable from any starting instant.
+            let mut now = Utc.with_ymd_and_hms(2026, 9, 27, 0, 0, 0).unwrap(); // Sunday
+            let mut seen = std::collections::BTreeSet::new();
+            for _ in 0..7 {
+                let next = next_fire_at(Some(&trigger), None, now).unwrap();
+                seen.insert(format!("{:?}", next.weekday()));
+                now = next;
+            }
+            assert_eq!(
+                seen.len(),
+                7,
+                "{expression} should fire on all seven weekdays, got {seen:?}"
+            );
+        }
+    }
+
+    /// `7-7` is genuinely the same day twice, so it stays a one-day range.
+    #[test]
+    fn cron_day_of_week_seven_to_seven_is_one_day() {
+        assert_eq!(posix_dow_field("7-7"), "sun");
+    }
+
+    /// The ordinary cases the raw-endpoint comparison must not disturb.
+    #[test]
+    fn cron_day_of_week_ranges_keep_their_meaning() {
+        assert_eq!(posix_dow_field("1-5"), "mon-fri");
+        // A wrapping range (start after end) still wraps rather than swapping.
+        assert_eq!(posix_dow_field("5-1"), "fri,sat,sun,mon");
     }
 
     #[test]
