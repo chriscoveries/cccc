@@ -5,6 +5,9 @@ use chromiumoxide::handler::viewport::Viewport;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 use super::{
@@ -22,6 +25,10 @@ pub(super) struct BrowserOwner {
     pub strategy: String,
     pub metadata: Value,
     pub viewer: Value,
+    /// Monotonic origin for `activity`, so idleness never depends on wall clock.
+    activity_base: Instant,
+    /// Milliseconds since `activity_base` of the last CDP message from this process.
+    activity: Arc<AtomicU64>,
 }
 
 impl BrowserOwner {
@@ -32,6 +39,7 @@ impl BrowserOwner {
         mode: BrowserMode,
         shared: bool,
         storage_state: Option<&Value>,
+        actor_id: Option<&str>,
     ) -> Result<Self> {
         let mut profile_lease = ProfileLease::acquire(profile).await?;
         let mut system_browser = match mode {
@@ -57,6 +65,14 @@ impl BrowserOwner {
                     .new_headless_mode();
                 if !proxy_args.is_empty() {
                     config = config.args(proxy_args);
+                }
+                // Attribute the browser process to its Actor: an operator (and the
+                // process/disk reapers) must be able to tell whose window holds the
+                // memory, and retire it without guessing. Kept after the proxy
+                // block so a queue sibling that also edits this launch chain
+                // applies independently (T178 queue clash with fix/web-bridge-misc).
+                if let Some(actor_id) = actor_id {
+                    config = config.env("CCCC_ACTOR_ID", actor_id);
                 }
                 // Preserve explicit CHROME and normal detection precedence.
                 // Only try our additional binary names if that lookup fails.
@@ -102,11 +118,19 @@ impl BrowserOwner {
             }
             return Err(error);
         }
+        // CDP traffic is the honest idleness signal: a driven page keeps talking to
+        // this handler, and a silent process is what an idle timeout is for. The
+        // sweep reads `activity` without waking the browser.
+        let activity_base = Instant::now();
+        let activity = Arc::new(AtomicU64::new(0));
+        let handler_activity = Arc::clone(&activity);
         let handler = tokio::spawn(async move {
             while let Some(message) = handler.next().await {
                 if message.is_err() {
                     break;
                 }
+                handler_activity
+                    .store(activity_base.elapsed().as_millis() as u64, Ordering::Relaxed);
             }
         });
 
@@ -132,6 +156,8 @@ impl BrowserOwner {
             strategy,
             metadata,
             viewer,
+            activity_base,
+            activity,
         };
         if let Some(cookies) = storage_state
             .and_then(|state| state.get("cookies"))
@@ -155,6 +181,14 @@ impl BrowserOwner {
             }
         }
         Ok(owner)
+    }
+
+    /// Time since this process last spoke CDP. A long silence means nothing is
+    /// driving its pages and the process only holds memory.
+    pub(super) fn idle_for(&self) -> Duration {
+        self.activity_base
+            .elapsed()
+            .saturating_sub(Duration::from_millis(self.activity.load(Ordering::Relaxed)))
     }
 
     pub async fn stop(&mut self) -> Result<()> {
