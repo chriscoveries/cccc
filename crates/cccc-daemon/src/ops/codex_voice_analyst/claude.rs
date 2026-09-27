@@ -51,6 +51,7 @@ const TRANSCRIPT_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PROMPT_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 const PROMPT_SETTLED_CORRELATION_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const GONE_CONFIRM: Duration = Duration::from_millis(500);
 const LIVENESS_FAILURE_TIMEOUT: Duration = Duration::from_secs(10);
 const PARTIAL_TAIL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LAUNCH_OUTPUT_BYTES: usize = 64 * 1024;
@@ -505,6 +506,10 @@ async fn kill_and_confirm(endpoint: &control::Endpoint, short: &str) -> io::Resu
     }
     let deadline = tokio::time::Instant::now() + STOP_TIMEOUT;
     let mut last_error: Option<io::Error>;
+    // A control endpoint that stays NotFound is gone for good: the task and its
+    // harness are already dead, so that counts as stopped. Anything shorter
+    // than the confirmation window is treated as a restart race and retried.
+    let mut gone_since: Option<tokio::time::Instant> = None;
     loop {
         match control::list(endpoint).await {
             Ok(jobs)
@@ -514,8 +519,21 @@ async fn kill_and_confirm(endpoint: &control::Endpoint, short: &str) -> io::Resu
             {
                 return Ok(());
             }
-            Ok(_) => last_error = None,
-            Err(error) if retryable_control_error(&error) => last_error = Some(error),
+            Ok(_) => {
+                last_error = None;
+                gone_since = None;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                last_error = Some(error);
+                let since = gone_since.get_or_insert_with(tokio::time::Instant::now);
+                if since.elapsed() >= GONE_CONFIRM {
+                    return Ok(());
+                }
+            }
+            Err(error) if retryable_control_error(&error) => {
+                last_error = Some(error);
+                gone_since = None;
+            }
             Err(error) => return Err(error),
         }
         if tokio::time::Instant::now() >= deadline {
@@ -2492,6 +2510,94 @@ mod tests {
             "{:?}",
             fixture.operations()
         );
+    }
+
+    /// A control endpoint whose socket file never existed (task and harness
+    /// already gone) counts as stopped after a short confirmation window
+    /// instead of burning the full stop timeout and failing the shutdown.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_treats_a_persistently_missing_endpoint_as_stopped() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(config_dir.join("daemon")).expect("daemon config");
+        let control_key = config_dir.join("daemon/control.key");
+        std::fs::write(&control_key, "0123456789abcdef0123456789abcdef\n").expect("key");
+        std::fs::set_permissions(&control_key, std::fs::Permissions::from_mode(0o600))
+            .expect("key permissions");
+        let config_dir = config_dir.canonicalize().expect("canonical config");
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(config_dir.to_string_lossy().as_bytes())
+        );
+        let control_dir = Path::new("/tmp")
+            .join(format!(
+                "cc-daemon-{}",
+                config_dir.metadata().expect("metadata").uid()
+            ))
+            .join(&digest[..8]);
+        std::fs::create_dir_all(&control_dir).expect("control directory");
+        std::fs::set_permissions(&control_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("control directory permissions");
+        let _guard = ControlDirectory(control_dir); // no control.sock is bound
+
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint resolves");
+        let started = std::time::Instant::now();
+        kill_and_confirm(&endpoint, "deadbeef")
+            .await
+            .expect("a missing endpoint is already stopped");
+        assert!(
+            started.elapsed() < STOP_TIMEOUT,
+            "missing endpoint must not wait out the stop timeout: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A task that stays listed keeps the full timeout: a stuck Agent View
+    /// job must still fail the stop, not masquerade as gone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_still_times_out_when_the_task_stays_listed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        let (config_dir, listener, _guard) = bind_fake_control(&config_dir);
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut line = Vec::new();
+                let mut byte = [0u8; 1];
+                while tokio::io::AsyncReadExt::read(&mut stream, &mut byte)
+                    .await
+                    .expect("read")
+                    > 0
+                {
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    line.push(byte[0]);
+                }
+                let request: Value = serde_json::from_slice(&line).expect("request json");
+                let op = request.get("op").and_then(Value::as_str).unwrap_or("");
+                let response = match op {
+                    "list" => json!({"ok":true,"op":"list","jobs":[{"short":"deadbeef"}]}),
+                    "kill" => json!({"ok":true,"op":"kill"}),
+                    _ => json!({"ok":false,"op":op,"code":"EPROTO","error":"unexpected op"}),
+                };
+                let mut bytes = serde_json::to_vec(&response).expect("response");
+                bytes.push(b'\n');
+                tokio::io::AsyncWriteExt::write_all(&mut stream, &bytes)
+                    .await
+                    .expect("write");
+            }
+        });
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint resolves");
+        let error = kill_and_confirm(&endpoint, "deadbeef")
+            .await
+            .expect_err("a stuck task still fails the stop");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        server.abort();
     }
 }
 
