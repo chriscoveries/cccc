@@ -11,6 +11,7 @@ const RECOGNIZED_COMMANDS: &[&str] = &[
     "/pause",
     "/resume",
     "/verbose",
+    "/relay",
     "/status",
     "/help",
     "/send",
@@ -120,7 +121,30 @@ fn inbound_decision_blocking_for_thread(
                     "Verbose delivery disabled."
                 },
             ),
-            Err(()) => InboundDecision::Reply("Usage: /verbose [on|off]".into()),
+            Err(()) => InboundDecision::Reply(
+                "Usage: /verbose [on|off|status] — off also stops all-message relay".into(),
+            ),
+        },
+        "/relay" => match relay_value(text) {
+            Ok(relay) => {
+                if authorization.verbose && !relay {
+                    InboundDecision::Reply(
+                        "Relay is on because /verbose is on. Use /verbose off to stop all-message \
+                         forwarding."
+                            .into(),
+                    )
+                } else {
+                    update_authorized(
+                        AuthorizedUpdate::Relay(relay),
+                        if relay {
+                            "All-message relay enabled."
+                        } else {
+                            "All-message relay disabled."
+                        },
+                    )
+                }
+            }
+            Err(()) => InboundDecision::Reply("Usage: /relay [on|off|status]".into()),
         },
         "/status" => InboundDecision::Reply(status_text(home, group_id, authorization)),
         "/help" => InboundDecision::Reply(help_text(platform).into()),
@@ -343,6 +367,7 @@ enum AuthorizedUpdate {
     Remove,
     Paused(bool),
     Verbose(bool),
+    Relay(bool),
 }
 
 fn persist_authorization_update(
@@ -423,7 +448,15 @@ fn update_items(
 fn apply_item_update(item: &mut Value, update: AuthorizedUpdate) -> bool {
     match update {
         AuthorizedUpdate::Paused(paused) => item["paused"] = json!(paused),
-        AuthorizedUpdate::Verbose(verbose) => item["verbose"] = json!(verbose),
+        AuthorizedUpdate::Verbose(verbose) => {
+            item["verbose"] = json!(verbose);
+            if !verbose {
+                // /verbose off is the single switch that stops all-message
+                // forwarding, so it clears relay rather than leaving it armed.
+                item["relay"] = json!(false);
+            }
+        }
+        AuthorizedUpdate::Relay(relay) => item["relay"] = json!(relay),
         AuthorizedUpdate::Remove => unreachable!(),
     }
     true
@@ -447,6 +480,15 @@ fn send_has_payload(text: &str) -> bool {
     text.trim()
         .split_once(char::is_whitespace)
         .is_some_and(|(_, payload)| !payload.trim().is_empty())
+}
+
+fn relay_value(text: &str) -> Result<bool, ()> {
+    match text.split_whitespace().nth(1).map(str::to_ascii_lowercase) {
+        None => Ok(true),
+        Some(value) if matches!(value.as_str(), "on" | "true" | "1") => Ok(true),
+        Some(value) if matches!(value.as_str(), "off" | "false" | "0") => Ok(false),
+        Some(_) => Err(()),
+    }
 }
 
 fn verbose_value(text: &str) -> Result<bool, ()> {
@@ -480,9 +522,9 @@ fn unauthorized_plain_text(home: &HomeLayout, group_id: &str, platform: &str) ->
 
 fn help_text(platform: &str) -> &'static str {
     if platform.eq_ignore_ascii_case("weixin") {
-        "Commands: /unsubscribe, /send <message>, /pause, /resume, /verbose [on|off], /status, /help"
+        "Commands: /unsubscribe, /send <message>, /pause, /resume, /verbose [on|off], /relay [on|off], /status, /help"
     } else {
-        "Commands: /subscribe, /unsubscribe, /send <message>, /pause, /resume, /verbose [on|off], /status, /help"
+        "Commands: /subscribe, /unsubscribe, /send <message>, /pause, /resume, /verbose [on|off], /relay [on|off], /status, /help"
     }
 }
 
@@ -879,5 +921,74 @@ mod tests {
         assert!(body.contains("removed"));
         let state = cccc_core::im_state::load(&store, &group_id).expect("state");
         assert!(state["authorized"].as_array().expect("array").is_empty());
+    }
+
+    #[test]
+    fn verbose_off_stops_all_message_relay() {
+        let (_temp, home, store, group_id) = setup();
+        authorize(&store, &group_id, false, false);
+
+        let body = reply(inbound_decision_blocking(
+            &home,
+            &group_id,
+            "telegram",
+            "chat-1",
+            "/relay on",
+        ));
+        assert!(body.contains("relay enabled"), "body={body}");
+        let state = cccc_core::im_state::load(&store, &group_id).expect("state");
+        assert_eq!(
+            state["authorized"][0]["relay"], true,
+            "relay on must persist"
+        );
+
+        let body = reply(inbound_decision_blocking(
+            &home,
+            &group_id,
+            "telegram",
+            "chat-1",
+            "/verbose off",
+        ));
+        assert!(body.contains("disabled"), "body={body}");
+        let state = cccc_core::im_state::load(&store, &group_id).expect("state");
+        assert_eq!(state["authorized"][0]["verbose"], false);
+        assert_eq!(
+            state["authorized"][0]["relay"], false,
+            "/verbose off must also clear relay, otherwise all-message \
+             forwarding stays enabled after the user turns it off"
+        );
+    }
+
+    #[test]
+    fn relay_cannot_be_disabled_while_verbose_is_on() {
+        let (_temp, home, store, group_id) = setup();
+        authorize(&store, &group_id, false, true);
+
+        let body = reply(inbound_decision_blocking(
+            &home,
+            &group_id,
+            "telegram",
+            "chat-1",
+            "/relay on",
+        ));
+        assert!(body.contains("relay enabled"), "body={body}");
+
+        let body = reply(inbound_decision_blocking(
+            &home,
+            &group_id,
+            "telegram",
+            "chat-1",
+            "/relay off",
+        ));
+        assert!(
+            body.contains("/verbose off"),
+            "relay off must point at the authoritative switch, body={body}"
+        );
+        let state = cccc_core::im_state::load(&store, &group_id).expect("state");
+        assert_eq!(
+            state["authorized"][0]["relay"], true,
+            "relay stays on while verbose is on"
+        );
+        assert_eq!(state["authorized"][0]["verbose"], true);
     }
 }
