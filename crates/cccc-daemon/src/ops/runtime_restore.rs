@@ -1,5 +1,8 @@
-use cccc_contracts::{Actor, GroupState};
-use cccc_core::{GroupStore, HomeLayout};
+use cccc_contracts::{Actor, Event, GroupState};
+use cccc_core::ledger;
+use cccc_core::{GroupDoc, GroupStore, HomeLayout};
+use cccc_runtime::SessionStatus;
+use serde_json::json;
 
 use crate::dispatch::OpError;
 use crate::dispatch_concurrency::DispatchLocks;
@@ -85,7 +88,8 @@ fn restore_group(home: &HomeLayout, store: &GroupStore, group_id: &str) -> Resul
             continue;
         }
         match actor_runtime::apply(home, &group, &actor.id, "actor.restore") {
-            Ok(_) => {
+            Ok(status) => {
+                record_respawn(home, &group, actor, status.as_ref());
                 actor_delivery::dispatch_unread(home, &group, &actor.id);
             }
             Err(error) => {
@@ -101,6 +105,60 @@ fn restore_group(home: &HomeLayout, store: &GroupStore, group_id: &str) -> Resul
     Ok(())
 }
 
+/// A restore is a real lifecycle transition, so it belongs in the ledger.
+///
+/// The daemon respawns every enabled actor runtime on service start, but that
+/// launch path appends no lifecycle event. The newest lifecycle event for a
+/// respawned actor therefore stays at whatever preceded it — usually a stop —
+/// while the daemon is meanwhile reporting the actor as running with a live pid.
+/// Anything that reasons from the ledger (card drives, watchdogs, "is this lane
+/// live?" checks, post-mortems) then reads a running actor as stopped, and the
+/// divergence silently widens with every restart.
+///
+/// Fail-soft on purpose: a ledger append that cannot be written must never stop
+/// an actor from coming up. A missing event is recoverable by the reconciler; a
+/// lane that does not launch is not.
+fn record_respawn(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    status: Option<&SessionStatus>,
+) {
+    let path = match GroupStore::new(home.clone()).and_then(|store| store.ledger_path(&group.group_id))
+    {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                group_id = %group.group_id,
+                actor_id = %actor.id,
+                %error,
+                "failed to resolve ledger path for actor respawn"
+            );
+            return;
+        }
+    };
+    let mut event = Event::new("actor.respawn", &group.group_id);
+    event.by = "system".into();
+    event.data = json!({
+        "actor_id": actor.id,
+        "runtime": serde_json::to_value(actor.runtime).unwrap_or(json!("unknown")),
+        "runner": serde_json::to_value(actor.runtime.runner()).unwrap_or(json!("unknown")),
+        "pid": status.and_then(|status| status.pid),
+        "started_at": status.map(|status| status.started_at.clone()),
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default();
+    if let Err(error) = ledger::append(&path, &event) {
+        tracing::warn!(
+            group_id = %group.group_id,
+            actor_id = %actor.id,
+            %error,
+            "failed to record actor respawn; ledger may report a live actor as stopped"
+        );
+    }
+}
+
 fn should_restore_actor(state: GroupState, actor: &Actor) -> bool {
     actor.enabled
         && !(state == GroupState::Paused && actor.runner == cccc_contracts::RunnerKind::Headless)
@@ -113,9 +171,72 @@ fn deepseek_restore_blocked(home: &HomeLayout, group: &cccc_core::GroupDoc, acto
 
 #[cfg(test)]
 mod tests {
-    use super::{deepseek_restore_blocked, should_restore_actor};
-    use cccc_contracts::{Actor, ActorRuntime, GroupState};
+    use super::{deepseek_restore_blocked, record_respawn, should_restore_actor};
+    use cccc_contracts::{Actor, ActorRuntime, GroupState, RunnerKind};
+    use cccc_core::ledger;
     use cccc_core::{GroupStore, HomeLayout};
+    use cccc_runtime::SessionStatus;
+    use serde_json::json;
+
+    #[test]
+    fn respawn_is_recorded_in_the_ledger_with_the_actors_identity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("respawn ledger", "").expect("group");
+
+        let mut actor = Actor::new("peer1");
+        actor.runtime = ActorRuntime::Opencode;
+        let status = SessionStatus {
+            group_id: group.group_id.clone(),
+            actor_id: actor.id.clone(),
+            runner: RunnerKind::Pty,
+            running: true,
+            pid: Some(4242),
+            started_at: "2026-09-27T21:30:00Z".into(),
+            exit_code: None,
+        };
+
+        record_respawn(&home, &group, &actor, Some(&status));
+
+        let events = ledger::read_all(&store.ledger_path(&group.group_id).expect("path"))
+            .expect("read ledger");
+        let respawn = events
+            .iter()
+            .find(|event| event.kind == "actor.respawn")
+            .expect("actor.respawn recorded");
+        assert_eq!(respawn.by, "system");
+        assert_eq!(respawn.data["actor_id"], json!("peer1"));
+        assert_eq!(respawn.data["runtime"], json!("opencode"));
+        assert_eq!(respawn.data["pid"], json!(4242));
+        assert_eq!(respawn.data["started_at"], json!("2026-09-27T21:30:00Z"));
+    }
+
+    /// A headless restore has no session status, so it records the transition
+    /// with a null pid rather than skipping the event. Losing the event is the
+    /// exact drift this change exists to close.
+    #[test]
+    fn respawn_without_a_session_status_still_records_the_transition() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("respawn headless", "").expect("group");
+
+        let mut actor = Actor::new("headless1");
+        actor.runtime = ActorRuntime::Deepseek;
+
+        record_respawn(&home, &group, &actor, None);
+
+        let events = ledger::read_all(&store.ledger_path(&group.group_id).expect("path"))
+            .expect("read ledger");
+        let respawn = events
+            .iter()
+            .find(|event| event.kind == "actor.respawn")
+            .expect("actor.respawn recorded even without a session status");
+        assert_eq!(respawn.data["actor_id"], json!("headless1"));
+        assert!(respawn.data["pid"].is_null());
+        assert!(respawn.data["started_at"].is_null());
+    }
 
     #[test]
     fn paused_groups_restore_terminal_runtimes_but_not_non_terminal_runtimes() {
