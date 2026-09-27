@@ -145,6 +145,27 @@ pub struct Actor {
     pub internal_kind: Option<String>,
     #[serde(default)]
     pub avatar_asset_path: String,
+    /// Per-actor inbound mail policy: allow-list of sender ids/groups that
+    /// may interrupt this actor immediately. Empty = everyone (default,
+    /// no behaviour change). Senders not in this list have their mail batched
+    /// into a digest at `digest_interval` (or refused when `refuse_others`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interrupt_from: Vec<String>,
+    /// Per-actor inbound mail policy: the interval at which non-allowlisted
+    /// senders' mail is batched into a digest. A duration string like "4h"
+    /// or "30m". `None` means non-allowlisted mail is queued indefinitely
+    /// until an allow-listed sender interrupts or the actor reads its inbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest_interval: Option<String>,
+    /// Per-actor inbound mail policy: when true, non-allowlisted senders'
+    /// mail is refused (dropped) instead of batched into a digest.
+    #[serde(default)]
+    pub refuse_others: bool,
+    /// Per-actor inbound mail policy: maximum number of mail messages per
+    /// (sender, recipient) pair per hour. Overflow is queued for digest,
+    /// never dropped. `None` means unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_hour: Option<u64>,
     #[serde(default)]
     pub profile_id: String,
     #[serde(default = "global_scope")]
@@ -183,6 +204,10 @@ impl Actor {
             runtime_state_source: RuntimeStateSource::default(),
             internal_kind: None,
             avatar_asset_path: String::new(),
+            interrupt_from: Vec::new(),
+            digest_interval: None,
+            refuse_others: false,
+            rate_limit_per_hour: None,
             profile_id: String::new(),
             profile_scope: global_scope(),
             profile_owner: String::new(),

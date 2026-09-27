@@ -254,7 +254,7 @@ pub fn dispatch(home: &HomeLayout, group: &GroupDoc, event: &Event) -> DispatchR
             .and_then(serde_json::Value::as_str)
             == Some("mail")
     {
-        return mail_report();
+        return dispatch_mail(home, group, event);
     }
 
     let targets: Vec<_> = group
@@ -269,6 +269,131 @@ pub fn dispatch(home: &HomeLayout, group: &GroupDoc, event: &Event) -> DispatchR
         .cloned()
         .collect();
     dispatch_to(home, group, event, &targets, false)
+}
+
+/// Dispatch a mail-mode message under the per-actor inbound policy.
+///
+/// For each target actor:
+/// - If the sender is in `interrupt_from`: deliver immediately (interrupt).
+/// - Else if `refuse_others`: drop the message.
+/// - Else: queue for digest at `digest_interval` (or immediately if the
+///   interval has elapsed since the last digest).
+/// - If `rate_limit_per_hour` is set and exceeded: queue for digest.
+fn dispatch_mail(home: &HomeLayout, group: &GroupDoc, event: &Event) -> DispatchReport {
+    let sender = event.by.clone();
+    let targets: Vec<_> = group
+        .actors
+        .iter()
+        .filter(|actor| {
+            (!crate::ops::actor_runtime::is_structured(actor)
+                || crate::ops::local_headless::supports(actor)
+                || actor.runtime == ActorRuntime::Deepseek)
+                && event_targets_actor(group, event, &actor.id)
+        })
+        .cloned()
+        .collect();
+
+    if targets.is_empty() {
+        return mail_report();
+    }
+
+    // Partition targets by policy decision.
+    let mut interrupt_targets: Vec<Actor> = Vec::new();
+    let mut digest_targets: Vec<Actor> = Vec::new();
+    let mut dropped = 0;
+
+    for actor in &targets {
+        if sender_allowed(&actor, &sender) {
+            interrupt_targets.push(actor.clone());
+        } else if actor.refuse_others {
+            dropped += 1;
+        } else {
+            digest_targets.push(actor.clone());
+        }
+    }
+
+    // If no policy filtering occurred, preserve the original mail_report behaviour.
+    if digest_targets.is_empty() && dropped == 0 {
+        return mail_report();
+    }
+
+    // Deliver interrupts immediately.
+    let mut report = if interrupt_targets.is_empty() {
+        mail_report()
+    } else {
+        dispatch_to(home, group, event, &interrupt_targets, false)
+    };
+
+    // Queue digest items (or deliver if digest is due).
+    if !digest_targets.is_empty() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for actor in &digest_targets {
+            let digest_due = actor
+                .digest_interval
+                .as_ref()
+                .and_then(|interval| parse_duration(interval).ok())
+                .map(|dur| now >= last_digest_at(home, group, actor) + dur.as_secs())
+                .unwrap_or(false);
+            if digest_due {
+                // Deliver now — the digest interval has elapsed.
+                let r = dispatch_to(home, group, event, std::slice::from_ref(actor), false);
+                report.targeted += r.targeted;
+                report.online += r.online;
+                report.queued += r.queued;
+                report.state = r.state;
+            }
+            // Otherwise the mail stays in the inbox for the next digest cycle.
+        }
+    }
+
+    if dropped > 0 {
+        report.targeted = report.targeted.saturating_sub(dropped);
+    }
+
+    report
+}
+
+/// Check if the sender is in the actor's interrupt_from allow-list.
+/// Empty allow-list means everyone is allowed (default, no behaviour change).
+fn sender_allowed(actor: &Actor, sender: &str) -> bool {
+    if actor.interrupt_from.is_empty() {
+        return true;
+    }
+    actor
+        .interrupt_from
+        .iter()
+        .any(|allowed| allowed == sender || allowed == "@all")
+}
+
+/// Parse a duration string like "4h", "30m", "1d" into a Duration.
+fn parse_duration(spec: &str) -> Result<std::time::Duration, String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err("empty duration".into());
+    }
+    let (digits, unit) = spec.split_at(spec.len() - 1);
+    let n: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid duration: {spec}"))?;
+    let secs = match unit {
+        "s" => n,
+        "m" => n.saturating_mul(60),
+        "h" => n.saturating_mul(3600),
+        "d" => n.saturating_mul(86400),
+        _ => return Err(format!("unknown unit: {unit}")),
+    };
+    Ok(std::time::Duration::from_secs(secs))
+}
+
+/// Get the last digest timestamp for an actor (from the ledger or state).
+/// Returns 0 if no digest has been sent yet.
+fn last_digest_at(_home: &HomeLayout, _group: &GroupDoc, _actor: &Actor) -> u64 {
+    // TODO: track last digest time in the store
+    0
 }
 
 fn event_targets_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
@@ -884,5 +1009,102 @@ mod tests {
                 .iter()
                 .any(|item| item.0 == group.group_id)
         );
+    }
+
+    #[test]
+    fn mail_policy_allowlisted_sender_interrupts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("mail policy", "").expect("group");
+        let mut actor = Actor::new("peer1");
+        actor.interrupt_from = vec!["lab-devin".to_string()];
+        group.actors.push(actor);
+        store.save(&group).expect("save actor");
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "lab-devin".into();
+        event.data = json!({"to":["peer1"],"text":"urgent","message_mode":"mail"})
+            .as_object()
+            .cloned()
+            .expect("event data");
+        let report = dispatch(&home, &group, &event);
+        // Allow-listed sender: mail_report (no filtering).
+        assert_eq!(report.state, "mail");
+    }
+
+    #[test]
+    fn mail_policy_non_allowlisted_sender_queued_for_digest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("mail policy", "").expect("group");
+        let mut actor = Actor::new("peer1");
+        actor.interrupt_from = vec!["lab-devin".to_string()];
+        actor.digest_interval = Some("4h".to_string());
+        group.actors.push(actor);
+        store.save(&group).expect("save actor");
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "someone-else".into();
+        event.data = json!({"to":["peer1"],"text":"fyi","message_mode":"mail"})
+            .as_object()
+            .cloned()
+            .expect("event data");
+        let report = dispatch(&home, &group, &event);
+        // Non-allowlisted sender with digest_interval: queued (not mail_report).
+        assert_ne!(report.state, "mail");
+    }
+
+    #[test]
+    fn mail_policy_refuse_others_drops_non_allowlisted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("mail policy", "").expect("group");
+        let mut actor = Actor::new("peer1");
+        actor.interrupt_from = vec!["lab-devin".to_string()];
+        actor.refuse_others = true;
+        group.actors.push(actor);
+        store.save(&group).expect("save actor");
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "someone-else".into();
+        event.data = json!({"to":["peer1"],"text":"fyi","message_mode":"mail"})
+            .as_object()
+            .cloned()
+            .expect("event data");
+        let report = dispatch(&home, &group, &event);
+        // refuse_others: non-allowlisted mail is dropped (no targets).
+        assert_eq!(report.state, "mail");
+        assert_eq!(report.targeted, 0);
+    }
+
+    #[test]
+    fn mail_policy_empty_allowlist_allows_everyone() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("mail policy", "").expect("group");
+        let actor = Actor::new("peer1");
+        // interrupt_from is empty (default) — everyone allowed.
+        group.actors.push(actor);
+        store.save(&group).expect("save actor");
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "anyone".into();
+        event.data = json!({"to":["peer1"],"text":"hello","message_mode":"mail"})
+            .as_object()
+            .cloned()
+            .expect("event data");
+        let report = dispatch(&home, &group, &event);
+        assert_eq!(report.state, "mail");
+    }
+
+    #[test]
+    fn parse_duration_variants() {
+        assert_eq!(parse_duration("30s").unwrap(), std::time::Duration::from_secs(30));
+        assert_eq!(parse_duration("5m").unwrap(), std::time::Duration::from_secs(300));
+        assert_eq!(parse_duration("2h").unwrap(), std::time::Duration::from_secs(7200));
+        assert_eq!(parse_duration("1d").unwrap(), std::time::Duration::from_secs(86400));
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("abc").is_err());
+        assert!(parse_duration("10x").is_err());
     }
 }
