@@ -170,6 +170,34 @@ pub(super) fn process_is_alive(_pid: u32) -> bool {
 }
 
 #[cfg(unix)]
+/// True when the pid is live but is executing a binary that has been unlinked.
+///
+/// Linux appends " (deleted)" to `/proc/<pid>/exe` when the inode the process
+/// is running has been replaced or removed. `process_is_alive` cannot see this:
+/// the pid answers, the port still serves, and every liveness probe passes —
+/// while the process is running pre-upgrade code out of an inode nothing can
+/// reach again. That is how a fixed cccc keeps serving a fixed bug.
+#[cfg(target_os = "linux")]
+pub(super) fn process_holds_deleted_executable(pid: u32) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .map(|path| path.to_string_lossy().ends_with(" (deleted)"))
+        .unwrap_or(false)
+}
+
+/// No equivalent signal is available on other unix targets, so this is
+/// deliberately false rather than a guess: the gate it feeds must fail closed
+/// on a real problem, not invent one.
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(super) fn process_holds_deleted_executable(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub(super) fn process_holds_deleted_executable(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn process_executable(pid: u32) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     if let Ok(path) = std::fs::read_link(format!("/proc/{pid}/exe")) {
@@ -518,6 +546,52 @@ pub(super) fn stop(home: &HomeLayout) -> Result<(), RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reproduce the real condition rather than mocking it: run a binary, then
+    /// unlink it, so the kernel marks the process's exe as deleted. This is
+    /// exactly what a cccc upgrade does to a still-running `cccc web`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deleted_executable_is_detected_on_a_live_process() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let binary = temp.path().join("cccc-test-live");
+        std::fs::copy("/bin/sleep", &binary).expect("copy sleep");
+
+        let mut child = std::process::Command::new(&binary)
+            .arg("30")
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+
+        // Alive and NOT deleted yet.
+        assert!(process_is_alive(pid), "process should be alive");
+        assert!(
+            !process_holds_deleted_executable(pid),
+            "a freshly spawned process must not look deleted"
+        );
+
+        // Unlink the binary underneath the running process.
+        std::fs::remove_file(&binary).expect("unlink");
+
+        // Still alive — this is the trap. Every liveness probe passes while the
+        // process runs an inode nothing can reach.
+        assert!(process_is_alive(pid), "process should still be alive");
+        assert!(
+            process_holds_deleted_executable(pid),
+            "a process running an unlinked binary must be reported as deleted"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// A pid that never existed must not be mistaken for a stale runtime, and a
+    /// dead process must not be reported as holding a deleted executable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn absent_pid_is_not_a_deleted_executable() {
+        assert!(!process_holds_deleted_executable(u32::MAX));
+    }
 
     #[cfg(unix)]
     #[test]

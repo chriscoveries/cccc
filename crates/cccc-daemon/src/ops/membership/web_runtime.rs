@@ -65,6 +65,19 @@ fn recorded_web_runtime(home: &HomeLayout) -> Result<RecordedWebRuntime, OpError
     if !crate::ops::membership_cloudflared::process_is_alive(pid) {
         return Err(gate("CCCC Web runtime is no longer running"));
     }
+    // A live pid is not a live runtime. When the binary it is executing has been
+    // replaced (an upgrade), /proc/<pid>/exe reads back as "<path> (deleted)":
+    // the process answers, serves the recorded port, and passes every liveness
+    // probe, while running pre-upgrade code out of an unreachable inode that
+    // no supervisor can re-adopt — web_runtime.json already records
+    // `supervisor_pid: null` for exactly this shape. Refuse the stale binding
+    // rather than route reach through code we have already replaced.
+    if crate::ops::membership_cloudflared::process_holds_deleted_executable(pid) {
+        return Err(gate(
+            "CCCC Web runtime is executing a deleted binary (pre-upgrade code); \
+             restart `cccc web` so reach is served by the current build",
+        ));
+    }
     let runtime_id = required_string(&runtime, "runtime_id", "identity")?.to_owned();
     let proof_key = required_string(&runtime, "runtime_proof_key", "proof key")?.to_owned();
     let host = runtime["host"]
