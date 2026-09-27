@@ -49,6 +49,64 @@ fn reconcile_one(store: &GroupStore, status: SessionStatus) -> Result<(), OpErro
         super::super::local_headless::stop(&status.group_id, &status.actor_id)
             .map_err(OpError::io)?;
     }
+    // RS-3: an exit inside the admission window is a fast failure. Repeated ones delay the next
+    // automatic restart and eventually park the Actor; a session that outlived the window proves
+    // its launch worked and clears the epoch.
+    let fast_failure = super::super::actor_restart_backoff::is_fast_failure(
+        &status.started_at,
+        super::super::actor_restart_backoff::now_ms(),
+    );
+    if fast_failure {
+        // The runtime registry keeps the exit code but not provider stderr, so the persisted
+        // `last_exit_stderr` slot carries the reason the daemon does have. A provider that
+        // refuses to start never reaches this path: its error text is already in the ledger as
+        // actor.resume_failed, and counting it here as well would double-count one failure.
+        let stderr = match status.exit_code {
+            Some(code) => format!("provider exited before admission (exit code {code})"),
+            None => "provider exited before admission (no exit code)".to_owned(),
+        };
+        if let Err(error) = super::super::actor_restart_backoff::record_fast_failure(
+            store.home(),
+            &status.group_id,
+            &status.actor_id,
+            status.exit_code.map(|code| code as i32),
+            &stderr,
+        ) {
+            tracing::warn!(
+                group_id = %status.group_id,
+                actor_id = %status.actor_id,
+                %error,
+                "failed to record the fast failure for restart backoff"
+            );
+        }
+        // RS-1's exit half: this launch never returned to a launcher, so nothing invalidated the
+        // provider binding it was resuming. Without this the next launch would resume the same dead
+        // session and only fall back to fresh after failing again.
+        if let Err(error) = super::super::runtime_session::invalidate_current_receipt(
+            store.home(),
+            &status.group_id,
+            &status.actor_id,
+            &stderr,
+        ) {
+            tracing::warn!(
+                group_id = %status.group_id,
+                actor_id = %status.actor_id,
+                %error,
+                "failed to invalidate the managed session after a fast failure"
+            );
+        }
+    } else if let Err(error) = super::super::actor_restart_backoff::record_first_turn(
+        store.home(),
+        &status.group_id,
+        &status.actor_id,
+    ) {
+        tracing::warn!(
+            group_id = %status.group_id,
+            actor_id = %status.actor_id,
+            %error,
+            "failed to clear the restart backoff epoch for a session that reached admission"
+        );
+    }
     // Preserve desired lifecycle after a provider exit. A later user-directed
     // message follows the same wake path whether the process exited or was stopped.
     append_exit_event(store, &status.group_id, &status.actor_id, status.exit_code)
@@ -175,6 +233,94 @@ mod tests {
         assert_eq!(event.kind, "actor.stop");
         assert_eq!(event.by, "system");
         assert_eq!(event.data["reason"], "process_exit");
+    }
+
+    #[test]
+    fn a_fast_exit_is_counted_and_a_healthy_session_clears_the_epoch() {
+        use crate::ops::actor_restart_backoff::{self, Gate};
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("fast exit", "").expect("group");
+        store
+            .mutate(&group.group_id, |doc| {
+                let mut actor = Actor::new("peer1");
+                actor.runtime_state_source = RuntimeStateSource::ManagedSession;
+                doc.actors.push(actor);
+                doc.running = true;
+                Ok(())
+            })
+            .expect("add actor");
+
+        let just_started =
+            chrono::DateTime::from_timestamp_millis(actor_restart_backoff::now_ms() - 1_000)
+                .expect("timestamp")
+                .to_rfc3339();
+        reconcile_exited(
+            &home,
+            vec![SessionStatus {
+                group_id: group.group_id.clone(),
+                actor_id: "peer1".into(),
+                runner: RunnerKind::Pty,
+                running: false,
+                pid: Some(43),
+                started_at: just_started,
+                exit_code: Some(3),
+            }],
+        )
+        .expect("reconcile fast exit");
+        assert_eq!(
+            actor_restart_backoff::load(&home, &group.group_id, "peer1")
+                .expect("load")
+                .consecutive_fast_failures,
+            1,
+            "an exit inside the admission window is one fast failure"
+        );
+        assert_eq!(
+            actor_restart_backoff::gate(&home, &group.group_id, "peer1"),
+            Gate::Allow,
+            "a single fast failure must not delay the next legitimate wake"
+        );
+
+        // A second consecutive fast failure is what the backoff holds back.
+        actor_restart_backoff::record_fast_failure(
+            &home,
+            &group.group_id,
+            "peer1",
+            Some(3),
+            "again",
+        )
+        .expect("second fast failure");
+        assert!(
+            matches!(
+                actor_restart_backoff::gate(&home, &group.group_id, "peer1"),
+                Gate::Wait { .. }
+            ),
+            "repeated fast failures are held back"
+        );
+
+        let long_running =
+            chrono::DateTime::from_timestamp_millis(actor_restart_backoff::now_ms() - 600_000)
+                .expect("timestamp")
+                .to_rfc3339();
+        reconcile_exited(
+            &home,
+            vec![SessionStatus {
+                group_id: group.group_id.clone(),
+                actor_id: "peer1".into(),
+                runner: RunnerKind::Pty,
+                running: false,
+                pid: Some(44),
+                started_at: long_running,
+                exit_code: Some(0),
+            }],
+        )
+        .expect("reconcile established exit");
+        assert_eq!(
+            actor_restart_backoff::gate(&home, &group.group_id, "peer1"),
+            Gate::Allow,
+            "a session that reached admission clears the backoff epoch"
+        );
     }
 
     #[test]

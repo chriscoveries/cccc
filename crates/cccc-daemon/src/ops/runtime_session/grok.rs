@@ -113,6 +113,24 @@ pub fn record_managed(
     write(home, group_id, actor_id, &document)
 }
 
+/// RS-1: the ACP leader resume failed for `failed_id`; poison that receipt so the retry is fresh.
+pub fn fail_managed(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    failed_id: &str,
+    error: &str,
+) -> std::io::Result<()> {
+    super::fail_managed_session(
+        home,
+        group_id,
+        actor_id,
+        MANAGED_TRANSPORT,
+        failed_id,
+        error,
+    )
+}
+
 fn identity_fingerprint(command: &[String], environment: &BTreeMap<String, String>) -> String {
     cccc_core::codex_voice_settings::ResolvedAgentRuntime {
         runtime: cccc_contracts::ActorRuntime::Grok,

@@ -5,6 +5,7 @@ mod actor_delivery_render;
 mod actor_delivery_worker;
 mod actor_listing;
 mod actor_profile_runtime;
+pub(crate) mod actor_restart_backoff;
 pub(crate) mod actor_runtime;
 mod actor_runtime_status;
 #[cfg(test)]

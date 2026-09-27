@@ -124,19 +124,19 @@ fn record_respawn(
     actor: &Actor,
     status: Option<&SessionStatus>,
 ) {
-    let path = match GroupStore::new(home.clone()).and_then(|store| store.ledger_path(&group.group_id))
-    {
-        Ok(path) => path,
-        Err(error) => {
-            tracing::warn!(
-                group_id = %group.group_id,
-                actor_id = %actor.id,
-                %error,
-                "failed to resolve ledger path for actor respawn"
-            );
-            return;
-        }
-    };
+    let path =
+        match GroupStore::new(home.clone()).and_then(|store| store.ledger_path(&group.group_id)) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    group_id = %group.group_id,
+                    actor_id = %actor.id,
+                    %error,
+                    "failed to resolve ledger path for actor respawn"
+                );
+                return;
+            }
+        };
     let mut event = Event::new("actor.respawn", &group.group_id);
     event.by = "system".into();
     event.data = json!({

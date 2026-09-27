@@ -129,6 +129,9 @@ fn process_deepseek_batch(
         if crate::ops::deepseek_runtime::manual_restart_required(home, group, actor) {
             return false;
         }
+        if !automation_may_launch(home, &group.group_id, &actor.id) {
+            return false;
+        }
         match actor_runtime::apply(home, group, &actor.id, "actor.start") {
             Ok(_) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
             Ok(_) | Err(_) => return false,
@@ -153,6 +156,9 @@ fn process_managed_batch(
     cancelled: &AtomicBool,
 ) -> bool {
     if !crate::ops::local_headless::running(&group.group_id, &actor.id) {
+        if !automation_may_launch(home, &group.group_id, &actor.id) {
+            return false;
+        }
         match actor_runtime::apply(home, group, &actor.id, "actor.start") {
             Ok(None) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {}
             Ok(_) => return false,
@@ -175,6 +181,34 @@ fn process_managed_batch(
     false
 }
 
+/// RS-3: message delivery is automation, not an operator, so it may not relaunch an Actor that
+/// is backing off or parked — that is exactly the hot loop the backoff exists to stop. A manual
+/// start goes through `actor_runtime::apply` and is never gated here; it clears the park instead.
+fn automation_may_launch(home: &cccc_core::HomeLayout, group_id: &str, actor_id: &str) -> bool {
+    use crate::ops::actor_restart_backoff::Gate;
+    match crate::ops::actor_restart_backoff::gate(home, group_id, actor_id) {
+        Gate::Allow => true,
+        Gate::Wait { delay, .. } => {
+            tracing::debug!(
+                %group_id,
+                %actor_id,
+                delay_ms = delay.as_millis() as u64,
+                "holding the automatic relaunch until the restart backoff elapses"
+            );
+            false
+        }
+        Gate::Parked { reason } => {
+            tracing::info!(
+                %group_id,
+                %actor_id,
+                %reason,
+                "not relaunching a parked Actor; a manual start clears the park"
+            );
+            false
+        }
+    }
+}
+
 fn finish_jobs(jobs: &[DeliveryJob]) {
     for job in jobs {
         complete_job(job);
@@ -190,6 +224,9 @@ fn ensure_running(
         && status.running
     {
         return Some(status);
+    }
+    if !automation_may_launch(home, &group.group_id, &actor.id) {
+        return None;
     }
     let status = match actor_runtime::apply(home, group, &actor.id, "actor.start") {
         Ok(Some(status)) if status.running => status,

@@ -22,6 +22,7 @@ mod native_input;
 mod opencode;
 mod process;
 mod protocol;
+mod resume_fallback;
 #[cfg(test)]
 mod tests;
 mod turns;

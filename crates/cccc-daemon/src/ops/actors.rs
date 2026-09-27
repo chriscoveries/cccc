@@ -711,6 +711,18 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         .map_err(OpError::io)?;
     }
     let enabled = kind != "actor.stop";
+    // RS-3: this is the operator path, so an explicit start clears a park and opens a new backoff
+    // epoch. Automation never reaches here, so the park cannot be cleared by a relaunch loop.
+    if enabled && kind != "actor.new_session" {
+        if let Err(error) =
+            super::actor_restart_backoff::clear_for_manual_start(home, &group_id, &actor_id)
+        {
+            tracing::warn!(
+                %group_id, %actor_id, %error,
+                "failed to clear the restart park before an explicit start"
+            );
+        }
+    }
     let status = match actor_runtime::apply(home, &group, &actor_id, kind) {
         Ok(status) => status,
         Err(error) => {

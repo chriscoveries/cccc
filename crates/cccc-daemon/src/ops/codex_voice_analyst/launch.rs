@@ -155,9 +155,12 @@ impl AnalystSession {
             ));
         }
         let mut env = config.environment;
-        let prepared = super::launch_command::prepare(&config.command, &env)?;
-        let session_command = prepared.app_server.clone();
+        let prepared_once = super::launch_command::prepare(&config.command, &env)?;
+        // The receipt is keyed on the app-server command and the identity environment, not on the
+        // per-attempt MCP wiring, so both are captured before the attempt loop.
+        let session_command = prepared_once.app_server.clone();
         let identity_environment = env.clone();
+        let model = prepared_once.model.clone();
         let resume_thread_id = lifecycle_timing::run_sync("codex.resume_lookup", || {
             super::super::runtime_session::prepare_codex_app_thread(
                 home,
@@ -166,10 +169,10 @@ impl AnalystSession {
                 &binding.root,
                 &session_command,
                 &identity_environment,
-                &prepared.model,
+                &model,
             )
         })?;
-        let mut command = prepared.app_server;
+        let mut command = prepared_once.app_server;
         if !super::super::codex_mcp::configure_mcp_only(
             home,
             &config.group_id,
@@ -182,15 +185,94 @@ impl AnalystSession {
                 "CCCC executable is unavailable for Codex Actor MCP binding",
             ));
         }
-        let session = Self::launch_prepared(
-            binding,
-            prepared.remote_tui_prefix,
-            command,
-            env,
-            resume_thread_id,
-            SessionPurpose::Actor,
-        )
-        .await?;
+        // RS-1: a failed thread resume poisons that thread id and gets exactly one fresh launch.
+        let fallback_context = resume_fallback::FallbackContext {
+            home,
+            group_id: &config.group_id,
+            actor_id: &config.actor_id,
+            runtime: "codex",
+        };
+        let mut fallback = resume_fallback::ResumeFallback::new(resume_thread_id);
+        let mut resume_failure: Option<(String, String)> = None;
+        let mut last_error: Option<io::Error> = None;
+        let session = loop {
+            let resume_thread_id = match fallback.next() {
+                resume_fallback::Next::Launch { resume_id } => resume_id,
+                resume_fallback::Next::Stop => {
+                    return Err(last_error.unwrap_or_else(|| {
+                        io::Error::other("Codex app-server launch refused without an error")
+                    }));
+                }
+            };
+            let prepared = super::launch_command::prepare(&config.command, &env)?;
+            let mut attempt_command = command.clone();
+            if !super::super::codex_mcp::configure_mcp_only(
+                home,
+                &config.group_id,
+                &config.actor_id,
+                &mut attempt_command,
+                &mut env,
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "CCCC executable is unavailable for Codex Actor MCP binding",
+                ));
+            }
+            let attempted = resume_thread_id.clone();
+            match Self::launch_prepared(
+                binding.clone(),
+                prepared.remote_tui_prefix,
+                attempt_command,
+                env.clone(),
+                resume_thread_id,
+                SessionPurpose::Actor,
+            )
+            .await
+            {
+                Ok(session) => break session,
+                Err(error) => {
+                    let failure = fallback.failed(attempted.as_deref());
+                    if let Some(failed_id) = failure.invalidate_id() {
+                        let error_text = error.to_string();
+                        resume_failure = Some((failed_id.to_owned(), error_text.clone()));
+                        resume_fallback::invalidate_receipt(
+                            |failed_id, reason| {
+                                super::super::runtime_session::fail_codex_app_thread(
+                                    home,
+                                    &config.group_id,
+                                    &config.actor_id,
+                                    failed_id,
+                                    reason,
+                                )
+                            },
+                            failed_id,
+                            &error_text,
+                        );
+                    }
+                    if failure.may_retry_fresh() {
+                        tracing::warn!(
+                            %error,
+                            group_id = %config.group_id,
+                            actor_id = %config.actor_id,
+                            "Codex app-server thread resume failed; retrying with a fresh thread"
+                        );
+                        last_error = Some(error);
+                        continue;
+                    }
+                    if let Some((failed_id, error_text)) = resume_failure {
+                        fallback_context.record_resume_failure(
+                            &failed_id,
+                            &error_text,
+                            Some(&error.to_string()),
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        };
+        if let Some((failed_id, error_text)) = resume_failure {
+            fallback_context.record_resume_failure(&failed_id, &error_text, None);
+        }
         if let Err(error) = lifecycle_timing::run_sync("codex.resume_record", || {
             super::super::runtime_session::record_codex_app_thread(
                 home,

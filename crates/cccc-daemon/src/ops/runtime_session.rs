@@ -10,20 +10,105 @@ mod grok;
 mod grok_tests;
 mod opencode;
 pub use claude::{
-    prepare_managed as prepare_claude_managed_session,
+    fail_managed as fail_claude_managed_session, prepare_managed as prepare_claude_managed_session,
     record_managed as record_claude_managed_session,
 };
 pub use grok::{
-    prepare_managed as prepare_grok_managed_session, record_managed as record_grok_managed_session,
+    fail_managed as fail_grok_managed_session, prepare_managed as prepare_grok_managed_session,
+    record_managed as record_grok_managed_session,
 };
 pub use opencode::{
+    fail_managed as fail_opencode_managed_session,
     prepare_managed as prepare_opencode_managed_session,
     record_managed as record_opencode_managed_session,
 };
 
+/// Invalidate whatever provider binding the receipt currently holds, using the receipt's own
+/// transport. This is the exit-side counterpart of [`fail_managed_session`]: a provider that
+/// started and then died before its first turn never reached a launcher, so nothing invalidated
+/// its id, and the next launch would otherwise resume the same dead session.
+pub(crate) fn invalidate_current_receipt(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    error: &str,
+) -> std::io::Result<()> {
+    if !resume_enabled() {
+        return Ok(());
+    }
+    let _ = path(home, group_id, actor_id)?;
+    let Ok(document) = read(home, group_id, actor_id) else {
+        return Ok(());
+    };
+    if string(&document, "kind") != "runtime_session" {
+        return Ok(());
+    }
+    let transport = string(&document, "transport");
+    let failed_id = [
+        string(&document, "provider_session_id"),
+        string(&document, "provider_thread_id"),
+    ]
+    .into_iter()
+    .find(|value| !value.is_empty())
+    .unwrap_or_default();
+    fail_managed_session(home, group_id, actor_id, &transport, &failed_id, error)
+}
+
+/// RS-1 invalidation shared by every provider receipt: a launch that failed while resuming this
+/// exact id must not leave the receipt resume-eligible, or the next launch replays the same
+/// doomed session. `transport` is the provider's own marker so a receipt written by one provider
+/// is never poisoned by another.
+pub(crate) fn fail_managed_session(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    transport: &str,
+    failed_id: &str,
+    error: &str,
+) -> std::io::Result<()> {
+    if !resume_enabled() {
+        return Ok(());
+    }
+    // Validate the actor id before reading: a receipt path that escapes the state directory is an
+    // error, not a silently skipped invalidation.
+    let _ = path(home, group_id, actor_id)?;
+    let Ok(mut document) = read(home, group_id, actor_id) else {
+        return Ok(());
+    };
+    if string(&document, "kind") != "runtime_session" || string(&document, "transport") != transport
+    {
+        return Ok(());
+    }
+    // Only the id this receipt actually holds may be invalidated: a stale failure report must not
+    // poison a newer binding recorded by a later launch. Providers differ in which field carries
+    // the id (Claude a session id, Codex a thread id), so both are considered.
+    let recorded = [
+        string(&document, "provider_session_id"),
+        string(&document, "provider_thread_id"),
+    ];
+    let holds_id = recorded.iter().any(|value| !value.is_empty());
+    if !failed_id.is_empty() && holds_id && !recorded.iter().any(|value| value == failed_id) {
+        return Ok(());
+    }
+    let failure_count = document
+        .get("failure_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    document.insert("status".into(), json!("resume_failed"));
+    document.insert("resume_eligible".into(), json!(false));
+    document.insert(
+        "last_resume_error".into(),
+        json!(error.chars().take(MAX_RESUME_ERROR).collect::<String>()),
+    );
+    document.insert("failure_count".into(), json!(failure_count + 1));
+    document.insert("updated_at".into(), json!(utc_now()));
+    write(home, group_id, actor_id, &document)
+}
+
 const NO_RESUME_VALUES: [&str; 4] = ["0", "false", "no", "off"];
 const MANAGED_RECORD_VERSION: u64 = 2;
 const CODEX_MANAGED_TRANSPORT: &str = "codex_app_server";
+const MAX_RESUME_ERROR: usize = 512;
 
 pub fn prepare_codex_app_thread(
     home: &HomeLayout,
@@ -67,6 +152,25 @@ pub fn prepare_codex_app_thread(
     document.insert("updated_at".into(), json!(utc_now()));
     write(home, group_id, actor_id, &document)?;
     Ok(Some(thread_id))
+}
+
+/// RS-1: the app-server thread resume failed for `failed_id`; poison that receipt so the retry is
+/// a fresh thread instead of the same doomed one.
+pub fn fail_codex_app_thread(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    failed_id: &str,
+    error: &str,
+) -> std::io::Result<()> {
+    fail_managed_session(
+        home,
+        group_id,
+        actor_id,
+        CODEX_MANAGED_TRANSPORT,
+        failed_id,
+        error,
+    )
 }
 
 pub struct CodexAppThread<'a> {
@@ -455,6 +559,154 @@ mod tests {
             prepare_codex_app_thread(&home, &group_id, "peer1", &cwd, &command, &environment, "",)
                 .expect("legacy receipt")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn fail_managed_session_poisons_only_the_id_that_failed() {
+        let (_temp, home, group_id, cwd) = fixture();
+        let command = app_thread_command();
+        let environment =
+            std::collections::BTreeMap::from([("CODEX_HOME".into(), "/tmp/codex-a".into())]);
+        record_codex_app_thread(
+            &home,
+            &group_id,
+            "peer1",
+            &cwd,
+            &command,
+            &environment,
+            CodexAppThread {
+                id: "thread-1",
+                resumed: false,
+            },
+        )
+        .expect("record app thread");
+
+        // A stale report about a different id must not poison the current binding.
+        fail_managed_session(
+            &home,
+            &group_id,
+            "peer1",
+            CODEX_MANAGED_TRANSPORT,
+            "thread-older",
+            "stale failure",
+        )
+        .expect("stale failure");
+        let stored = read(&home, &group_id, "peer1").expect("stored metadata");
+        assert_eq!(stored["status"], "usable");
+        assert_eq!(stored["resume_eligible"], true);
+        assert_eq!(stored["provider_thread_id"], "thread-1");
+
+        // A receipt from another provider is never touched.
+        fail_managed_session(
+            &home,
+            &group_id,
+            "peer1",
+            "claude_agent_view",
+            "thread-1",
+            "wrong transport",
+        )
+        .expect("wrong transport");
+        let stored = read(&home, &group_id, "peer1").expect("stored metadata");
+        assert_eq!(stored["status"], "usable");
+
+        fail_codex_app_thread(&home, &group_id, "peer1", "thread-1", "app-server refused")
+            .expect("record failure");
+        let stored = read(&home, &group_id, "peer1").expect("stored metadata");
+        assert_eq!(stored["status"], "resume_failed");
+        assert_eq!(stored["resume_eligible"], false);
+        assert_eq!(stored["failure_count"], 1);
+        assert_eq!(stored["last_resume_error"], "app-server refused");
+        assert_eq!(
+            stored["provider_thread_id"], "thread-1",
+            "invalidation keeps the record of what was dropped"
+        );
+        assert!(
+            prepare_codex_app_thread(&home, &group_id, "peer1", &cwd, &command, &environment, "")
+                .expect("poisoned prepare")
+                .is_none(),
+            "a poisoned receipt is never resumed again"
+        );
+
+        fail_codex_app_thread(&home, &group_id, "peer1", "thread-1", "again").expect("second");
+        let stored = read(&home, &group_id, "peer1").expect("stored metadata");
+        assert_eq!(stored["failure_count"], 2);
+        assert_eq!(stored["last_resume_error"], "again");
+
+        // An unknown actor is not an error: there is no receipt to poison.
+        fail_codex_app_thread(&home, &group_id, "nobody", "thread-1", "no receipt")
+            .expect("unknown actor");
+    }
+
+    #[test]
+    fn invalidate_current_receipt_uses_the_receipts_own_transport() {
+        let (_temp, home, group_id, cwd) = fixture();
+        let command = app_thread_command();
+        let environment =
+            std::collections::BTreeMap::from([("CODEX_HOME".into(), "/tmp/codex-a".into())]);
+        record_codex_app_thread(
+            &home,
+            &group_id,
+            "peer1",
+            &cwd,
+            &command,
+            &environment,
+            CodexAppThread {
+                id: "thread-1",
+                resumed: false,
+            },
+        )
+        .expect("record app thread");
+
+        // A provider that started and then died before its first turn never reached a launcher, so
+        // the exit side has to invalidate the id itself or the next launch resumes the dead thread.
+        invalidate_current_receipt(
+            &home,
+            &group_id,
+            "peer1",
+            "provider exited before admission",
+        )
+        .expect("invalidate current receipt");
+        let stored = read(&home, &group_id, "peer1").expect("stored metadata");
+        assert_eq!(stored["status"], "resume_failed");
+        assert_eq!(stored["resume_eligible"], false);
+        assert_eq!(stored["provider_thread_id"], "thread-1");
+        assert_eq!(
+            stored["last_resume_error"],
+            "provider exited before admission"
+        );
+        assert_eq!(stored["transport"], CODEX_MANAGED_TRANSPORT);
+
+        // No receipt, no error: an actor without a managed session is not poisoned.
+        invalidate_current_receipt(&home, &group_id, "peer2", "nothing recorded")
+            .expect("unknown actor has no receipt");
+        assert!(
+            invalidate_current_receipt(&home, &group_id, "../escape", "traversal").is_err(),
+            "the receipt path must still reject a traversal actor id"
+        );
+    }
+
+    #[test]
+    fn fail_managed_session_rejects_a_traversal_actor_id() {
+        let (_temp, home, group_id, cwd) = fixture();
+        let command = app_thread_command();
+        let environment = std::collections::BTreeMap::new();
+        record_codex_app_thread(
+            &home,
+            &group_id,
+            "peer1",
+            &cwd,
+            &command,
+            &environment,
+            CodexAppThread {
+                id: "thread-1",
+                resumed: false,
+            },
+        )
+        .expect("record app thread");
+        assert!(
+            fail_codex_app_thread(&home, &group_id, "../escape", "thread-1", "nope").is_err(),
+            "the receipt path must reject an actor id that escapes the state directory"
         );
     }
 

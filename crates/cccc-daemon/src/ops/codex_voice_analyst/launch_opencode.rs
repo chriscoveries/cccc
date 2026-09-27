@@ -37,7 +37,7 @@ impl AnalystSession {
         let mut mcp_server = acp_mcp_server(home, &cccc, group_id, actor_id, tool_profile);
         add_voice_mcp_origin(&mut mcp_server, &env, purpose);
         let session_command = command.clone();
-        let prepared = opencode::prepare(&command, &env, runtime)?;
+        opencode::prepare(&command, &env, runtime)?;
         let resume_session_id = if let Some((group_id, actor_id)) = actor {
             super::super::runtime_session::prepare_opencode_managed_session(
                 runtime,
@@ -51,16 +51,85 @@ impl AnalystSession {
         } else {
             requested_session_id
         };
-        let launched = opencode::launch(
-            prepared,
-            &binding.root,
-            env,
-            &generation,
-            purpose,
-            resume_session_id.as_deref(),
-            mcp_server,
-        )
-        .await?;
+        // RS-1: a failed ACP resume poisons that session id and gets one fresh attempt.
+        let fallback_context = actor.map(|(group_id, actor_id)| resume_fallback::FallbackContext {
+            home,
+            group_id,
+            actor_id,
+            runtime: if runtime == ActorRuntime::Kilo {
+                "kilo"
+            } else {
+                "opencode"
+            },
+        });
+        let mut fallback = resume_fallback::ResumeFallback::new(resume_session_id);
+        let mut resume_failure: Option<(String, String)> = None;
+        let mut last_error: Option<io::Error> = None;
+        let launched = loop {
+            let resume_id = match fallback.next() {
+                resume_fallback::Next::Launch { resume_id } => resume_id,
+                resume_fallback::Next::Stop => {
+                    return Err(last_error.unwrap_or_else(|| {
+                        io::Error::other("OpenCode/Kilo launch refused without an error")
+                    }));
+                }
+            };
+            let attempt = opencode::prepare(&command, &env, runtime)?;
+            match opencode::launch(
+                attempt,
+                &binding.root,
+                env.clone(),
+                &generation,
+                purpose,
+                resume_id.as_deref(),
+                mcp_server.clone(),
+            )
+            .await
+            {
+                Ok(launched) => break launched,
+                Err(error) => {
+                    let failure = fallback.failed(resume_id.as_deref());
+                    if let (Some(context), Some(failed_id)) =
+                        (fallback_context, failure.invalidate_id())
+                    {
+                        let error_text = error.to_string();
+                        resume_failure = Some((failed_id.to_owned(), error_text.clone()));
+                        resume_fallback::invalidate_receipt(
+                            |failed_id, reason| {
+                                super::super::runtime_session::fail_opencode_managed_session(
+                                    runtime,
+                                    home,
+                                    context.group_id,
+                                    context.actor_id,
+                                    failed_id,
+                                    reason,
+                                )
+                            },
+                            failed_id,
+                            &error_text,
+                        );
+                    }
+                    if failure.may_retry_fresh() {
+                        tracing::warn!(
+                            %error, ?runtime,
+                            "OpenCode/Kilo managed resume failed; retrying with a fresh session"
+                        );
+                        last_error = Some(error);
+                        continue;
+                    }
+                    if let (Some(context), Some((failed_id, error_text))) =
+                        (fallback_context, resume_failure)
+                    {
+                        context.record_resume_failure(
+                            &failed_id,
+                            &error_text,
+                            Some(&error.to_string()),
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        };
         if let Some((group_id, actor_id)) = actor
             && let Err(error) = super::super::runtime_session::record_opencode_managed_session(
                 runtime,

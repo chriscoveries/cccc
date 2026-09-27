@@ -129,6 +129,25 @@ pub fn record_managed(
     write(home, group_id, actor_id, &document)
 }
 
+/// RS-1: the ACP resume failed for `failed_id`; poison that receipt so the retry is fresh.
+pub fn fail_managed(
+    runtime: ActorRuntime,
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    failed_id: &str,
+    error: &str,
+) -> std::io::Result<()> {
+    super::fail_managed_session(
+        home,
+        group_id,
+        actor_id,
+        transport(runtime),
+        failed_id,
+        error,
+    )
+}
+
 fn identity_fingerprint(
     runtime: ActorRuntime,
     command: &[String],

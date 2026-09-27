@@ -79,23 +79,82 @@ impl AnalystSession {
         } else {
             requested_session_id
         };
-        let prepared = claude::prepare(
+        // RS-1: a failed Agent View resume poisons that session id and gets exactly one fresh
+        // attempt. The receipt invalidation and the ledger event are shared across providers.
+        let fallback_context = resume_fallback::FallbackContext {
             home,
-            &command,
-            &environment,
-            &binding.root,
-            &settings_key,
-            purpose,
-            mcp_server,
-        )?;
-        let launched = claude::launch(
-            prepared,
-            &binding.root,
-            &generation,
-            purpose,
-            resume_session_id.as_deref(),
-        )
-        .await?;
+            group_id,
+            actor_id,
+            runtime: "claude",
+        };
+        let mut fallback = resume_fallback::ResumeFallback::new(resume_session_id);
+        let mut resume_failure: Option<(String, String)> = None;
+        let mut last_error: Option<io::Error> = None;
+        let launched = loop {
+            let resume_id = match fallback.next() {
+                resume_fallback::Next::Launch { resume_id } => resume_id,
+                resume_fallback::Next::Stop => {
+                    return Err(last_error.unwrap_or_else(|| {
+                        io::Error::other("Claude managed launch refused without an error")
+                    }));
+                }
+            };
+            let prepared = claude::prepare(
+                home,
+                &command,
+                &environment,
+                &binding.root,
+                &settings_key,
+                purpose,
+                mcp_server.clone(),
+            )?;
+            match claude::launch(
+                prepared,
+                &binding.root,
+                &generation,
+                purpose,
+                resume_id.as_deref(),
+            )
+            .await
+            {
+                Ok(launched) => break launched,
+                Err(error) => {
+                    let failure = fallback.failed(resume_id.as_deref());
+                    if let Some(failed_id) = failure.invalidate_id() {
+                        let error_text = error.to_string();
+                        resume_failure = Some((failed_id.to_owned(), error_text.clone()));
+                        resume_fallback::invalidate_receipt(
+                            |failed_id, reason| {
+                                super::super::runtime_session::fail_claude_managed_session(
+                                    home, group_id, actor_id, failed_id, reason,
+                                )
+                            },
+                            failed_id,
+                            &error_text,
+                        );
+                    }
+                    if failure.may_retry_fresh() {
+                        tracing::warn!(
+                            %error, %group_id, %actor_id,
+                            "Claude managed resume failed; retrying with a fresh session"
+                        );
+                        last_error = Some(error);
+                        continue;
+                    }
+                    if let Some((failed_id, error_text)) = resume_failure {
+                        fallback_context.record_resume_failure(
+                            &failed_id,
+                            &error_text,
+                            Some(&error.to_string()),
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        };
+        if let Some((failed_id, error_text)) = resume_failure {
+            fallback_context.record_resume_failure(&failed_id, &error_text, None);
+        }
         if let Some((group_id, actor_id)) = actor
             && let Err(error) = super::super::runtime_session::record_claude_managed_session(
                 home,
