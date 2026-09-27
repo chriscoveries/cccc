@@ -10,6 +10,17 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+// The app-server answers `thread/resume` with the thread's whole history as a
+// single unfragmented websocket message — observed at ~30 MiB on long-lived
+// actors, which exceeds tungstenite's default 16 MiB frame / 64 MiB message
+// caps and put the connection into a permanent connect→Capacity→drop loop.
+// Bound generously above the observed maximum rather than removing the cap.
+fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    let mut config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+    config.max_frame_size = Some(64 << 20);
+    config.max_message_size = Some(128 << 20);
+    config
+}
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const EVENT_CAPACITY: usize = 2048;
 const COMMAND_CAPACITY: usize = 32;
@@ -25,7 +36,8 @@ pub(super) async fn connect_with_retry(
 > {
     let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
     loop {
-        match tokio_tungstenite::connect_async(endpoint).await {
+        match tokio_tungstenite::connect_async_with_config(endpoint, Some(ws_config()), false).await
+        {
             Ok((socket, _)) => return Ok(socket),
             Err(error) if tokio::time::Instant::now() < deadline => {
                 tracing::debug!(%error, "waiting for Codex app-server websocket");
@@ -439,3 +451,7 @@ fn publish_event(
 #[cfg(test)]
 #[path = "protocol_disconnect_tests.rs"]
 mod disconnect_tests;
+
+#[cfg(test)]
+#[path = "protocol_ws_config_tests.rs"]
+mod ws_config_tests;
