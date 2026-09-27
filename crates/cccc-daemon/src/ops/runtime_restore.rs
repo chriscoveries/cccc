@@ -91,6 +91,22 @@ fn restore_group(home: &HomeLayout, store: &GroupStore, group_id: &str) -> Resul
             );
             continue;
         }
+        // RS-3: a daemon restart is not an operator. Restoring a parked Actor here would relaunch
+        // exactly what the park exists to stop, and would erase the reason the next `actor_list`
+        // shows. A Waiting Actor is deferred instead: the next delivery or rule wakes it once the
+        // delay has elapsed, and an operator start clears a park.
+        if let Some(refusal) =
+            crate::ops::actor_restart_backoff::refusal(home, &group.group_id, &actor.id)
+        {
+            tracing::info!(
+                group_id = %group.group_id,
+                actor_id = %actor.id,
+                code = refusal.code(),
+                message = %refusal.message(),
+                "skipped boot restore for a backing-off or parked Actor"
+            );
+            continue;
+        }
         let was_running = actor_runtime::actor_is_running(&group, &actor);
         match actor_runtime::apply_resolved(home, &group, &actor, "actor.restore") {
             Ok(_) => {
@@ -152,6 +168,11 @@ mod tests {
     use crate::ops::actor_runtime;
     use cccc_contracts::{Actor, ActorRuntime, GroupState, RunnerKind};
     use cccc_core::{GroupDoc, GroupStore, HomeLayout, Scope, ledger};
+    use serde_json::json;
+
+    fn running(group_id: &str, actor_id: &str) -> bool {
+        cccc_runtime::status(group_id, actor_id).is_ok_and(|status| status.running)
+    }
 
     #[test]
     fn paused_groups_restore_terminal_runtimes_but_not_non_terminal_runtimes() {
