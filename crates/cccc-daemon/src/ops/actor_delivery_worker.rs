@@ -129,9 +129,28 @@ fn process_deepseek_batch(
         if crate::ops::deepseek_runtime::manual_restart_required(home, group, actor) {
             return false;
         }
+        // Same bounded backoff as the managed path: this is the deepseek
+        // runtime's automatic respawn, reached once per incoming message.
+        if let Some(delay) = super::actor_respawn_backoff::due_delay(&group.group_id, &actor.id) {
+            tracing::warn!(
+                group_id = %group.group_id,
+                actor_id = %actor.id,
+                delay_ms = delay.as_millis() as u64,
+                "delaying automatic actor respawn after a failed restart"
+            );
+            std::thread::sleep(delay);
+            if cancelled.load(Ordering::Acquire) {
+                return false;
+            }
+        }
         match actor_runtime::apply(home, group, &actor.id, "actor.start") {
-            Ok(_) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
-            Ok(_) | Err(_) => return false,
+            Ok(_) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {
+                super::actor_respawn_backoff::record_restart(&group.group_id, &actor.id, true);
+            }
+            Ok(_) | Err(_) => {
+                super::actor_respawn_backoff::record_restart(&group.group_id, &actor.id, false);
+                return false;
+            }
         }
     }
     for job in jobs {
@@ -153,10 +172,37 @@ fn process_managed_batch(
     cancelled: &AtomicBool,
 ) -> bool {
     if !crate::ops::local_headless::running(&group.group_id, &actor.id) {
+        // A dying actor would otherwise be relaunched once per incoming
+        // message, with no delay: a fast-exiting process plus a chatty group
+        // is a tight restart loop. Back off between AUTOMATIC restarts. The
+        // gate is deliberately here and not inside `actor_runtime::apply`,
+        // which is also the human-initiated start path — a person pressing
+        // start must not wait on a previous automatic failure.
+        if let Some(delay) = super::actor_respawn_backoff::due_delay(&group.group_id, &actor.id) {
+            tracing::warn!(
+                group_id = %group.group_id,
+                actor_id = %actor.id,
+                delay_ms = delay.as_millis() as u64,
+                "delaying automatic actor respawn after a failed restart"
+            );
+            std::thread::sleep(delay);
+            if cancelled.load(Ordering::Acquire) {
+                return false;
+            }
+        }
         match actor_runtime::apply(home, group, &actor.id, "actor.start") {
-            Ok(None) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {}
-            Ok(_) => return false,
+            Ok(None) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {
+                super::actor_respawn_backoff::record_restart(&group.group_id, &actor.id, true);
+            }
+            Ok(_) => {
+                super::actor_respawn_backoff::record_restart(&group.group_id, &actor.id, false);
+                return false;
+            }
             Err(error) => {
+                // A failed resume is still a failed automatic restart:
+                // record it so the backoff gates the next auto-start even
+                // though this delivery round pauses below.
+                super::actor_respawn_backoff::record_restart(&group.group_id, &actor.id, false);
                 if error.code == actor_runtime::CLAUDE_RESUME_FAILED {
                     // Release this worker's claims but leave inbox/ledger messages pending.
                     // Explicit recovery redispatches them; automatic startup must stop.
