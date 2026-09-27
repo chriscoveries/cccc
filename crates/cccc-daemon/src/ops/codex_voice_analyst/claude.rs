@@ -51,7 +51,7 @@ const TRANSCRIPT_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PROMPT_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 const PROMPT_SETTLED_CORRELATION_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
-const GONE_CONFIRM: Duration = Duration::from_millis(500);
+const GONE_CONFIRM: Duration = Duration::from_secs(2);
 const LIVENESS_FAILURE_TIMEOUT: Duration = Duration::from_secs(10);
 const PARTIAL_TAIL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LAUNCH_OUTPUT_BYTES: usize = 64 * 1024;
@@ -507,8 +507,9 @@ async fn kill_and_confirm(endpoint: &control::Endpoint, short: &str) -> io::Resu
     let deadline = tokio::time::Instant::now() + STOP_TIMEOUT;
     let mut last_error: Option<io::Error>;
     // A control endpoint that stays NotFound is gone for good: the task and its
-    // harness are already dead, so that counts as stopped. Anything shorter
-    // than the confirmation window is treated as a restart race and retried.
+    // harness are already dead, so that counts as stopped. Agent View jobs can
+    // outlive a brief harness restart, so only a NotFound sustained past the
+    // confirmation window counts — anything shorter is a restart race.
     let mut gone_since: Option<tokio::time::Instant> = None;
     loop {
         match control::list(endpoint).await {
@@ -2549,6 +2550,11 @@ mod tests {
         kill_and_confirm(&endpoint, "deadbeef")
             .await
             .expect("a missing endpoint is already stopped");
+        assert!(
+            started.elapsed() >= GONE_CONFIRM,
+            "a missing endpoint must be confirmed gone first: {:?}",
+            started.elapsed()
+        );
         assert!(
             started.elapsed() < STOP_TIMEOUT,
             "missing endpoint must not wait out the stop timeout: {:?}",
