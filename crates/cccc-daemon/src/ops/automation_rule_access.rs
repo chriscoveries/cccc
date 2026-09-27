@@ -160,6 +160,15 @@ fn validate_trigger(value: &mut Value) -> Result<String, OpError> {
             reject_unknown(trigger, &["kind", "at"], "at trigger")?;
             required_text(trigger, "at")?;
         }
+        "task_stalled" => {
+            // Fires when an actor's active task has had no progress for the
+            // window the core's stall scan applies, so the trigger carries no
+            // schedule of its own: there is nothing to require and nothing to
+            // default. Unknown fields are still rejected, so a rule that
+            // looks like an interval rule is reported rather than silently
+            // treated as a stall watch.
+            reject_unknown(trigger, &["kind"], "task_stalled trigger")?;
+        }
         _ => return Err(invalid(format!("unsupported trigger kind: {kind}"))),
     }
     Ok(kind)
@@ -262,4 +271,37 @@ fn reject_unknown(
 
 fn invalid(message: impl Into<String>) -> OpError {
     OpError::new("group_automation_manage_failed", message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn task_stalled_trigger_is_accepted() {
+        let mut trigger = json!({"kind":"task_stalled"});
+        let kind = validate_trigger(&mut trigger).expect("task_stalled must be accepted");
+        assert_eq!(kind, "task_stalled");
+    }
+
+    #[test]
+    fn task_stalled_trigger_rejects_unknown_fields() {
+        let mut trigger = json!({"kind":"task_stalled","every_seconds":60});
+        let err = validate_trigger(&mut trigger).expect_err("unknown field must be rejected");
+        assert!(
+            err.message.contains("unknown task_stalled trigger field"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_unsupported_kind_is_still_rejected() {
+        let mut trigger = json!({"kind":"nonsense"});
+        let err = validate_trigger(&mut trigger).expect_err("unknown kind must be rejected");
+        assert!(
+            err.message.contains("unsupported trigger kind"),
+            "unexpected error: {err:?}"
+        );
+    }
 }
