@@ -143,7 +143,9 @@ fn deepseek_restore_blocked(home: &HomeLayout, group: &cccc_core::GroupDoc, acto
 
 #[cfg(test)]
 mod tests {
-    use super::{deepseek_restore_blocked, record_respawn_event, should_restore_actor};
+    use super::{
+        deepseek_restore_blocked, record_respawn_event, restore_group, should_restore_actor,
+    };
     use cccc_contracts::{Actor, ActorRuntime, GroupState};
     use cccc_core::{ledger, GroupStore, HomeLayout};
 
@@ -221,6 +223,37 @@ mod tests {
             .iter()
             .find(|e| e.kind == "actor.start" && e.data["reason"] == "daemon_respawn")
             .expect("daemon respawn actor.start event not found");
+        assert_eq!(respawn.data["actor_id"], "peer1");
+        assert_eq!(respawn.by, "system");
+    }
+
+    /// Path-level regression: drive `restore_running` with a real actor and
+    /// assert the ledger holds the daemon-respawn event. The helper-level test
+    /// above calls `record_respawn_event` directly, so deleting the call site
+    /// in `restore_group` leaves the whole lib suite green — this test pins it.
+    #[test]
+    fn restore_path_journals_actor_start_on_daemon_respawn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("restore path test", "").expect("group");
+        let mut actor = Actor::new("peer1");
+        actor.enabled = true;
+        actor.runtime = cccc_contracts::ActorRuntime::WebModel;
+        actor.runner = cccc_contracts::RunnerKind::Headless;
+        actor.default_scope_key = "global_scope".into();
+        group.actors.push(actor.clone());
+        group.running = true;
+        store.save(&group).expect("save");
+
+        restore_group(&home, &store, &group.group_id).expect("restore group");
+
+        let events = ledger::read_all(&store.ledger_path(&group.group_id).expect("ledger path"))
+            .expect("read ledger");
+        let respawn = events
+            .iter()
+            .find(|e| e.kind == "actor.start" && e.data["reason"] == "daemon_respawn")
+            .expect("restore path journaled no actor.start reason=daemon_respawn");
         assert_eq!(respawn.data["actor_id"], "peer1");
         assert_eq!(respawn.by, "system");
     }
