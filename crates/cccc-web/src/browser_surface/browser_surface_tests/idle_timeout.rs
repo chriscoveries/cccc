@@ -1,6 +1,16 @@
 use super::*;
 
-/// A browser that has been silent for the timeout is retired, and its process goes
+/// The production idle timeout, so the cutoff under test is the one the reaper uses.
+const IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// A clock far enough past a surface's last CDP message to clear `IDLE_TTL`, so the
+/// sweep is exercised with a positive TTL instead of `Duration::ZERO` (which closes
+/// anything, whether or not the cutoff itself works).
+fn aged_clock() -> std::time::Instant {
+    std::time::Instant::now() + IDLE_TTL + std::time::Duration::from_secs(1)
+}
+
+/// A browser that has been silent past the timeout is retired, and its process goes
 /// with it; the next use re-opens the surface on demand.
 #[tokio::test]
 async fn idle_browser_surface_is_closed_and_its_process_retired() {
@@ -27,16 +37,72 @@ async fn idle_browser_surface_is_closed_and_its_process_retired() {
     );
     assert_eq!(manager.info(key).await["active"], true);
 
-    // Once the silence reaches the timeout the sweep closes it and frees the process.
+    // Silence that reaches the timeout retires it and frees the process.
     assert_eq!(
         manager
-            .close_idle(std::time::Duration::ZERO)
+            .close_idle_at(IDLE_TTL, aged_clock())
             .await
             .expect("idle sweep"),
         1
     );
     assert_eq!(manager.info(key).await["active"], false);
     wait_for_process_exit(pid).await;
+    manager.shutdown_all().await.expect("shutdown");
+    server.abort();
+}
+
+/// The sweep is scoped to web-model Actor slots. A presentation surface is silenter
+/// than any timeout while a person is watching it, so silence alone must not retire
+/// it; its own route (or its group) closes it.
+#[tokio::test]
+async fn idle_sweep_leaves_non_web_model_surfaces_alone() {
+    require_chrome!();
+    let (url, server) = local_page("Idle sweep scope").await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let manager = BrowserSurfaces::default();
+    let actor_key = "web-model::g_idle::reader";
+    let presentation_key = "g_idle::presentation";
+    let opened_actor = manager
+        .open(actor_key, &temp.path().join("actor-profile"), &url, 800, 600)
+        .await
+        .expect("open actor browser");
+    let actor_pid = opened_actor["metadata"]["pid"]
+        .as_u64()
+        .expect("actor browser pid");
+    let opened_presentation = manager
+        .open(
+            presentation_key,
+            &temp.path().join("presentation-profile"),
+            &url,
+            800,
+            600,
+        )
+        .await
+        .expect("open presentation browser");
+    let presentation_pid = opened_presentation["metadata"]["pid"]
+        .as_u64()
+        .expect("presentation browser pid");
+    assert_ne!(actor_pid, presentation_pid);
+
+    assert_eq!(
+        manager
+            .close_idle_at(IDLE_TTL, aged_clock())
+            .await
+            .expect("idle sweep"),
+        1,
+        "only the web-model surface is swept"
+    );
+    assert_eq!(manager.info(actor_key).await["active"], false);
+    assert_eq!(
+        manager.info(presentation_key).await["active"],
+        true,
+        "a silent non-web-model surface outlives the idle sweep"
+    );
+    assert!(
+        process_alive(presentation_pid),
+        "the idle sweep must not retire a non-web-model browser process"
+    );
+    wait_for_process_exit(actor_pid).await;
     manager.shutdown_all().await.expect("shutdown");
     server.abort();
 }
@@ -82,6 +148,17 @@ fn process_env(pid: u64, name: &str) -> Option<String> {
 #[cfg(not(target_os = "linux"))]
 fn process_env(_pid: u64, _name: &str) -> Option<String> {
     None
+}
+
+#[cfg(target_os = "linux")]
+fn process_alive(pid: u64) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_alive(pid: u64) -> bool {
+    let _ = pid;
+    true
 }
 
 async fn wait_for_process_exit(pid: u64) {
