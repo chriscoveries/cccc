@@ -90,16 +90,7 @@ impl AnalystSession {
             .map(str::trim)
             .filter(|value| !value.is_empty());
         let (started, thread_resumed) = if let Some(thread_id) = requested_thread_id {
-            let mut resume_params = params.clone();
-            resume_params["threadId"] = json!(thread_id);
-            // Only the thread id is used. Full history arrives as one websocket
-            // frame that outgrows its size limit on long threads, and the
-            // disconnect then repeats on every reconnect.
-            resume_params["excludeTurns"] = json!(true);
-            match protocol
-                .request("thread/resume", resume_params, Duration::from_secs(20))
-                .await
-            {
+            match resume_with_metadata_only_reply(&protocol, &params, thread_id).await {
                 Ok(started) => (started, true),
                 Err(error) if purpose == SessionPurpose::Actor => {
                     tracing::warn!(
@@ -211,4 +202,55 @@ impl AnalystSession {
         })
         .await
     }
+}
+
+/// Resume the requested thread asking for a metadata-only reply.
+///
+/// Only the thread id is used from the response. Full history arrives as one
+/// websocket frame that outgrows its size limit on long threads, and the
+/// disconnect then repeats on every reconnect, so `excludeTurns` keeps the
+/// reply at a few KB.
+///
+/// The optimisation must never cost the actor its thread: an app-server that
+/// refuses `excludeTurns` as an unknown field is retried once without it, so a
+/// stricter server still resumes the same thread instead of falling back to a
+/// fresh one.
+async fn resume_with_metadata_only_reply(
+    protocol: &ProtocolClient,
+    params: &Value,
+    thread_id: &str,
+) -> io::Result<Value> {
+    let mut resume_params = params.clone();
+    resume_params["threadId"] = json!(thread_id);
+    resume_params["excludeTurns"] = json!(true);
+    match protocol
+        .request("thread/resume", resume_params, Duration::from_secs(20))
+        .await
+    {
+        Ok(started) => Ok(started),
+        Err(error) if rejects_exclude_turns(&error) => {
+            tracing::warn!(
+                %error,
+                thread_id,
+                "Codex app-server rejected excludeTurns; retrying the resume without it"
+            );
+            let mut resume_params = params.clone();
+            resume_params["threadId"] = json!(thread_id);
+            protocol
+                .request("thread/resume", resume_params, Duration::from_secs(20))
+                .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// True when the app-server refused the resume because it does not know the
+/// `excludeTurns` field, rather than because the thread itself is unusable.
+/// Only that class is retried: a timeout or a transport failure is not.
+fn rejects_exclude_turns(error: &io::Error) -> bool {
+    let message = error.to_string();
+    message.contains("excludeTurns")
+        || message.contains("unknown field")
+        || message.contains("invalid params")
+        || message.contains("-32602")
 }
