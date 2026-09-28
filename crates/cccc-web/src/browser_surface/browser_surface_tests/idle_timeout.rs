@@ -176,3 +176,49 @@ async fn wait_for_process_exit(pid: u64) {
     #[cfg(not(target_os = "linux"))]
     let _ = pid;
 }
+
+/// CCCC_BROWSER_IDLE_SECS is clamped, not taken literally: `0` - and unset, blank or
+/// unparseable - means the default, never `Duration::ZERO`, which would retire every
+/// surface on the next sweep; anything else below the floor is raised to it.
+#[test]
+fn browser_idle_timeout_clamps_the_environment_value() {
+    use crate::browser_surface::{
+        clamp_browser_idle_timeout, DEFAULT_BROWSER_IDLE_TIMEOUT, MIN_BROWSER_IDLE_TIMEOUT,
+    };
+    let default = DEFAULT_BROWSER_IDLE_TIMEOUT;
+    let floor = MIN_BROWSER_IDLE_TIMEOUT;
+    assert_eq!(floor, std::time::Duration::from_secs(60), "floor is 60s");
+    assert_eq!(
+        default,
+        std::time::Duration::from_secs(15 * 60),
+        "default is 15 minutes"
+    );
+
+    // Unset, blank, unparseable and 0 all mean the default.
+    for raw in [
+        None,
+        Some(""),
+        Some("   "),
+        Some("0"),
+        Some("0 "),
+        Some("nope"),
+        Some("-1"),
+    ] {
+        assert_eq!(
+            clamp_browser_idle_timeout(raw),
+            default,
+            "raw {raw:?} must fall back to the default timeout"
+        );
+    }
+
+    // Anything below the floor is raised to it, so a typo cannot retire live surfaces.
+    assert_eq!(clamp_browser_idle_timeout(Some("1")), floor);
+    assert_eq!(clamp_browser_idle_timeout(Some("59")), floor);
+
+    // The floor itself and anything above it pass through unchanged.
+    assert_eq!(clamp_browser_idle_timeout(Some("60")), floor);
+    assert_eq!(
+        clamp_browser_idle_timeout(Some("900")),
+        std::time::Duration::from_secs(900)
+    );
+}
