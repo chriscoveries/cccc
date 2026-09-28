@@ -94,7 +94,7 @@ pub fn respawn_backoff_delay(failures: u32) -> Duration {
     if failures == 0 {
         return Duration::ZERO;
     }
-    // 5s, 10s, 20s, 40s, then capped at 60s. The exponent is clamped before the
+    // 10s, 20s, 40s, then capped at 60s. The exponent is clamped before the
     // shift so a long-failing actor cannot overflow the multiply.
     let exponent = failures.saturating_sub(1).min(4);
     let delay = RESPAWN_BACKOFF_BASE * (1_u32 << exponent);
@@ -162,6 +162,17 @@ pub fn forget(group_id: &str, actor_id: &str) {
 mod tests {
     use super::*;
 
+    /// The attempt map is process-global, so tests that touch it must not run
+    /// concurrently. With two tests on one key, one test's `forget()` clears the
+    /// key the other just asserted on: measured 6/25 parallel failures before
+    /// this guard, 0/25 serialized. Every test below that calls `attempts()`
+    /// takes this lock AND uses its own key namespace, so a test that later
+    /// drops the lock is still unlikely to collide.
+    fn test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[test]
     fn no_failures_means_no_wait() {
         assert_eq!(respawn_backoff_delay(0), Duration::ZERO);
@@ -198,37 +209,42 @@ mod tests {
     /// ever changes its interval this pairing is what to revisit.
     #[test]
     fn the_base_is_a_whole_number_of_automation_ticks() {
-        assert_eq!(RESPAWN_BACKOFF_BASE.as_secs() % AUTOMATION_TICK.as_secs(), 0);
+        assert_eq!(
+            RESPAWN_BACKOFF_BASE.as_secs() % AUTOMATION_TICK.as_secs(),
+            0
+        );
         assert_eq!(RESPAWN_BACKOFF_BASE, Duration::from_secs(10));
     }
 
     #[test]
     fn a_successful_restart_clears_the_count() {
-        forget("g", "a");
-        record_restart("g", "a", false);
-        record_restart("g", "a", false);
+        let _guard = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        forget("clear-count", "a");
+        record_restart("clear-count", "a", false);
+        record_restart("clear-count", "a", false);
         assert!(
-            due_delay("g", "a").is_some(),
+            due_delay("clear-count", "a").is_some(),
             "two failures must impose a wait"
         );
-        record_restart("g", "a", true);
+        record_restart("clear-count", "a", true);
         assert!(
-            due_delay("g", "a").is_none(),
+            due_delay("clear-count", "a").is_none(),
             "a successful restart must clear the penalty"
         );
-        forget("g", "a");
+        forget("clear-count", "a");
     }
 
     #[test]
     fn failures_are_per_actor_not_global() {
-        forget("g", "a");
-        forget("g", "b");
-        record_restart("g", "a", false);
+        let _guard = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        forget("per-actor", "a");
+        forget("per-actor", "b");
+        record_restart("per-actor", "a", false);
         // b has no history, so a dying actor must not delay a healthy one.
-        assert!(due_delay("g", "b").is_none());
-        assert!(due_delay("g", "a").is_some());
-        forget("g", "a");
-        forget("g", "b");
+        assert!(due_delay("per-actor", "b").is_none());
+        assert!(due_delay("per-actor", "a").is_some());
+        forget("per-actor", "a");
+        forget("per-actor", "b");
     }
 
     /// THE NEGATIVE CONTROL the card asks for, as a property of the gate's
@@ -282,9 +298,10 @@ mod tests {
 
     #[test]
     fn a_fresh_actor_starts_immediately() {
-        forget("g", "fresh");
+        let _guard = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        forget("fresh-actor", "fresh");
         assert!(
-            due_delay("g", "fresh").is_none(),
+            due_delay("fresh-actor", "fresh").is_none(),
             "an actor with no failure history must start now, not wait"
         );
     }
