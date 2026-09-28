@@ -179,11 +179,11 @@ impl BrowserOwner {
         Ok(owner)
     }
 
-    /// Time since this process last spoke CDP. A long silence means nothing is
-    /// driving its pages and the process only holds memory.
-    pub(super) fn idle_for(&self) -> Duration {
-        self.activity_base
-            .elapsed()
+    /// Time since this process last spoke CDP, as of `now`. A long silence means
+    /// nothing is driving its pages and the process only holds memory. The clock is
+    /// a parameter so an idleness cutoff can be tested without waiting it out.
+    pub(super) fn idle_for_at(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.activity_base)
             .saturating_sub(Duration::from_millis(self.activity.load(Ordering::Relaxed)))
     }
 

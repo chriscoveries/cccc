@@ -208,14 +208,27 @@ impl BrowserSurfaces {
         Ok(closed)
     }
 
-    /// Close surfaces whose browser process has been CDP-idle for `ttl`. The
-    /// process is what costs memory while nothing drives it, and the next use
-    /// re-opens the surface, so retiring an idle one is safe.
+    /// Close surfaces whose web-model browser process has been CDP-idle for `ttl`.
+    /// The process is what costs memory while nothing drives it, and the next use
+    /// re-opens the surface, so retiring an idle one is safe. Only keys that name a
+    /// web-model Actor slot are swept: a presentation surface can sit silent while a
+    /// person is still watching it, so silence alone must not retire it.
     pub async fn close_idle(&self, ttl: std::time::Duration) -> Result<usize> {
+        self.close_idle_at(ttl, std::time::Instant::now()).await
+    }
+
+    /// `close_idle` against an explicit clock, so the cutoff can be exercised with a
+    /// positive TTL instead of colliding with `Duration::ZERO`.
+    async fn close_idle_at(
+        &self,
+        ttl: std::time::Duration,
+        now: std::time::Instant,
+    ) -> Result<usize> {
         let candidates = {
             let sessions = self.sessions.lock().await;
             sessions
                 .iter()
+                .filter(|(key, _)| session_actor(key).is_some())
                 .map(|(key, session)| {
                     (
                         key.clone(),
@@ -227,7 +240,7 @@ impl BrowserSurfaces {
         };
         let mut stale = Vec::new();
         for (key, owner, target) in candidates {
-            if owner.read().await.idle_for() >= ttl {
+            if owner.read().await.idle_for_at(now) >= ttl {
                 stale.push((key, target));
             }
         }
