@@ -143,15 +143,8 @@ pub fn record_restart(group_id: &str, actor_id: &str, running: bool) {
     }
 }
 
-/// Forget an actor's history — used when an actor is stopped or removed, so a
+/// Forget an actor's history — called from the actor stop and remove paths, so a
 /// later start begins clean instead of inheriting a stale penalty.
-///
-/// PROTOTYPE NOTE: not yet called from the stop/remove paths; only the tests
-/// use it today. Wiring it into actor-stop is deliberate follow-up, not part of
-/// this bounded change. Until then a stopped-then-restarted actor keeps its
-/// count and waits once — bounded by the 4s cap, and cleared on its first
-/// successful restart, so the effect is a short delay rather than a penalty.
-#[allow(dead_code)]
 pub fn forget(group_id: &str, actor_id: &str) {
     if let Ok(mut map) = attempts().lock() {
         map.remove(&(group_id.to_owned(), actor_id.to_owned()));
@@ -248,11 +241,15 @@ mod tests {
     }
 
     /// THE NEGATIVE CONTROL the card asks for, as a property of the gate's
-    /// placement: the backoff is only ever consulted by the DELIVERY WORKER's
+    /// placement: the backoff is only ever CONSULTED by the DELIVERY WORKER's
     /// automatic respawn. `actor_runtime::apply` — the path a human start takes
     /// (`ops/actors.rs`, `start_group`, the actor CLI verbs) — never calls into
     /// this module, so a person pressing start cannot be delayed by a previous
     /// automatic failure.
+    ///
+    /// The manual verbs do touch this module in one direction only: a deliberate
+    /// stop or a removal CLEARS the history (`forget`), so a later manual start
+    /// begins clean. They must never ask for a delay.
     ///
     /// That is a claim about which files the delay logic reaches, so assert it
     /// the way it can actually break: the delay must not be reachable from
@@ -268,9 +265,22 @@ mod tests {
              must not wait on a previous automatic failure"
         );
         let actors_src = include_str!("actors.rs");
+        // The manual verbs' own code — the test module at the end of the file
+        // legitimately reads the delay to observe the effect, so scan only the
+        // shipping path.
+        let actors_prod = actors_src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("actors.rs has production code");
         assert!(
-            !actors_src.contains("actor_respawn_backoff"),
-            "the manual actor verbs must never consult the respawn backoff"
+            !actors_prod.contains("due_delay") && !actors_prod.contains("record_restart"),
+            "the manual actor verbs may clear the history but must never consult \
+             the respawn backoff's delay"
+        );
+        assert_eq!(
+            actors_prod.matches("actor_respawn_backoff::forget").count(),
+            2,
+            "the history is cleared by exactly the stop and remove paths"
         );
     }
 

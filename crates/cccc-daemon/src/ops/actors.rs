@@ -579,6 +579,9 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     if let Err(error) = runtime_session::remove(home, &group_id, &actor_id) {
         tracing::warn!(%error, %group_id, %actor_id, "post-commit runtime session cleanup failed");
     }
+    // The actor is gone: its respawn history must not outlive it, so a later
+    // actor reusing the id does not start with a stale penalty.
+    super::actor_respawn_backoff::forget(&group_id, &actor_id);
     object(json!({"actor_id": actor_id, "event": event}))
 }
 
@@ -774,6 +777,11 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
             ));
         }
     };
+    if kind == "actor.stop" {
+        // A deliberate stop clears the respawn backoff: a later manual start
+        // must not inherit the attempt count of whatever failed before it.
+        super::actor_respawn_backoff::forget(&group_id, &actor_id);
+    }
     if enabled {
         match GroupStore::new(home.clone()).and_then(|store| store.load(&group_id)) {
             Ok(current_group) => {
@@ -988,4 +996,68 @@ fn append_event(
     )
     .map_err(OpError::io)?;
     Ok(event)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::actor_respawn_backoff::{due_delay, record_restart};
+
+    fn seeded() -> (tempfile::TempDir, HomeLayout, String) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("respawn forget", "").expect("group");
+        group.actors.push(Actor::new("peer1"));
+        store.save(&group).expect("save group");
+        (temp, home, group.group_id)
+    }
+
+    fn request(group_id: &str, op: &str) -> DaemonRequest {
+        DaemonRequest {
+            v: 1,
+            op: op.into(),
+            args: json!({"group_id": group_id, "actor_id": "peer1", "by": "user"})
+                .as_object()
+                .cloned()
+                .expect("args"),
+        }
+    }
+
+    fn with_failed_restarts(group_id: &str) -> String {
+        record_restart(group_id, "peer1", false);
+        record_restart(group_id, "peer1", false);
+        let delay = due_delay(group_id, "peer1");
+        assert!(
+            delay.is_some(),
+            "two failed restarts must schedule a backoff before the lifecycle runs"
+        );
+        group_id.to_owned()
+    }
+
+    #[test]
+    fn stopping_an_actor_clears_its_respawn_backoff() {
+        let (_temp, home, group_id) = seeded();
+        let group_id = with_failed_restarts(&group_id);
+
+        lifecycle(&home, &request(&group_id, "actor_stop"), "actor.stop").expect("stop actor");
+
+        assert!(
+            due_delay(&group_id, "peer1").is_none(),
+            "a deliberate stop must clear the attempt history"
+        );
+    }
+
+    #[test]
+    fn removing_an_actor_clears_its_respawn_backoff() {
+        let (_temp, home, group_id) = seeded();
+        let group_id = with_failed_restarts(&group_id);
+
+        remove(&home, &request(&group_id, "actor_remove")).expect("remove actor");
+
+        assert!(
+            due_delay(&group_id, "peer1").is_none(),
+            "a removed actor's history must not outlive it"
+        );
+    }
 }
