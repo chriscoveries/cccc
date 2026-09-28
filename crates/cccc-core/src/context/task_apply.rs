@@ -21,6 +21,7 @@ pub(super) fn create(doc: &mut ContextDoc, op: &Map<String, Value>, by: &str) ->
         "free"
     });
     let waiting_on = enum_value(op, "waiting_on", WAITING_ON)?;
+    let assignee = assignee(op)?;
     let mut task = op
         .iter()
         .filter(|(key, _)| key.as_str() != "op")
@@ -37,6 +38,10 @@ pub(super) fn create(doc: &mut ContextDoc, op: &Map<String, Value>, by: &str) ->
     if let Some(value) = waiting_on {
         task.insert("waiting_on".into(), Value::String(value.into()));
     }
+    match assignee {
+        Some(value) => task.insert("assignee".into(), Value::String(value)),
+        None => task.remove("assignee"),
+    };
     task.insert("created_by".into(), Value::String(by.into()));
     task.insert("created_at".into(), Value::String(utc_now()));
     task.insert("updated_at".into(), Value::String(utc_now()));
@@ -63,12 +68,12 @@ pub(super) fn update(doc: &mut ContextDoc, op: &Map<String, Value>) -> io::Resul
     }
     let waiting_on = enum_value(op, "waiting_on", WAITING_ON)?;
     let task_type = enum_value(op, "task_type", TASK_TYPES)?;
+    let assignee = assignee(op)?;
     let task = find_mut(doc, &task_id)?;
     let allowed = [
         "title",
         "outcome",
         "parent_id",
-        "assignee",
         "priority",
         "blocked_by",
         "waiting_on",
@@ -82,6 +87,10 @@ pub(super) fn update(doc: &mut ContextDoc, op: &Map<String, Value>) -> io::Resul
             task.insert(key.into(), value.clone());
         }
     }
+    match assignee {
+        Some(value) => task.insert("assignee".into(), Value::String(value)),
+        None => task.remove("assignee"),
+    };
     if let Some(value) = title {
         task.insert("title".into(), Value::String(value));
     }
@@ -251,6 +260,27 @@ fn required<'a>(op: &'a Map<String, Value>, key: &str) -> io::Result<&'a str> {
         .ok_or_else(|| io::Error::other(format!("{key} is required")))
 }
 
+/// Validate and normalize the assignee field (T245).
+///
+/// The assignee must be a string (or null/absent). Whitespace is trimmed.
+/// A non-string value is rejected with `invalid_args` — the same error the
+/// enum fields produce via `enum_value`. An empty string after trim is
+/// also rejected.
+fn assignee(op: &Map<String, Value>) -> io::Result<Option<String>> {
+    match op.get("assignee") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Err(io::Error::other("assignee must not be empty"))
+            } else {
+                Ok(Some(trimmed.to_owned()))
+            }
+        }
+        Some(_) => Err(io::Error::other("assignee must be a string or null")),
+    }
+}
+
 fn nullable_id(op: &Map<String, Value>, key: &str) -> io::Result<Option<String>> {
     match op.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -338,6 +368,91 @@ mod tests {
         assert_eq!(doc.tasks[0]["title"], "root");
         assert_eq!(doc.tasks[0]["status"], "planned");
         assert!(doc.tasks[0].get("parent_id").is_none());
+    }
+
+    #[test]
+    fn assignee_must_be_a_string_or_null_on_create() {
+        let mut doc = ContextDoc::default();
+        create(
+            &mut doc,
+            &operation(json!({"op":"task.create","title":"root"})),
+            "user",
+        )
+        .expect("root");
+        // Non-string assignees are rejected.
+        for invalid in [
+            json!({"op":"task.create","title":"bad","assignee":["peer-b"]}),
+            json!({"op":"task.create","title":"bad","assignee":42}),
+            json!({"op":"task.create","title":"bad","assignee":true}),
+            json!({"op":"task.create","title":"bad","assignee":""}),
+        ] {
+            assert!(create(&mut doc, &operation(invalid), "user").is_err());
+        }
+        // Valid assignee is stored.
+        create(
+            &mut doc,
+            &operation(json!({"op":"task.create","title":"good","assignee":"peer-a"})),
+            "user",
+        )
+        .expect("good");
+        assert_eq!(doc.tasks[1]["assignee"], "peer-a");
+        // Whitespace is trimmed.
+        create(
+            &mut doc,
+            &operation(json!({"op":"task.create","title":"trim","assignee":"  peer-b  "})),
+            "user",
+        )
+        .expect("trim");
+        assert_eq!(doc.tasks[2]["assignee"], "peer-b");
+        // Null assignee is accepted (no assignee field).
+        create(
+            &mut doc,
+            &operation(json!({"op":"task.create","title":"null","assignee":null})),
+            "user",
+        )
+        .expect("null");
+        assert!(doc.tasks[3].get("assignee").is_none());
+    }
+
+    #[test]
+    fn assignee_must_be_a_string_or_null_on_update() {
+        let mut doc = ContextDoc::default();
+        create(
+            &mut doc,
+            &operation(json!({"op":"task.create","title":"root","assignee":"peer-a"})),
+            "user",
+        )
+        .expect("root");
+        // Non-string assignees are rejected.
+        for invalid in [
+            json!({"op":"task.update","task_id":"T001","assignee":["peer-b"]}),
+            json!({"op":"task.update","task_id":"T001","assignee":42}),
+            json!({"op":"task.update","task_id":"T001","assignee":true}),
+            json!({"op":"task.update","task_id":"T001","assignee":""}),
+        ] {
+            assert!(update(&mut doc, &operation(invalid)).is_err());
+        }
+        // Valid assignee is stored.
+        update(
+            &mut doc,
+            &operation(json!({"op":"task.update","task_id":"T001","assignee":"peer-b"})),
+        )
+        .expect("update");
+        assert_eq!(doc.tasks[0]["assignee"], "peer-b");
+        // Whitespace is trimmed.
+        update(
+            &mut doc,
+            &operation(json!({"op":"task.update","task_id":"T001","assignee":"  peer-c  "})),
+        )
+        .expect("trim");
+        assert_eq!(doc.tasks[0]["assignee"], "peer-c");
+        // Null assignee clears the field.
+        update(
+            &mut doc,
+            &operation(json!({"op":"task.update","task_id":"T001","assignee":null})),
+        )
+        .expect("null");
+        assert!(doc.tasks[0].get("assignee").is_none());
     }
 
     #[test]
