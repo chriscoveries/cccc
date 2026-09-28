@@ -2568,7 +2568,7 @@
   },
   {
     "name": "cccc_task",
-    "description": "Shared collaboration task hub (not runtime todo): action=list|create|update|move|restore|delete. Use for multi-actor, long-horizon, or user-tracked work. Lifecycle transitions are canonical via move; update with status auto-applies the matching lifecycle move.",
+    "description": "Shared collaboration task hub (not runtime todo): action=list|create|update|move|restore|delete. Use for multi-actor, long-horizon, or user-tracked work. Lifecycle transitions are canonical via move; update with status auto-applies the matching lifecycle move. action=list filters server-side (status/statuses/attention/query/assignee) and pages with limit/offset; without them it returns the whole board.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2593,7 +2593,8 @@
           "default": "list"
         },
         "task_id": {
-          "type": "string"
+          "type": "string",
+          "description": "Single card id. action=get, or action=list with this id, returns that card and its children."
         },
         "include_archived": {
           "type": "boolean",
@@ -2622,13 +2623,53 @@
             "done",
             "archived"
           ],
-          "description": "Lifecycle status. Required for action=move. If passed with action=update, the wrapper also applies the corresponding lifecycle transition. Use action=update when the same call must also change outcome, notes, checklist, or type."
+          "description": "Lifecycle status. Required for action=move. If passed with action=update, the wrapper also applies the corresponding lifecycle transition. Use action=update when the same call must also change outcome, notes, checklist, or type. With action=list it filters the board and, with limit/offset, returns one page of it."
         },
         "parent_id": {
           "type": "string"
         },
         "assignee": {
-          "type": "string"
+          "type": "string",
+          "description": "Assignee actor id. With action=list it filters to that assignee's cards; the value __unassigned__ selects the cards that have no assignee."
+        },
+        "statuses": {
+          "type": "string",
+          "description": "action=list: comma-separated lifecycle statuses (planned, active, done, archived), e.g. \"planned,done\". Returns one page per status under pages.*; mutually exclusive with status."
+        },
+        "attention": {
+          "type": "string",
+          "enum": [
+            "blocked",
+            "waiting_user",
+            "handoff",
+            "unassigned"
+          ],
+          "description": "action=list: only the cards needing that attention."
+        },
+        "query": {
+          "type": "string",
+          "description": "action=list: case-insensitive substring over id, title, outcome, notes, assignee, priority and handoff_to."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "description": "action=list: return at most this many cards (1-100) and page the rest with offset. Without it a list returns the whole board."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "action=list: skip this many matching cards; requires limit."
+        },
+        "task_ids": {
+          "type": "string",
+          "description": "action=list: comma-separated card ids (at most 100) to fetch in one call, e.g. \"T001,T002\"."
+        },
+        "include_index": {
+          "type": "boolean",
+          "default": false,
+          "description": "action=list: also return a compact task_index (id, title, status, assignee, parent_id) for the whole board."
         },
         "priority": {
           "type": "string"

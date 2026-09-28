@@ -84,6 +84,58 @@ mod tests {
     }
 
     #[test]
+    fn task_tool_declares_the_list_filters_and_paging() {
+        let catalog = super::catalog();
+        let task = catalog
+            .iter()
+            .find(|tool| tool["name"] == "cccc_task")
+            .expect("cccc_task");
+        let properties = task["inputSchema"]["properties"]
+            .as_object()
+            .expect("properties");
+        // The daemon validates these sets (crates/cccc-daemon/src/ops/task_list.rs):
+        // the schema must not advertise a value the op would refuse, nor hide
+        // one a client needs.
+        assert_eq!(
+            properties["status"]["enum"],
+            serde_json::json!(["planned", "active", "done", "archived"])
+        );
+        assert_eq!(
+            properties["attention"]["enum"],
+            serde_json::json!(["blocked", "waiting_user", "handoff", "unassigned"])
+        );
+        assert_eq!(properties["limit"]["type"], "integer");
+        assert_eq!(properties["limit"]["maximum"], 100);
+        assert_eq!(properties["offset"]["type"], "integer");
+        for field in ["statuses", "query", "task_ids", "include_index"] {
+            assert!(properties.contains_key(field), "the schema hides {field}");
+        }
+        for field in [
+            "status",
+            "statuses",
+            "attention",
+            "query",
+            "assignee",
+            "limit",
+            "offset",
+        ] {
+            assert!(
+                properties[field]["description"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+                "{field}: the schema is the client's only view of this filter"
+            );
+        }
+        assert!(
+            task["description"]
+                .as_str()
+                .expect("description")
+                .contains("filters server-side"),
+            "the tool description must say that list filters and pages"
+        );
+    }
+
+    #[test]
     fn tool_permissions_are_explicit_and_file_reads_cannot_advertise_sending() {
         let catalog = super::catalog();
         for tool in &catalog {

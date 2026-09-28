@@ -234,6 +234,22 @@ fn context_action(
     Ok(("context_sync".into(), request))
 }
 
+/// The filter and paging arguments the daemon's `task_list` op honours
+/// (crates/cccc-daemon/src/ops/task_list.rs). A list call forwards these; the
+/// tool boundary must not silently drop a filter the op would have applied.
+const TASK_LIST_FIELDS: [&str; 10] = [
+    "task_ids",
+    "status",
+    "statuses",
+    "attention",
+    "query",
+    "assignee",
+    "limit",
+    "offset",
+    "include_index",
+    "task_id",
+];
+
 fn task_action(
     mut args: Map<String, Value>,
     action_name: &str,
@@ -249,6 +265,12 @@ fn task_action(
         }
         if let Some(value) = args.remove("task_id") {
             request.insert("task_id".into(), value);
+        }
+        if action_name == "list" {
+            // The daemon op already filters and pages: forward what it can
+            // honour instead of returning the whole board to a filtered call.
+            retain_fields(&mut args, &TASK_LIST_FIELDS);
+            request.extend(args);
         }
         return Ok(("task_list".into(), request));
     }
@@ -564,6 +586,86 @@ mod tests {
             let (op, _) = daemon_call(tool, args).expect("mapping");
             assert_eq!(op, expected);
         }
+    }
+
+    #[test]
+    fn task_list_forwards_the_filters_and_paging_the_daemon_op_honours() {
+        let args = json!({
+            "action":"list","group_id":"g_test","actor_id":"peer","by":"peer",
+            "status":"planned","attention":"unassigned","query":"needle",
+            "assignee":"lane-1","limit":10,"offset":20,"task_ids":"T001,T002",
+            "include_index":true,"title":"not a filter"
+        })
+        .as_object()
+        .cloned()
+        .expect("list args");
+        let (op, args) = daemon_call("cccc_task", args).expect("list mapping");
+        assert_eq!(op, "task_list");
+        assert_eq!(args["group_id"], "g_test");
+        for (key, expected) in [
+            ("status", json!("planned")),
+            ("attention", json!("unassigned")),
+            ("query", json!("needle")),
+            ("assignee", json!("lane-1")),
+            ("task_ids", json!("T001,T002")),
+            ("limit", json!(10)),
+            ("offset", json!(20)),
+            ("include_index", json!(true)),
+        ] {
+            assert_eq!(args[key], expected, "the mapping dropped {key}");
+        }
+        for dropped in ["action", "actor_id", "by", "title"] {
+            assert!(args.get(dropped).is_none(), "leaked {dropped}");
+        }
+    }
+
+    #[test]
+    fn task_get_stays_a_single_card_read() {
+        let args = json!({
+            "action":"get","group_id":"g_test","task_id":"T001","status":"done","limit":5
+        })
+        .as_object()
+        .cloned()
+        .expect("get args");
+        let (op, args) = daemon_call("cccc_task", args).expect("get mapping");
+        assert_eq!(op, "task_list");
+        assert_eq!(json!(args), json!({"group_id":"g_test","task_id":"T001"}));
+    }
+
+    #[test]
+    fn every_declared_task_list_filter_reaches_the_daemon_op() {
+        let schema = crate::tools::catalog()
+            .into_iter()
+            .find(|tool| tool["name"] == "cccc_task")
+            .expect("cccc_task");
+        let mut checked = 0;
+        for (field, sample) in [
+            ("status", json!("planned")),
+            ("statuses", json!("planned,done")),
+            ("attention", json!("unassigned")),
+            ("query", json!("needle")),
+            ("assignee", json!("lane-1")),
+            ("task_ids", json!("T001")),
+            ("limit", json!(5)),
+            ("offset", json!(0)),
+            ("include_index", json!(true)),
+        ] {
+            assert!(
+                schema["inputSchema"]["properties"].get(field).is_some(),
+                "the schema must declare {field}: a filter a client cannot see is a filter it cannot send"
+            );
+            let mut args = json!({"action":"list","group_id":"g_test"});
+            args[field] = sample.clone();
+            let (op, mapped) = daemon_call("cccc_task", args.as_object().cloned().expect("args"))
+                .expect("mapping");
+            assert_eq!(op, "task_list");
+            assert_eq!(
+                mapped[field], sample,
+                "the mapping dropped declared {field}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 9);
     }
 
     #[test]
