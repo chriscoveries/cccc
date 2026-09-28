@@ -188,45 +188,69 @@ pub fn mail_pending_summary(
 ) -> io::Result<Option<Value>> {
     let store = GroupStore::new(home.clone())?;
     let state = load(home, &group.group_id)?;
-    ledger::inspect(&store.ledger_path(&group.group_id)?, |events, positions| {
-        let cursor_start = state
-            .cursors
-            .get(actor_id)
-            .and_then(|event_id| positions.get(event_id))
-            .map_or(0, |position| position + 1);
-        let generation_start = actor_generation_positions(events)
-            .get(actor_id)
-            .copied()
-            .unwrap_or(0);
-        let start = cursor_start.max(generation_start);
+    let cursor_event_id = state.cursors.get(actor_id).cloned().unwrap_or_default();
 
-        // Reply and manual-delivery facts suppress the one-shot active notice,
-        // but they do not consume Mail. Natural hints must therefore mirror
-        // the unread Inbox projection rather than the notice-eligible subset.
-        let pending = events[start..]
-            .iter()
-            .filter(|event| {
-                event.kind == "chat.message"
-                    && event.by != actor_id
-                    && event.data.get("message_mode").and_then(Value::as_str) == Some("mail")
-                    && is_for_actor(group, event, actor_id)
-            })
-            .collect::<Vec<_>>();
-        let oldest = pending.first()?;
-        let oldest_age_seconds = DateTime::parse_from_rfc3339(&oldest.ts)
-            .map(|created| {
-                Utc::now()
-                    .signed_duration_since(created.with_timezone(&Utc))
-                    .num_seconds()
-                    .max(0)
-            })
-            .unwrap_or(0);
-        Some(json!({
-            "count":pending.len(),
-            "oldest_age_seconds":oldest_age_seconds,
-            "action":"cccc_inbox_read()",
-        }))
-    })
+    // Stream the ledger rather than building the shared index: every `cccc mcp`
+    // bridge pays this call at bootstrap, and the index it used to build stays
+    // resident for the life of the bridge (ChesterRa/cccc#125). Positions are
+    // the same ones `ledger::inspect` reports, tracked as the scan goes, so the
+    // answer is unchanged while the retained memory is only the pending set.
+    let mut cursor_position: Option<usize> = None;
+    let mut generation_position: Option<usize> = None;
+    let mut pending: Vec<(usize, String)> = Vec::new();
+    ledger::visit_events(&store.ledger_path(&group.group_id)?, |position, event| {
+        if !cursor_event_id.is_empty() && event.id == cursor_event_id {
+            cursor_position = Some(position);
+        }
+        if event.kind == "actor.add" && added_actor_id(&event) == Some(actor_id) {
+            generation_position = Some(position);
+        }
+        if event.kind == "chat.message"
+            && event.by != actor_id
+            && event.data.get("message_mode").and_then(Value::as_str) == Some("mail")
+            && is_for_actor(group, &event, actor_id)
+        {
+            pending.push((position, event.ts.clone()));
+        }
+        Ok(())
+    })?;
+
+    let start = cursor_position
+        .map_or(0, |position| position.saturating_add(1))
+        .max(generation_position.unwrap_or(0));
+    let pending = pending
+        .into_iter()
+        .filter(|(position, _)| *position >= start)
+        .collect::<Vec<_>>();
+    let Some((_, oldest_ts)) = pending.first() else {
+        return Ok(None);
+    };
+    let oldest_age_seconds = DateTime::parse_from_rfc3339(oldest_ts)
+        .map(|created| {
+            Utc::now()
+                .signed_duration_since(created.with_timezone(&Utc))
+                .num_seconds()
+                .max(0)
+        })
+        .unwrap_or(0);
+    Ok(Some(json!({
+        "count":pending.len(),
+        "oldest_age_seconds":oldest_age_seconds,
+        "action":"cccc_inbox_read()",
+    })))
+}
+
+/// The Actor a generation event belongs to, as the index reads it: `actor.add`
+/// carries the added Actor under `data.actor.id`.
+fn added_actor_id(event: &Event) -> Option<&str> {
+    event
+        .data
+        .get("actor")
+        .and_then(Value::as_object)
+        .and_then(|actor| actor.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|actor_id| !actor_id.is_empty())
 }
 
 pub fn cursor(home: &HomeLayout, group_id: &str, actor_id: &str) -> io::Result<Option<String>> {
@@ -802,5 +826,111 @@ mod tests {
                 .expect("empty summary")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn mail_pending_summary_streams_a_large_ledger_without_indexing_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("bounded pending summary", "").expect("group");
+        group.actors.push(Actor::new("peer1"));
+        store.save(&group).expect("save group");
+        let ledger_path = store.ledger_path(&group.group_id).expect("ledger path");
+
+        // History far larger than the summary needs: 20_000 Mail records with
+        // the reader's cursor near the end, so only the last three are pending.
+        // An index-backed scan keeps the whole history resident for the life of
+        // the bridge (ChesterRa/cccc#125); a streaming scan keeps three items.
+        let mut history = Vec::new();
+        let mut cursor_event_id = String::new();
+        for index in 0..20_000 {
+            let mut event = Event::new("chat.message", &group.group_id);
+            event.by = "user".into();
+            event.data = json!({
+                "text":format!("history {index}"),
+                "to":["peer1"],
+                "message_mode":"mail",
+            })
+            .as_object()
+            .cloned()
+            .expect("history data");
+            if index == 19_996 {
+                cursor_event_id = event.id.clone();
+            }
+            history.push(event);
+        }
+        let mut body = Vec::new();
+        for event in &history {
+            body.extend_from_slice(&serde_json::to_vec(event).expect("encode history"));
+            body.push(b'\n');
+        }
+        std::fs::write(&ledger_path, &body).expect("write ledger");
+        save(
+            &home,
+            &group.group_id,
+            &InboxState {
+                cursors: BTreeMap::from([("peer1".to_owned(), cursor_event_id.clone())]),
+            },
+            "peer1",
+            &cccc_contracts::utc_now(),
+        )
+        .expect("save cursor");
+
+        let summary = mail_pending_summary(&home, &group, "peer1")
+            .expect("summary")
+            .expect("pending mail");
+        assert_eq!(summary["count"], 3);
+        assert_eq!(summary["action"], "cccc_inbox_read()");
+        assert!(
+            summary["oldest_age_seconds"].as_i64().expect("age") <= 5,
+            "the oldest pending Mail was just written"
+        );
+        // The bridge holds this call's memory for the life of the session, so
+        // the scan must not leave the shared whole-ledger index behind.
+        assert!(
+            !crate::ledger_index::is_cached(&ledger_path),
+            "pending-mail summary built the shared ledger index"
+        );
+
+        // ...and the streamed answer must equal the indexed projection it
+        // replaces, which is the count every bridge used to report.
+        let reference = ledger::inspect(&ledger_path, |events, positions| {
+            let cursor_start = positions
+                .get(&cursor_event_id)
+                .map_or(0, |position| position + 1);
+            let generation_start = actor_generation_positions(events)
+                .get("peer1")
+                .copied()
+                .unwrap_or(0);
+            let start = cursor_start.max(generation_start);
+            let pending = events[start..]
+                .iter()
+                .filter(|event| {
+                    event.kind == "chat.message"
+                        && event.by != "peer1"
+                        && event.data.get("message_mode").and_then(Value::as_str) == Some("mail")
+                        && is_for_actor(&group, event, "peer1")
+                })
+                .collect::<Vec<_>>();
+            let oldest = pending.first()?;
+            let oldest_age_seconds = DateTime::parse_from_rfc3339(&oldest.ts)
+                .map(|created| {
+                    Utc::now()
+                        .signed_duration_since(created.with_timezone(&Utc))
+                        .num_seconds()
+                        .max(0)
+                })
+                .unwrap_or(0);
+            Some(json!({
+                "count":pending.len(),
+                "oldest_age_seconds":oldest_age_seconds,
+                "action":"cccc_inbox_read()",
+            }))
+        })
+        .expect("indexed reference")
+        .expect("indexed pending mail");
+        assert_eq!(summary["count"], reference["count"]);
+        assert_eq!(summary["action"], reference["action"]);
     }
 }

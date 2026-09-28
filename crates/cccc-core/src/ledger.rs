@@ -241,6 +241,62 @@ pub(crate) fn read_all_uncached(path: &Path) -> io::Result<Vec<Event>> {
     Ok(events)
 }
 
+/// Stream canonical records in ledger order without building an index.
+///
+/// Positions match [`inspect`]: the concatenation of the ledger's source files,
+/// oldest first, counting only the records that decode. Invalid records are
+/// skipped exactly as `read_all_uncached` skips them, so a caller that tracks
+/// its own position reads the same history for a fraction of the memory.
+pub(crate) fn visit_events(
+    path: &Path,
+    mut visit: impl FnMut(usize, Event) -> io::Result<()>,
+) -> io::Result<()> {
+    let group_id = ledger_group_id(path);
+    let mut position = 0_usize;
+    for source in source_paths(path)? {
+        if is_gzip(&source) {
+            let mut reader = BufReader::new(GzDecoder::new(File::open(&source)?));
+            visit_events_source(&mut reader, &source, &group_id, &mut position, &mut visit)?;
+            continue;
+        }
+        let file = File::open(&source)?;
+        FileExt::lock_shared(&file)?;
+        let result = visit_events_source(
+            &mut BufReader::new(&file),
+            &source,
+            &group_id,
+            &mut position,
+            &mut visit,
+        );
+        let unlock = FileExt::unlock(&file);
+        result.and_then(|()| unlock)?;
+    }
+    Ok(())
+}
+
+fn visit_events_source(
+    reader: &mut impl BufRead,
+    source: &Path,
+    group_id: &str,
+    position: &mut usize,
+    visit: &mut impl FnMut(usize, Event) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut line = Vec::new();
+    let mut line_no = 0_usize;
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        line_no += 1;
+        let raw = trim_ascii(&line);
+        if !raw.is_empty()
+            && let Some(event) = decode_event_line(raw, source, line_no, group_id)
+        {
+            visit(*position, event)?;
+            *position += 1;
+        }
+        line.clear();
+    }
+    Ok(())
+}
+
 /// Visit canonical records for maintenance without retaining a query index.
 /// The caller holds the stable writer lock for the entire visit.
 pub(crate) fn visit_validated(
@@ -736,6 +792,45 @@ mod tests {
         let events = tail(&path, 1).expect("tail");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "chat.message");
+    }
+
+    #[test]
+    fn visit_events_streams_the_same_records_as_read_all() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let mut body = Vec::new();
+        let mut expected = Vec::new();
+        for index in 0..64 {
+            let mut event = Event::new("chat.message", "g_test");
+            event.data = serde_json::json!({"text": format!("line {index}")})
+                .as_object()
+                .cloned()
+                .expect("data");
+            body.extend_from_slice(&serde_json::to_vec(&event).expect("encode"));
+            body.push(b'\n');
+            expected.push(event);
+            if index == 32 {
+                // A blank line and an invalid record: the index skips both, so
+                // the streamed positions must line up with it.
+                body.extend_from_slice(b"\n");
+                body.extend_from_slice(b"{not a ledger event\n");
+            }
+        }
+        std::fs::write(&path, &body).expect("write ledger");
+
+        let mut seen = Vec::new();
+        visit_events(&path, |position, event| {
+            seen.push((position, event));
+            Ok(())
+        })
+        .expect("visit events");
+
+        assert_eq!(read_all_uncached(&path).expect("read all"), expected);
+        assert_eq!(seen.len(), expected.len());
+        for (index, (position, event)) in seen.iter().enumerate() {
+            assert_eq!(*position, index, "streamed positions must be contiguous");
+            assert_eq!(event, &expected[index]);
+        }
     }
 
     #[test]
