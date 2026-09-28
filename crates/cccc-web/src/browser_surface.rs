@@ -44,16 +44,28 @@ use tokio::task::JoinHandle;
 const BROWSER_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Retire a web-model browser process after this much CDP silence: nothing drives
-/// its pages, so the next use re-opens the surface on demand. Tune the fleet with
-/// CCCC_BROWSER_IDLE_SECS.
+/// its pages, so the next use re-opens the surface on demand.
 pub(crate) const DEFAULT_BROWSER_IDLE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(15 * 60);
 
+/// Floor for CCCC_BROWSER_IDLE_SECS: below this, a sweep would retire surfaces that
+/// are still in use between two CDP messages.
+pub(crate) const MIN_BROWSER_IDLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// Clamp a raw CCCC_BROWSER_IDLE_SECS value. Unset, blank, unparseable and `0` all
+/// mean the default - a `0` must not become `Duration::ZERO`, which retires every
+/// surface on the next sweep - and any other value below the floor is raised to it.
+/// Pure, so the rule is tested without mutating the process environment.
+pub(crate) fn clamp_browser_idle_timeout(raw: Option<&str>) -> std::time::Duration {
+    match raw.and_then(|value| value.trim().parse::<u64>().ok()) {
+        None | Some(0) => DEFAULT_BROWSER_IDLE_TIMEOUT,
+        Some(secs) => std::time::Duration::from_secs(secs).max(MIN_BROWSER_IDLE_TIMEOUT),
+    }
+}
+
 pub(crate) fn browser_idle_timeout() -> std::time::Duration {
-    std::env::var("CCCC_BROWSER_IDLE_SECS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .map_or(DEFAULT_BROWSER_IDLE_TIMEOUT, std::time::Duration::from_secs)
+    clamp_browser_idle_timeout(std::env::var("CCCC_BROWSER_IDLE_SECS").ok().as_deref())
 }
 
 pub(crate) fn system_browser_path() -> Option<PathBuf> {
