@@ -1,5 +1,5 @@
 use cccc_contracts::{Actor, Event, GroupState};
-use cccc_core::{ledger, GroupStore, HomeLayout};
+use cccc_core::{GroupStore, HomeLayout, ledger};
 
 use crate::dispatch::OpError;
 use crate::dispatch_concurrency::DispatchLocks;
@@ -147,7 +147,7 @@ mod tests {
         deepseek_restore_blocked, record_respawn_event, restore_group, should_restore_actor,
     };
     use cccc_contracts::{Actor, ActorRuntime, GroupState};
-    use cccc_core::{ledger, GroupStore, HomeLayout};
+    use cccc_core::{GroupStore, HomeLayout, ledger};
 
     #[test]
     fn paused_groups_restore_terminal_runtimes_but_not_non_terminal_runtimes() {
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(respawn.by, "system");
     }
 
-    /// Path-level regression: drive `restore_running` with a real actor and
+    /// Path-level regression: drive `restore_group` with a real actor and
     /// assert the ledger holds the daemon-respawn event. The helper-level test
     /// above calls `record_respawn_event` directly, so deleting the call site
     /// in `restore_group` leaves the whole lib suite green — this test pins it.
