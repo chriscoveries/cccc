@@ -30,15 +30,34 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// The daemon's automation tick period — the clock the exit/relaunch loop runs
+/// on. Named here so the base below is derived from it rather than copied.
+///
+/// `server.rs` drives an automation pass on this interval
+/// (`tokio::time::interval`, `MissedTickBehavior::Skip`), and that pass is what
+/// notices an actor process has exited (`prepare_exited` -> `reap_exited` ->
+/// `reconcile_exited`). The evidence for the loop's cadence is the burst's
+/// timing: every interval was an exact multiple of 5s (5/10/15/20/25), and the
+/// stop timestamps held a ~3ms phase band across 20 minutes — a shared ticker,
+/// not independently-lifetimed processes.
+const AUTOMATION_TICK: Duration = Duration::from_secs(5);
+
 /// First delay after a failed restart, doubling thereafter.
 ///
-/// 5s, NOT the 250ms of `actor_delivery::deferred_retry_delay`, and the reason
-/// is the evidence rather than taste: the measured hot loop relaunches about
-/// every 5s (126 exits in 20m45s, minimum interval 4.998s). A delay below that
-/// floor does not space the relaunches out at all — the next message arrives
-/// before the wait elapses, so the loop is unchanged and the code only looks
-/// like a fix. The first delay has to clear the observed cadence to do anything.
-const RESPAWN_BACKOFF_BASE: Duration = Duration::from_secs(5);
+/// 5s, NOT the 250ms of `actor_delivery::deferred_retry_delay`: the first delay
+/// must exceed ONE AUTOMATION TICK, or the retry is serviced by the same tick
+/// that is already driving the loop and nothing changes. A delay below the
+/// cadence cannot space the relaunches out — the next message arrives before
+/// the wait elapses, so the loop is unchanged and the code only looks like a
+/// fix.
+///
+/// TWO ticks, not one, and the difference is the difference between working and
+/// not working: a delay EQUAL to the period can be serviced by the very tick
+/// that triggered the loop, so the retry and the loop collide. Twice the period
+/// guarantees the relaunch lands after the tick that would have driven it,
+/// which is the whole point. (This is also why the measured 4.998s floor was a
+/// trap: 5s sits exactly ON the grid rather than off it.)
+const RESPAWN_BACKOFF_BASE: Duration = Duration::from_secs(2 * AUTOMATION_TICK.as_secs());
 /// Ceiling on the delay, matching the daemon's existing ceiling for a
 /// REPEATEDLY failing background task (`membership::restore::MAX_BACKOFF`).
 ///
@@ -150,28 +169,37 @@ mod tests {
 
     #[test]
     fn the_delay_doubles_then_caps() {
-        assert_eq!(respawn_backoff_delay(1), Duration::from_secs(5));
-        assert_eq!(respawn_backoff_delay(2), Duration::from_secs(10));
-        assert_eq!(respawn_backoff_delay(3), Duration::from_secs(20));
-        assert_eq!(respawn_backoff_delay(4), Duration::from_secs(40));
+        assert_eq!(respawn_backoff_delay(1), Duration::from_secs(10));
+        assert_eq!(respawn_backoff_delay(2), Duration::from_secs(20));
+        assert_eq!(respawn_backoff_delay(3), Duration::from_secs(40));
+        assert_eq!(respawn_backoff_delay(4), Duration::from_secs(60)); // capped
         assert_eq!(respawn_backoff_delay(5), RESPAWN_BACKOFF_MAX);
         assert_eq!(respawn_backoff_delay(u32::MAX), RESPAWN_BACKOFF_MAX);
     }
 
-    /// The first delay must exceed the measured relaunch cadence, or it cannot
-    /// space the loop out at all: the next message arrives before the wait
-    /// elapses and the code only looks like a fix.
+    /// The first delay must exceed one automation tick, or it cannot space the
+    /// loop out at all: the next tick/message arrives before the wait elapses
+    /// and the code only looks like a fix.
     ///
-    /// The measured loop: 126 exits in 20m45s, minimum interval 4.998s. This
-    /// test fails if anyone lowers the base under that floor.
+    /// Pinned to the NAMED constant rather than the observed 4.998s floor, so
+    /// the invariant documents itself and cannot drift with the measurement.
+    /// Fails if anyone lowers the base to or below `AUTOMATION_TICK`.
     #[test]
-    fn the_first_delay_clears_the_measured_relaunch_cadence() {
-        const MEASURED_MIN_INTERVAL: Duration = Duration::from_millis(4_998);
+    fn the_first_delay_exceeds_one_automation_tick() {
         assert!(
-            respawn_backoff_delay(1) > MEASURED_MIN_INTERVAL,
-            "the first delay must exceed the observed ~5s cadence, otherwise the \
-             loop is unchanged: measured minimum interval was 4.998s"
+            respawn_backoff_delay(1) > AUTOMATION_TICK,
+            "the first delay must exceed the daemon's automation tick, otherwise \
+             the retry is serviced by the very tick driving the loop"
         );
+    }
+
+    /// The base is derived FROM the tick, and is a whole number of ticks, so
+    /// the curve stays on the grid instead of drifting off it. If `server.rs`
+    /// ever changes its interval this pairing is what to revisit.
+    #[test]
+    fn the_base_is_a_whole_number_of_automation_ticks() {
+        assert_eq!(RESPAWN_BACKOFF_BASE.as_secs() % AUTOMATION_TICK.as_secs(), 0);
+        assert_eq!(RESPAWN_BACKOFF_BASE, Duration::from_secs(10));
     }
 
     #[test]
