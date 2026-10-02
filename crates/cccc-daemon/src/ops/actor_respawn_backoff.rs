@@ -12,9 +12,8 @@
 //! damage from the loop while the root cause is dealt with separately.
 //!
 //! SHAPE, and why it is shaped this way:
-//!   - The delay is bounded exponential — `250ms * 2^(n-1)`, capped at 4s —
-//!     reusing the numbers from `actor_delivery::deferred_retry_delay` so the
-//!     daemon has ONE backoff vocabulary rather than two.
+//!   - The delay is bounded exponential — a 10s base doubling through
+//!     10s, 20s, and 40s, capped at 60s.
 //!   - It lives at the DELIVERY-WORKER call site, deliberately not inside
 //!     `actor_runtime::apply`. `apply` is also the path for human-initiated
 //!     starts (`ops/actors.rs`, `start_group`, the actor CLI verbs); a human
@@ -23,7 +22,7 @@
 //!     people, which is worse than the loop it fixes.
 //!   - State is in-memory and per (group, actor). It resets when the actor
 //!     reaches healthy uptime, so a one-off crash does not leave a permanent
-//!     penalty; a restart daemon restart forgets it, which is the safe
+//!     penalty; a daemon restart forgets it, which is the safe
 //!     direction (a fresh daemon should try immediately, not inherit a wait).
 
 use std::collections::HashMap;
@@ -149,7 +148,7 @@ pub fn record_restart(group_id: &str, actor_id: &str, running: bool) {
 /// PROTOTYPE NOTE: not yet called from the stop/remove paths; only the tests
 /// use it today. Wiring it into actor-stop is deliberate follow-up, not part of
 /// this bounded change. Until then a stopped-then-restarted actor keeps its
-/// count and waits once — bounded by the 4s cap, and cleared on its first
+/// count and waits once — bounded by the 60s cap, and cleared on its first
 /// successful restart, so the effect is a short delay rather than a penalty.
 #[allow(dead_code)]
 pub fn forget(group_id: &str, actor_id: &str) {
