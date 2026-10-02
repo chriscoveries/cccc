@@ -264,7 +264,7 @@ async fn bootstrap_and_coordination_share_attention_while_only_inbox_read_consum
         &group.group_id,
         2,
         "cccc_task",
-        json!({"action":"list"}),
+        json!({"action":"create","title":"coordination boundary","waiting_on":"actor"}),
     )
     .await;
     assert!(coordination.get("error").is_none(), "{coordination}");
