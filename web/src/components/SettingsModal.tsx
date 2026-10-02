@@ -312,8 +312,8 @@ export function SettingsModal({
     setMailNoticeAfterSeconds((current) =>
       sync(
         current,
-        previous?.mail_notice_after_seconds ?? 1800,
-        settings.mail_notice_after_seconds ?? 1800,
+        previous?.mail_notice_after_seconds ?? 300,
+        settings.mail_notice_after_seconds ?? 300,
       ),
     );
     setReplyNoticeAfterSeconds((current) =>

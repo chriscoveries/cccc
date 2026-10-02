@@ -101,7 +101,7 @@ fn projected_settings(group: &Value) -> Value {
         "silence_timeout_seconds":0,
         "help_nudge_interval_seconds":600,
         "help_nudge_min_messages":10,
-        "mail_notice_after_seconds":1800,
+        "mail_notice_after_seconds":300,
         "reply_notice_after_seconds":900,
         "terminal_transcript_visibility":"foreman",
         "terminal_transcript_notify_tail":true,

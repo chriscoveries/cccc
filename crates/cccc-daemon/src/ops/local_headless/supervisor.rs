@@ -246,11 +246,23 @@ pub fn detach_after_viewer_exit(group_id: &str, actor_id: &str) -> io::Result<bo
     let Some(item) = lookup(&key) else {
         return Ok(false);
     };
-    if !item.stopped.load(std::sync::atomic::Ordering::Acquire) {
-        item.detach_viewer();
+    if item.detach_viewer()? {
         super::output::emit(&item, "headless.session.viewer_detached", Map::new());
     }
     Ok(true)
+}
+
+/// Reopen only the native attachment to a registered, healthy provider.
+/// Called by write/control paths; status reads must never launch a viewer.
+pub fn ensure_viewer(group_id: &str, actor_id: &str) -> io::Result<()> {
+    let key = (group_id.to_owned(), actor_id.to_owned());
+    let _start = StartGuard::acquire(&key)?;
+    if let Some(item) = lookup(&key)
+        && item.running()
+    {
+        item.reattach_viewer()?;
+    }
+    Ok(())
 }
 
 fn stop_locked(key: &Key) -> io::Result<()> {
@@ -392,7 +404,7 @@ pub fn submit_batch(
     if !item.running() {
         return false;
     }
-    let Some(delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
+    let Some(delivery) = super::super::actor_delivery_render::prepare_batch_with_mail_context(
         home,
         group,
         &actor.id,
@@ -400,9 +412,7 @@ pub fn submit_batch(
     ) else {
         return false;
     };
-    if !item.has_terminal()
-        && let Err(error) = item.reattach_viewer()
-    {
+    if let Err(error) = item.reattach_viewer() {
         tracing::warn!(
             %error,
             group_id = %group.group_id,
@@ -412,12 +422,20 @@ pub fn submit_batch(
         return false;
     }
     if item.has_terminal() {
-        return submit_with_startup_prompt(&item.startup_prompt, &delivery, |prepared| {
-            super::super::actor_delivery::submit_terminal_text(
+        return submit_with_startup_prompt(&item.startup_prompt, &delivery.text, |prepared| {
+            super::super::actor_delivery::submit_terminal_text_prepared(
                 &group.group_id,
                 actor,
-                prepared,
                 cancelled,
+                || {
+                    super::super::actor_delivery_render::append_valid_mail_context(
+                        home,
+                        group,
+                        &actor.id,
+                        delivery.hint.as_ref(),
+                        prepared.to_owned(),
+                    )
+                },
             )
         });
     }

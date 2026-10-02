@@ -19,6 +19,17 @@ pub fn process_batch(
     preamble_session: &mut String,
     cancelled: &AtomicBool,
 ) -> bool {
+    // Defence in depth for queues created by older code: never submit a
+    // legacy mail-only source, even through the generic short retry loop.
+    let filtered = jobs
+        .iter()
+        .filter(|j| !cccc_core::mail_attention::is_mail_originated(&j.group.group_id, &j.event))
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        return true;
+    }
+    let jobs = filtered.as_slice();
     let Some(job) = jobs.first() else {
         return false;
     };
@@ -91,7 +102,7 @@ pub fn process_batch(
     }
 
     let events = jobs.iter().map(|job| job.event.clone()).collect::<Vec<_>>();
-    let Some(mut payload) = super::actor_delivery_render::render_batch_with_mail_context(
+    let Some(prepared) = super::actor_delivery_render::prepare_batch_with_mail_context(
         &job.home,
         &current_group,
         &current_actor.id,
@@ -99,6 +110,7 @@ pub fn process_batch(
     ) else {
         return false;
     };
+    let mut payload = prepared.text;
     if first_delivery && current_actor.runtime != ActorRuntime::Custom {
         payload = format!(
             "{}\n\n{payload}",
@@ -110,11 +122,25 @@ pub fn process_batch(
             "[CCCC] If this conversation has not completed CCCC initialization, call cccc_bootstrap before handling this task. Otherwise continue without repeating bootstrap.\n\n{payload}"
         );
     }
-    if submit_text(&current_group.group_id, &current_actor, &payload, cancelled) {
+    if super::actor_delivery::submit_terminal_text_prepared(
+        &current_group.group_id,
+        &current_actor,
+        cancelled,
+        || {
+            super::actor_delivery_render::append_valid_mail_context(
+                &job.home,
+                &current_group,
+                &current_actor.id,
+                prepared.hint.as_ref(),
+                payload,
+            )
+        },
+    ) {
         preamble_session.clone_from(&status.started_at);
         finish_jobs(jobs);
         return true;
     }
+    fail_attention(jobs);
     false
 }
 
@@ -172,7 +198,21 @@ fn process_managed_batch(
         finish_jobs(jobs);
         return true;
     }
+    fail_attention(jobs);
     false
+}
+
+fn fail_attention(jobs: &[DeliveryJob]) {
+    for job in jobs {
+        let _ = cccc_core::mail_attention::finish_carrier(
+            &job.home,
+            &job.group.group_id,
+            &job.actor.id,
+            &job.event.id,
+            "failed",
+            chrono::Utc::now().timestamp(),
+        );
+    }
 }
 
 fn finish_jobs(jobs: &[DeliveryJob]) {

@@ -45,6 +45,7 @@ mod groups;
 mod hermes_runtime;
 mod im;
 pub(crate) mod local_headless;
+mod mail_attention;
 mod maintenance;
 mod membership;
 pub(crate) use membership::ReachRestore;
@@ -110,6 +111,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         connect_outbound::resolve_operation,
         runtime_state::resolve_operation,
         maintenance::resolve_operation,
+        mail_attention::resolve_operation,
         im::resolve_operation,
         memory::resolve_operation,
         context::resolve_operation,

@@ -20,6 +20,8 @@ mod group_preamble_ops;
 mod integration_ops;
 #[path = "suite/ledger_pagination.rs"]
 mod ledger_pagination;
+#[path = "suite/mail_attention.rs"]
+mod mail_attention;
 #[path = "suite/message_reliability.rs"]
 mod message_reliability;
 #[path = "suite/presentation_ops.rs"]
