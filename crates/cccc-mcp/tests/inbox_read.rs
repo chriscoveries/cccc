@@ -224,3 +224,72 @@ async fn mcp_call(
     )
     .await
 }
+
+#[tokio::test]
+async fn bootstrap_and_coordination_share_attention_while_only_inbox_read_consumes_mail() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    home.initialize().expect("initialize");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let mut group = store.create("attention context", "").expect("group");
+    group.state = cccc_contracts::GroupState::Active;
+    cccc_core::actors::add(&mut group, cccc_contracts::Actor::new("peer1")).expect("actor");
+    store.save(&group).expect("save");
+    let mut mail = cccc_contracts::Event::new("chat.message", &group.group_id);
+    mail.by = "sender".into();
+    mail.ts = (chrono::Utc::now() - chrono::Duration::minutes(6)).to_rfc3339();
+    mail.data = json!({"message_mode":"mail","to":["peer1"],"text":"actionable source"})
+        .as_object()
+        .cloned()
+        .expect("data");
+    cccc_core::ledger::append(&store.ledger_path(&group.group_id).expect("path"), &mail)
+        .expect("append");
+    let daemon_home = home.clone();
+    let daemon_task = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
+    let client = DaemonClient::new(home.clone());
+    wait_for_daemon(&client).await;
+    let bootstrap = mcp_call(&home, &group.group_id, 1, "cccc_bootstrap", json!({})).await;
+    assert!(bootstrap.get("error").is_none(), "{bootstrap}");
+    assert_eq!(
+        bootstrap["result"]["structuredContent"]["mail_pending"]["attention_count"],
+        1
+    );
+    assert!(
+        cccc_core::inbox::cursor(&home, &group.group_id, "peer1")
+            .expect("cursor")
+            .is_none()
+    );
+    let coordination = mcp_call(
+        &home,
+        &group.group_id,
+        2,
+        "cccc_task",
+        json!({"action":"list"}),
+    )
+    .await;
+    assert!(coordination.get("error").is_none(), "{coordination}");
+    assert!(coordination["result"]["structuredContent"]["mail_pending"].is_null());
+    let events = cccc_core::ledger::read_all(&store.ledger_path(&group.group_id).expect("path"))
+        .expect("events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == "mail.attention"
+                && e.data.get("action").and_then(Value::as_str) == Some("context_offered"))
+            .count(),
+        1
+    );
+    assert!(events.iter().all(|e| e.kind != "mail.read"));
+    let read = mcp_call(&home, &group.group_id, 3, "cccc_inbox_read", json!({})).await;
+    assert_eq!(
+        read["result"]["structuredContent"]["event"]["kind"],
+        "mail.read"
+    );
+    assert_eq!(
+        read["result"]["structuredContent"]["cursor"]["event_id"],
+        mail.id
+    );
+    let next = mcp_call(&home, &group.group_id, 4, "cccc_bootstrap", json!({})).await;
+    assert!(next["result"]["structuredContent"]["mail_pending"].is_null());
+    daemon_task.abort();
+}

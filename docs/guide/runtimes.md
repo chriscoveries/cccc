@@ -199,7 +199,7 @@ without an outcome is settled to `ambiguous` and is not retried automatically.
 Current-generation Send work with no accepted/ambiguous evidence can be
 recovered in ledger order after actor/group activation. Mail is never promoted
 by recovery: it remains in the Inbox until `cccc_inbox_read`, apart from the
-single bounded content-free Mail notice. Within the current actor generation,
+bounded content-free [Mail attention](../reference/mail-attention.md). Within the current actor generation,
 legacy `chat.read.event_id` remains an inclusive ledger watermark rather than a
 per-event receipt. Recovery excludes `system.notify` records at or before the
 furthest valid watermark, plus later notices that reference an event in that

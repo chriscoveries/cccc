@@ -1820,7 +1820,7 @@ Args:
 
 Patch keys used by CCCC include:
 - Messaging: `default_send_to`
-- Delivery: `mail_notice_after_seconds` (default 1800, zero disables),
+- Delivery: `mail_notice_after_seconds` (default 300, zero disables standalone attention),
   `reply_notice_after_seconds` (default 900, zero disables)
 - Automation: `actor_idle_timeout_seconds`, `keepalive_delay_seconds`,
   `keepalive_max_per_actor`,
@@ -4131,12 +4131,40 @@ from `inbox_peek` / `inbox_read`. Concrete-recipient Mail batches retain the
 earliest eligible deadline. New Mail does not reset it. Broadcast-like Mail
 remains visible in the Inbox but does not start an active runtime notice timer.
 
-After `mail_notice_after_seconds`, an active/idle enabled actor may receive one
-content-free `system.notify(kind="mail_notice")` for the concrete batch. The
-notice states only that Mail is waiting and directs the actor to `inbox_read`;
-it does not copy message bodies, repeat, escalate, or create another Inbox
-obligation. Bootstrap, the next explicit Push, and low-frequency coordination
-responses MAY carry a passive `mail_pending` count without writing a notice.
+After `mail_notice_after_seconds`, a concrete eligible Mail batch opens one
+journaled attention episode per actor incarnation. Bootstrap, coordination
+responses, ordinary Send carriers and supported native between-turn admission
+share `(episode_id, attempt_no)` tokens. The first offer is due after 300 seconds
+unless explicitly overridden; offers back off 10/20/40/80/160 minutes then at most
+six hours, with stable 0–30 second jitter. Accepted or ambiguous standalone
+admission consumes one of three wakeups per unresolved episode. Passive context
+offers advance the same clock without spending a standalone wakeup. New Mail,
+partial reads, process restart and pause/resume do not reset the budget.
+
+Sources expire from automatic attention exactly 72 hours after their valid
+source timestamp. Expiry preserves the raw Inbox, history and cursor. Invalid
+or future timestamps fail closed. `mail.attention` facts are authoritative;
+`state/mail-attention.json` is a rebuildable per-actor cache. Reservations are
+committed before runtime input. Uncertain reservations settle as ambiguous,
+never automatically replay. The old one-shot `mail_notice` injection is
+suppressed on delivery, queued jobs and replay paths. Plain terminal Actors
+receive passive hints only. Structured between-turn pull is the foundation
+adapter; native terminal adapters must provide atomic idle admission before
+standalone reminders can be enabled.
+
+Internal actor-owned IPC operations:
+- `mail_attention_context`: `{group_id, actor_id, by: actor_id, carrier_id}`;
+  returns `{mail_pending: {count, attention_count, token, action} | null}`.
+  Journals `context_offered` before returning. MCP callers treat failure as an
+  absent optional hint and preserve the normal tool response.
+- `mail_attention_status`: `{group_id, actor_id, by: actor_id}`; returns
+  `{mail_attention: {unread_count, attention_count, expired_unread_count,
+  invalid_unread_count, state}}` without claiming a token or changing a cursor.
+
+Reminder turns are internal `system.notify(kind="mail_attention")`, not Mail.
+They cannot carry another passive reminder or be resubmitted through runtime
+recovery. No recurring notice targets user. Concrete enabled agent recipients
+with eligible Mail can own an attention token.
 
 A `request_reply` obligation starts its timer only after an accepted runtime
 delivery. If no matching `reply_to`
@@ -4146,7 +4174,7 @@ active/idle enabled actor may receive one content-free
 blocked, or ambiguous delivery does not nudge the recipient.
 
 Paused, stopped, or disabled actors are never woken for either notice. Pending
-Mail is surfaced at the next start/resume bootstrap and begins a fresh notice
+Mail is surfaced at the next due bootstrap without resetting the attention
 window. Explicit start/resume may recover only blocked Push work from the
 current actor generation that has no accepted/ambiguous delivery evidence;
 Mail is never automatically promoted. No implementation may depend on a

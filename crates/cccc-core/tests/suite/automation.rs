@@ -96,7 +96,7 @@ fn idle_group_suppresses_builtin_standup_but_runs_custom_rules() {
 }
 
 #[test]
-fn mail_notice_waits_for_a_delivery_eligible_actor_and_is_one_shot() {
+fn mail_attention_never_mints_a_pty_notice_and_context_is_bounded() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
     let store = GroupStore::new(home.clone()).expect("store");
@@ -113,7 +113,7 @@ fn mail_notice_waits_for_a_delivery_eligible_actor_and_is_one_shot() {
         .expect("delivery settings");
     let mut message = Event::new("chat.message", &group.group_id);
     message.by = "user".into();
-    message.ts = "2020-01-01T00:00:00Z".into();
+    message.ts = (chrono::Utc::now() - chrono::Duration::seconds(2)).to_rfc3339();
     message.data = json!({
         "text":"private work detail that must not be copied into a notice",
         "to":["peer"],
@@ -136,16 +136,32 @@ fn mail_notice_waits_for_a_delivery_eligible_actor_and_is_one_shot() {
     let eligible = HashSet::from(["peer".to_owned()]);
     let due = automation::tick_group_for_delivery_actors(&home, &group.group_id, true, &eligible)
         .expect("running actor tick");
-    assert_eq!(due.notifications.len(), 1);
-    assert_eq!(due.notifications[0].data["kind"], "mail_notice");
-    assert_eq!(due.notifications[0].data["context"]["count"], 1);
     assert!(
-        !due.notifications[0].data["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("private work detail")
+        due.notifications.is_empty(),
+        "running alone never admits a mail turn"
     );
-
+    let now = chrono::Utc::now().timestamp();
+    let hint = cccc_core::mail_attention::offer_context(
+        &home,
+        &group.group_id,
+        "peer",
+        "ordinary-response",
+        now,
+    )
+    .expect("offer")
+    .expect("due context");
+    assert_eq!(hint.attention_count, 1);
+    assert!(
+        cccc_core::mail_attention::offer_context(
+            &home,
+            &group.group_id,
+            "peer",
+            "another-response",
+            now
+        )
+        .expect("offer")
+        .is_none()
+    );
     let repeated =
         automation::tick_group_for_delivery_actors(&home, &group.group_id, true, &eligible)
             .expect("repeated tick");
@@ -153,7 +169,7 @@ fn mail_notice_waits_for_a_delivery_eligible_actor_and_is_one_shot() {
 }
 
 #[test]
-fn actor_start_begins_a_fresh_mail_notice_window() {
+fn actor_start_cannot_revive_expired_mail_attention() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
     let store = GroupStore::new(home.clone()).expect("store");
@@ -192,12 +208,12 @@ fn actor_start_begins_a_fresh_mail_notice_window() {
         .expect("post-start tick");
     assert!(
         tick.notifications.is_empty(),
-        "old Mail must wait for a fresh notice window after actor.start"
+        "expired Mail never prompts after actor.start"
     );
 }
 
 #[test]
-fn mail_arriving_before_batch_closure_shares_the_existing_notice() {
+fn mail_arrivals_and_replies_refresh_one_attention_episode_without_new_prompts() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
     let store = GroupStore::new(home.clone()).expect("store");
@@ -216,7 +232,7 @@ fn mail_arriving_before_batch_closure_shares_the_existing_notice() {
     let append_mail = |text: &str| {
         let mut event = Event::new("chat.message", &group.group_id);
         event.by = "user".into();
-        event.ts = "2020-01-01T00:00:00Z".into();
+        event.ts = (chrono::Utc::now() - chrono::Duration::seconds(2)).to_rfc3339();
         event.data = json!({"text":text,"to":["peer"],"message_mode":"mail"})
             .as_object()
             .cloned()
@@ -241,7 +257,14 @@ fn mail_arriving_before_batch_closure_shares_the_existing_notice() {
     let initial =
         automation::tick_group_for_delivery_actors(&home, &group.group_id, true, &eligible)
             .expect("initial notice");
-    assert_eq!(initial.notifications.len(), 1);
+    assert!(initial.notifications.is_empty());
+    let now = chrono::Utc::now().timestamp();
+    cccc_core::mail_attention::offer_context(&home, &group.group_id, "peer", "first-context", now)
+        .expect("offer")
+        .expect("hint");
+    let before = cccc_core::mail_attention::inspect(&home, &group.group_id, "peer", now)
+        .expect("inspect")
+        .state;
 
     let joined = append_mail("joined before closure");
     append_reply(&first);
@@ -258,10 +281,15 @@ fn mail_arriving_before_batch_closure_shares_the_existing_notice() {
     let next_batch =
         automation::tick_group_for_delivery_actors(&home, &group.group_id, true, &eligible)
             .expect("next batch notice");
-    assert_eq!(next_batch.notifications.len(), 1);
-    assert_eq!(
-        next_batch.notifications[0].data["context"]["source_event_ids"],
-        json!([next.id])
+    assert!(next_batch.notifications.is_empty());
+    let after = cccc_core::mail_attention::inspect(&home, &group.group_id, "peer", now)
+        .expect("inspect")
+        .state;
+    assert_ne!(before.episode_id, after.episode_id);
+    assert_eq!(after.opened_by.as_deref(), Some(next.id.as_str()));
+    assert!(
+        after.due_at >= now + 300,
+        "closure retains the actor cooldown"
     );
 }
 

@@ -55,38 +55,83 @@ pub fn render_batch(events: &[Event]) -> Option<String> {
     Some(reply_guidance::append(events, rendered))
 }
 
-pub fn render_batch_with_mail_context(
+pub(super) struct PreparedBatch {
+    pub text: String,
+    pub hint: Option<cccc_core::mail_attention::Hint>,
+}
+
+pub(super) fn prepare_batch_with_mail_context(
     home: &HomeLayout,
     group: &GroupDoc,
     actor_id: &str,
     events: &[Event],
-) -> Option<String> {
-    let mut output = render_batch(events)?;
-    let has_direct_message = events.iter().any(|event| {
+) -> Option<PreparedBatch> {
+    let text = render_batch(events)?;
+    let direct = events.iter().any(|event| {
         event.kind == "chat.message"
             && matches!(
                 event.data.get("message_mode").and_then(Value::as_str),
                 Some("send" | "request_reply")
             )
     });
-    if !has_direct_message {
-        return Some(output);
-    }
-    let pending = cccc_core::inbox::mail_pending_summary(home, group, actor_id)
+    let hint = if direct
+        && !events
+            .iter()
+            .any(|e| cccc_core::mail_attention::is_mail_originated(&group.group_id, e))
+    {
+        cccc_core::mail_attention::reserve_delivery_hint(
+            home,
+            &group.group_id,
+            actor_id,
+            &events.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+            chrono::Utc::now().timestamp(),
+        )
         .ok()
-        .flatten();
-    let count = pending
-        .as_ref()
-        .and_then(|value| value.get("count"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    if count > 0 {
+        .flatten()
+    } else {
+        None
+    };
+    Some(PreparedBatch { text, hint })
+}
+
+pub(super) fn append_valid_mail_context(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor_id: &str,
+    hint: Option<&cccc_core::mail_attention::Hint>,
+    mut text: String,
+) -> String {
+    if let Some(hint) = hint
+        && let Ok(Some(count)) = cccc_core::mail_attention::validate_delivery_hint(
+            home,
+            &group.group_id,
+            actor_id,
+            &hint.token,
+            chrono::Utc::now().timestamp(),
+        )
+    {
         let noun = if count == 1 { "item" } else { "items" };
-        output.push_str(&format!(
+        text.push_str(&format!(
             "\n\n[cccc] MAIL PENDING: {count} {noun}. Call cccc_inbox_read when appropriate."
         ));
     }
-    Some(output)
+    text
+}
+
+pub fn render_batch_with_mail_context(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor_id: &str,
+    events: &[Event],
+) -> Option<String> {
+    let prepared = prepare_batch_with_mail_context(home, group, actor_id, events)?;
+    Some(append_valid_mail_context(
+        home,
+        group,
+        actor_id,
+        prepared.hint.as_ref(),
+        prepared.text,
+    ))
 }
 
 fn protocol_lines(event: &Event) -> Vec<String> {
@@ -320,12 +365,14 @@ mod tests {
         let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
         let store = cccc_core::GroupStore::new(home.clone()).expect("store");
         let mut group = store.create("mail context", "").expect("group");
+        group.state = cccc_contracts::GroupState::Active;
         group.actors.push(cccc_contracts::Actor::new("peer1"));
         store.save(&group).expect("save group");
         let ledger_path = store.ledger_path(&group.group_id).expect("ledger");
 
         let mut mail = Event::new("chat.message", &group.group_id);
         mail.by = "user".into();
+        mail.ts = (chrono::Utc::now() - chrono::Duration::minutes(6)).to_rfc3339();
         mail.data = json!({
             "to":["peer1"],
             "text":"read later",

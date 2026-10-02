@@ -31,10 +31,17 @@ pub(super) fn submit_terminal_text(
     text: &str,
     cancelled: &AtomicBool,
 ) -> bool {
-    let raw = text.trim_end_matches(['\r', '\n']);
-    if raw.is_empty() {
-        return false;
-    }
+    submit_terminal_text_prepared(group_id, actor, cancelled, || text.to_owned())
+}
+
+/// Optional context is revalidated after existing input readiness waits and
+/// immediately before the ordinary payload write. This does not admit new work.
+pub(super) fn submit_terminal_text_prepared(
+    group_id: &str,
+    actor: &Actor,
+    cancelled: &AtomicBool,
+    prepare: impl FnOnce() -> String,
+) -> bool {
     if super::local_headless::supports(actor)
         && !cccc_runtime::wait_for_input_ready(
             group_id,
@@ -44,6 +51,11 @@ pub(super) fn submit_terminal_text(
         )
         .unwrap_or(false)
     {
+        return false;
+    }
+    let text = prepare();
+    let raw = text.trim_end_matches(['\r', '\n']);
+    if raw.is_empty() {
         return false;
     }
     let bracketed = raw.contains(['\r', '\n'])
@@ -241,7 +253,8 @@ fn fail_jobs(jobs: &[DeliveryJob], reason: &str) {
 }
 
 pub fn dispatch(home: &HomeLayout, group: &GroupDoc, event: &Event) -> DispatchReport {
-    if !matches!(event.kind.as_str(), "chat.message" | "system.notify")
+    if cccc_core::mail_attention::is_mail_originated(&group.group_id, event)
+        || !matches!(event.kind.as_str(), "chat.message" | "system.notify")
         || matches!(group.state, GroupState::Paused | GroupState::Stopped)
     {
         return report(0, 0, 0);
@@ -314,7 +327,9 @@ fn dispatch_to_inner(
     force_ambiguous: bool,
     preclaimed: bool,
 ) -> DispatchReport {
-    if matches!(group.state, GroupState::Paused | GroupState::Stopped) {
+    if cccc_core::mail_attention::is_mail_originated(&group.group_id, event)
+        || matches!(group.state, GroupState::Paused | GroupState::Stopped)
+    {
         return report(targets.len(), 0, 0);
     }
     let mut queued = 0;

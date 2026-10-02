@@ -67,10 +67,7 @@ pub(crate) async fn build(
         context_hygiene,
         memory_recall_gate,
     );
-    if let Ok(store) = cccc_core::GroupStore::new(home.clone())
-        && let Ok(group) = store.load(&group_id)
-        && let Ok(Some(pending)) = cccc_core::inbox::mail_pending_summary(home, &group, &actor_id)
-    {
+    if let Some(pending) = crate::router::prepare_mail_context(client, &group_id, &actor_id).await {
         payload["mail_pending"] = pending;
     }
     Ok(payload)

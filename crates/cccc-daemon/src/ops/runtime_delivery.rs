@@ -74,6 +74,17 @@ pub fn append_state(
     .expect("runtime delivery data");
     ledger::append(&store.ledger_path(group_id).map_err(OpError::io)?, &event)
         .map_err(OpError::io)?;
+    // Optional attention bookkeeping must never invalidate ordinary delivery.
+    if let Err(error) = cccc_core::mail_attention::finish_carrier(
+        home,
+        group_id,
+        actor_id,
+        source_event_id,
+        state,
+        chrono::Utc::now().timestamp(),
+    ) {
+        tracing::debug!(%error, %group_id, %actor_id, "attention outcome unavailable");
+    }
     Ok(event)
 }
 
@@ -327,6 +338,9 @@ pub fn pending_sources(
         }
         let mut pending = Vec::new();
         for event in generation_events {
+            if cccc_core::mail_attention::is_mail_originated(&group.group_id, event) {
+                continue; // Legacy mail sources never bypass native admission.
+            }
             if event.by == actor.id {
                 continue;
             }
