@@ -235,3 +235,22 @@ fn call(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
     assert!(r.ok, "{op}: {:?}", r.error);
     r
 }
+
+#[test]
+fn browser_handoff_needs_its_own_atomic_adapter_before_standalone_attention() {
+    let f = Fixture::new();
+    f.mail();
+    let browser = call(
+        &f.home,
+        "runtime_wait_next_turn",
+        json!({"group_id":f.group_id,"actor_id":"web1","by":"web1","transport":"web_model_browser"}),
+    );
+    assert_eq!(browser.result["status"], "idle");
+    assert!(
+        ledger::read_all(&f.path())
+            .expect("events")
+            .iter()
+            .all(|e| e.kind != "system.notify")
+    );
+    assert_eq!(f.pull().result["status"], "work_available");
+}

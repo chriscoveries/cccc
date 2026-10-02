@@ -270,7 +270,9 @@ fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             crate::ops::runtime_delivery::ClaimResult::Terminal(_) => {}
         }
     }
-    if messages.is_empty() {
+    if messages.is_empty() && transport == "web_model_pull" {
+        // Browser handoff releases this permit before external browser input;
+        // it needs its own atomic adapter before standalone admission.
         // This request owns the group write permit and the actor's between-turn
         // pull. All ordinary pending work was considered first. No terminal
         // submission, steer, auto-start, or group resume is performed here.
