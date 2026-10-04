@@ -270,6 +270,49 @@ fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             crate::ops::runtime_delivery::ClaimResult::Terminal(_) => {}
         }
     }
+    if messages.is_empty() && transport == "web_model_pull" {
+        // Browser handoff releases this permit before external browser input;
+        // it needs its own atomic adapter before standalone admission.
+        // This request owns the group write permit and the actor's between-turn
+        // pull. All ordinary pending work was considered first. No terminal
+        // submission, steer, auto-start, or group resume is performed here.
+        let source_id = cccc_contracts::Event::new("system.notify", &group.group_id).id;
+        if let Ok(Some(hint)) = cccc_core::mail_attention::reserve_boundary_turn(
+            home,
+            &group.group_id,
+            &actor_id,
+            &source_id,
+            chrono::Utc::now().timestamp(),
+        ) {
+            let event = cccc_core::mail_attention::new_boundary_source(
+                &group.group_id,
+                &actor_id,
+                &hint,
+                source_id,
+            );
+            let path = GroupStore::new(home.clone()).and_then(|s| s.ledger_path(&group.group_id));
+            if let Ok(path) = path
+                && cccc_core::ledger::append(&path, &event).is_ok()
+                && matches!(
+                    crate::ops::runtime_delivery::claim(
+                        home, &group, actor, &event.id, &transport, false
+                    ),
+                    Ok(crate::ops::runtime_delivery::ClaimResult::Claimed)
+                )
+            {
+                messages.push(event);
+            } else {
+                let _ = cccc_core::mail_attention::finish_carrier(
+                    home,
+                    &group.group_id,
+                    &actor_id,
+                    &event.id,
+                    "failed",
+                    chrono::Utc::now().timestamp(),
+                );
+            }
+        }
+    }
     if messages.is_empty() {
         set_runtime_status(home, &group, &actor_id, "waiting", "", "", &[])?;
         return object(json!({"status":"idle","turn":null,"suggested_retry_after_ms":5000}));
@@ -372,6 +415,12 @@ fn recover_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         ));
     }
     for event in &messages {
+        if cccc_core::mail_attention::is_mail_originated(&group.group_id, event) {
+            return Err(OpError::new(
+                "attention_not_replayable",
+                "Mail attention turns are never resubmitted through recovery",
+            ));
+        }
         if !matches!(event.kind.as_str(), "chat.message" | "system.notify") {
             return Err(OpError::new(
                 "invalid_event_kind",

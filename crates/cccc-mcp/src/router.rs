@@ -81,7 +81,7 @@ pub(crate) async fn call_with_context(
             let result = crate::local_tools::call(home, client, name, arguments).await?;
             return Ok(if message_operation {
                 let (group_id, actor_id) = message_context.as_ref().expect("message context");
-                with_post_message_context(home, result, group_id, actor_id)
+                with_post_message_context(client, result, group_id, actor_id).await
             } else {
                 result
             });
@@ -121,7 +121,7 @@ pub(crate) async fn call_with_context(
                         .get("by")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    insert_mail_pending_context(home, &mut result, group_id, actor_id);
+                    insert_mail_pending_context(client, &mut result, group_id, actor_id).await;
                 }
             }
             if name == "cccc_actor_notes" {
@@ -133,7 +133,7 @@ pub(crate) async fn call_with_context(
     let result = tool_result(payload);
     Ok(if message_operation {
         let (group_id, actor_id) = message_context.as_ref().expect("message context");
-        with_post_message_context(home, result, group_id, actor_id)
+        with_post_message_context(client, result, group_id, actor_id).await
     } else {
         result
     })
@@ -796,8 +796,8 @@ fn is_message_operation(name: &str) -> bool {
     )
 }
 
-fn with_post_message_context(
-    home: &HomeLayout,
+async fn with_post_message_context(
+    client: &DaemonClient,
     mut result: Value,
     group_id: &str,
     actor_id: &str,
@@ -806,32 +806,44 @@ fn with_post_message_context(
         .get_mut("structuredContent")
         .and_then(Value::as_object_mut)
     {
-        insert_mail_pending_context(home, payload, group_id, actor_id);
+        insert_mail_pending_context(client, payload, group_id, actor_id).await;
         let text = serde_json::to_string_pretty(payload).unwrap_or_else(|_| "{}".into());
         result["content"] = json!([{"type":"text","text":text}]);
     }
     result
 }
 
-fn insert_mail_pending_context(
-    home: &HomeLayout,
+async fn insert_mail_pending_context(
+    client: &DaemonClient,
     payload: &mut Map<String, Value>,
     group_id: &str,
     actor_id: &str,
 ) {
-    if group_id.is_empty() || matches!(actor_id, "" | "user" | "system") {
-        return;
+    if let Some(pending) = prepare_mail_context(client, group_id, actor_id).await {
+        payload.insert("mail_pending".into(), pending);
     }
-    let Ok(store) = cccc_core::GroupStore::new(home.clone()) else {
-        return;
-    };
-    let Ok(group) = store.load(group_id) else {
-        return;
-    };
-    let Ok(Some(pending)) = cccc_core::inbox::mail_pending_summary(home, &group, actor_id) else {
-        return;
-    };
-    payload.insert("mail_pending".into(), pending);
+}
+
+pub(crate) async fn prepare_mail_context(
+    client: &DaemonClient,
+    group_id: &str,
+    actor_id: &str,
+) -> Option<Value> {
+    if group_id.is_empty() || matches!(actor_id, "" | "user" | "system") {
+        return None;
+    }
+    let args = json!({"group_id":group_id,"actor_id":actor_id,"by":actor_id,
+        "carrier_id":format!("mcp:{}", uuid::Uuid::new_v4())})
+    .as_object()
+    .cloned()?;
+    // This optional operation owns the shared durable presentation token.
+    // Its failure never changes a successful ordinary tool response.
+    daemon(client, "mail_attention_context", args)
+        .await
+        .ok()?
+        .get("mail_pending")
+        .filter(|value| !value.is_null())
+        .cloned()
 }
 
 fn is_repo_tool(name: &str) -> bool {
@@ -1234,8 +1246,8 @@ mod tests {
         assert!(!is_message_operation("cccc_file"));
     }
 
-    #[test]
-    fn message_results_preserve_receipts_and_errors_without_behavior_instructions() {
+    #[tokio::test]
+    async fn message_results_preserve_receipts_and_errors_without_behavior_instructions() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
         for payload in [
@@ -1247,8 +1259,13 @@ mod tests {
             json!({"receipt":{"status":"failed"}}),
             json!({"error":{"code":"invalid_recipient","message":"unknown actor"}}),
         ] {
-            let result =
-                with_post_message_context(&home, super::tool_result(payload.clone()), "", "");
+            let result = with_post_message_context(
+                &cccc_client::DaemonClient::new(home.clone()),
+                super::tool_result(payload.clone()),
+                "",
+                "",
+            )
+            .await;
             assert_eq!(result["structuredContent"], payload);
             let text: serde_json::Value =
                 serde_json::from_str(result["content"][0]["text"].as_str().expect("text"))
@@ -1257,8 +1274,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pending_mail_context_preserves_message_outcome() {
+    #[tokio::test]
+    async fn unavailable_attention_daemon_preserves_message_outcome() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
         let store = cccc_core::GroupStore::new(home.clone()).expect("store");
@@ -1275,27 +1292,33 @@ mod tests {
             .expect("append mail");
 
         let success = with_post_message_context(
-            &home,
+            &cccc_client::DaemonClient::new(home.clone()),
             super::tool_result(json!({"event":{"id":"event-1"}})),
             &group.group_id,
             "peer1",
-        );
+        )
+        .await;
         assert_eq!(success["structuredContent"]["event"]["id"], "event-1");
         assert!(
             success["structuredContent"]
                 .get("post_message_nudge")
                 .is_none()
         );
-        assert_eq!(success["structuredContent"]["mail_pending"]["count"], 1);
+        assert!(success["structuredContent"].get("mail_pending").is_none());
 
         let incomplete = with_post_message_context(
-            &home,
+            &cccc_client::DaemonClient::new(home.clone()),
             super::tool_result(json!({"partial_failure":true})),
             &group.group_id,
             "peer1",
-        );
+        )
+        .await;
         assert!(incomplete["structuredContent"]["post_message_nudge"].is_null());
-        assert_eq!(incomplete["structuredContent"]["mail_pending"]["count"], 1);
+        assert!(
+            incomplete["structuredContent"]
+                .get("mail_pending")
+                .is_none()
+        );
     }
 
     #[test]

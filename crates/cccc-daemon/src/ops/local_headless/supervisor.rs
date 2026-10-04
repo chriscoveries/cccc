@@ -404,7 +404,7 @@ pub fn submit_batch(
     if !item.running() {
         return false;
     }
-    let Some(delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
+    let Some(delivery) = super::super::actor_delivery_render::prepare_batch_with_mail_context(
         home,
         group,
         &actor.id,
@@ -422,12 +422,20 @@ pub fn submit_batch(
         return false;
     }
     if item.has_terminal() {
-        return submit_with_startup_prompt(&item.startup_prompt, &delivery, |prepared| {
-            super::super::actor_delivery::submit_terminal_text(
+        return submit_with_startup_prompt(&item.startup_prompt, &delivery.text, |prepared| {
+            super::super::actor_delivery::submit_terminal_text_prepared(
                 &group.group_id,
                 actor,
-                prepared,
                 cancelled,
+                || {
+                    super::super::actor_delivery_render::append_valid_mail_context(
+                        home,
+                        group,
+                        &actor.id,
+                        delivery.hint.as_ref(),
+                        prepared.to_owned(),
+                    )
+                },
             )
         });
     }

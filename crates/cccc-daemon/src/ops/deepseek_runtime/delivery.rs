@@ -51,15 +51,16 @@ pub(super) fn deliver_with_timeout(
     if super::recovery::has_completed_event(home, group, actor, &event.id) {
         return true;
     }
-    let payload = crate::ops::actor_delivery_render::render_batch_with_mail_context(
+    let prepared = crate::ops::actor_delivery_render::prepare_batch_with_mail_context(
         home,
         group,
         &actor.id,
         std::slice::from_ref(event),
     );
-    let Some(mut payload) = payload else {
+    let Some(prepared) = prepared else {
         return false;
     };
+    let mut payload = prepared.text;
     if event.kind == "chat.message" {
         payload.push_str("\n\n[cccc] ");
         payload.push_str(cccc_core::system_prompt::NEW_MESSAGE_MODE_GUIDANCE);
@@ -73,6 +74,13 @@ pub(super) fn deliver_with_timeout(
     let Some(session_id) = supervisor.session_id().map(str::to_owned) else {
         return false;
     };
+    let payload = crate::ops::actor_delivery_render::append_valid_mail_context(
+        home,
+        group,
+        &actor.id,
+        prepared.hint.as_ref(),
+        payload,
+    );
     let request_id = match supervisor.enqueue(payload).and_then(|_| {
         supervisor
             .flush_one(&session_id)
