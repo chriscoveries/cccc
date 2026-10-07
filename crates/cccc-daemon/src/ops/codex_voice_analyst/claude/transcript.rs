@@ -41,6 +41,7 @@ struct ActiveTurn {
 }
 
 pub(super) struct TranscriptState {
+    last_assistant: Option<(String, String)>,
     generation: String,
     session_id: String,
     events: broadcast::Sender<AnalystEvent>,
@@ -58,6 +59,7 @@ impl TranscriptState {
         events: broadcast::Sender<AnalystEvent>,
     ) -> Self {
         Self {
+            last_assistant: None,
             generation,
             session_id,
             events,
@@ -121,6 +123,15 @@ impl TranscriptState {
             Some("user") => self.ingest_user(record, controlled, native),
             Some("assistant") => {
                 self.ingest_assistant(record)?;
+                // Queued slash commands can mint a fresh promptId for an interruption.
+                // Retain the latest assistant parent together with its active turn owner.
+                self.last_assistant = self.active_turn_id().and_then(|turn_id| {
+                    record
+                        .get("uuid")
+                        .and_then(Value::as_str)
+                        .filter(|uuid| !uuid.trim().is_empty())
+                        .map(|uuid| (turn_id.to_owned(), uuid.to_owned()))
+                });
                 Ok(IngestOutcome::None)
             }
             Some("system")
@@ -147,11 +158,17 @@ impl TranscriptState {
         let text = text_content(content);
         if matches!(text.trim(), INTERRUPTION_MARKER | TOOL_INTERRUPTION_MARKER) {
             let prompt_id = required_prompt_id(record)?;
-            if self
-                .active
-                .as_ref()
-                .is_some_and(|turn| turn.prompt_ids.contains(prompt_id))
-            {
+            if self.active.as_ref().is_some_and(|turn| {
+                turn.prompt_ids.contains(prompt_id)
+                    || record
+                        .get("parentUuid")
+                        .and_then(Value::as_str)
+                        .is_some_and(|parent| {
+                            self.last_assistant.as_ref().is_some_and(|(turn_id, uuid)| {
+                                turn_id == &turn.turn_id && uuid == parent
+                            })
+                        })
+            }) {
                 self.settle("cancelled", None);
                 return Ok(IngestOutcome::None);
             }
@@ -410,6 +427,7 @@ impl TranscriptState {
         let Some(active) = self.active.take() else {
             return;
         };
+        self.last_assistant = None;
         let error = requested_error.map(str::to_owned).or(active.error);
         let status = if error.is_some() {
             "failed"
@@ -694,6 +712,97 @@ mod tests {
             Some("delegation-1")
         );
         assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn queued_resume_interruption_correlates_through_assistant_parent() {
+        let (mut state, mut events) = harness();
+        for record in [
+            json!({"type":"user","sessionId":"session-1","promptId":"original",
+                "message":{"content":"work"}}),
+            json!({"type":"queue-operation","operation":"enqueue","content":"/resume"}),
+            json!({"type":"queue-operation","operation":"dequeue"}),
+            json!({"type":"assistant","sessionId":"session-1","uuid":"assistant-current",
+                "message":{"content":[{"type":"thinking","thinking":""}]}}),
+            json!({"type":"user","sessionId":"session-1","promptId":"resume-command",
+                "parentUuid":"assistant-current",
+                "message":{"content":[{"type":"text","text":INTERRUPTION_MARKER}]}}),
+        ] {
+            state.ingest(&record, None).expect("queued resume replay");
+        }
+        assert_eq!(state.active_turn_id(), None);
+        let completed = std::iter::from_fn(|| events.try_recv().ok())
+            .find(|event| event.message["method"] == "turn/completed")
+            .expect("cancelled turn");
+        assert_eq!(completed.message["params"]["turn"]["id"], "claude-original");
+        assert_eq!(completed.message["params"]["turn"]["status"], "cancelled");
+        state
+            .ingest(
+                &json!({"type":"user","sessionId":"session-1","promptId":"next",
+            "message":{"content":"next work"}}),
+                None,
+            )
+            .expect("next turn");
+        assert_eq!(state.active_turn_id(), Some("claude-next"));
+    }
+
+    #[test]
+    fn interruption_parent_must_belong_to_the_current_assistant_record() {
+        for parent in [None, Some("unrelated"), Some("assistant-old"), Some("")] {
+            let (mut state, _) = harness();
+            state
+                .ingest(
+                    &json!({"type":"user","sessionId":"session-1","promptId":"original",
+                "message":{"content":"work"}}),
+                    None,
+                )
+                .expect("start");
+            for uuid in ["assistant-old", "assistant-current"] {
+                state
+                    .ingest(
+                        &json!({"type":"assistant","sessionId":"session-1","uuid":uuid,
+                    "message":{"content":[]}}),
+                        None,
+                    )
+                    .expect("assistant");
+            }
+            let error = state
+                .ingest(
+                    &json!({"type":"user","sessionId":"session-1",
+                "promptId":"different","parentUuid":parent,
+                "message":{"content":INTERRUPTION_MARKER}}),
+                    None,
+                )
+                .expect_err("unowned marker");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(state.active_turn_id(), Some("claude-original"));
+        }
+    }
+
+    #[test]
+    fn interruption_parent_is_not_reused_after_settlement() {
+        let (mut state, _) = harness();
+        for record in [
+            json!({"type":"user","sessionId":"session-1","promptId":"original",
+                "message":{"content":"work"}}),
+            json!({"type":"assistant","sessionId":"session-1","uuid":"prior-assistant",
+                "message":{"content":[]}}),
+            json!({"type":"system","sessionId":"session-1","subtype":"turn_duration"}),
+        ] {
+            state.ingest(&record, None).expect("completed turn");
+        }
+        let marker = json!({"type":"user","sessionId":"session-1","promptId":"different",
+            "parentUuid":"prior-assistant","message":{"content":INTERRUPTION_MARKER}});
+        assert!(state.ingest(&marker, None).is_err(), "no active turn");
+        state
+            .ingest(
+                &json!({"type":"user","sessionId":"session-1","promptId":"next",
+            "message":{"content":"next work"}}),
+                None,
+            )
+            .expect("next turn");
+        assert!(state.ingest(&marker, None).is_err(), "prior turn's parent");
+        assert_eq!(state.active_turn_id(), Some("claude-next"));
     }
 
     #[test]
