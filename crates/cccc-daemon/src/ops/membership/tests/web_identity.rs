@@ -79,10 +79,11 @@ fn reach_uses_the_identity_verified_live_web_port() {
 }
 
 #[test]
-fn reach_rejects_a_recorded_web_port_that_is_not_listening() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind closed fixture");
+fn reach_rejects_a_recorded_web_port_that_cannot_prove_identity() {
+    // Keep the listener bound (and never answer) for the whole probe. A port that was bound
+    // and released could be rebound by another fixture that answers with a valid proof.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind silent Web fixture");
     let port = listener.local_addr().expect("fixture address").port();
-    drop(listener);
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
     home.initialize().expect("home");
@@ -91,7 +92,8 @@ fn reach_rejects_a_recorded_web_port_that_is_not_listening() {
         &json!({"pid":std::process::id(),"runtime_id":"web_fixture","runtime_proof_key":"proof-key","host":"127.0.0.1","port":port}),
     )
     .expect("runtime state");
-    let error = live_web_port(&home).expect_err("closed binding must fail");
+    let error = live_web_port(&home).expect_err("a port without a proof must fail");
+    drop(listener);
     assert_eq!(error.code, "membership_gate");
     assert!(error.message.contains("did not prove its runtime identity"));
 }
