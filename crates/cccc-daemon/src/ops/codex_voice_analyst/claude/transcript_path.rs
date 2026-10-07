@@ -206,4 +206,37 @@ mod tests {
                 .is_none()
         );
     }
+    #[tokio::test]
+    async fn mismatched_transcript_diagnostic_identifies_the_job_and_both_sessions() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let job = temp.path().join("jobs/abcdef12");
+        std::fs::create_dir_all(&job).expect("job");
+        let state = job.join("state.json");
+        let observed = "62b41c61-e23c-4b7c-8b60-809c347451b5.jsonl";
+        let path = temp.path().join("projects/workspace").join(observed);
+        std::fs::write(&state, json!({"linkScanPath":path}).to_string()).expect("state");
+        let mut follower = TranscriptFollower::new(state, temp.path().into(), ID.into(), false);
+        let error = follower
+            .initialize()
+            .await
+            .expect_err("foreign identity remains rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let detail = error.to_string();
+        assert!(
+            detail.contains(ID),
+            "expected session is attributable: {detail}"
+        );
+        assert!(
+            detail.contains(observed),
+            "observed filename is attributable: {detail}"
+        );
+        assert!(
+            detail.contains("abcdef12"),
+            "managed job is attributable: {detail}"
+        );
+        assert!(
+            follower.path.is_none(),
+            "foreign transcript was not adopted"
+        );
+    }
 }
