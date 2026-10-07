@@ -45,6 +45,9 @@ pub(super) struct TranscriptState {
     session_id: String,
     events: broadcast::Sender<AnalystEvent>,
     active: Option<ActiveTurn>,
+    /// promptId of hidden input Claude may answer in a turn of its own (scheduled prompts,
+    /// messages from other Claude sessions, delivery notices).
+    hidden_prompt_id: Option<String>,
 }
 
 impl TranscriptState {
@@ -58,6 +61,7 @@ impl TranscriptState {
             session_id,
             events,
             active: None,
+            hidden_prompt_id: None,
         }
     }
 
@@ -86,9 +90,16 @@ impl TranscriptState {
         controlled: Option<PendingPrompt<'_>>,
         native: Option<PendingNativeInput<'_>>,
     ) -> io::Result<IngestOutcome> {
-        if record.get("isSidechain").and_then(Value::as_bool) == Some(true)
-            || record.get("isMeta").and_then(Value::as_bool) == Some(true)
-        {
+        if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            return Ok(IngestOutcome::None);
+        }
+        if record.get("isMeta").and_then(Value::as_bool) == Some(true) {
+            if self.active.is_none() && record.get("type").and_then(Value::as_str) == Some("user") {
+                self.hidden_prompt_id = record
+                    .get("promptId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
             return Ok(IngestOutcome::None);
         }
         if let Some(observed) = record
@@ -213,9 +224,31 @@ impl TranscriptState {
 
     fn ingest_assistant(&mut self, record: &Value) -> io::Result<()> {
         let mut messages = Vec::new();
-        let Some(active) = self.active.as_mut() else {
-            return invalid("Claude emitted assistant output without an active transcript turn");
-        };
+        if self.active.is_none() {
+            // Claude answers some hidden inputs in a turn of its own; any other output without
+            // a turn is still a desync and fails closed.
+            let Some(prompt_id) = self.hidden_prompt_id.take() else {
+                return invalid(
+                    "Claude emitted assistant output without an active transcript turn",
+                );
+            };
+            let turn_id = format!("claude-{prompt_id}");
+            self.active = Some(ActiveTurn {
+                turn_id: turn_id.clone(),
+                prompt_ids: HashSet::from([prompt_id]),
+                text: String::new(),
+                error: None,
+                tools: HashMap::new(),
+            });
+            self.publish(
+                json!({
+                    "method":"turn/started",
+                    "params":{"threadId":self.session_id,"turn":{"id":turn_id}}
+                }),
+                None,
+            );
+        }
+        let active = self.active.as_mut().expect("active turn");
         let content = record.pointer("/message/content").unwrap_or(&Value::Null);
         for block in content.as_array().into_iter().flatten() {
             match block.get("type").and_then(Value::as_str) {
@@ -334,6 +367,7 @@ impl TranscriptState {
     }
 
     fn settle(&mut self, requested_status: &str, requested_error: Option<&str>) {
+        self.hidden_prompt_id = None;
         let Some(active) = self.active.take() else {
             return;
         };
@@ -683,6 +717,54 @@ mod tests {
             failed.message["params"]["turn"]["error"]
                 .as_str()
                 .is_some_and(|value| value.contains("authentication_failed"))
+        );
+    }
+
+    #[test]
+    fn turn_claude_starts_for_hidden_input_is_tracked() {
+        let (mut state, mut events) = harness();
+        state
+            .ingest(
+                &json!({
+                    "type":"user","sessionId":"session-1","promptId":"scheduled-1","isMeta":true,
+                    "message":{"content":"Periodic check"}
+                }),
+                None,
+            )
+            .expect("hidden input");
+        state
+            .ingest(
+                &json!({"type":"assistant","sessionId":"session-1",
+                    "message":{"content":[{"type":"text","text":"all clear"}]}}),
+                None,
+            )
+            .expect("Claude's own turn");
+        assert_eq!(state.active_turn_id(), Some("claude-scheduled-1"));
+        state
+            .ingest(
+                &json!({"type":"system","sessionId":"session-1","subtype":"turn_duration"}),
+                None,
+            )
+            .expect("settle");
+        let methods: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .map(|event| {
+                event.message["method"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(methods.first().map(String::as_str), Some("turn/started"));
+        assert_eq!(methods.last().map(String::as_str), Some("turn/completed"));
+        assert!(
+            state
+                .ingest(
+                    &json!({"type":"assistant","sessionId":"session-1",
+                        "message":{"content":[{"type":"text","text":"orphan"}]}}),
+                    None,
+                )
+                .is_err(),
+            "output with no turn and no pending hidden input still fails closed"
         );
     }
 
