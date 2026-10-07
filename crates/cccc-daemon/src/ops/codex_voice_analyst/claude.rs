@@ -16,6 +16,8 @@ mod control;
 mod resume_failure;
 mod transcript;
 mod transcript_ack;
+#[cfg(all(test, unix))]
+mod transcript_autonomous_client_tests;
 mod transcript_buffer;
 mod transcript_continuity;
 #[cfg(all(test, unix))]
@@ -50,6 +52,10 @@ const LIVE_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
 const TRANSCRIPT_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PROMPT_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 const PROMPT_SETTLED_CORRELATION_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long CCCC holds new prompts after Claude received hidden input while idle, so a prompt
+/// cannot be folded into the turn Claude starts for it. Bounded: hidden input that Claude never
+/// answers must not block delivery.
+const HIDDEN_TURN_ADMISSION_HOLD: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const LIVENESS_FAILURE_TIMEOUT: Duration = Duration::from_secs(10);
 const PARTIAL_TAIL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -982,12 +988,16 @@ async fn run_client(
     let mut terminal_error = None;
     let mut expected_close = false;
     let mut liveness_failure: Option<(tokio::time::Instant, String)> = None;
+    let mut hidden_input_since: Option<tokio::time::Instant> = None;
 
     'client: loop {
         tokio::select! {
             command = commands.recv() => match command {
                 Some(ClientCommand::Prompt { delegation_id, text, response }) => {
-                    if pending.is_some() || state.active_turn_id().is_some() {
+                    let hidden_turn_starting = hidden_input_since.is_some_and(|since| {
+                        since.elapsed() < HIDDEN_TURN_ADMISSION_HOLD
+                    });
+                    if pending.is_some() || state.active_turn_id().is_some() || hidden_turn_starting {
                         let _ = response.send(Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
                             "Claude managed session already has an active or pending turn",
@@ -1104,6 +1114,11 @@ async fn run_client(
                                     break 'client;
                                 }
                             }
+                        }
+                        if state.hidden_input_pending() {
+                            hidden_input_since.get_or_insert_with(tokio::time::Instant::now);
+                        } else {
+                            hidden_input_since = None;
                         }
                     }
                     Err(error) => {
@@ -2252,6 +2267,11 @@ mod tests {
         }
         assert_eq!(final_text.as_deref(), Some("managed answer"));
         if !fail_transcript {
+            transcript_autonomous_client_tests::verify_hidden_input_turn(
+                &launched.protocol,
+                &transcript_path,
+            )
+            .await;
             transcript_move_client_tests::verify_round_trip(
                 &launched.protocol,
                 &transcript_path,
