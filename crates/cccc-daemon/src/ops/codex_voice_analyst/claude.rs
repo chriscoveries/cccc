@@ -1353,7 +1353,17 @@ impl TranscriptFollower {
         if filename != format!("{}.jsonl", self.session_id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Claude Agent View state referenced a different transcript identity",
+                format!(
+                    "Claude Agent View state referenced a different transcript identity: \
+                     expected session {:?}, observed transcript {:?}, job {:?}",
+                    self.session_id,
+                    filename,
+                    self.state_path
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("unknown"),
+                ),
             ));
         }
         let path = transcript_path::recover_missing(
