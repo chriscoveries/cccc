@@ -58,23 +58,14 @@ pub(super) fn ensure_for_actor(
                 "Hermes CLI is not installed or not in PATH",
             )
         })?;
-    let mut argv = vec![
-        "mcp".into(),
-        "add".into(),
-        SERVER.into(),
-        "--command".into(),
-        command[0].clone(),
-    ];
-    if command.len() > 1 {
-        argv.push("--args".into());
-        argv.extend(command[1..].iter().cloned());
-    }
-    argv.push("--env".into());
-    argv.extend([
-        format!("CCCC_HOME={}", home.root().display()),
-        "CCCC_GROUP_ID=${CCCC_GROUP_ID}".into(),
-        "CCCC_ACTOR_ID=${CCCC_ACTOR_ID}".into(),
-    ]);
+    let argv = mcp_add_argv(
+        &command,
+        [
+            format!("CCCC_HOME={}", home.root().display()),
+            "CCCC_GROUP_ID=${CCCC_GROUP_ID}".into(),
+            "CCCC_ACTOR_ID=${CCCC_ACTOR_ID}".into(),
+        ],
+    );
     let values = env
         .iter()
         .map(|(key, value)| (key.as_str(), value.clone()))
@@ -104,6 +95,25 @@ pub(super) fn ensure_for_actor(
         ));
     }
     Ok(())
+}
+
+/// `hermes mcp add` takes everything after `--args` literally as the server's argv, so
+/// `--args` must come last; otherwise `--env` and its values become arguments to `cccc`.
+fn mcp_add_argv(command: &[String], env: [String; 3]) -> Vec<String> {
+    let mut argv = vec![
+        "mcp".into(),
+        "add".into(),
+        SERVER.into(),
+        "--command".into(),
+        command[0].clone(),
+        "--env".into(),
+    ];
+    argv.extend(env);
+    if command.len() > 1 {
+        argv.push("--args".into());
+        argv.extend(command[1..].iter().cloned());
+    }
+    argv
 }
 
 fn find_executable_in_env(
@@ -198,23 +208,14 @@ fn prepare(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         )
     })?;
     let command = cccc_command();
-    let mut argv = vec![
-        "mcp".into(),
-        "add".into(),
-        SERVER.into(),
-        "--command".into(),
-        command[0].clone(),
-    ];
-    if command.len() > 1 {
-        argv.push("--args".into());
-        argv.extend(command[1..].iter().cloned());
-    }
-    argv.push("--env".into());
-    argv.extend([
-        format!("CCCC_HOME={}", home.root().display()),
-        "CCCC_GROUP_ID=g_probe".into(),
-        "CCCC_ACTOR_ID=hermes-probe".into(),
-    ]);
+    let argv = mcp_add_argv(
+        &command,
+        [
+            format!("CCCC_HOME={}", home.root().display()),
+            "CCCC_GROUP_ID=g_probe".into(),
+            "CCCC_ACTOR_ID=hermes-probe".into(),
+        ],
+    );
     let cwd = string_arg(request, "cwd").map(PathBuf::from);
     let result = with_exclusive_lock(&home.daemon_dir().join("hermes-runtime-setup.lock"), || {
         run(
@@ -274,4 +275,32 @@ fn mcp_test(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         ));
     }
     object(json!({"ok":true,"argv":argv,"result":result}))
+}
+
+#[cfg(test)]
+mod mcp_add_argv_tests {
+    use super::*;
+
+    #[test]
+    fn server_arguments_come_last_so_env_is_not_swallowed() {
+        let argv = mcp_add_argv(
+            &["/usr/local/bin/cccc".into(), "mcp".into()],
+            ["CCCC_HOME=/home".into(), "A=1".into(), "B=2".into()],
+        );
+        let env = argv.iter().position(|arg| arg == "--env").expect("--env");
+        let args = argv.iter().position(|arg| arg == "--args").expect("--args");
+        assert!(env < args, "{argv:?}");
+        assert_eq!(&argv[args..], ["--args", "mcp"]);
+        assert_eq!(&argv[env + 1..env + 4], ["CCCC_HOME=/home", "A=1", "B=2"]);
+    }
+
+    #[test]
+    fn a_bare_command_has_no_args_option() {
+        let argv = mcp_add_argv(
+            &["/usr/local/bin/cccc".into()],
+            ["CCCC_HOME=/home".into(), "A=1".into(), "B=2".into()],
+        );
+        assert!(!argv.iter().any(|arg| arg == "--args"), "{argv:?}");
+        assert_eq!(argv.last().map(String::as_str), Some("B=2"));
+    }
 }
