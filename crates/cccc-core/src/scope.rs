@@ -10,8 +10,12 @@ pub fn detect(path: &Path) -> io::Result<Scope> {
     let root = git_output(&absolute, &["rev-parse", "--show-toplevel"])
         .map(PathBuf::from)
         .unwrap_or_else(|| absolute.clone());
-    let remote = git_output(&root, &["remote", "get-url", "origin"])
-        .map(|value| normalize_remote(&value))
+    // Read the configured URL literally: `git remote get-url` expands
+    // url.<base>.insteadOf aliases, which would key the scope on the local
+    // rewrite (e.g. a git proxy) instead of the canonical remote. Like
+    // `get-url`, use the first URL when origin has several.
+    let remote = git_output(&root, &["config", "--get-all", "remote.origin.url"])
+        .and_then(|value| value.lines().next().map(normalize_remote))
         .unwrap_or_default();
     let url = root.to_string_lossy().into_owned();
     let seed = if remote.is_empty() { &url } else { &remote };
@@ -119,6 +123,77 @@ mod tests {
 
         let scope = detect(temp.path()).expect("scope");
 
+        assert_eq!(scope.git_remote, "https://github.com/Acme/Repo");
+        assert_eq!(scope.scope_key, "s_3b1f782ba15e");
+    }
+}
+
+#[cfg(test)]
+mod rewrite_tests {
+    use super::*;
+
+    #[test]
+    fn scope_identity_ignores_local_remote_url_rewrites() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "--quiet"]);
+        git(&[
+            "config",
+            "remote.origin.url",
+            "https://github.com/Acme/Repo.git",
+        ]);
+        let canonical = detect(temp.path()).expect("canonical scope");
+        git(&[
+            "config",
+            "url.https://proxy.invalid/.insteadOf",
+            "https://github.com/",
+        ]);
+        assert_eq!(
+            git(&["remote", "get-url", "origin"]),
+            "https://proxy.invalid/Acme/Repo.git"
+        );
+        let rewritten = detect(temp.path()).expect("rewritten scope");
+        assert_eq!(rewritten.git_remote, "https://github.com/Acme/Repo");
+        assert_eq!(rewritten.scope_key, canonical.scope_key);
+        assert_eq!(rewritten.scope_key, "s_3b1f782ba15e");
+    }
+
+    #[test]
+    fn scope_identity_uses_the_first_origin_url() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("git");
+            assert!(output.status.success());
+        };
+        git(&["init", "--quiet"]);
+        git(&[
+            "config",
+            "remote.origin.url",
+            "https://github.com/Acme/Repo.git",
+        ]);
+        git(&[
+            "config",
+            "--add",
+            "remote.origin.url",
+            "https://mirror.invalid/Acme/Repo.git",
+        ]);
+        let scope = detect(temp.path()).expect("scope");
         assert_eq!(scope.git_remote, "https://github.com/Acme/Repo");
         assert_eq!(scope.scope_key, "s_3b1f782ba15e");
     }
