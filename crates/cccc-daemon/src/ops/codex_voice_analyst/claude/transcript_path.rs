@@ -144,6 +144,48 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn fresh_publication_waits_for_the_first_transcript_without_losing_input() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let project = temp.path().join("projects/workspace");
+        std::fs::create_dir_all(&project).expect("project");
+        let path = project.join(format!("{ID}.jsonl"));
+        let state = temp.path().join("state.json");
+        std::fs::write(&state, json!({"linkScanPath":path}).to_string()).expect("state");
+        let mut follower = TranscriptFollower::new(state, temp.path().into(), ID.into(), false);
+        follower
+            .initialize()
+            .await
+            .expect("publication may precede creation");
+        assert!(
+            follower
+                .poll()
+                .await
+                .expect("bounded publication wait")
+                .is_empty()
+        );
+        let record = json!({"type":"user","sessionId":ID,"promptId":"first", "message":{"content":"first input"}});
+        std::fs::write(&path, format!("{record}\n")).expect("transcript");
+        assert_eq!(follower.poll().await.expect("first input"), vec![record]);
+        assert!(follower.poll().await.expect("no replay").is_empty());
+    }
+
+    #[tokio::test]
+    async fn first_transcript_publication_wait_is_bounded() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let state = temp.path().join("state.json");
+        let path = temp
+            .path()
+            .join("projects/workspace")
+            .join(format!("{ID}.jsonl"));
+        std::fs::write(&state, json!({"linkScanPath":path}).to_string()).expect("state");
+        let mut follower = TranscriptFollower::new(state, temp.path().into(), ID.into(), false);
+        follower.initialize().await.expect("start publication wait");
+        tokio::time::sleep(super::super::transcript_continuity::RELOCATION_TIMEOUT).await;
+        let error = follower.poll().await.expect_err("permanent absence fails");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
     #[test]
     fn refuses_ambiguous_sessions_and_does_not_select_other_sessions() {
         let temp = tempfile::tempdir().expect("create test directory");
