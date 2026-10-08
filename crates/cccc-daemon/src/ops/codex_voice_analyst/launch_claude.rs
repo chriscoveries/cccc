@@ -15,6 +15,14 @@ impl AnalystSession {
         actor: Option<(&str, &str)>,
     ) -> io::Result<Self> {
         let generation = uuid::Uuid::new_v4().simple().to_string();
+        let detach =
+            purpose == SessionPurpose::Actor && cccc_core::settings::detach_claude_on_exit(home)?;
+        if detach && !super::super::runtime_session::resume_enabled() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Claude detach requires CCCC_RUNTIME_RESUME to be enabled",
+            ));
+        }
         let cccc =
             super::super::codex_mcp::configure_actor_cli(&mut environment).ok_or_else(|| {
                 io::Error::new(
@@ -139,6 +147,16 @@ impl AnalystSession {
                 launched.resumed,
             )
         {
+            if detach {
+                if launched.resumed {
+                    launched.protocol.detach().await;
+                } else if let Err(cleanup) = launched.protocol.close().await {
+                    return Err(io::Error::other(format!(
+                        "failed to persist Claude session: {error}; exact-job rollback also failed: {cleanup}"
+                    )));
+                }
+                return Err(error);
+            }
             tracing::warn!(%error, %group_id, %actor_id, "failed to persist Claude managed session");
         }
         Ok(Self {

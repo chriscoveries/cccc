@@ -6,7 +6,7 @@ use std::{
     collections::BTreeMap,
     path::PathBuf,
     process::Child,
-    sync::atomic::AtomicBool,
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -454,5 +454,112 @@ fn new_claude_session_retires_pending_trust_recovery_before_removing_the_receipt
             .join(format!("{SAVED}.jsonl"))
             .exists(),
         "reset retains provider history"
+    );
+}
+
+fn detach_policy(f: &Fixture) {
+    std::fs::write(
+        f.home.root().join("settings.yaml"),
+        "runtime:\n  claude_daemon_exit: detach\n",
+    )
+    .expect("detach setting");
+}
+
+#[test]
+fn detach_primitive_releases_observers() {
+    if isolated("detach_primitive_releases_observers") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    assert!(f.lifecycle("actor_start").ok);
+    let saved = f.receipt()["provider_session_id"].clone();
+    let observer = Arc::downgrade(
+        &super::supervisor::lookup(&(f.group.group_id.clone(), f.actor.id.clone()))
+            .expect("registered session"),
+    );
+    super::supervisor::shutdown_with_policy(true).expect("observer detach");
+    assert!(
+        f.config.join("active").exists(),
+        "detach must not kill the provider job"
+    );
+    assert!(super::supervisor::registered_running(&f.group.group_id, &f.actor.id).is_none());
+    f.wait(|| observer.upgrade().is_none());
+    assert!(!cccc_runtime::status(&f.group.group_id, &f.actor.id).is_ok_and(|s| s.running));
+    crate::runtime_start_gate::allow(&f.home).expect("restart start gate");
+    super::super::runtime_restore::restore_running(&f.home).expect("restore");
+    assert!(super::running(&f.group.group_id, &f.actor.id));
+    assert_eq!(f.receipt()["provider_session_id"], saved);
+    assert_eq!(f.launches(), 1, "re-adoption must not launch another job");
+}
+
+#[test]
+fn reviewer_default_stop_missing_workspace_is_idempotent() {
+    if isolated("reviewer_default_stop_missing_workspace_is_idempotent") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    std::fs::remove_dir(&f.group.scopes[0].url).expect("remove scratch workspace");
+    let stopped = f.lifecycle("actor_stop");
+    assert!(stopped.ok, "default stop changed: {:?}", stopped.error);
+}
+
+#[test]
+fn reviewer_default_interrupted_handoff_remains_deferred() {
+    if isolated("reviewer_default_interrupted_handoff_remains_deferred") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    assert!(f.lifecycle("actor_start").ok);
+    f.wait(|| {
+        cccc_runtime::bracketed_paste_enabled(&f.group.group_id, &f.actor.id).unwrap_or(false)
+    });
+    let job = f.delivery();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancellation = Arc::clone(&cancelled);
+    let task = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        cancellation.store(true, std::sync::atomic::Ordering::Release);
+    });
+    let handled =
+        super::super::actor_delivery_worker::process_batch(&[job], &mut String::new(), &cancelled);
+    task.join().expect("cancel");
+    assert!(
+        !handled,
+        "non-opt-in interrupted submission now becomes terminal ambiguous"
+    );
+}
+
+#[test]
+fn reviewer_shutdown_flushes_accepted_completion_without_redelivery() {
+    if isolated("reviewer_shutdown_flushes_accepted_completion_without_redelivery") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    let job = f.delivery();
+    super::super::runtime_delivery::claim(&f.home, &f.group, &f.actor, &job.event.id, "pty", false)
+        .expect("claim");
+    super::super::actor_delivery::record_completion(
+        super::super::actor_delivery::DeliveryCompletion {
+            group_id: f.group.group_id.clone(),
+            actor_id: f.actor.id.clone(),
+            actor_created_at: f.actor.created_at.clone(),
+            event_id: job.event.id.clone(),
+            transport: "pty".into(),
+        },
+    );
+    super::super::actor_delivery::shutdown_with_policy(Some(&f.home));
+    assert_eq!(
+        super::super::runtime_delivery::claim(
+            &f.home,
+            &f.group,
+            &f.actor,
+            &job.event.id,
+            "pty",
+            false
+        )
+        .expect("no redelivery"),
+        super::super::runtime_delivery::ClaimResult::Terminal("accepted".into())
     );
 }

@@ -316,6 +316,16 @@ pub fn stop_group(group_id: &str) -> io::Result<()> {
 /// to confirm (up to ~10s for Agent View), so a serial loop over a busy host
 /// outlives the launcher's forced-exit deadline and strands the remainder.
 pub fn stop_all() -> io::Result<()> {
+    shutdown(false)
+}
+
+// Inactive until daemon lifecycle integration is complete.
+#[allow(dead_code)]
+pub fn shutdown_with_policy(detach_claude: bool) -> io::Result<()> {
+    shutdown(detach_claude)
+}
+
+fn shutdown(detach_claude: bool) -> io::Result<()> {
     let keys = lifecycle_keys()?;
     for key in &keys {
         super::workspace_trust_recovery::cancel(key)?;
@@ -325,6 +335,18 @@ pub fn stop_all() -> io::Result<()> {
             .iter()
             .map(|(group_id, actor_id)| {
                 scope.spawn(move || {
+                    if detach_claude {
+                        let key = (group_id.clone(), actor_id.clone());
+                        let _start = StartGuard::acquire(&key).map_err(|e| e.to_string())?;
+                        if let Some(item) = lookup(&key)
+                            && item.managed.runtime() == ActorRuntime::Claude
+                        {
+                            item.detach()
+                                .map_err(|e| format!("{group_id}/{actor_id}: {e}"))?;
+                            sessions().write().map_err(|e| e.to_string())?.remove(&key);
+                            return Ok(());
+                        }
+                    }
                     stop(group_id, actor_id)
                         .map_err(|error| format!("{group_id}/{actor_id}: {error}"))
                 })
@@ -473,7 +495,13 @@ pub fn submit_batch(
         return BatchSubmission::Deferred;
     }
     if item.has_terminal() {
+        let detach = cccc_core::settings::detach_claude_on_exit(&item.home).unwrap_or(false);
+        let mut attempted = false;
         let accepted = submit_with_startup_prompt(&item.startup_prompt, &delivery, |prepared| {
+            if detach && cancelled.load(Ordering::Acquire) {
+                return false;
+            }
+            attempted = true;
             super::super::actor_delivery::submit_terminal_text(
                 &group.group_id,
                 actor,
@@ -483,6 +511,10 @@ pub fn submit_batch(
         });
         return if accepted {
             BatchSubmission::Accepted
+        } else if detach && attempted && item.managed.runtime() == ActorRuntime::Claude {
+            // A PTY can write the payload and then be interrupted before the
+            // submit key or its receipt. Preserve uncertainty across detach.
+            BatchSubmission::Unconfirmed
         } else {
             BatchSubmission::Deferred
         };
@@ -523,7 +555,7 @@ fn render_turn(event: &Event) -> Option<(String, String)> {
     })
 }
 
-fn lookup(key: &Key) -> Option<Arc<Session>> {
+pub(super) fn lookup(key: &Key) -> Option<Arc<Session>> {
     sessions().read().ok()?.get(key).cloned()
 }
 

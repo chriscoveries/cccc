@@ -11,6 +11,8 @@ use crate::ops::actor_delivery_worker;
 mod drain;
 mod lifecycle;
 pub(crate) use drain::{drain_group, pending_group_ids};
+#[allow(unused_imports)]
+pub(crate) use lifecycle::shutdown_with_policy;
 pub use lifecycle::{shutdown_actor, shutdown_all, shutdown_group};
 
 const QUEUE_CAPACITY: usize = 256;

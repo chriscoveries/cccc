@@ -5,6 +5,21 @@ use std::time::Duration;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl AnalystSession {
+    pub(crate) async fn detach_claude(&self) -> io::Result<()> {
+        match &self.protocol {
+            ManagedProtocol::Claude(client) => {
+                client.detach().await;
+                // Stable settings paths belong to the provider's respawn
+                // metadata. Detachment must keep them and the session receipt.
+                Ok(())
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "only Claude jobs can detach",
+            )),
+        }
+    }
+
     pub(crate) async fn cancel_pending_input(
         &self,
         generation: &str,

@@ -6,6 +6,21 @@ use std::sync::atomic::Ordering;
 use tracing::Instrument;
 
 impl Session {
+    pub(super) fn detach(&self) -> io::Result<()> {
+        let _guard = self.stop_lock.lock().map_err(|_| super::poisoned())?;
+        // Fence the reader's stop-after-disconnect path before waking it.
+        self.stopped.store(true, Ordering::Release);
+        block_on_managed(self.managed.detach_claude())?;
+        if self.has_terminal.swap(false, Ordering::AcqRel) {
+            match cccc_runtime::stop(&self.group_id, &self.actor_id) {
+                Ok(_) | Err(cccc_runtime::RuntimeError::NotFound(_, _)) => {}
+                Err(error) => return Err(io::Error::other(error)),
+            }
+        }
+        output::emit(self, "headless.session.detached", serde_json::Map::new());
+        Ok(())
+    }
+
     pub(super) fn running(&self) -> bool {
         if self.stopped.load(Ordering::Acquire) {
             return false;

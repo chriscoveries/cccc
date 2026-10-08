@@ -32,6 +32,12 @@ pub fn shutdown_group(group_id: &str) {
 }
 
 pub fn shutdown_all() {
+    shutdown_with_policy(None);
+}
+
+// None preserves the existing completion clearing behavior.
+#[allow(dead_code)]
+pub fn shutdown_with_policy(settle_home: Option<&HomeLayout>) {
     let removed = workers()
         .lock()
         .map(|mut workers| {
@@ -42,6 +48,11 @@ pub fn shutdown_all() {
         .unwrap_or_default();
     for worker in removed {
         worker.shutdown();
+    }
+    if let Some(home) = settle_home {
+        for group_id in pending_group_ids() {
+            drain_group(home, &group_id);
+        }
     }
     if let Ok(mut completions) = completions().lock() {
         completions.clear();

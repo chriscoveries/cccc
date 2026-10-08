@@ -766,6 +766,22 @@ pub(super) struct ClaudeClient {
 }
 
 impl ClaudeClient {
+    /// Stop observing without sending any provider control operation. Wake the
+    /// reader explicitly: it owns an Arc to the client and cannot rely on Drop.
+    pub(super) async fn detach(&self) {
+        self.running.store(false, Ordering::Release);
+        let task = self.task.lock().ok().and_then(|mut task| task.take());
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        let _ = self.events.send(AnalystEvent {
+            generation: String::new(),
+            requested_delegation_id: None,
+            message: json!({"method":MANAGED_AGENT_DISCONNECTED_METHOD,"params":{"expected":true}}),
+        });
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn new(
         endpoint: control::Endpoint,
