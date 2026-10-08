@@ -10,6 +10,10 @@ use tokio::sync::broadcast;
 mod acp;
 mod antigravity;
 mod claude;
+pub(crate) use claude::{
+    claude_config_dir, has_saved_claude_job, poll_saved_claude_job, report_unmatched_claude_jobs,
+    stop_saved_claude_job,
+};
 mod control;
 mod grok;
 mod launch;

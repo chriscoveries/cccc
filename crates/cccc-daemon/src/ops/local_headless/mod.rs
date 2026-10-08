@@ -146,3 +146,50 @@ where
     }
     managed_runtime().block_on(future)
 }
+
+pub(crate) fn report_unmatched_claude_jobs(
+    configurations: std::collections::BTreeMap<
+        std::path::PathBuf,
+        std::collections::HashSet<String>,
+    >,
+) {
+    block_on_managed(async {
+        for (config, known) in configurations {
+            if let Err(error) =
+                super::codex_voice_analyst::report_unmatched_claude_jobs(&config, &known).await
+            {
+                tracing::warn!(%error, config_dir=%config.display(), "could not inspect surviving Claude jobs");
+            }
+        }
+    });
+}
+
+pub(crate) fn stop_saved_claude_job(
+    config_dir: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+) -> std::io::Result<()> {
+    block_on_managed(super::codex_voice_analyst::stop_saved_claude_job(
+        config_dir, session_id, cwd,
+    ))
+}
+
+pub(crate) fn poll_saved_claude_job(
+    config: &std::path::Path,
+    id: &str,
+    cwd: &std::path::Path,
+) -> std::io::Result<()> {
+    block_on_managed(super::codex_voice_analyst::poll_saved_claude_job(
+        config, id, cwd,
+    ))
+}
+
+pub(crate) fn has_saved_claude_job(
+    config: &std::path::Path,
+    id: &str,
+    cwd: &std::path::Path,
+) -> std::io::Result<bool> {
+    block_on_managed(super::codex_voice_analyst::has_saved_claude_job(
+        config, id, cwd,
+    ))
+}

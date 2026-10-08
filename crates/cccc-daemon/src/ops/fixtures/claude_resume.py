@@ -41,6 +41,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "server":
             line = connection.makefile("rb").readline()
             request = json.loads(line)
             op = request["op"]
+            with (root / "requests").open("a") as log: log.write(op + "\n")
             jobs = []
             if (root / "active").exists():
                 state = json.loads((root / "jobs" / SHORT / "state.json").read_text())
@@ -73,7 +74,7 @@ else:
         path = root / "projects" / "workspace" / f"{session}.jsonl"
         if mode != "missing_history" and not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"type": "user", "sessionId": session, "message": {"content": "fixture history"}}) + "\n")
+            path.write_text(json.dumps({"type": "user", "promptId": "fixture-user", "sessionId": session, "message": {"content": "fixture history"}}) + "\n")
         write_json(root / "jobs" / SHORT / "state.json", {
             "sessionId": session, "daemonShort": SHORT, "cwd": os.getcwd(),
             "tempo": "idle", "inFlight": {"tasks": 0, "queued": 0},

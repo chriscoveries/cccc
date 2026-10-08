@@ -18,6 +18,7 @@ pub(in crate::ops::codex_voice_analyst) struct PreparedClaude {
     pub(super) arguments: Vec<String>,
     pub(super) launch_environment: BTreeMap<String, String>,
     pub(super) config_dir: PathBuf,
+    pub(super) detach_on_exit: bool,
     #[cfg(test)]
     pub(super) settings_path: PathBuf,
 }
@@ -82,6 +83,8 @@ pub(in crate::ops::codex_voice_analyst) fn prepare(
     arguments.push("--dangerously-skip-permissions".into());
 
     Ok(PreparedClaude {
+        detach_on_exit: purpose == SessionPurpose::Actor
+            && cccc_core::settings::detach_claude_on_exit(home)?,
         executable: executable.to_string_lossy().into_owned(),
         arguments,
         launch_environment,
@@ -467,7 +470,7 @@ fn launcher_environment(environment: &BTreeMap<String, String>) -> BTreeMap<Stri
         .collect()
 }
 
-fn config_dir(environment: &BTreeMap<String, String>) -> io::Result<PathBuf> {
+pub(super) fn config_dir(environment: &BTreeMap<String, String>) -> io::Result<PathBuf> {
     let configured = environment.get("CLAUDE_CONFIG_DIR").cloned().or_else(|| {
         environment
             .get("HOME")

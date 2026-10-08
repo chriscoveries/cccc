@@ -91,6 +91,35 @@ impl AnalystSession {
             .as_ref()
             .map(|attempt| attempt.session_id.as_str())
             .or(requested_session_id.as_deref());
+        if detach
+            && resume_session_id.is_none()
+            && let Some((group_id, actor_id)) = actor
+            && let Some(saved) = super::super::runtime_session::snapshot(home, group_id, actor_id)?
+            && saved.get("transport").and_then(Value::as_str) == Some("claude_agent_view")
+            && saved
+                .get("provider_session_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Claude detach cannot replace a saved session whose launch identity no longer matches; restore its configuration or choose New Session",
+            ));
+        }
+        if detach
+            && let Some((group_id, actor_id)) = actor
+            && let Some(id) = resume_session_id
+        {
+            super::super::runtime_session::claude_ownership::record(
+                home,
+                group_id,
+                actor_id,
+                &claude::claude_config_dir(&environment)?,
+                &binding.root,
+                id,
+                false,
+            )?;
+        }
         let result = match claude::prepare(
             home,
             &command,
@@ -135,6 +164,25 @@ impl AnalystSession {
                 return Err(error);
             }
         };
+        if detach && let Some((group_id, actor_id)) = actor {
+            // Record original ownership before publishing the session/viewer.
+            if let Err(error) = super::super::runtime_session::claude_ownership::record(
+                home,
+                group_id,
+                actor_id,
+                &claude::claude_config_dir(&environment)?,
+                &binding.root,
+                &launched.session_id,
+                false,
+            ) {
+                if launched.resumed {
+                    launched.protocol.detach().await;
+                } else {
+                    launched.protocol.close().await?;
+                }
+                return Err(error);
+            }
+        }
         if let Some((group_id, actor_id)) = actor
             && let Err(error) = super::super::runtime_session::record_claude_managed_session(
                 home,

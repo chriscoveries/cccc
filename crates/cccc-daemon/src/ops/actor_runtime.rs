@@ -19,6 +19,7 @@ pub use reconcile::{reap_exited, reconcile_exited};
 /// Claude Code refused the Actor's workspace; only the operator can accept its trust prompt.
 pub(crate) const CLAUDE_WORKSPACE_UNTRUSTED: &str = "claude_workspace_untrusted";
 pub(crate) const CLAUDE_RESUME_FAILED: &str = "claude_resume_failed";
+pub(crate) const RUNTIME_BUSY: &str = "runtime_busy";
 
 pub fn apply(
     home: &HomeLayout,
@@ -44,7 +45,7 @@ pub fn apply(
         .map_err(OpError::io)?;
     }
     if kind == "actor.stop" {
-        return stop_registered(group, actor_id);
+        return stop_registered(home, group, actor_id, true);
     }
     let actor = actor_profile_runtime::resolve(home, stored_actor)?;
     if !matches!(kind, "actor.restart" | "actor.new_session")
@@ -65,7 +66,12 @@ pub fn apply(
         );
     }
     // Also retire a disconnected registration whose previous cleanup failed.
-    stop_registered(group, actor_id)?;
+    stop_registered(
+        home,
+        group,
+        actor_id,
+        matches!(kind, "actor.restart" | "actor.new_session"),
+    )?;
     if kind == "actor.new_session" {
         // Pending trust recovery holds the start guard until its launch is
         // attached or discarded. Retire its ownership before removing the
@@ -97,7 +103,16 @@ fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> R
     actor.env = env;
     let _start_permit = crate::runtime_start_gate::permit(home)
         .map_err(|message| OpError::new("runtime_shutting_down", message))?;
-    super::local_headless::start(home, group, &actor).map_err(launch_error)
+    super::local_headless::start(home, group, &actor).map_err(|error| {
+        if actor.runtime == ActorRuntime::Claude
+            && cccc_core::settings::detach_claude_on_exit(home).unwrap_or(false)
+            && error.kind() == std::io::ErrorKind::WouldBlock
+        {
+            OpError::new(RUNTIME_BUSY, error.to_string())
+        } else {
+            launch_error(error)
+        }
+    })
 }
 
 fn launch_error(error: std::io::Error) -> OpError {
@@ -161,11 +176,40 @@ pub(super) fn stop(group: &GroupDoc, actor_id: &str) -> Result<Option<SessionSta
     }
 }
 
-fn stop_registered(group: &GroupDoc, actor_id: &str) -> Result<Option<SessionStatus>, OpError> {
+fn stop_registered(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor_id: &str,
+    stop_saved: bool,
+) -> Result<Option<SessionStatus>, OpError> {
     let result = (|| {
+        if stop_saved
+            && cccc_core::settings::detach_claude_on_exit(home).map_err(OpError::io)?
+            && super::local_headless::registered_running(&group.group_id, actor_id).is_none()
+            && let Some(stored) = group.actors.iter().find(|actor| actor.id == actor_id)
+            && let Some(owner) = saved_claude_binding(home, group, stored)?
+        {
+            if owner.session_id.is_empty() {
+                return Err(OpError::new(
+                    CLAUDE_RESUME_FAILED,
+                    "Claude launch is uncertain; reconcile the provider before replacing it",
+                ));
+            }
+            super::local_headless::stop_saved_claude_job(
+                &owner.config_dir,
+                &owner.session_id,
+                &owner.workspace,
+            )
+            .map_err(OpError::io)?;
+        }
         super::local_headless::stop(&group.group_id, actor_id).map_err(OpError::io)?;
         super::deepseek_runtime::stop(&group.group_id, actor_id);
-        stop(group, actor_id)
+        let status = stop(group, actor_id)?;
+        if stop_saved && cccc_core::settings::detach_claude_on_exit(home).map_err(OpError::io)? {
+            super::runtime_session::claude_ownership::remove(home, &group.group_id, actor_id)
+                .map_err(OpError::io)?;
+        }
+        Ok(status)
     })();
     result.map_err(|mut error: OpError| {
         error
@@ -236,7 +280,18 @@ pub(crate) fn stop_all() -> Result<Vec<SessionStatus>, cccc_runtime::RuntimeErro
     cccc_runtime::stop_all()
 }
 
-pub fn stop_group(group: &GroupDoc) -> Result<Vec<SessionStatus>, OpError> {
+pub fn stop_group(home: &HomeLayout, group: &GroupDoc) -> Result<Vec<SessionStatus>, OpError> {
+    if cccc_core::settings::detach_claude_on_exit(home).map_err(OpError::io)? {
+        let mut statuses = Vec::new();
+        for actor in &group.actors {
+            if let Some(status) = stop_registered(home, group, &actor.id, true)? {
+                statuses.push(status);
+            }
+        }
+        super::local_headless::stop_group(&group.group_id).map_err(OpError::io)?;
+        super::deepseek_runtime::stop_group(&group.group_id);
+        return Ok(statuses);
+    }
     super::local_headless::stop_group(&group.group_id).map_err(OpError::io)?;
     super::deepseek_runtime::stop_group(&group.group_id);
     let mut stopped = Vec::new();
@@ -278,4 +333,62 @@ pub(super) fn working_directory(group: &GroupDoc, actor: &Actor) -> Result<PathB
 
 fn runtime_error(error: cccc_runtime::RuntimeError) -> OpError {
     OpError::new("runtime_error", error.to_string())
+}
+
+/// Resolve teardown from the original receipt, never the replacement workspace.
+pub(crate) fn saved_claude_binding(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+) -> Result<Option<super::runtime_session::claude_ownership::Ownership>, OpError> {
+    use super::runtime_session::claude_ownership as ownership;
+    if let Some(owner) = ownership::load(home, &group.group_id, actor).map_err(OpError::io)? {
+        return Ok(Some(owner));
+    }
+    let Some(id) =
+        ownership::saved_session(home, &group.group_id, &actor.id).map_err(OpError::io)?
+    else {
+        return Ok(None);
+    };
+    let saved = super::runtime_session::snapshot(home, &group.group_id, &actor.id)
+        .map_err(OpError::io)?
+        .ok_or_else(|| OpError::new("not_found", "Claude receipt disappeared"))?;
+    let cwd = PathBuf::from(
+        saved
+            .get("workspace_path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+    );
+    let resolved = environment::resolve_launch_actor(home, group, actor)?;
+    let env = environment::launch_env(home, group, &resolved);
+    // Legacy receipts do not store the config path. Require their original
+    // identity before deriving it from effective configuration.
+    let identity = cccc_core::codex_voice_settings::ResolvedAgentRuntime {
+        runtime: ActorRuntime::Claude,
+        runtime_mode: resolved.runtime_mode,
+        command: resolved.command.clone(),
+        environment: env.clone(),
+    }
+    .identity_fingerprint_at(&cwd)
+    .map_err(OpError::io)?;
+    if saved
+        .get("identity_fingerprint")
+        .and_then(serde_json::Value::as_str)
+        != Some(&identity)
+    {
+        return Err(OpError::new(
+            CLAUDE_RESUME_FAILED,
+            "Cannot resolve original Claude provider configuration from legacy receipt; restore its configuration before teardown",
+        ));
+    }
+    let config = super::codex_voice_analyst::claude_config_dir(&env).map_err(OpError::io)?;
+    Ok(Some(ownership::Ownership {
+        group_id: group.group_id.clone(),
+        actor_id: actor.id.clone(),
+        actor_created_at: actor.created_at.clone(),
+        session_id: id,
+        config_dir: config,
+        workspace: cwd,
+        uncertain: false,
+    }))
 }

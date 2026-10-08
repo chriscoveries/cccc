@@ -24,6 +24,66 @@ mod transcript_path;
 mod workspace_trust;
 
 pub(super) use command::prepare;
+
+pub(crate) fn claude_config_dir(environment: &BTreeMap<String, String>) -> io::Result<PathBuf> {
+    command::config_dir(environment)
+}
+
+pub(crate) async fn report_unmatched_claude_jobs(
+    config_dir: &Path,
+    known: &std::collections::HashSet<String>,
+) -> io::Result<usize> {
+    let endpoint = match control::Endpoint::resolve(config_dir) {
+        Ok(endpoint) => endpoint,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut unmatched = 0;
+    for job in control::list(&endpoint).await? {
+        if !job
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| known.contains(id))
+        {
+            let short = job.get("short").and_then(Value::as_str).unwrap_or("?");
+            unmatched += 1;
+            let session_id = job.get("sessionId").and_then(Value::as_str).unwrap_or("?");
+            tracing::warn!(job=%short, %session_id, config_dir=%config_dir.display(), "surviving Claude job has no matching actor session; leaving it running");
+        }
+    }
+    Ok(unmatched)
+}
+
+pub(crate) async fn has_saved_claude_job(config: &Path, id: &str, cwd: &Path) -> io::Result<bool> {
+    let Some((_, job)) = find_live_job(config, id).await? else {
+        return Ok(false);
+    };
+    read_job_state(config, &job, cwd)?;
+    Ok(true)
+}
+
+pub(crate) async fn poll_saved_claude_job(config: &Path, id: &str, cwd: &Path) -> io::Result<()> {
+    if let Some((_, job)) = find_live_job(config, id).await? {
+        validate_worker_version(&job)?;
+        await_settled(config, &job, cwd).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn stop_saved_claude_job(
+    config_dir: &Path,
+    session_id: &str,
+    cwd: &Path,
+) -> io::Result<()> {
+    validate_session_id(session_id)?;
+    if let Some((endpoint, job)) = find_live_job(config_dir, session_id).await? {
+        // Busy is allowed for Stop. Still require exact session/job/workspace
+        // identity before issuing a kill; never enumerate and stop other jobs.
+        let _ = read_job_state(config_dir, &job, cwd)?;
+        kill_and_confirm(&endpoint, &job.short).await?;
+    }
+    Ok(())
+}
 pub(super) use resume_failure::diagnostic as resume_diagnostic;
 pub(super) use workspace_trust::untrusted_workspace;
 
@@ -105,7 +165,14 @@ async fn launch_inner(
         validate_session_id(session_id)?;
         if let Some((endpoint, job)) = find_live_job(&prepared.config_dir, session_id).await? {
             validate_worker_version(&job)?;
-            await_settled(&prepared.config_dir, &job, cwd).await?;
+            if prepared.detach_on_exit {
+                let state = read_job_state(&prepared.config_dir, &job, cwd)?;
+                if classify_quiescence(&state) != Quiescence::Settled {
+                    return Err(unsettled_error(&job.short, &state));
+                }
+            } else {
+                await_settled(&prepared.config_dir, &job, cwd).await?;
+            }
             return connect_launched(
                 prepared,
                 endpoint,
@@ -2214,6 +2281,7 @@ mod tests {
 
         let launched = launch(
             command::PreparedClaude {
+                detach_on_exit: false,
                 executable: executable.to_string_lossy().into_owned(),
                 arguments: Vec::new(),
                 launch_environment: BTreeMap::new(),
@@ -2437,6 +2505,26 @@ mod tests {
         fn drop(&mut self) {
             self.server.abort();
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unmatched_jobs_are_reported_without_provider_stops() {
+        let fixture = SettleFixture::new(json!({"tempo":"idle","inFlight":{"tasks":0,"queued":0}}));
+        assert_eq!(
+            report_unmatched_claude_jobs(&fixture.config_dir, &Default::default())
+                .await
+                .expect("report"),
+            1
+        );
+        let known = std::collections::HashSet::from([fixture.job.session_id.clone()]);
+        assert_eq!(
+            report_unmatched_claude_jobs(&fixture.config_dir, &known)
+                .await
+                .expect("matched"),
+            0
+        );
+        assert_eq!(fixture.operations(), ["list", "list"]);
     }
 
     #[cfg(unix)]

@@ -563,3 +563,571 @@ fn reviewer_shutdown_flushes_accepted_completion_without_redelivery() {
         super::super::runtime_delivery::ClaimResult::Terminal("accepted".into())
     );
 }
+
+#[test]
+fn restart_survival_busy_job_is_retried_until_re_adopted() {
+    if isolated("restart_survival_busy_job_is_retried_until_re_adopted") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    let output = std::process::Command::new(&f.actor.command[0])
+        .args(["--bg", "--resume", SAVED])
+        .envs(&f.actor.env)
+        .current_dir(&f.group.scopes[0].url)
+        .output()
+        .expect("surviving provider job");
+    assert!(output.status.success());
+    let path = f.config.join("jobs/abcdef12/state.json");
+    let mut state: Value = cccc_core::fs::read_json(&path).expect("state");
+    state["tempo"] = json!("active");
+    state["inFlight"] = json!({"tasks":1,"queued":0,"kinds":["prompt"]});
+    cccc_core::fs::write_json(&path, &state).expect("busy state");
+    let locks = crate::dispatch_concurrency::DispatchLocks::default();
+    super::super::runtime_restore::spawn(f.home.clone(), locks.clone());
+    f.wait(|| f.receipt()["failure_count"].as_u64().unwrap_or(0) > 0);
+    locks
+        .with_group_write_blocking(&f.group.group_id, || {
+            GroupStore::new(f.home.clone())
+                .expect("store")
+                .mutate(&f.group.group_id, |group| {
+                    group.actors[0].title = "renamed while busy".into();
+                    group.running = false;
+                    Ok(())
+                })
+                .map_err(crate::dispatch::OpError::io)
+        })
+        .expect("metadata update while waiting");
+    assert!(
+        f.config.join("active").exists(),
+        "busy job must be untouched"
+    );
+    state["tempo"] = json!("idle");
+    state["inFlight"] = json!({"tasks":0,"queued":0});
+    cccc_core::fs::write_json(&path, &state).expect("settled state");
+    f.wait(|| {
+        super::running(&f.group.group_id, &f.actor.id)
+            && GroupStore::new(f.home.clone())
+                .expect("store")
+                .load(&f.group.group_id)
+                .expect("group")
+                .running
+    });
+    let restored = GroupStore::new(f.home.clone())
+        .expect("store")
+        .load(&f.group.group_id)
+        .expect("restored group");
+    assert_eq!(restored.actors[0].title, "renamed while busy");
+    assert!(restored.running);
+    assert_eq!(f.receipt()["provider_session_id"], SAVED);
+    assert_eq!(f.launches(), 1);
+}
+
+#[test]
+fn restart_survival_explicit_stop_still_kills_exact_job() {
+    if isolated("restart_survival_explicit_stop_still_kills_exact_job") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    assert!(f.lifecycle("actor_start").ok);
+    assert!(f.config.join("active").exists());
+    assert!(f.lifecycle("actor_stop").ok);
+    assert!(
+        !f.config.join("active").exists(),
+        "explicit Actor Stop must stop the job"
+    );
+}
+
+#[test]
+fn restart_survival_interrupted_handoff_is_quarantined() {
+    if isolated("restart_survival_interrupted_handoff_is_quarantined") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    assert!(f.lifecycle("actor_start").ok);
+    f.wait(|| {
+        cccc_runtime::bracketed_paste_enabled(&f.group.group_id, &f.actor.id).unwrap_or(false)
+    });
+    let job = f.delivery();
+    super::super::runtime_delivery::claim(&f.home, &f.group, &f.actor, &job.event.id, "pty", false)
+        .expect("durable claim");
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel = Arc::clone(&cancelled);
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+    });
+    assert!(super::super::actor_delivery_worker::process_batch(
+        std::slice::from_ref(&job),
+        &mut String::new(),
+        &cancelled
+    ));
+    thread.join().expect("cancel");
+    super::supervisor::shutdown_with_policy(true).expect("detach");
+    let latest = super::super::runtime_delivery::latest_state(
+        &f.home,
+        &f.group.group_id,
+        &f.actor.id,
+        &job.event.id,
+    )
+    .expect("state")
+    .expect("claim outcome");
+    assert_eq!(latest.0, "ambiguous");
+    assert_eq!(
+        super::super::runtime_delivery::claim(
+            &f.home,
+            &f.group,
+            &f.actor,
+            &job.event.id,
+            "pty",
+            false
+        )
+        .expect("no automatic replay"),
+        super::super::runtime_delivery::ClaimResult::Terminal("ambiguous".into())
+    );
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    assert!(
+        ledger::read_all(&store.ledger_path(&f.group.group_id).expect("ledger path"))
+            .expect("retained source")
+            .iter()
+            .any(|e| e.id == job.event.id)
+    );
+    assert!(f.config.join("active").exists());
+    crate::runtime_start_gate::allow(&f.home).expect("restart gate");
+}
+
+#[test]
+fn restart_survival_explicit_stop_during_busy_restore_stops_job() {
+    if isolated("restart_survival_explicit_stop_during_busy_restore_stops_job") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    let output = std::process::Command::new(&f.actor.command[0])
+        .args(["--bg", "--resume", SAVED])
+        .envs(&f.actor.env)
+        .current_dir(&f.group.scopes[0].url)
+        .output()
+        .expect("survivor");
+    assert!(output.status.success());
+    let path = f.config.join("jobs/abcdef12/state.json");
+    let mut state: Value = cccc_core::fs::read_json(&path).expect("state");
+    state["tempo"] = json!("active");
+    cccc_core::fs::write_json(&path, &state).expect("busy");
+    let locks = crate::dispatch_concurrency::DispatchLocks::default();
+    super::super::runtime_restore::spawn(f.home.clone(), locks.clone());
+    f.wait(|| f.receipt()["failure_count"].as_u64().unwrap_or(0) > 0);
+    // Production dispatch owns this same group lock. Simulate that boundary.
+    locks
+        .with_group_write_blocking(&f.group.group_id, || {
+            let stopped = f.lifecycle("actor_stop");
+            assert!(stopped.ok, "{:?}", stopped.error);
+            Ok::<(), crate::dispatch::OpError>(())
+        })
+        .expect("explicit stop");
+    assert!(!f.config.join("active").exists());
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(
+        f.launches(),
+        1,
+        "retry must not resurrect an explicitly stopped actor"
+    );
+    assert!(!super::running(&f.group.group_id, &f.actor.id));
+}
+
+#[test]
+fn restart_survival_mismatched_receipt_never_launches_fresh() {
+    if isolated("restart_survival_mismatched_receipt_never_launches_fresh") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    GroupStore::new(f.home.clone())
+        .expect("store")
+        .mutate(&f.group.group_id, |group| {
+            group.actors[0]
+                .command
+                .extend(["--append-system-prompt".into(), "different-prompt".into()]);
+            Ok(())
+        })
+        .expect("changed launch identity");
+    let response = f.lifecycle("actor_start");
+    assert!(!response.ok);
+    assert!(
+        response
+            .error
+            .expect("refusal")
+            .message
+            .contains("launch identity")
+    );
+    assert_eq!(f.launches(), 0);
+    assert_eq!(f.receipt()["provider_session_id"], SAVED);
+}
+
+// Independent reviewer probes. Offline fixtures only.
+fn reviewer_seed_survivor(f: &Fixture, busy: bool) -> PathBuf {
+    let output = std::process::Command::new(&f.actor.command[0])
+        .args(["--bg", "--resume", SAVED])
+        .envs(&f.actor.env)
+        .current_dir(&f.group.scopes[0].url)
+        .output()
+        .expect("scratch job");
+    assert!(output.status.success());
+    let path = f.config.join("jobs/abcdef12/state.json");
+    if busy {
+        let mut state: Value = cccc_core::fs::read_json(&path).expect("state");
+        state["tempo"] = json!("active");
+        cccc_core::fs::write_json(&path, &state).expect("busy");
+    }
+    path
+}
+
+#[test]
+fn reviewer_group_stop_kills_unadopted_saved_job() {
+    if isolated("reviewer_group_stop_kills_unadopted_saved_job") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    reviewer_seed_survivor(&f, true);
+    let response = crate::handle_request(
+        &f.home,
+        &DaemonRequest {
+            v: 1,
+            op: "group_stop".into(),
+            args: json!({"group_id":f.group.group_id,"by":"user"})
+                .as_object()
+                .expect("args")
+                .clone(),
+        },
+    );
+    assert!(response.ok, "{:?}", response.error);
+    assert!(
+        !f.config.join("active").exists(),
+        "successful Group Stop left saved busy provider job running"
+    );
+}
+
+#[test]
+fn reviewer_second_restart_preserves_pending_sibling_restore() {
+    if isolated("reviewer_second_restart_preserves_pending_sibling_restore") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    let path = reviewer_seed_survivor(&f, true);
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    store
+        .mutate(&f.group.group_id, |g| {
+            let mut sibling = f.actor.clone();
+            sibling.id = "claude-2".into();
+            g.actors.push(sibling);
+            Ok(())
+        })
+        .expect("add sibling");
+    // Start restore for the first actor without letting the sibling launch.
+    store
+        .mutate(&f.group.group_id, |g| {
+            g.actors[1].enabled = false;
+            Ok(())
+        })
+        .expect("sibling disabled");
+    let locks = crate::dispatch_concurrency::DispatchLocks::default();
+    super::super::runtime_restore::spawn(f.home.clone(), locks.clone());
+    f.wait(|| f.receipt()["failure_count"].as_u64().unwrap_or(0) > 0);
+    locks
+        .with_group_write_blocking(&f.group.group_id, || {
+            let response = crate::handle_request(
+                &f.home,
+                &DaemonRequest {
+                    v: 1,
+                    op: "actor_stop".into(),
+                    args: json!({"group_id":f.group.group_id,"actor_id":"claude-2","by":"user"})
+                        .as_object()
+                        .expect("args")
+                        .clone(),
+                },
+            );
+            assert!(response.ok, "{:?}", response.error);
+            Ok::<(), crate::dispatch::OpError>(())
+        })
+        .expect("stop sibling");
+    let current = store.load(&f.group.group_id).expect("group");
+    assert!(!current.running);
+    assert!(current.actors[0].enabled);
+    assert_ne!(current.state, cccc_contracts::GroupState::Stopped);
+    crate::runtime_start_gate::prevent(&f.home).expect("shutdown fence");
+    std::thread::sleep(Duration::from_millis(150));
+    let mut state: Value = cccc_core::fs::read_json(&path).expect("state");
+    state["tempo"] = json!("idle");
+    cccc_core::fs::write_json(&path, &state).expect("settled during absence");
+    crate::runtime_start_gate::allow(&f.home).expect("second restart");
+    super::super::runtime_restore::restore_running(&f.home).expect("second restore");
+    assert!(
+        super::running(&f.group.group_id, &f.actor.id),
+        "second startup silently skipped still-enabled surviving sibling"
+    );
+}
+
+#[test]
+fn reviewer_new_session_after_scope_drift_stops_old_job() {
+    if isolated("reviewer_new_session_after_scope_drift_stops_old_job") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    reviewer_seed_survivor(&f, true);
+    let new_workspace = f._temp.path().join("new-workspace");
+    std::fs::create_dir(&new_workspace).expect("new workspace");
+    GroupStore::new(f.home.clone())
+        .expect("store")
+        .mutate(&f.group.group_id, |g| {
+            g.scopes[0].url = new_workspace.to_string_lossy().into_owned();
+            Ok(())
+        })
+        .expect("changed workspace");
+    let response = f.lifecycle("actor_new_session");
+    assert!(
+        response.ok,
+        "advertised New Session recovery refused: {:?}",
+        response.error
+    );
+}
+
+#[test]
+fn reviewer_busy_job_disappears_and_resumes_exactly() {
+    if isolated("reviewer_busy_job_disappears_and_resumes_exactly") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    reviewer_seed_survivor(&f, true);
+    let locks = crate::dispatch_concurrency::DispatchLocks::default();
+    super::super::runtime_restore::spawn(f.home.clone(), locks);
+    f.wait(|| f.receipt()["failure_count"].as_u64().unwrap_or(0) > 0);
+    std::fs::remove_file(f.config.join("active")).expect("job exited");
+    f.wait(|| super::running(&f.group.group_id, &f.actor.id));
+    assert_eq!(f.receipt()["provider_session_id"], SAVED);
+    assert_eq!(f.launches(), 2, "resume once, do not spin on absent job");
+}
+
+#[test]
+fn reviewer_pending_restart_and_new_session_do_not_resurrect_old_job() {
+    if isolated("reviewer_pending_restart_and_new_session_do_not_resurrect_old_job") {
+        return;
+    }
+    for action in ["actor_restart", "actor_new_session"] {
+        let f = Fixture::new("healthy");
+        detach_policy(&f);
+        reviewer_seed_survivor(&f, true);
+        let locks = crate::dispatch_concurrency::DispatchLocks::default();
+        super::super::runtime_restore::spawn(f.home.clone(), locks.clone());
+        f.wait(|| f.receipt()["failure_count"].as_u64().unwrap_or(0) > 0);
+        locks
+            .with_group_write_blocking(&f.group.group_id, || {
+                let response = f.lifecycle(action);
+                assert!(response.ok, "{:?}", response.error);
+                Ok::<(), crate::dispatch::OpError>(())
+            })
+            .expect("explicit action");
+        std::thread::sleep(Duration::from_millis(800));
+        assert_eq!(f.launches(), 2);
+        assert!(super::running(&f.group.group_id, &f.actor.id));
+        let expected = if action == "actor_restart" {
+            SAVED
+        } else {
+            "ca52e69a-6596-4abd-a0ec-3e8690dc70e1"
+        };
+        assert_eq!(f.receipt()["provider_session_id"], expected);
+    }
+}
+
+#[test]
+fn reviewer_busy_retry_releases_group_lock_before_provider_polling() {
+    if isolated("reviewer_busy_retry_releases_group_lock_before_provider_polling") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    reviewer_seed_survivor(&f, true);
+    let locks = crate::dispatch_concurrency::DispatchLocks::default();
+    super::super::runtime_restore::spawn(f.home.clone(), locks.clone());
+    f.wait(|| f.receipt()["failure_count"].as_u64().unwrap_or(0) > 0);
+    f.wait(|| {
+        f.receipt()["last_resume_attempt_id"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    });
+    let start = Instant::now();
+    locks
+        .with_group_write_blocking(&f.group.group_id, || Ok::<(), crate::dispatch::OpError>(()))
+        .expect("group action");
+    let elapsed = start.elapsed();
+    crate::runtime_start_gate::prevent(&f.home).expect("stop retry worker");
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "busy retry held group dispatch lock for {elapsed:?}"
+    );
+}
+
+#[test]
+fn reviewer_unmatched_reporting_uses_effective_private_configuration() {
+    if isolated("reviewer_unmatched_reporting_uses_effective_private_configuration") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    reviewer_seed_survivor(&f, false);
+    let decoy = f._temp.path().join("unused-public-config");
+    std::fs::create_dir(&decoy).expect("decoy configuration");
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    store
+        .mutate(&f.group.group_id, |g| {
+            g.actors[0].env.insert(
+                "CLAUDE_CONFIG_DIR".into(),
+                decoy.to_string_lossy().into_owned(),
+            );
+            Ok(())
+        })
+        .expect("public configuration");
+    super::super::actor_secrets::replace(
+        &f.home,
+        &f.group.group_id,
+        &f.actor.id,
+        BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".into(),
+            f.config.to_string_lossy().into_owned(),
+        )]),
+    )
+    .expect("private launch configuration");
+    super::super::runtime_restore::report_unmatched(&f.home, &store).expect("report");
+    let requests = std::fs::read_to_string(f.config.join("requests")).unwrap_or_default();
+    assert!(
+        requests.contains("list"),
+        "reporting inspected public/ambient configuration instead of actual launch configuration"
+    );
+}
+#[test]
+fn detach_new_session_uses_original_provider_configuration() {
+    if isolated("detach_new_session_uses_original_provider_configuration") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    assert!(f.lifecycle("actor_start").ok);
+    super::supervisor::shutdown_with_policy(true).expect("detach old job");
+    let old =
+        super::super::runtime_session::claude_ownership::load(&f.home, &f.group.group_id, &f.actor)
+            .expect("owner")
+            .expect("durable owner");
+    assert_eq!(
+        old.config_dir,
+        f.config.canonicalize().expect("original config")
+    );
+    let replacement = Fixture::new("healthy");
+    let workspace = &replacement.group.scopes[0].url;
+    GroupStore::new(f.home.clone())
+        .expect("store")
+        .mutate(&f.group.group_id, |g| {
+            g.scopes[0].url = workspace.clone();
+            g.actors[0].env.insert(
+                "CLAUDE_CONFIG_DIR".into(),
+                replacement.config.to_string_lossy().into_owned(),
+            );
+            Ok(())
+        })
+        .expect("edit config and workspace");
+    let response = f.lifecycle("actor_new_session");
+    assert!(response.ok, "{:?}", response.error);
+    assert!(!f.config.join("active").exists());
+    assert!(replacement.config.join("active").exists());
+    let owner =
+        super::super::runtime_session::claude_ownership::load(&f.home, &f.group.group_id, &f.actor)
+            .expect("owner")
+            .expect("replacement owner");
+    assert_eq!(
+        owner.config_dir,
+        replacement.config.canonicalize().expect("new config")
+    );
+    assert_eq!(
+        owner.workspace,
+        PathBuf::from(workspace)
+            .canonicalize()
+            .expect("new workspace")
+    );
+    assert_ne!(owner.session_id, SAVED);
+    assert_eq!(f.receipt()["provider_session_id"], owner.session_id);
+}
+
+#[test]
+fn detach_stopped_state_kills_pending_job() {
+    if isolated("detach_stopped_state_kills_pending_job") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    reviewer_seed_survivor(&f, true);
+    let response = crate::handle_request(
+        &f.home,
+        &DaemonRequest {
+            v: 1,
+            op: "group_set_state".into(),
+            args: json!({"group_id":f.group.group_id,"by":"user","state":"stopped"})
+                .as_object()
+                .expect("args")
+                .clone(),
+        },
+    );
+    assert!(response.ok, "{:?}", response.error);
+    assert!(!f.config.join("active").exists());
+}
+
+#[test]
+fn detach_archived_empty_receipt_never_stops_a_job() {
+    if isolated("detach_archived_empty_receipt_never_stops_a_job") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    reviewer_seed_survivor(&f, true);
+    let file = f
+        .home
+        .groups_dir()
+        .join(&f.group.group_id)
+        .join("state/runtime_sessions/claude-1.json");
+    let mut receipt = f.receipt();
+    receipt["provider_session_id"] = json!("");
+    receipt["status"] = json!("new_session");
+    cccc_core::fs::write_json(&file, &receipt).expect("archive");
+    assert!(f.lifecycle("actor_stop").ok);
+    assert!(
+        f.config.join("active").exists(),
+        "unmatched job stays untouched"
+    );
+    assert!(
+        !std::fs::read_to_string(f.config.join("requests"))
+            .unwrap_or_default()
+            .contains("kill")
+    );
+}
+
+#[test]
+fn detach_history_without_running_intent_is_not_auto_started() {
+    if isolated("detach_history_without_running_intent_is_not_auto_started") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    GroupStore::new(f.home.clone())
+        .expect("store")
+        .mutate(&f.group.group_id, |g| {
+            g.running = false;
+            Ok(())
+        })
+        .expect("not running");
+    super::super::runtime_restore::restore_running(&f.home).expect("restore");
+    assert_eq!(f.launches(), 0);
+    assert!(!super::running(&f.group.group_id, &f.actor.id));
+}

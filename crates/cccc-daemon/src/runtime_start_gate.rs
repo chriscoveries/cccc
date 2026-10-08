@@ -30,6 +30,12 @@ pub fn prevent(home: &HomeLayout) -> Result<(), &'static str> {
     Ok(())
 }
 
+pub fn allowed(home: &HomeLayout) -> bool {
+    gates()
+        .lock()
+        .is_ok_and(|gates| gates.get(home.root()).copied().unwrap_or(true))
+}
+
 pub fn permit(home: &HomeLayout) -> Result<StartPermit, &'static str> {
     let guard = gates()
         .lock()

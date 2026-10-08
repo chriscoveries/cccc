@@ -41,7 +41,7 @@ pub(super) fn reset(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         .map_err(|error| rollback_new(&store, &old, &created.group_id, error))?;
 
     super::actor_delivery::shutdown_group(&old.group_id);
-    if let Err(error) = super::actor_runtime::stop_group(&old) {
+    if let Err(error) = super::actor_runtime::stop_group(home, &old) {
         return Err(rollback_new(&store, &old, &replacement.group_id, error));
     }
     if was_active && let Err(error) = active::set(home, &replacement.group_id).map_err(OpError::io)

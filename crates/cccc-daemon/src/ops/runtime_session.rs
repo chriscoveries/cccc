@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) mod antigravity;
 mod claude;
+pub(crate) mod claude_ownership;
 mod grok;
 #[cfg(test)]
 mod grok_tests;

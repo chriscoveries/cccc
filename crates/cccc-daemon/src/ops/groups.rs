@@ -564,7 +564,7 @@ fn delete(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group = load(home, request)?;
     authorize(&group, request)?;
     actor_delivery::shutdown_group(&group.group_id);
-    actor_runtime::stop_group(&group)?;
+    actor_runtime::stop_group(home, &group)?;
     for actor in &group.actors {
         super::codex_voice_analyst::remove_claude_actor_settings(home, &group.group_id, &actor.id)
             .map_err(OpError::io)?;
@@ -601,7 +601,13 @@ fn set_state(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             .map_err(OpError::io)?;
         }
         actor_delivery::shutdown_group(&group.group_id);
-        super::local_headless::stop_group(&group.group_id).map_err(OpError::io)?;
+        if state == GroupState::Stopped
+            && cccc_core::settings::detach_claude_on_exit(home).map_err(OpError::io)?
+        {
+            actor_runtime::stop_group(home, &group)?;
+        } else {
+            super::local_headless::stop_group(&group.group_id).map_err(OpError::io)?;
+        }
         super::deepseek_runtime::stop_group(&group.group_id);
     }
     let updated = store(home)?
@@ -642,7 +648,7 @@ fn running(home: &HomeLayout, request: &DaemonRequest, value: bool) -> OpResult 
             .map_err(OpError::io)?;
         }
         actor_delivery::shutdown_group(&group.group_id);
-        actor_runtime::stop_group(&group)?
+        actor_runtime::stop_group(home, &group)?
     };
     let updated = store(home)?
         .mutate(&group.group_id, |doc| {
