@@ -500,6 +500,7 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let original_secrets = actor_secrets::values(home, &group_id, &actor_id)?;
     let runtime_was_running = actor_process_running(&group, &original_actor);
     actor_delivery::shutdown_actor(&group_id, &actor_id);
+    super::actor_respawn_backoff::forget(&group_id, &actor_id);
     if let Err(error) = actor_runtime::apply(home, &group, &actor_id, "actor.stop") {
         actor_delivery::dispatch_group_unread(home, &group);
         return Err(error);
@@ -733,6 +734,9 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         })
         .map_err(OpError::io)?;
     }
+    // Explicit lifecycle commands reset restart history. Destructive paths joined the
+    // worker above; healthy Start preserves it, including any pending automatic wait.
+    super::actor_respawn_backoff::forget(&group_id, &actor_id);
     let retry_resume = retry_claude
         && runtime_session::retry_failed_claude_resume(home, &group_id, &actor_id)
             .map_err(OpError::io)?;

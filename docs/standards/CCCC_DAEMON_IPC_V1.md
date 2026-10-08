@@ -2365,6 +2365,11 @@ Result:
 }
 ```
 
+Actor startup is asynchronous. `actor_woken` reports the running-state snapshot
+observed before dispatch; `false` may accompany a successfully queued wake.
+`actor_wake_error` is empty for asynchronous startup. `actor_notify_delivered`
+reports queue acceptance; it does not confirm actor startup or completed delivery.
+
 #### `assistant_voice_session_update`
 
 Persist a Web-owned completion projection (currently speaker diarization) into
@@ -2567,6 +2572,11 @@ Result:
 }
 ```
 
+Actor startup is asynchronous. `actor_woken` reports the running-state snapshot
+observed before dispatch; `false` may accompany a successfully queued wake.
+`actor_wake_error` is empty for asynchronous startup. `actor_notify_delivered`
+reports queue acceptance; it does not confirm actor startup or completed delivery.
+
 `request_id` identifies the logical Ask request. `input_append_id` identifies
 one durable append attempt. A caller retrying an accepted append MUST reuse both
 values. The daemon MUST then return the existing input with
@@ -2627,6 +2637,11 @@ Result:
   event?: CCCSEventV1
 }
 ```
+
+Actor startup is asynchronous. `actor_woken` reports the running-state snapshot
+observed before dispatch; `false` may accompany a successfully queued wake.
+`actor_wake_error` is empty for asynchronous startup. `actor_notify_delivered`
+reports queue acceptance; it does not confirm actor startup or completed delivery.
 
 #### `assistant_voice_instruction_feedback`
 

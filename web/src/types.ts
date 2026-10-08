@@ -974,8 +974,14 @@ export type AssistantVoiceTranscriptSegmentResult = {
   input_event_created?: boolean;
   input_notify_emitted?: boolean;
   input_notify_error?: string;
+  /**
+   * Startup is asynchronous: running-state snapshot before dispatch.
+   * False may accompany a successfully queued wake.
+   */
   actor_woken?: boolean;
+  /** Empty for asynchronous startup. */
   actor_wake_error?: string;
+  /** Queue acceptance only; does not confirm startup or completed delivery. */
   actor_notify_delivered?: boolean;
   actor_notify_delivery_error?: string;
 };
@@ -1009,8 +1015,14 @@ export type AssistantVoiceDocumentMutationResult = {
   input_event_created?: boolean;
   input_notify_emitted?: boolean;
   input_notify_error?: string;
+  /**
+   * Startup is asynchronous: running-state snapshot before dispatch.
+   * False may accompany a successfully queued wake.
+   */
   actor_woken?: boolean;
+  /** Empty for asynchronous startup. */
   actor_wake_error?: string;
+  /** Queue acceptance only; does not confirm startup or completed delivery. */
   actor_notify_delivered?: boolean;
   actor_notify_delivery_error?: string;
   event?: unknown;
@@ -1060,8 +1072,14 @@ export type AssistantVoiceInputResult = {
   input_event_created?: boolean;
   input_notify_emitted?: boolean;
   input_notify_error?: string;
+  /**
+   * Startup is asynchronous: running-state snapshot before dispatch.
+   * False may accompany a successfully queued wake.
+   */
   actor_woken?: boolean;
+  /** Empty for asynchronous startup. */
   actor_wake_error?: string;
+  /** Queue acceptance only; does not confirm startup or completed delivery. */
   actor_notify_delivered?: boolean;
   actor_notify_delivery_error?: string;
   event?: unknown;

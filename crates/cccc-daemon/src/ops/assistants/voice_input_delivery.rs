@@ -53,14 +53,13 @@ pub(super) fn deliver(
     if !needs_notice {
         return Ok(outcome);
     }
-    if cccc_runtime::status(group_id, ACTOR_ID).is_ok_and(|status| status.running) {
-        outcome.actor_woken = true;
-    } else if group.running {
-        match actor_runtime::apply(home, &group, ACTOR_ID, "actor.start") {
-            Ok(status) => outcome.actor_woken = status.is_some_and(|item| item.running),
-            Err(error) => outcome.wake_error = format!("{}: {}", error.code, error.message),
-        }
-    }
+    // The notification's delivery worker owns automatic startup, including its cancellable
+    // restart backoff. Starting here would bypass that wait for every voice segment.
+    outcome.actor_woken = group
+        .actors
+        .iter()
+        .find(|actor| actor.id == ACTOR_ID)
+        .is_some_and(|actor| actor_runtime::actor_is_running(&group, actor));
     let notice = if let Some(event) = prior_notice {
         event
     } else {
@@ -122,4 +121,69 @@ fn event_data_string<'a>(event: &'a Event, path: &[&str]) -> Option<&'a str> {
         value = value.get(*key)?;
     }
     value.as_str()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use cccc_contracts::{Actor, ActorRuntime, GroupState};
+    use cccc_core::Scope;
+    use std::time::Duration;
+
+    #[test]
+    fn voice_input_wake_uses_the_cancellable_delivery_backoff() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("voice restart", "").expect("group");
+        group.running = true;
+        group.state = GroupState::Active;
+        group.scopes.push(Scope {
+            scope_key: "project".into(),
+            url: temp.path().to_string_lossy().into_owned(),
+            label: "project".into(),
+            git_remote: String::new(),
+        });
+        group.active_scope_key = "project".into();
+        let launched = temp.path().join("launched");
+        let mut actor = Actor::new(ACTOR_ID);
+        actor.runtime = ActorRuntime::Custom;
+        actor.command = vec![
+            "sh".into(),
+            "-c".into(),
+            "touch \"$1\"; exit 1".into(),
+            "fixture".into(),
+            launched.to_string_lossy().into_owned(),
+        ];
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save");
+        use crate::ops::actor_respawn_backoff as backoff;
+        assert!(backoff::begin_restart(&group.group_id, ACTOR_ID).is_zero());
+        backoff::end_restart(&group.group_id, ACTOR_ID);
+        let outcome = deliver(
+            &home,
+            &store,
+            &group.group_id,
+            "session",
+            "segment",
+            "user",
+            Some(&json!({"session_id":"session","segment_id":"segment"})),
+        )
+        .expect("voice delivery");
+        std::thread::sleep(Duration::from_millis(250));
+        let stopped = std::time::Instant::now();
+        actor_delivery::shutdown_actor(&group.group_id, ACTOR_ID);
+        let _ = cccc_runtime::stop(&group.group_id, ACTOR_ID);
+        backoff::forget(&group.group_id, ACTOR_ID);
+        assert!(
+            stopped.elapsed() < Duration::from_secs(1),
+            "shutdown must interrupt the wait"
+        );
+        assert!(!outcome.actor_woken, "a queued wake has not launched yet");
+        assert_eq!(outcome.delivery.expect("dispatch report")["queued"], 1);
+        assert!(
+            !launched.exists(),
+            "voice input must not launch around the worker's backoff"
+        );
+    }
 }
