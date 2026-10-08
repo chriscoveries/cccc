@@ -45,6 +45,7 @@ pub(super) struct TranscriptState {
     session_id: String,
     events: broadcast::Sender<AnalystEvent>,
     active: Option<ActiveTurn>,
+    fence_existing_tail: bool,
 }
 
 impl TranscriptState {
@@ -58,7 +59,15 @@ impl TranscriptState {
             session_id,
             events,
             active: None,
+            fence_existing_tail: false,
         }
+    }
+
+    /// A resumed observer can see a late tail of the turn whose input was
+    /// before its transcript cursor. Do not project that historical tail as a
+    /// new turn; retain strict validation once a new primary user input arrives.
+    pub(super) fn fence_existing_turn_tail(&mut self) {
+        self.fence_existing_tail = true;
     }
 
     pub(super) fn active_turn_id(&self) -> Option<&str> {
@@ -101,6 +110,27 @@ impl TranscriptState {
         }
         if super::transcript_ack::is_resume_ack(record) {
             return Ok(IngestOutcome::None);
+        }
+        if self.fence_existing_tail {
+            // Agent View may report idle before flushing the old assistant tail.
+            // The old user input is behind this observer's cursor. Ignore only
+            // that unowned tail; the first new primary input restores ownership.
+            if record.get("type").and_then(Value::as_str) == Some("assistant") {
+                return Ok(IngestOutcome::None);
+            }
+            if record.get("type").and_then(Value::as_str) == Some("user") {
+                let content = record.pointer("/message/content").unwrap_or(&Value::Null);
+                let text = text_content(content);
+                if contains_tool_result(content)
+                    || text.trim().is_empty()
+                    || matches!(text.trim(), INTERRUPTION_MARKER | TOOL_INTERRUPTION_MARKER)
+                {
+                    return Ok(IngestOutcome::None);
+                }
+                let outcome = self.ingest_user(record, controlled, native)?;
+                self.fence_existing_tail = false;
+                return Ok(outcome);
+            }
         }
         match record.get("type").and_then(Value::as_str) {
             Some("user") => self.ingest_user(record, controlled, native),
@@ -745,3 +775,7 @@ mod resume_ack_tests;
 #[cfg(test)]
 #[path = "transcript_interrupt_tests.rs"]
 mod interrupt_tests;
+
+#[cfg(test)]
+#[path = "transcript_detach_tail_tests.rs"]
+mod detach_tail_tests;

@@ -549,7 +549,7 @@ fn reviewer_shutdown_flushes_accepted_completion_without_redelivery() {
             transport: "pty".into(),
         },
     );
-    super::super::actor_delivery::shutdown_with_policy(Some(&f.home));
+    crate::stop_every_runtime(&f.home).expect("flush shutdown");
     assert_eq!(
         super::super::runtime_delivery::claim(
             &f.home,
@@ -665,7 +665,7 @@ fn restart_survival_interrupted_handoff_is_quarantined() {
         &cancelled
     ));
     thread.join().expect("cancel");
-    super::supervisor::shutdown_with_policy(true).expect("detach");
+    crate::stop_every_runtime(&f.home).expect("detach");
     let latest = super::super::runtime_delivery::latest_state(
         &f.home,
         &f.group.group_id,
@@ -755,12 +755,9 @@ fn restart_survival_mismatched_receipt_never_launches_fresh() {
         .expect("changed launch identity");
     let response = f.lifecycle("actor_start");
     assert!(!response.ok);
-    assert!(
-        response
-            .error
-            .expect("refusal")
-            .message
-            .contains("launch identity")
+    assert_eq!(
+        response.error.expect("refusal").code,
+        super::super::actor_runtime::CLAUDE_RESUME_FAILED
     );
     assert_eq!(f.launches(), 0);
     assert_eq!(f.receipt()["provider_session_id"], SAVED);
@@ -1206,6 +1203,207 @@ fn reviewer_scoped_launch_failure_cannot_launch_a_second_job() {
     );
 }
 
+#[test]
+fn restart_survival_detach_leaves_job_and_releases_observers() {
+    if isolated("restart_survival_detach_leaves_job_and_releases_observers") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    assert!(f.lifecycle("actor_start").ok);
+    super::block_on_managed(super::kill_all_requests());
+    assert!(
+        f.config.join("active").exists(),
+        "forced-exit requests must honor detach"
+    );
+    let saved = f.receipt()["provider_session_id"].clone();
+    let observer = Arc::downgrade(
+        &super::supervisor::lookup(&(f.group.group_id.clone(), f.actor.id.clone()))
+            .expect("registered session"),
+    );
+    crate::stop_every_runtime(&f.home).expect("daemon shutdown");
+    assert!(
+        f.config.join("active").exists(),
+        "detach must not kill the provider job"
+    );
+    assert!(super::supervisor::registered_running(&f.group.group_id, &f.actor.id).is_none());
+    f.wait(|| observer.upgrade().is_none());
+    assert!(!cccc_runtime::status(&f.group.group_id, &f.actor.id).is_ok_and(|s| s.running));
+    crate::runtime_start_gate::allow(&f.home).expect("restart start gate");
+    super::super::runtime_restore::restore_running(&f.home).expect("restore");
+    assert!(super::running(&f.group.group_id, &f.actor.id));
+    assert_eq!(f.receipt()["provider_session_id"], saved);
+    assert_eq!(f.launches(), 1, "re-adoption must not launch another job");
+}
+
+#[test]
+fn reviewer_queued_before_handoff_remains_retryable() {
+    if isolated("reviewer_queued_before_handoff_remains_retryable") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    store
+        .mutate(&f.group.group_id, |g| {
+            g.state = cccc_contracts::GroupState::Paused;
+            Ok(())
+        })
+        .expect("pause before worker");
+    let job = f.delivery();
+    let report = super::super::actor_delivery::dispatch_to(
+        &f.home,
+        &f.group,
+        &job.event,
+        &[f.actor.clone()],
+        false,
+    );
+    assert_eq!(report.queued, 1);
+    std::thread::sleep(Duration::from_millis(100));
+    crate::stop_every_runtime(&f.home).expect("shutdown queued worker");
+    assert!(
+        !f.config.join("active").exists(),
+        "no provider handoff was attempted"
+    );
+    assert_eq!(
+        super::super::runtime_delivery::claim(
+            &f.home,
+            &f.group,
+            &f.actor,
+            &job.event.id,
+            "pty",
+            false
+        )
+        .expect("reclaim"),
+        super::super::runtime_delivery::ClaimResult::Claimed
+    );
+}
+
+#[test]
+fn reviewer_ambiguous_is_visible_and_requires_explicit_retry() {
+    if isolated("reviewer_ambiguous_is_visible_and_requires_explicit_retry") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    let job = f.delivery();
+    super::super::runtime_delivery::append_state(
+        &f.home,
+        &f.group.group_id,
+        &f.actor.id,
+        &f.actor.created_at,
+        &job.event.id,
+        "pty",
+        super::super::runtime_delivery::DeliveryOutcome::Ambiguous("reviewer interrupted handoff"),
+    )
+    .expect("ambiguous");
+    let status = super::super::messaging_status::for_events(
+        &f.home,
+        &f.group.group_id,
+        &[job.event.id.clone()],
+    )
+    .expect("visible status");
+    assert_eq!(
+        status[&job.event.id]["obligation_status"][&f.actor.id]["delivery_state"],
+        "ambiguous"
+    );
+    assert_eq!(
+        super::super::actor_delivery::dispatch_unread(&f.home, &f.group, &f.actor.id),
+        0
+    );
+    assert_eq!(
+        super::super::runtime_delivery::claim(
+            &f.home,
+            &f.group,
+            &f.actor,
+            &job.event.id,
+            "pty",
+            true
+        )
+        .expect("explicit retry"),
+        super::super::runtime_delivery::ClaimResult::Claimed
+    );
+}
+
+#[test]
+fn reviewer_default_shutdown_keeps_stock_completion_clearing() {
+    if isolated("reviewer_default_shutdown_keeps_stock_completion_clearing") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    let job = f.delivery();
+    super::super::runtime_delivery::claim(&f.home, &f.group, &f.actor, &job.event.id, "pty", false)
+        .expect("claim");
+    super::super::actor_delivery::record_completion(
+        super::super::actor_delivery::DeliveryCompletion {
+            group_id: f.group.group_id.clone(),
+            actor_id: f.actor.id.clone(),
+            actor_created_at: f.actor.created_at.clone(),
+            event_id: job.event.id.clone(),
+            transport: "pty".into(),
+        },
+    );
+    crate::stop_every_runtime(&f.home).expect("default shutdown");
+    assert_eq!(
+        super::super::runtime_delivery::latest_state(
+            &f.home,
+            &f.group.group_id,
+            &f.actor.id,
+            &job.event.id
+        )
+        .expect("state")
+        .expect("claim")
+        .0,
+        "claimed"
+    );
+}
+
+// This also runs unchanged when combined with session continuity. A successful
+// continuity decision (including model-only drift) must pass the detach guard.
+#[test]
+fn detach_model_change_respects_continuity_decision() {
+    if isolated("detach_model_change_respects_continuity_decision") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    let continuity = f
+        .receipt()
+        .get("command_without_model_fingerprint")
+        .is_some();
+    assert!(f.lifecycle("actor_start").ok);
+    super::supervisor::shutdown_with_policy(true).expect("detach");
+    let file = f.config.join("jobs/abcdef12/state.json");
+    let mut state: Value = cccc_core::fs::read_json(&file).expect("state");
+    state["resumeSessionId"] = json!(SAVED);
+    state["respawnFlags"] = json!(["--model", "sonnet"]);
+    cccc_core::fs::write_json(&file, &state).expect("provider already selected model");
+    GroupStore::new(f.home.clone())
+        .expect("store")
+        .mutate(&f.group.group_id, |g| {
+            g.actors[0]
+                .command
+                .extend(["--model".into(), "sonnet".into()]);
+            Ok(())
+        })
+        .expect("model-only config change");
+    let response = f.lifecycle("actor_start");
+    if continuity {
+        assert!(response.ok, "{:?}", response.error);
+        assert!(super::running(&f.group.group_id, &f.actor.id));
+    } else {
+        // Standalone v0.4.42 keeps its existing model identity policy.
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.expect("blocked").code,
+            super::super::actor_runtime::CLAUDE_RESUME_FAILED
+        );
+    }
+    assert_eq!(f.receipt()["provider_session_id"], SAVED);
+    assert!(f.config.join("active").exists());
+    assert_eq!(f.launches(), 1, "no fresh session/job on model drift");
+}
+
 impl Fixture {
     fn reconcile(&self, op: &str, fields: Value) -> cccc_contracts::DaemonResponse {
         let mut args = fields.as_object().expect("fields").clone();
@@ -1477,6 +1675,65 @@ fn proven_spawn_failure_restores_prior_owner_and_preserves_changed_generation() 
             .expect("record")
             .uncertain
     );
+}
+
+#[test]
+fn rv2_second_restart_still_busy_then_group_stop_cancels_adoption() {
+    if isolated("rv2_second_restart_still_busy_then_group_stop_cancels_adoption") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    reviewer_seed_survivor(&f, true);
+    let locks = crate::dispatch_concurrency::DispatchLocks::default();
+    super::super::runtime_restore::spawn(f.home.clone(), locks);
+    f.wait(|| {
+        f.receipt()["last_resume_attempt_id"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    });
+    let first_probe = f.receipt()["last_resume_attempt_id"].clone();
+    crate::stop_every_runtime(&f.home).expect("first shutdown while busy");
+    std::thread::sleep(Duration::from_millis(3400));
+    assert!(f.config.join("active").exists());
+    assert!(!super::running(&f.group.group_id, &f.actor.id));
+    crate::runtime_start_gate::allow(&f.home).expect("fixture");
+    let locks = crate::dispatch_concurrency::DispatchLocks::default();
+    super::super::runtime_restore::spawn(f.home.clone(), locks.clone());
+    f.wait(|| f.receipt()["last_resume_attempt_id"] != first_probe);
+    assert!(f.config.join("active").exists());
+    assert_eq!(f.launches(), 1, "second restart must not spawn another job");
+    let start = Instant::now();
+    locks
+        .with_group_write_blocking(&f.group.group_id, || {
+            let response = crate::handle_request(
+                &f.home,
+                &DaemonRequest {
+                    v: 1,
+                    op: "group_stop".into(),
+                    args: json!({"group_id":f.group.group_id,"by":"user"})
+                        .as_object()
+                        .expect("fixture")
+                        .clone(),
+                },
+            );
+            assert!(response.ok, "{:?}", response.error);
+            Ok::<(), crate::dispatch::OpError>(())
+        })
+        .expect("fixture");
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "Group Stop waited for adoption poll"
+    );
+    assert!(!f.config.join("active").exists());
+    std::thread::sleep(Duration::from_millis(4500));
+    assert!(!super::running(&f.group.group_id, &f.actor.id));
+    assert_eq!(
+        f.launches(),
+        1,
+        "pending adoption resurrected a stopped group"
+    );
+    crate::runtime_start_gate::prevent(&f.home).expect("fixture");
 }
 
 #[test]

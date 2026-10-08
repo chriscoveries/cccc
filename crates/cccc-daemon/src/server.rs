@@ -23,26 +23,29 @@ use crate::server_lifecycle::{DaemonLifecycle, cleanup_stale};
 
 type RuntimeRestoreSpawner = fn(HomeLayout, DispatchLocks);
 
+fn validate_claude_detach(detach: bool, resume: bool, windows: bool) -> Result<()> {
+    if detach && !resume {
+        bail!("runtime.claude_daemon_exit=detach requires CCCC_RUNTIME_RESUME to be enabled");
+    }
+    if detach && windows {
+        bail!(
+            "runtime.claude_daemon_exit=detach is unsupported under the Windows daemon job object"
+        );
+    }
+    Ok(())
+}
+
 pub async fn run(home: HomeLayout) -> Result<()> {
     run_with_restore(home, crate::ops::runtime_restore::spawn).await
 }
 
 async fn run_with_restore(home: HomeLayout, restore: RuntimeRestoreSpawner) -> Result<()> {
     home.initialize().context("initialize Rust home")?;
-    let detach_claude = cccc_core::settings::detach_claude_on_exit(&home)?;
-    if detach_claude && !crate::ops::runtime_resume_enabled() {
-        anyhow::bail!(
-            "runtime.claude_daemon_exit=detach requires CCCC_RUNTIME_RESUME to be enabled"
-        );
-    }
-    if cfg!(windows) && detach_claude {
-        anyhow::bail!(
-            "runtime.claude_daemon_exit=detach is unsupported under the Windows daemon job object"
-        );
-    }
-    if detach_claude {
-        anyhow::bail!("runtime.claude_daemon_exit=detach is not available in this build");
-    }
+    validate_claude_detach(
+        cccc_core::settings::detach_claude_on_exit(&home)?,
+        crate::ops::runtime_resume_enabled(),
+        cfg!(windows),
+    )?;
     let paths = DaemonPaths::new(home);
     std::fs::create_dir_all(&paths.daemon_dir)?;
     let lock = claim_home(&paths)?;
@@ -475,5 +478,16 @@ mod tests {
             .filter_map(|event| event.data["state"].as_str().map(str::to_owned))
             .collect::<Vec<_>>();
         assert_eq!(states, ["claimed", "ambiguous"]);
+    }
+    #[test]
+    fn claude_detach_validation_preserves_stop_and_rejects_unsupported_configuration() {
+        for windows in [false, true] {
+            for resume in [false, true] {
+                assert!(validate_claude_detach(false, resume, windows).is_ok());
+            }
+        }
+        assert!(validate_claude_detach(true, false, false).is_err());
+        assert!(validate_claude_detach(true, true, true).is_err());
+        assert!(validate_claude_detach(true, true, false).is_ok());
     }
 }

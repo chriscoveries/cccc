@@ -48,6 +48,31 @@ impl DaemonLifecycle {
 /// may wait for protocol closure, session locks and output draining.
 pub fn stop_every_runtime(home: &HomeLayout) -> Result<Vec<cccc_runtime::SessionStatus>> {
     let _ = crate::runtime_start_gate::prevent(home);
+    if cccc_core::settings::detach_claude_on_exit(home).unwrap_or(false) {
+        crate::ops::actor_delivery::shutdown_with_policy(Some(home));
+        let settlement = crate::ops::runtime_restore::settle_stranded(home);
+        let managed = crate::ops::local_headless::shutdown_with_policy(true);
+        let runtimes = crate::ops::actor_runtime::stop_all();
+        let mut errors = Vec::new();
+        if let Err(error) = settlement {
+            errors.push(error.message);
+        }
+        if let Err(error) = managed {
+            errors.push(error.to_string());
+        }
+        let statuses = match runtimes {
+            Ok(statuses) => statuses,
+            Err(error) => {
+                errors.push(error.to_string());
+                Vec::new()
+            }
+        };
+        return if errors.is_empty() {
+            Ok(statuses)
+        } else {
+            Err(anyhow::anyhow!(errors.join("; ")))
+        };
+    }
     crate::ops::actor_delivery::shutdown_all();
     let managed = crate::ops::local_headless::stop_all();
     let runtimes = crate::ops::actor_runtime::stop_all();

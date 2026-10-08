@@ -26,7 +26,7 @@ pub use server::run;
 pub use server_lifecycle::stop_every_runtime;
 
 /// Best-effort provider stop requests for managed Actor sessions registered in
-/// this process (Claude Agent View). This does not address a detached daemon
+/// this process (Claude Agent View), honoring their daemon-exit policy. This does not address a detached daemon
 /// or Voice Analyst, and never waits for provider job disappearance.
 pub async fn request_managed_session_stop() {
     ops::local_headless::kill_all_requests().await;

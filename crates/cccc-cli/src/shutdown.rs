@@ -10,7 +10,8 @@ use std::time::Duration;
 const FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 // Agent View sessions are not owned process trees, so force_terminate_owned
 // leaves them running. One bounded round of stop requests keeps them from
-// being stranded without making the forced exit wait for confirmations.
+// being stranded without making the forced exit wait for confirmations. The
+// provider request path honors an Actor's configured daemon-exit detach policy.
 const FORCE_STOP_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const INTERRUPTED_EXIT_CODE: i32 = 130;
 

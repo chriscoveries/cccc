@@ -329,8 +329,6 @@ pub fn stop_all() -> io::Result<()> {
     shutdown(false)
 }
 
-// Inactive until daemon lifecycle integration is complete.
-#[allow(dead_code)]
 pub fn shutdown_with_policy(detach_claude: bool) -> io::Result<()> {
     shutdown(detach_claude)
 }
@@ -391,6 +389,11 @@ pub async fn kill_all_requests() {
     };
     let mut tasks = tokio::task::JoinSet::new();
     for item in items {
+        if item.managed.runtime() == ActorRuntime::Claude
+            && cccc_core::settings::detach_claude_on_exit(&item.home).unwrap_or(false)
+        {
+            continue;
+        }
         tasks.spawn(async move {
             if let Err(error) = item.managed.kill_request().await {
                 tracing::warn!(

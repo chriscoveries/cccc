@@ -187,7 +187,11 @@ fn process_managed_batch(
                     &job.event.id,
                     super::actor_delivery::delivery_transport(home, group, actor),
                     crate::ops::runtime_delivery::DeliveryOutcome::Ambiguous(
-                        "ACP prompt receipt was not confirmed; inspect the Actor before an explicit retry",
+                        if actor.runtime == cccc_contracts::ActorRuntime::Claude {
+                            "Claude prompt receipt was not confirmed; inspect the Actor before an explicit retry"
+                        } else {
+                            "ACP prompt receipt was not confirmed; inspect the Actor before an explicit retry"
+                        },
                     ),
                 ) {
                     // The original durable claim remains unretryable and is

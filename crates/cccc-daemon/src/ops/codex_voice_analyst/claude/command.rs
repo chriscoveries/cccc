@@ -715,3 +715,63 @@ mod tests {
         assert!(error.to_string().contains("upgrade to 2.1.259 or newer"));
     }
 }
+
+#[cfg(all(test, unix))]
+mod exit_policy_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn daemon_bus_environment_is_added_only_for_detach() {
+        let temp = tempfile::tempdir().expect("scratch");
+        let home = HomeLayout::from_path(temp.path().join("cccc")).expect("home");
+        home.initialize().expect("initialize");
+        let exe = temp.path().join("claude");
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").expect("fixture");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
+            .expect("permissions");
+        let environment = BTreeMap::from([
+            (
+                "CLAUDE_CONFIG_DIR".into(),
+                temp.path().join("config").to_string_lossy().into_owned(),
+            ),
+            ("XDG_RUNTIME_DIR".into(), "private-runtime".into()),
+            (
+                "DBUS_SESSION_BUS_ADDRESS".into(),
+                "unix:path=/private/bus".into(),
+            ),
+        ]);
+        let command = vec![exe.to_string_lossy().into_owned()];
+        let prepared = prepare(
+            &home,
+            &command,
+            &environment,
+            temp.path(),
+            "actor",
+            SessionPurpose::Actor,
+            json!({}),
+        )
+        .expect("stop prepare");
+        for key in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+            assert!(!prepared.launch_environment.contains_key(key));
+        }
+        std::fs::write(
+            home.root().join("settings.yaml"),
+            "runtime:\n  claude_daemon_exit: detach\n",
+        )
+        .expect("detach");
+        let prepared = prepare(
+            &home,
+            &command,
+            &environment,
+            temp.path(),
+            "actor",
+            SessionPurpose::Actor,
+            json!({}),
+        )
+        .expect("detach prepare");
+        for key in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+            assert_eq!(prepared.launch_environment.get(key), environment.get(key));
+        }
+    }
+}

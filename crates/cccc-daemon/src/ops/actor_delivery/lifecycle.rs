@@ -36,7 +36,6 @@ pub fn shutdown_all() {
 }
 
 // None preserves the existing completion clearing behavior.
-#[allow(dead_code)]
 pub fn shutdown_with_policy(settle_home: Option<&HomeLayout>) {
     let removed = workers()
         .lock()

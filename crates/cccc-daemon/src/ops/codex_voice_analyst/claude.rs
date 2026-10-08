@@ -497,6 +497,7 @@ async fn connect_launched(
         prepared.config_dir.clone(),
         generation.to_owned(),
         skip_existing_transcript,
+        prepared.detach_on_exit && resumed && skip_existing_transcript,
     )
     .await
     {
@@ -963,6 +964,7 @@ impl ClaudeClient {
         config_dir: PathBuf,
         generation: String,
         skip_existing_transcript: bool,
+        fence_existing_tail: bool,
     ) -> io::Result<Self> {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
@@ -983,6 +985,7 @@ impl ClaudeClient {
             generation,
             events.clone(),
             Arc::clone(&running),
+            fence_existing_tail,
         ));
         Ok(Self {
             commands,
@@ -1158,9 +1161,13 @@ async fn run_client(
     generation: String,
     events: broadcast::Sender<AnalystEvent>,
     running: Arc<AtomicBool>,
+    fence_existing_tail: bool,
 ) {
     let mut state =
         transcript::TranscriptState::new(generation.clone(), session_id.clone(), events.clone());
+    if fence_existing_tail {
+        state.fence_existing_turn_tail();
+    }
     let mut pending: Option<PendingControl> = None;
     let mut native_inputs = std::collections::VecDeque::new();
     let mut transcript_tick = tokio::time::interval(Duration::from_millis(50));
