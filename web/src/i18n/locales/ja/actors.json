@@ -350,5 +350,11 @@
   "acpMode": {
     "label": "{{runtime}} モード",
     "hint": "ACP はローカル CLI のログインと独立した管理セッションを使います。ターミナルはなく、入力は現在のタスク終了後に実行されます。"
-  }
+  },
+  "reconcileClaudeLaunch": "Claude の起動を復旧",
+  "claudeLaunchResetDescription": "元の Claude 設定のジョブを確認してください。起動失敗の状態を解除すると、次の開始で新しいジョブを作成できます。表示されたジョブは実行を続けます。",
+  "claudeLaunchResetAcknowledge": "この設定を確認し、次の開始で別のジョブが作成される可能性を了承しました。",
+  "clearClaudeLaunchFence": "新しい起動を許可",
+  "claudeLaunchInspectionFailed": "Claude の起動状態を確認できませんでした。",
+  "claudeLaunchResetFailed": "起動失敗の状態を解除できませんでした。"
 }

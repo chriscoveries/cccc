@@ -19,6 +19,8 @@ pub(in crate::ops::codex_voice_analyst) struct PreparedClaude {
     pub(super) launch_environment: BTreeMap<String, String>,
     pub(super) config_dir: PathBuf,
     pub(super) detach_on_exit: bool,
+    pub(in crate::ops::codex_voice_analyst) launch_owner:
+        Option<crate::ops::runtime_session::claude_ownership::LaunchOwnership>,
     #[cfg(test)]
     pub(super) settings_path: PathBuf,
 }
@@ -66,7 +68,20 @@ pub(in crate::ops::codex_voice_analyst) fn prepare(
     // Keep one stable, owner-scoped file so stop/start can resume the same
     // session while still allowing actor removal to erase the private copy.
     let settings_path = settings_root.join(format!("{}.json", &settings_digest[..24]));
+    let detach_on_exit =
+        purpose == SessionPurpose::Actor && cccc_core::settings::detach_claude_on_exit(home)?;
     let mut launch_environment = launcher_environment(environment);
+    if detach_on_exit {
+        for key in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+            if let Some(value) = environment
+                .get(key)
+                .cloned()
+                .or_else(|| std::env::var(key).ok())
+            {
+                launch_environment.insert(key.into(), value);
+            }
+        }
+    }
     network_environment::extend_launcher(&mut launch_environment, &settings);
     cccc_core::fs::write_secret_json(&settings_path, &Value::Object(settings))?;
 
@@ -83,8 +98,8 @@ pub(in crate::ops::codex_voice_analyst) fn prepare(
     arguments.push("--dangerously-skip-permissions".into());
 
     Ok(PreparedClaude {
-        detach_on_exit: purpose == SessionPurpose::Actor
-            && cccc_core::settings::detach_claude_on_exit(home)?,
+        detach_on_exit,
+        launch_owner: None,
         executable: executable.to_string_lossy().into_owned(),
         arguments,
         launch_environment,

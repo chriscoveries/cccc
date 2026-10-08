@@ -434,3 +434,30 @@ export async function copyProfilePrivateEnvFromProfile(
     },
   );
 }
+
+export interface ClaudeLaunchInspection {
+  group_id: string;
+  actor_id: string;
+  actor_generation: string;
+  actor_created_at: string;
+  config_dir: string;
+  attempt_id: string;
+  session_id: string;
+  resettable: boolean;
+  jobs: Array<Record<string, unknown>> | null;
+  inspection_error: string | null;
+}
+
+export function inspectActorClaudeLaunch(groupId: string, actorId: string) {
+  return apiJson<ClaudeLaunchInspection>(
+    `/api/v1/groups/${encodeURIComponent(groupId)}/actors/${encodeURIComponent(actorId)}/claude_launch`,
+  );
+}
+
+export function resetActorClaudeLaunch(inspection: ClaudeLaunchInspection) {
+  clearActorsReadOnlyRequest(inspection.group_id);
+  return apiJson(
+    `/api/v1/groups/${encodeURIComponent(inspection.group_id)}/actors/${encodeURIComponent(inspection.actor_id)}/claude_launch/reset`,
+    { method: "POST", body: JSON.stringify({ ...inspection, acknowledge: true }) },
+  );
+}

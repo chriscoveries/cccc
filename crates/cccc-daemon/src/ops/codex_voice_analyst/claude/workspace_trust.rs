@@ -87,6 +87,7 @@ mod tests {
         let result = super::super::launch(
             super::super::command::PreparedClaude {
                 detach_on_exit: false,
+                launch_owner: None,
                 executable: executable.to_string_lossy().into_owned(),
                 arguments: Vec::new(),
                 launch_environment: BTreeMap::new(),

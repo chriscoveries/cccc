@@ -42,6 +42,29 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             )
             .await?
         }
+        ActorAction::ReconcileClaude {
+            actor_id,
+            group_id,
+            acknowledge,
+        } => {
+            let inspected = call(
+                client,
+                "actor_claude_launch_inspect",
+                json!({
+                    "group_id":group(home, group_id)?, "actor_id":actor_id, "by":"user"
+                }),
+            )
+            .await?;
+            if !inspected.ok || !acknowledge {
+                return print(inspected);
+            }
+            // Always show the original config's job list before clearing the fence.
+            print(inspected.clone())?;
+            let mut args = inspected.result;
+            args.insert("by".into(), json!("user"));
+            args.insert("acknowledge".into(), json!(true));
+            call(client, "actor_claude_launch_reset", Value::Object(args)).await?
+        }
         ActorAction::Remove(target) => lifecycle(client, home, "actor_remove", target).await?,
         ActorAction::Start(target) => lifecycle(client, home, "actor_start", target).await?,
         ActorAction::Stop(target) => lifecycle(client, home, "actor_stop", target).await?,

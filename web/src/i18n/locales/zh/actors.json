@@ -350,5 +350,11 @@
   "acpMode": {
     "label": "{{runtime}} 模式",
     "hint": "ACP 使用本机 CLI 登录和独立的受管会话。没有原生终端；输入在当前任务结束后执行。"
-  }
+  },
+  "reconcileClaudeLaunch": "恢复 Claude 启动",
+  "claudeLaunchResetDescription": "请检查原 Claude 配置中的任务。清除启动失败状态后，下次启动可创建新任务；列出的任务将继续运行。",
+  "claudeLaunchResetAcknowledge": "我已检查此配置，并接受下次启动可能创建另一个任务。",
+  "clearClaudeLaunchFence": "允许重新启动",
+  "claudeLaunchInspectionFailed": "无法检查 Claude 启动状态。",
+  "claudeLaunchResetFailed": "无法清除启动失败状态。"
 }

@@ -29,6 +29,14 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/groups/{group_id}/actors/{actor_id}/new_session",
             post(new_session),
         )
+        .route(
+            "/api/v1/groups/{group_id}/actors/{actor_id}/claude_launch",
+            get(inspect_claude_launch),
+        )
+        .route(
+            "/api/v1/groups/{group_id}/actors/{actor_id}/claude_launch/reset",
+            post(reset_claude_launch),
+        )
         .merge(super::actor_assets::routes())
         .merge(super::actor_profiles::routes())
 }
@@ -131,4 +139,22 @@ fn normalize_command(args: &mut Map<String, Value>) -> Result<(), crate::api::Ap
         args.insert("command".into(), json!(command));
     }
     Ok(())
+}
+
+async fn inspect_claude_launch(
+    State(state): State<AppState>,
+    Path((group_id, actor_id)): Path<(String, String)>,
+) -> ApiResult {
+    lifecycle(&state, &group_id, &actor_id, "actor_claude_launch_inspect").await
+}
+async fn reset_claude_launch(
+    State(state): State<AppState>,
+    Path((group_id, actor_id)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let mut args = body_object(body)?;
+    args.insert("group_id".into(), json!(group_id));
+    args.insert("actor_id".into(), json!(actor_id));
+    args.insert("by".into(), json!("user"));
+    call(&state, "actor_claude_launch_reset", args).await
 }

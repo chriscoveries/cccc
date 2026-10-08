@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 
 mod command;
 mod control;
+mod isolation;
 mod resume_failure;
 mod transcript;
 mod transcript_ack;
@@ -27,6 +28,31 @@ pub(super) use command::prepare;
 
 pub(crate) fn claude_config_dir(environment: &BTreeMap<String, String>) -> io::Result<PathBuf> {
     command::config_dir(environment)
+}
+
+pub(crate) async fn inspect_claude_jobs(config_dir: &Path) -> io::Result<Vec<Value>> {
+    let endpoint = control::Endpoint::resolve(config_dir)?;
+    Ok(control::list(&endpoint)
+        .await?
+        .into_iter()
+        .map(|job| {
+            let mut fields = serde_json::Map::new();
+            for key in [
+                "short",
+                "sessionId",
+                "cwd",
+                "name",
+                "cliVersion",
+                "active",
+                "state",
+            ] {
+                if let Some(value) = job.get(key) {
+                    fields.insert(key.into(), value.clone());
+                }
+            }
+            Value::Object(fields)
+        })
+        .collect())
 }
 
 pub(crate) async fn report_unmatched_claude_jobs(
@@ -203,24 +229,70 @@ async fn launch_inner(
         arguments.extend(prepared.arguments.iter().cloned());
         arguments.extend(["--name".into(), name, "--bg".into()]);
     }
-    let mut command = command::process_command(
+    let mut command = isolation::command(
         &prepared.executable,
         &arguments,
         &prepared.launch_environment,
-    )?;
+        prepared.detach_on_exit,
+    )
+    .await?;
     command
         .current_dir(cwd)
         .env_clear()
         .envs(&prepared.launch_environment)
         .kill_on_drop(true);
-    let output = tokio::time::timeout(LAUNCH_TIMEOUT, command.output())
-        .await
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Claude Agent View launch timed out",
-            )
-        })??;
+    let output = if prepared.detach_on_exit {
+        let attempt = prepared
+            .launch_owner
+            .as_ref()
+            .map(|owner| {
+                crate::ops::runtime_session::claude_ownership::begin_launch(
+                    owner,
+                    &prepared.config_dir,
+                    cwd,
+                    requested_session_id.unwrap_or_default(),
+                )
+            })
+            .transpose()?;
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                if let (Some(owner), Some(attempt)) = (&prepared.launch_owner, attempt) {
+                    crate::ops::runtime_session::claude_ownership::restore_unexecuted(
+                        owner, attempt,
+                    )
+                    .map_err(|cleanup| {
+                        io::Error::new(
+                            error.kind(),
+                            format!("{error}; failed to restore launch ownership: {cleanup}"),
+                        )
+                    })?;
+                }
+                return Err(error);
+            }
+        };
+        tokio::time::timeout(LAUNCH_TIMEOUT, child.wait_with_output())
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Claude Agent View launch timed out",
+                )
+            })??
+    } else {
+        tokio::time::timeout(LAUNCH_TIMEOUT, command.output())
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Claude Agent View launch timed out",
+                )
+            })??
+    };
     let output_bytes = output.stdout.len().saturating_add(output.stderr.len());
     if output_bytes > MAX_LAUNCH_OUTPUT_BYTES {
         return Err(io::Error::new(
@@ -231,6 +303,24 @@ async fn launch_inner(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
+        // A failed scope may still have started the job. Its reported short ID
+        // is exact launch evidence; keep uncertainty even when identity resolves.
+        if let Some(owner) = &prepared.launch_owner
+            && let Some(short) = parse_short_id(&stdout).or_else(|| parse_short_id(&stderr))
+            && let Ok((_, job)) = wait_for_job(&prepared.config_dir, &short).await
+            && validate_session_id(&job.session_id).is_ok()
+            && read_job_state(&prepared.config_dir, &job, cwd).is_ok()
+        {
+            crate::ops::runtime_session::claude_ownership::record(
+                &owner.home,
+                &owner.group_id,
+                &owner.actor_id,
+                &prepared.config_dir,
+                cwd,
+                &job.session_id,
+                true,
+            )?;
+        }
         let detail = nonempty_detail(&stderr, &stdout);
         if let Some(error) = workspace_trust::WorkspaceUntrusted::from_refusal(
             detail,
@@ -269,11 +359,13 @@ async fn launch_inner(
         Ok(value) => value,
         Err(error) => {
             let rollback = rollback_started_job(&prepared.config_dir, &short).await;
+            clear_confirmed_launch(&prepared, &rollback)?;
             return Err(with_optional_cleanup_error(error, rollback.err()));
         }
     };
     if let Err(error) = validate_worker_version(&job) {
         let rollback = kill_and_confirm(&endpoint, &job.short).await;
+        clear_confirmed_launch(&prepared, &rollback)?;
         return Err(with_optional_cleanup_error(error, rollback.err()));
     }
     if let Some(expected) = requested_session_id
@@ -281,11 +373,24 @@ async fn launch_inner(
     {
         let error = resume_failure::Rejection::CopiedSession.error();
         let rollback = kill_and_confirm(&endpoint, &job.short).await;
+        clear_confirmed_launch(&prepared, &rollback)?;
         return Err(with_optional_cleanup_error(error, rollback.err()));
     }
     if let Err(error) = await_settled(&prepared.config_dir, &job, cwd).await {
         let rollback = kill_and_confirm(&endpoint, &job.short).await;
+        clear_confirmed_launch(&prepared, &rollback)?;
         return Err(with_optional_cleanup_error(error, rollback.err()));
+    }
+    if let Some(owner) = &prepared.launch_owner {
+        crate::ops::runtime_session::claude_ownership::record(
+            &owner.home,
+            &owner.group_id,
+            &owner.actor_id,
+            &prepared.config_dir,
+            cwd,
+            &job.session_id,
+            true,
+        )?;
     }
     let resumed = requested_session_id.is_some();
     connect_launched(
@@ -2282,6 +2387,7 @@ mod tests {
         let launched = launch(
             command::PreparedClaude {
                 detach_on_exit: false,
+                launch_owner: None,
                 executable: executable.to_string_lossy().into_owned(),
                 arguments: Vec::new(),
                 launch_environment: BTreeMap::new(),
@@ -2574,3 +2680,19 @@ mod tests {
 #[cfg(test)]
 #[path = "claude/transcript_buffer_tests.rs"]
 mod transcript_buffer_tests;
+
+fn clear_confirmed_launch(
+    prepared: &command::PreparedClaude,
+    cleanup: &io::Result<()>,
+) -> io::Result<()> {
+    if cleanup.is_ok()
+        && let Some(owner) = &prepared.launch_owner
+    {
+        crate::ops::runtime_session::claude_ownership::remove(
+            &owner.home,
+            &owner.group_id,
+            &owner.actor_id,
+        )?;
+    }
+    Ok(())
+}

@@ -12,6 +12,7 @@ pub(super) fn list(
     group: &GroupDoc,
     request: &DaemonRequest,
 ) -> Result<Vec<Value>, OpError> {
+    let detach = cccc_core::settings::detach_claude_on_exit(home).unwrap_or(false);
     let include_internal = bool_arg(request, "include_internal");
     let include_unread = bool_arg(request, "include_unread");
     let actor_ids = group
@@ -45,6 +46,21 @@ pub(super) fn list(
                     &group.group_id,
                     &actor.id,
                 ));
+                if detach {
+                    object.insert(
+                        "claude_launch_resettable".into(),
+                        json!(
+                            super::runtime_session::claude_ownership::load(
+                                home,
+                                &group.group_id,
+                                &actor
+                            )
+                            .ok()
+                            .flatten()
+                            .is_some_and(|owner| owner.uncertain && owner.session_id.is_empty())
+                        ),
+                    );
+                }
                 object.insert("running".into(), Value::Bool(status.running));
                 let actual = super::local_headless::structured_state(&group.group_id, &actor.id);
                 let retained_pty = cccc_runtime::status(&group.group_id, &actor.id)

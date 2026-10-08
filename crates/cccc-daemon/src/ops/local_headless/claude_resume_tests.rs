@@ -1131,3 +1131,605 @@ fn detach_history_without_running_intent_is_not_auto_started() {
     assert_eq!(f.launches(), 0);
     assert!(!super::running(&f.group.group_id, &f.actor.id));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn reviewer_scoped_launch_failure_cannot_launch_a_second_job() {
+    if isolated("reviewer_scoped_launch_failure_cannot_launch_a_second_job") {
+        return;
+    }
+    if !std::path::Path::new("/run/systemd/system").exists() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    super::super::runtime_session::remove(&f.home, &f.group.group_id, &f.actor.id)
+        .expect("fresh actor");
+    let bin = f._temp.path().join("bin");
+    std::fs::create_dir(&bin).expect("private runner dir");
+    let runner = bin.join("systemd-run");
+    std::fs::write(&runner, "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nif [ \"$1\" = /bin/true ]; then exec /bin/true; fi\n\"$@\"\nexit 1\n").expect("runner starts provider then fails");
+    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755))
+        .expect("runner permissions");
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    let group = store
+        .mutate(&f.group.group_id, |g| {
+            g.actors[0].env.insert(
+                "PATH".into(),
+                format!("{}:{}", bin.display(), f.actor.env["PATH"]),
+            );
+            Ok(g.clone())
+        })
+        .expect("private PATH");
+    let first = super::super::actor_runtime::apply(&f.home, &group, &f.actor.id, "actor.start");
+    assert!(first.is_err());
+    assert_eq!(f.launches(), 1);
+    assert!(f.config.join("active").exists());
+    // This is the same retry performed by the ordinary delivery worker after
+    // launch_error maps the failed fresh launch to a retriable io_error.
+    let second = super::super::actor_runtime::apply(&f.home, &group, &f.actor.id, "actor.start");
+    assert!(second.is_err());
+    assert_eq!(
+        f.launches(),
+        1,
+        "failed scoped launch left a job but the next startup launched again"
+    );
+    let owner =
+        super::super::runtime_session::claude_ownership::load(&f.home, &f.group.group_id, &f.actor)
+            .expect("owner")
+            .expect("durable fence");
+    assert!(owner.uncertain);
+    assert!(
+        !owner.session_id.is_empty(),
+        "resolve the exact reported job even after scope failure"
+    );
+    let job = f.delivery();
+    assert!(
+        super::super::actor_delivery_worker::process_batch(
+            &[job],
+            &mut String::new(),
+            &AtomicBool::new(false)
+        ),
+        "automatic delivery leaves its retry loop at the durable fence"
+    );
+    assert_eq!(f.launches(), 1);
+    assert!(
+        f.lifecycle("actor_stop").ok,
+        "explicit stop reconciles exact uncertain ownership"
+    );
+    assert!(!f.config.join("active").exists());
+    assert!(
+        super::super::runtime_session::claude_ownership::load(&f.home, &f.group.group_id, &f.actor)
+            .expect("owner")
+            .is_none()
+    );
+}
+
+impl Fixture {
+    fn reconcile(&self, op: &str, fields: Value) -> cccc_contracts::DaemonResponse {
+        let mut args = fields.as_object().expect("fields").clone();
+        args.insert("group_id".into(), json!(self.group.group_id));
+        args.insert("actor_id".into(), json!(self.actor.id));
+        args.insert("by".into(), json!("user"));
+        if op == "actor_claude_launch_reset" {
+            args.insert("acknowledge".into(), json!(true));
+        }
+        crate::handle_request(
+            &self.home,
+            &DaemonRequest {
+                v: 1,
+                op: op.into(),
+                args,
+            },
+        )
+    }
+}
+
+#[test]
+fn rv2_unidentified_failed_launch_has_explicit_recovery() {
+    if isolated("rv2_unidentified_failed_launch_has_explicit_recovery") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    let executable = &f.actor.command[0];
+    let original = std::fs::read(executable).expect("fixture");
+    std::fs::write(
+        executable,
+        r#"#!/usr/bin/env python3
+import sys
+if '--version' in sys.argv:
+    print('2.1.286 (Claude Code)')
+else:
+    print('launch refused before any job started', file=sys.stderr)
+    sys.exit(1)
+"#,
+    )
+    .expect("fixture");
+    let first = f.lifecycle("actor_new_session");
+    assert!(!first.ok, "fixture must refuse the first fresh launch");
+    let owner =
+        super::super::runtime_session::claude_ownership::load(&f.home, &f.group.group_id, &f.actor)
+            .expect("fixture")
+            .expect("fixture");
+    assert!(owner.uncertain && owner.session_id.is_empty());
+    assert!(!f.config.join("active").exists());
+    std::fs::write(executable, original).expect("fixture");
+    for action in [
+        "actor_start",
+        "actor_stop",
+        "actor_restart",
+        "actor_new_session",
+        "actor_remove",
+    ] {
+        let response = f.lifecycle(action);
+        assert!(!response.ok, "uncertainty must still block {action}");
+        assert!(
+            response
+                .error
+                .expect("blocked")
+                .message
+                .contains("cccc actor reconcile-claude")
+        );
+    }
+    let inspect = f.reconcile("actor_claude_launch_inspect", json!({}));
+    assert!(inspect.ok, "supported inspection: {:?}", inspect.error);
+    let reset = f.reconcile("actor_claude_launch_reset", Value::Object(inspect.result));
+    assert!(reset.ok, "supported reset: {:?}", reset.error);
+    assert!(
+        f.lifecycle("actor_start").ok,
+        "reset restores explicit Start"
+    );
+    assert!(f.config.join("active").exists());
+    assert_eq!(f.launches(), 1);
+}
+
+#[test]
+fn rv2_proven_spawn_failure_does_not_leave_uncertainty() {
+    if isolated("rv2_proven_spawn_failure_does_not_leave_uncertainty") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    let executable = &f.actor.command[0];
+    let original = std::fs::read(executable).expect("fixture");
+    std::fs::write(
+        executable,
+        r#"#!/bin/sh
+if [ "$1" = --version ]; then
+    printf '2.1.286 (Claude Code)\n'
+    /bin/rm -- "$0"
+    exit 0
+fi
+exit 77
+"#,
+    )
+    .expect("fixture");
+    // Keep the fixture away from any real user scope. The effective PATH
+    // contains no systemd-run; only the disposable Claude executable is removed.
+    GroupStore::new(f.home.clone())
+        .expect("fixture")
+        .mutate(&f.group.group_id, |g| {
+            g.actors[0]
+                .env
+                .insert("PATH".into(), "/nonexistent-claude-test-path".into());
+            Ok(())
+        })
+        .expect("fixture");
+    super::super::runtime_session::remove(&f.home, &f.group.group_id, &f.actor.id)
+        .expect("fixture");
+    let result = f.lifecycle("actor_new_session");
+    eprintln!("known pre-exec failure: {:?}", result.error);
+    assert!(!result.ok);
+    assert!(
+        !std::path::Path::new(executable).exists(),
+        "version fixture did not delete its executable"
+    );
+    assert!(!f.config.join("active").exists());
+    let owner =
+        super::super::runtime_session::claude_ownership::load(&f.home, &f.group.group_id, &f.actor)
+            .expect("fixture");
+    std::fs::write(executable, original).expect("fixture");
+    assert!(
+        owner.is_none_or(|o| !o.uncertain),
+        "ENOENT from spawn proves no launcher ran, but the actor is still durably fenced"
+    );
+}
+
+#[test]
+fn claude_launch_reset_checks_generation_original_config_attempt_and_ack() {
+    if isolated("claude_launch_reset_checks_generation_original_config_attempt_and_ack") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    reviewer_seed_survivor(&f, false);
+    super::super::runtime_session::claude_ownership::record(
+        &f.home,
+        &f.group.group_id,
+        &f.actor.id,
+        &f.config,
+        std::path::Path::new(&f.group.scopes[0].url),
+        "",
+        true,
+    )
+    .expect("unknown launch");
+    // Configuration drift must not redirect inspection to another provider.
+    let replacement = f
+        .config
+        .parent()
+        .expect("parent")
+        .join("replacement-config");
+    std::fs::create_dir(&replacement).expect("replacement config");
+    GroupStore::new(f.home.clone())
+        .expect("store")
+        .mutate(&f.group.group_id, |group| {
+            group.actors[0].env.insert(
+                "CLAUDE_CONFIG_DIR".into(),
+                replacement.to_string_lossy().into_owned(),
+            );
+            Ok(())
+        })
+        .expect("drift");
+    let inspection = f.reconcile("actor_claude_launch_inspect", json!({}));
+    assert!(inspection.ok, "{:?}", inspection.error);
+    assert_eq!(
+        inspection.result["config_dir"],
+        json!(f.config.canonicalize().expect("original config"))
+    );
+    assert_eq!(inspection.result["jobs"][0]["short"], "abcdef12");
+    let fields = Value::Object(inspection.result);
+    for key in [
+        "actor_generation",
+        "actor_created_at",
+        "config_dir",
+        "attempt_id",
+    ] {
+        let mut stale = fields.clone();
+        stale[key] = json!("different");
+        let reset = f.reconcile("actor_claude_launch_reset", stale);
+        assert!(!reset.ok, "stale {key} must be rejected");
+        assert_eq!(reset.error.expect("stale").code, "stale_claude_launch");
+    }
+    let mut no_ack = fields.as_object().expect("fields").clone();
+    no_ack.insert("by".into(), json!("user"));
+    let response = crate::handle_request(
+        &f.home,
+        &DaemonRequest {
+            v: 1,
+            op: "actor_claude_launch_reset".into(),
+            args: no_ack.clone(),
+        },
+    );
+    assert_eq!(
+        response.error.expect("ack required").code,
+        "acknowledgment_required"
+    );
+    no_ack.insert("by".into(), json!(f.actor.id));
+    no_ack.insert("acknowledge".into(), json!(true));
+    let response = crate::handle_request(
+        &f.home,
+        &DaemonRequest {
+            v: 1,
+            op: "actor_claude_launch_reset".into(),
+            args: no_ack,
+        },
+    );
+    assert_eq!(
+        response.error.expect("operator only").code,
+        "permission_denied"
+    );
+    let reset = f.reconcile("actor_claude_launch_reset", fields);
+    assert!(reset.ok, "{:?}", reset.error);
+    assert_eq!(reset.result["jobs_stopped"], 0);
+    assert!(f.config.join("active").exists(), "listed job is left alone");
+    assert_eq!(f.launches(), 1, "reset does not start or replay work");
+    assert!(
+        super::super::runtime_session::claude_ownership::load(&f.home, &f.group.group_id, &f.actor)
+            .expect("owner")
+            .is_none()
+    );
+}
+
+#[test]
+fn proven_spawn_failure_restores_prior_owner_and_preserves_changed_generation() {
+    if isolated("proven_spawn_failure_restores_prior_owner_and_preserves_changed_generation") {
+        return;
+    }
+    use super::super::runtime_session::claude_ownership as ownership;
+    let f = Fixture::new("healthy");
+    let owner = ownership::LaunchOwnership {
+        home: f.home.clone(),
+        group_id: f.group.group_id.clone(),
+        actor_id: f.actor.id.clone(),
+    };
+    let cwd = std::path::Path::new(&f.group.scopes[0].url);
+    ownership::record(
+        &f.home,
+        &f.group.group_id,
+        &f.actor.id,
+        &f.config,
+        cwd,
+        SAVED,
+        false,
+    )
+    .expect("prior owner");
+    let prior = ownership::load(&f.home, &f.group.group_id, &f.actor).expect("load");
+    let attempt = ownership::begin_launch(&owner, &f.config, cwd, SAVED).expect("begin");
+    ownership::restore_unexecuted(&owner, attempt).expect("restore");
+    assert_eq!(
+        ownership::load(&f.home, &f.group.group_id, &f.actor).expect("load"),
+        prior
+    );
+    let attempt = ownership::begin_launch(&owner, &f.config, cwd, SAVED).expect("begin");
+    GroupStore::new(f.home.clone())
+        .expect("store")
+        .mutate(&f.group.group_id, |group| {
+            group.actors[0].generation = "replacement".into();
+            Ok(())
+        })
+        .expect("new generation");
+    assert!(ownership::restore_unexecuted(&owner, attempt).is_err());
+    assert!(
+        ownership::load(&f.home, &f.group.group_id, &f.actor)
+            .expect("owner")
+            .expect("record")
+            .uncertain
+    );
+}
+
+#[test]
+fn rv3_reset_cannot_remove_owner_confirmed_by_background_launch() {
+    if isolated("rv3_reset_cannot_remove_owner_confirmed_by_background_launch") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    super::super::runtime_session::remove(&f.home, &f.group.group_id, &f.actor.id)
+        .expect("fixture");
+    let executable = &f.actor.command[0];
+    let script = std::fs::read_to_string(executable).expect("fixture");
+    let marker = "        print(f\"started · {SHORT}\")";
+    assert!(script.contains(marker));
+    std::fs::write(executable, script.replace(marker, "        print(f\"started · {SHORT}\", flush=True)\n        while not (root / 'release_launch').exists():\n            time.sleep(0.01)")).expect("fixture");
+    let home = f.home.clone();
+    let group = f.group.clone();
+    let actor = f.actor.clone();
+    // The actual delivery-worker wake path owns StartGuard, without the
+    // daemon group-dispatch lock. Delay its launcher exit after writing the
+    // unidentified attempt so reset deterministically overlaps that launch.
+    let launch = std::thread::spawn(move || {
+        super::super::actor_runtime::apply(&home, &group, &actor.id, "actor.start")
+    });
+    f.wait(|| f.config.join("active").exists());
+    let inspected = f.reconcile("actor_claude_launch_inspect", json!({}));
+    assert!(inspected.ok, "{:?}", inspected.error);
+    assert_eq!(inspected.result["session_id"], "");
+    assert_eq!(inspected.result["jobs"][0]["short"], "abcdef12");
+    let mut args = inspected.result;
+    args.insert("by".into(), json!("user"));
+    args.insert("acknowledge".into(), json!(true));
+    let stale_args = args.clone();
+    let home = f.home.clone();
+    let group_id = f.group.group_id.clone();
+    let locks = crate::dispatch_concurrency::DispatchLocks::default();
+    let (sent, received) = std::sync::mpsc::channel();
+    let reset = std::thread::spawn(move || {
+        let response = locks.with_group_write_blocking(&group_id, || {
+            crate::handle_request(
+                &home,
+                &DaemonRequest {
+                    v: 1,
+                    op: "actor_claude_launch_reset".into(),
+                    args,
+                },
+            )
+        });
+        sent.send(response.clone()).expect("fixture");
+        response
+    });
+    let before_launch_finished = received.recv_timeout(Duration::from_secs(2));
+    // Release and join both threads before assertions, including on regression.
+    std::fs::write(f.config.join("release_launch"), "finish background launch").expect("fixture");
+    let started = launch.join().expect("fixture");
+    let result = reset.join().expect("fixture");
+    assert!(started.is_ok(), "{started:?}");
+    use super::super::runtime_session::claude_ownership as ownership;
+    let confirmed = ownership::load(&f.home, &f.group.group_id, &f.actor)
+        .expect("fixture")
+        .expect("fixture");
+    assert!(!confirmed.uncertain && !confirmed.session_id.is_empty());
+    assert!(
+        before_launch_finished.is_ok(),
+        "reset must not wait for an active launch"
+    );
+    assert!(
+        !result.ok,
+        "reset must not delete an in-flight launch's ownership"
+    );
+    assert_eq!(
+        result.error.expect("fixture").code,
+        super::super::actor_runtime::RUNTIME_BUSY
+    );
+    // Once launch finishes, stale acknowledgment must reject confirmed ownership.
+    let stale_reset = f.reconcile("actor_claude_launch_reset", Value::Object(stale_args));
+    assert!(!stale_reset.ok);
+    assert_eq!(
+        stale_reset.error.expect("fixture").code,
+        "no_uncertain_launch"
+    );
+    assert_eq!(
+        ownership::load(&f.home, &f.group.group_id, &f.actor).expect("fixture"),
+        Some(confirmed)
+    );
+    assert!(f.config.join("active").exists());
+}
+
+#[test]
+fn rv3_spawn_rollback_preserves_newer_attempt_exactly() {
+    if isolated("rv3_spawn_rollback_preserves_newer_attempt_exactly") {
+        return;
+    }
+    use super::super::runtime_session::claude_ownership as ownership;
+    let f = Fixture::new("healthy");
+    let owner = ownership::LaunchOwnership {
+        home: f.home.clone(),
+        group_id: f.group.group_id.clone(),
+        actor_id: f.actor.id.clone(),
+    };
+    let cwd = std::path::Path::new(&f.group.scopes[0].url);
+    let attempt = ownership::begin_launch(&owner, &f.config, cwd, "").expect("fixture");
+    let home = f.home.clone();
+    let group_id = f.group.group_id.clone();
+    let actor_id = f.actor.id.clone();
+    let config = f.config.clone();
+    let workspace = cwd.to_owned();
+    std::thread::spawn(move || {
+        ownership::record(
+            &home, &group_id, &actor_id, &config, &workspace, SAVED, false,
+        )
+    })
+    .join()
+    .expect("fixture")
+    .expect("fixture");
+    let newer = ownership::load(&f.home, &f.group.group_id, &f.actor)
+        .expect("fixture")
+        .expect("fixture");
+    assert!(!newer.uncertain);
+    assert!(ownership::restore_unexecuted(&owner, attempt).is_err());
+    assert_eq!(
+        ownership::load(&f.home, &f.group.group_id, &f.actor).expect("fixture"),
+        Some(newer)
+    );
+}
+
+#[test]
+fn rv3_group_block_errors_name_reconciliation_and_identified_reset_refuses() {
+    if isolated("rv3_group_block_errors_name_reconciliation_and_identified_reset_refuses") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    use super::super::runtime_session::claude_ownership as ownership;
+    ownership::record(
+        &f.home,
+        &f.group.group_id,
+        &f.actor.id,
+        &f.config,
+        std::path::Path::new(&f.group.scopes[0].url),
+        "",
+        true,
+    )
+    .expect("fixture");
+    for (op, extra) in [
+        ("group_stop", json!({})),
+        ("group_set_state", json!({"state":"stopped"})),
+        ("group_reset", json!({"confirm":f.group.group_id})),
+    ] {
+        let mut args = extra.as_object().expect("fixture").clone();
+        args.insert("group_id".into(), json!(f.group.group_id));
+        args.insert("by".into(), json!("user"));
+        let response = crate::handle_request(
+            &f.home,
+            &DaemonRequest {
+                v: 1,
+                op: op.into(),
+                args,
+            },
+        );
+        assert!(!response.ok, "{op} must remain blocked");
+        assert!(
+            response
+                .error
+                .expect("fixture")
+                .message
+                .contains("cccc actor reconcile-claude"),
+            "{op} must name recovery"
+        );
+    }
+    reviewer_seed_survivor(&f, false);
+    ownership::record(
+        &f.home,
+        &f.group.group_id,
+        &f.actor.id,
+        &f.config,
+        std::path::Path::new(&f.group.scopes[0].url),
+        SAVED,
+        true,
+    )
+    .expect("fixture");
+    let inspected = f.reconcile("actor_claude_launch_inspect", json!({}));
+    assert!(inspected.ok);
+    assert_eq!(inspected.result["resettable"], false);
+    let reset = f.reconcile("actor_claude_launch_reset", Value::Object(inspected.result));
+    assert!(!reset.ok);
+    assert_eq!(
+        reset.error.expect("fixture").code,
+        "identified_claude_launch"
+    );
+    assert!(f.config.join("active").exists());
+}
+
+#[test]
+fn rv3_reset_never_waits_on_launch_guard_under_group_lock() {
+    if isolated("rv3_reset_never_waits_on_launch_guard_under_group_lock") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    detach_policy(&f);
+    use super::super::runtime_session::claude_ownership as ownership;
+    ownership::record(
+        &f.home,
+        &f.group.group_id,
+        &f.actor.id,
+        &f.config,
+        std::path::Path::new(&f.group.scopes[0].url),
+        "",
+        true,
+    )
+    .expect("fixture");
+    let before = ownership::load(&f.home, &f.group.group_id, &f.actor).expect("fixture");
+    let inspected = f.reconcile("actor_claude_launch_inspect", json!({}));
+    assert!(inspected.ok);
+    let locks = Arc::new(crate::dispatch_concurrency::DispatchLocks::default());
+    let (ready, received) = std::sync::mpsc::channel();
+    let mut waiting = None;
+    let reset = locks.with_group_write_blocking(&f.group.group_id, || {
+        let locks = Arc::clone(&locks);
+        let key = (f.group.group_id.clone(), f.actor.id.clone());
+        waiting = Some(std::thread::spawn(move || {
+            let _launch = super::supervisor::StartGuard::acquire(&key).expect("fixture");
+            ready.send(()).expect("fixture");
+            // Model a launch waiting on the group lock while it owns StartGuard.
+            // A bounded wait also lets a regressed blocking reset unwind safely.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("fixture");
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(2), locks.group_write(&key.0))
+                    .await
+                    .is_ok()
+            })
+        }));
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fixture");
+        f.reconcile("actor_claude_launch_reset", Value::Object(inspected.result))
+    });
+    let acquired_group = waiting.expect("fixture").join().expect("fixture");
+    assert!(
+        acquired_group,
+        "reset must release the group lock without waiting on StartGuard"
+    );
+    assert!(!reset.ok);
+    assert_eq!(
+        reset.error.expect("fixture").code,
+        super::super::actor_runtime::RUNTIME_BUSY
+    );
+    assert_eq!(
+        ownership::load(&f.home, &f.group.group_id, &f.actor).expect("fixture"),
+        before
+    );
+}

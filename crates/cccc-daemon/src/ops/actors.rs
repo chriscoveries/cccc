@@ -22,6 +22,10 @@ const RUNTIME_STATES_KEY: &str = "runtime_states";
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "actor_list" => Operation::new(Read, list),
+        "actor_claude_launch_inspect" => {
+            Operation::new(Read, super::claude_launch_recovery::inspect)
+        }
+        "actor_claude_launch_reset" => Operation::new(Write, super::claude_launch_recovery::reset),
         "actor_prompt" => Operation::new(Read, prompt),
         "actor_add" => Operation::new(Write, add),
         "actor_update" => Operation::new(Write, update),

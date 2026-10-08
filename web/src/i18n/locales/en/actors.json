@@ -350,5 +350,11 @@
   "acpMode": {
     "label": "{{runtime}} mode",
     "hint": "ACP uses the native CLI login and its own managed session. There is no terminal; inputs queue until the current task finishes."
-  }
+  },
+  "reconcileClaudeLaunch": "Recover Claude launch",
+  "claudeLaunchResetDescription": "Review the jobs in the original Claude configuration. Clearing the failed-launch state allows a later Start to create a job; listed jobs stay running.",
+  "claudeLaunchResetAcknowledge": "I have inspected this configuration and accept that a later Start may create another job.",
+  "clearClaudeLaunchFence": "Allow a new launch",
+  "claudeLaunchInspectionFailed": "Could not inspect the Claude launch.",
+  "claudeLaunchResetFailed": "Could not clear the failed-launch state."
 }

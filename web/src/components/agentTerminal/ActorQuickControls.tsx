@@ -20,6 +20,7 @@ export function ActorQuickControls({
   onTakeover,
   onHistory,
   onNewSession,
+  onReconcileClaude,
   onRestart,
   onStop,
   onEdit,
@@ -43,6 +44,7 @@ export function ActorQuickControls({
   onTakeover: () => void;
   onHistory: () => void;
   onNewSession: () => void;
+  onReconcileClaude?: () => void;
   onRestart: () => void;
   onStop: () => void;
   onEdit: () => void;
@@ -172,6 +174,15 @@ export function ActorQuickControls({
                 {!running ? (
                   <button className={item} disabled={busy} onClick={() => run(onLaunch)}>
                     {t("launchAgentLabel")}
+                  </button>
+                ) : null}
+                {onReconcileClaude ? (
+                  <button
+                    className={item}
+                    disabled={busy}
+                    onClick={() => run(onReconcileClaude, true)}
+                  >
+                    {t("reconcileClaudeLaunch")}
                   </button>
                 ) : null}
                 {canStartNewSession ? (

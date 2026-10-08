@@ -44,6 +44,7 @@ import {
   PlusIcon,
   ClockIcon,
 } from "./Icons";
+import { ClaudeLaunchRecoveryDialog } from "./agentTerminal/ClaudeLaunchRecoveryDialog";
 import { ActorQuickControls } from "./agentTerminal/ActorQuickControls";
 import { TerminalHistoryPanel } from "./agentTerminal/TerminalHistoryPanel";
 import { ScrollFade } from "./ScrollFade";
@@ -216,6 +217,7 @@ export function AgentTab({
   });
   const [activated, setActivated] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [claudeRecoveryOpen, setClaudeRecoveryOpen] = useState(false);
   // Bumped to trigger a fresh WebSocket connection from the reconnect button
   const [reconnectTrigger, setReconnectTrigger] = useState(0);
   const [stoppedTerminalText, setStoppedTerminalText] = useState("");
@@ -733,6 +735,9 @@ export function AgentTab({
             onReconnect={requestReconnect}
             onTakeover={requestTakeover}
             onHistory={() => setHistoryOpen(true)}
+            onReconcileClaude={
+              actor.claude_launch_resettable ? () => setClaudeRecoveryOpen(true) : undefined
+            }
             onNewSession={handleNewSession}
             onRestart={onRelaunch}
             onStop={onQuit}
@@ -1078,6 +1083,13 @@ export function AgentTab({
         )}
       </div>
 
+      <ClaudeLaunchRecoveryDialog
+        open={claudeRecoveryOpen}
+        onOpenChange={setClaudeRecoveryOpen}
+        groupId={groupId}
+        actorId={actor.id}
+        onReset={() => onStatusChange?.()}
+      />
       {/* Action Buttons - Scrollable on mobile with fade edges */}
       {canControl && !compact ? (
         <ScrollFade
@@ -1085,6 +1097,15 @@ export function AgentTab({
           innerClassName="flex items-center gap-2 px-4 py-3 sm:px-5"
           fadeWidth={20}
         >
+          {actor.claude_launch_resettable ? (
+            <button
+              onClick={() => setClaudeRecoveryOpen(true)}
+              disabled={isBusy}
+              className={secondaryActionButtonClass}
+            >
+              {t("reconcileClaudeLaunch")}
+            </button>
+          ) : null}
           {isRunning ? (
             <>
               <button

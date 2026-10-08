@@ -14,6 +14,8 @@ mod supervisor_managed_tests;
 mod workspace_trust;
 mod workspace_trust_recovery;
 
+pub(super) use supervisor::StartGuard;
+
 #[cfg(test)]
 pub(crate) use managed_reader::verify_claude_reader_release;
 
@@ -27,6 +29,12 @@ pub(crate) use supervisor::{
 };
 
 use cccc_core::HomeLayout;
+
+pub(crate) fn inspect_claude_jobs(
+    config: &std::path::Path,
+) -> std::io::Result<Vec<serde_json::Value>> {
+    block_on_managed(super::codex_voice_analyst::inspect_claude_jobs(config))
+}
 use serde::Serialize;
 use std::future::Future;
 use std::sync::atomic::AtomicBool;

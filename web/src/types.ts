@@ -345,6 +345,7 @@ export type Actor = {
   effective_runtime_mode?: RuntimeMode;
   effective_runtime?: string;
   runtime_state_source?: "terminal" | "managed_session" | string;
+  claude_launch_resettable?: boolean;
   runtime_session_status?: string | null;
   runtime_session_resume_eligible?: boolean | null;
   runtime_session_last_resume_error?: string | null;

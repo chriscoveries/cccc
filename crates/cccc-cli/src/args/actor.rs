@@ -33,6 +33,15 @@ pub enum ActorAction {
         #[arg(long, default_value = "user")]
         by: String,
     },
+    /// Inspect an uncertain Claude launch; acknowledge to clear only an unidentified fence.
+    ReconcileClaude {
+        actor_id: String,
+        #[arg(long = "group")]
+        group_id: Option<String>,
+        /// I inspected the original Claude configuration and accept leaving its jobs running.
+        #[arg(long)]
+        acknowledge: bool,
+    },
     Remove(ActorTarget),
     Start(ActorTarget),
     Stop(ActorTarget),
@@ -86,4 +95,41 @@ pub struct ActorTarget {
     pub group_id: Option<String>,
     #[arg(long, default_value = "user")]
     pub by: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    #[test]
+    fn reconcile_claude_requires_explicit_acknowledgment_flag() {
+        for acknowledged in [false, true] {
+            let mut args = vec![
+                "cccc",
+                "actor",
+                "reconcile-claude",
+                "worker",
+                "--group",
+                "g_one",
+            ];
+            if acknowledged {
+                args.push("--acknowledge");
+            }
+            let cli = crate::args::Cli::try_parse_from(args).expect("reconciliation command");
+            let Some(crate::args::CommandKind::Actor(ActorArgs {
+                action:
+                    ActorAction::ReconcileClaude {
+                        actor_id,
+                        group_id,
+                        acknowledge,
+                    },
+            })) = cli.command
+            else {
+                panic!("wrong command");
+            };
+            assert_eq!(actor_id, "worker");
+            assert_eq!(group_id.as_deref(), Some("g_one"));
+            assert_eq!(acknowledge, acknowledged);
+        }
+    }
 }

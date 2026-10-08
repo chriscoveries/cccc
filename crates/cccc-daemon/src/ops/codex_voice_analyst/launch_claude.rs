@@ -75,6 +75,11 @@ impl AnalystSession {
             "env":mcp_environment,
         });
         let session_command = command.clone();
+        if detach && let Some((group_id, actor_id)) = actor {
+            super::super::runtime_session::claude_ownership::check_launch(
+                home, group_id, actor_id,
+            )?;
+        }
         let resume_attempt = if let Some((group_id, actor_id)) = actor {
             super::super::runtime_session::prepare_claude_managed_session(
                 home,
@@ -101,10 +106,9 @@ impl AnalystSession {
                 .and_then(Value::as_str)
                 .is_some_and(|id| !id.is_empty())
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Claude detach cannot replace a saved session whose launch identity no longer matches; restore its configuration or choose New Session",
-            ));
+            return Err(io::Error::other(super::super::runtime_session::ClaudeResumeBlocked(
+                "Claude detach cannot replace a saved session whose launch identity no longer matches; restore its configuration or choose New Session".into(),
+            )));
         }
         if detach
             && let Some((group_id, actor_id)) = actor
@@ -129,7 +133,16 @@ impl AnalystSession {
             purpose,
             mcp_server,
         ) {
-            Ok(prepared) => {
+            Ok(mut prepared) => {
+                if detach && let Some((group_id, actor_id)) = actor {
+                    prepared.launch_owner = Some(
+                        super::super::runtime_session::claude_ownership::LaunchOwnership {
+                            home: home.clone(),
+                            group_id: group_id.into(),
+                            actor_id: actor_id.into(),
+                        },
+                    );
+                }
                 // Transcript validation holds a large future. Keep it off the
                 // managed worker's stack, including unoptimized native builds.
                 Box::pin(claude::launch(
@@ -146,6 +159,11 @@ impl AnalystSession {
         let launched = match result {
             Ok(launched) => launched,
             Err(error) => {
+                if detach && let Some((group_id, actor_id)) = actor {
+                    super::super::runtime_session::claude_ownership::check_launch(
+                        home, group_id, actor_id,
+                    )?;
+                }
                 if let Some((group_id, actor_id)) = actor
                     && let Some(attempt) = resume_attempt.as_ref()
                     && let Some((diagnostic, blocked)) = claude::resume_diagnostic(&error)
@@ -173,7 +191,7 @@ impl AnalystSession {
                 &claude::claude_config_dir(&environment)?,
                 &binding.root,
                 &launched.session_id,
-                false,
+                true,
             ) {
                 if launched.resumed {
                     launched.protocol.detach().await;
@@ -203,9 +221,35 @@ impl AnalystSession {
                         "failed to persist Claude session: {error}; exact-job rollback also failed: {cleanup}"
                     )));
                 }
+                if !launched.resumed {
+                    super::super::runtime_session::claude_ownership::remove(
+                        home, group_id, actor_id,
+                    )?;
+                }
                 return Err(error);
             }
             tracing::warn!(%error, %group_id, %actor_id, "failed to persist Claude managed session");
+        }
+        if detach && let Some((group_id, actor_id)) = actor {
+            if let Err(error) = super::super::runtime_session::claude_ownership::record(
+                home,
+                group_id,
+                actor_id,
+                &claude::claude_config_dir(&environment)?,
+                &binding.root,
+                &launched.session_id,
+                false,
+            ) {
+                if launched.resumed {
+                    launched.protocol.detach().await;
+                } else {
+                    launched.protocol.close().await?;
+                    super::super::runtime_session::claude_ownership::remove(
+                        home, group_id, actor_id,
+                    )?;
+                }
+                return Err(error);
+            }
         }
         Ok(Self {
             #[cfg(test)]

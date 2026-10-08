@@ -192,7 +192,7 @@ fn stop_registered(
             if owner.session_id.is_empty() {
                 return Err(OpError::new(
                     CLAUDE_RESUME_FAILED,
-                    "Claude launch is uncertain; reconcile the provider before replacing it",
+                    super::runtime_session::claude_ownership::guidance(&group.group_id, actor_id),
                 ));
             }
             super::local_headless::stop_saved_claude_job(
@@ -390,5 +390,6 @@ pub(crate) fn saved_claude_binding(
         config_dir: config,
         workspace: cwd,
         uncertain: false,
+        attempt_id: String::new(),
     }))
 }

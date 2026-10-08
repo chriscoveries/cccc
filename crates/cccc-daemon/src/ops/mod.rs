@@ -20,6 +20,7 @@ mod automation_manage;
 mod automation_rule_access;
 pub(crate) mod automation_runtime;
 mod capabilities;
+mod claude_launch_recovery;
 mod codex_mcp;
 pub(crate) mod codex_voice_analyst;
 pub(crate) mod codex_voice_controller;

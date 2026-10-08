@@ -34,11 +34,21 @@ fn starts() -> &'static (Mutex<HashSet<Key>>, Condvar) {
     STARTS.get_or_init(|| (Mutex::new(HashSet::new()), Condvar::new()))
 }
 
-pub(super) struct StartGuard {
+pub(in crate::ops) struct StartGuard {
     key: Key,
 }
 
 impl StartGuard {
+    /// Reconciliation already owns the group dispatch lock. Never wait here:
+    /// a launch holding this guard may itself be waiting for that group lock.
+    pub(in crate::ops) fn try_acquire(key: &Key) -> io::Result<Option<Self>> {
+        let (active, _) = starts();
+        let mut active = active.lock().map_err(|_| poisoned())?;
+        Ok(active
+            .insert(key.clone())
+            .then(|| Self { key: key.clone() }))
+    }
+
     pub(super) fn acquire(key: &Key) -> io::Result<Self> {
         let (active, changed) = starts();
         let mut active = active.lock().map_err(|_| poisoned())?;
