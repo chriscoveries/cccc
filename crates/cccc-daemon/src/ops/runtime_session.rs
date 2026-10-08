@@ -12,8 +12,10 @@ mod grok_tests;
 pub(crate) mod native_acp;
 mod opencode;
 pub use claude::{
-    ResumeBlocked as ClaudeResumeBlocked, is_resume_blocked as is_claude_resume_blocked,
+    ResumeBlocked as ClaudeResumeBlocked, archive_new_session as archive_claude_new_session,
+    explicit_workspace as claude_explicit_workspace, is_resume_blocked as is_claude_resume_blocked,
     prepare_managed as prepare_claude_managed_session,
+    prepare_managed_with_policy as prepare_claude_managed_with_policy,
     record_managed as record_claude_managed_session,
     record_resume_failure as record_claude_resume_failure,
     retry_failed_resume as retry_failed_claude_resume,
@@ -25,6 +27,37 @@ pub use opencode::{
     prepare_managed as prepare_opencode_managed_session,
     record_managed as record_opencode_managed_session,
 };
+
+/// Record the recovery outcome for all managed providers without persisting provider stderr.
+pub fn recovery_decision(
+    home: &HomeLayout,
+    group: &str,
+    actor: &str,
+    action: &str,
+    reason: &str,
+) -> std::io::Result<()> {
+    let mut document = match read(home, group, actor) {
+        Ok(document) => document,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData
+            ) =>
+        {
+            Map::new()
+        }
+        Err(error) => return Err(error),
+    };
+    if action == "failure" && string(&document, "last_resume_error").is_empty() {
+        document.insert("last_resume_error".into(), json!(reason));
+        let failures = document
+            .get("failure_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        document.insert("failure_count".into(), json!(failures.saturating_add(1)));
+    }
+    claude::recovery_decision(home, group, actor, &mut document, action, reason)
+}
 
 const NO_RESUME_VALUES: [&str; 4] = ["0", "false", "no", "off"];
 const MANAGED_RECORD_VERSION: u64 = 2;
@@ -205,6 +238,13 @@ pub fn actor_fields(home: &HomeLayout, group_id: &str, actor_id: &str) -> Map<St
     let document = read(home, group_id, actor_id).unwrap_or_default();
     Map::from_iter([
         (
+            "runtime_session_last_recovery_decision".into(),
+            document
+                .get("last_recovery_decision")
+                .cloned()
+                .unwrap_or(Value::Null),
+        ),
+        (
             "runtime_session_status".into(),
             nullable_string(&document, "status"),
         ),
@@ -251,11 +291,15 @@ fn selected_path(home: &HomeLayout, group: &str, actor: &str) -> std::io::Result
 }
 
 fn read(home: &HomeLayout, group_id: &str, actor_id: &str) -> std::io::Result<Map<String, Value>> {
-    let value: Value = cccc_core::fs::read_json(&path(home, group_id, actor_id)?)?;
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| std::io::Error::other("runtime session document is not an object"))
+    let bytes = std::fs::read(path(home, group_id, actor_id)?)?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    value.as_object().cloned().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "runtime session document is not an object",
+        )
+    })
 }
 
 fn write(
@@ -337,6 +381,9 @@ fn stable_app_thread_command(command: &[String]) -> Vec<String> {
 
 fn model_from_command(command: &[String]) -> String {
     for (index, item) in command.iter().enumerate() {
+        if item == "--" {
+            break;
+        }
         if matches!(item.as_str(), "-m" | "--model") {
             return command.get(index + 1).cloned().unwrap_or_default();
         }

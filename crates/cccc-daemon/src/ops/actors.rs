@@ -744,7 +744,7 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
     } else {
         kind
     };
-    let status = match actor_runtime::apply(home, &group, &actor_id, apply_kind) {
+    let status = match actor_runtime::apply_explicit(home, &group, &actor_id, apply_kind) {
         Ok(status) => status,
         Err(error) => {
             // A failed teardown has not launched a replacement. Do not turn

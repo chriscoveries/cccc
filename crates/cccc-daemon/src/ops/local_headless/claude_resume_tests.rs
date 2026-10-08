@@ -275,7 +275,19 @@ fn copied_claude_resume_stops_auto_wake_and_explicit_retry_delivers_the_original
         ));
     }
     assert_eq!(f.launches(), 1, "no repeated provider launch");
-    assert_eq!(f.receipt(), failed);
+    let mut after = f.receipt();
+    let mut before = failed.clone();
+    for document in [&mut after, &mut before] {
+        document
+            .as_object_mut()
+            .expect("fixture operation")
+            .remove("updated_at");
+        document
+            .as_object_mut()
+            .expect("fixture operation")
+            .remove("last_recovery_decision");
+    }
+    assert_eq!(after, before);
     assert!(
         !f.config.join("received").exists(),
         "pending task was not sent"
@@ -448,6 +460,14 @@ fn new_claude_session_retires_pending_trust_recovery_before_removing_the_receipt
     assert!(result.ok, "{:?}", result.error);
     assert_ne!(f.receipt()["provider_session_id"], SAVED);
     assert_eq!(f.receipt()["status"], "usable");
+    assert!(
+        f.receipt()["previous_sessions"]
+            .as_array()
+            .expect("archived sessions")
+            .iter()
+            .any(|entry| entry["session_id"] == SAVED && entry["reason"] == "new_session"),
+        "explicit New Session must archive the saved pointer before retiring it"
+    );
     assert!(
         f.config
             .join("projects/workspace")

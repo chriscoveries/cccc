@@ -11,8 +11,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+mod cache_confirmation;
 mod command;
 mod control;
+mod model_switch;
 mod resume_failure;
 mod transcript;
 mod transcript_ack;
@@ -82,7 +84,44 @@ pub(super) async fn launch(
     purpose: SessionPurpose,
     requested_session_id: Option<&str>,
 ) -> io::Result<LaunchedClaude> {
-    launch_inner(prepared, cwd, generation, purpose, requested_session_id).await
+    Box::pin(launch_inner(
+        prepared,
+        cwd,
+        generation,
+        purpose,
+        requested_session_id,
+        None,
+    ))
+    .await
+}
+
+pub(super) async fn launch_with_model(
+    prepared: command::PreparedClaude,
+    cwd: &Path,
+    generation: &str,
+    purpose: SessionPurpose,
+    requested_session_id: Option<&str>,
+    model: Option<&str>,
+) -> io::Result<LaunchedClaude> {
+    if model.is_none() {
+        return Box::pin(launch(
+            prepared,
+            cwd,
+            generation,
+            purpose,
+            requested_session_id,
+        ))
+        .await;
+    }
+    Box::pin(launch_inner(
+        prepared,
+        cwd,
+        generation,
+        purpose,
+        requested_session_id,
+        model,
+    ))
+    .await
 }
 
 async fn launch_inner(
@@ -91,6 +130,7 @@ async fn launch_inner(
     generation: &str,
     purpose: SessionPurpose,
     requested_session_id: Option<&str>,
+    model: Option<&str>,
 ) -> io::Result<LaunchedClaude> {
     command::require_supported_version(&prepared.executable, cwd, &prepared.launch_environment)
         .await?;
@@ -114,6 +154,7 @@ async fn launch_inner(
                 true,
                 skip_existing_transcript,
                 false,
+                model,
             )
             .await;
         }
@@ -229,6 +270,7 @@ async fn launch_inner(
         resumed,
         skip_existing_transcript,
         true,
+        model,
     )
     .await
 }
@@ -311,7 +353,24 @@ async fn connect_launched(
     resumed: bool,
     skip_existing_transcript: bool,
     rollback_on_failure: bool,
+    model: Option<&str>,
 ) -> io::Result<LaunchedClaude> {
+    if let Some(model) = model
+        && let Err(error) = Box::pin(model_switch::apply(
+            &prepared.config_dir,
+            &endpoint,
+            &job,
+            model,
+            rollback_on_failure,
+        ))
+        .await
+    {
+        if rollback_on_failure {
+            let rollback = kill_and_confirm(&endpoint, &job.short).await;
+            return Err(with_optional_cleanup_error(error, rollback.err()));
+        }
+        return Err(error);
+    }
     let state_path = prepared
         .config_dir
         .join("jobs")

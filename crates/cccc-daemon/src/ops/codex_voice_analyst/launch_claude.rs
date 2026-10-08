@@ -13,6 +13,7 @@ impl AnalystSession {
         requested_session_id: Option<String>,
         purpose: SessionPurpose,
         actor: Option<(&str, &str)>,
+        explicit: bool,
     ) -> io::Result<Self> {
         let generation = uuid::Uuid::new_v4().simple().to_string();
         let cccc =
@@ -68,17 +69,32 @@ impl AnalystSession {
         });
         let session_command = command.clone();
         let resume_attempt = if let Some((group_id, actor_id)) = actor {
-            super::super::runtime_session::prepare_claude_managed_session(
-                home,
-                group_id,
-                actor_id,
-                &binding.root,
-                &session_command,
-                &environment,
-            )?
+            if explicit {
+                super::super::runtime_session::prepare_claude_managed_with_policy(
+                    home,
+                    group_id,
+                    actor_id,
+                    &binding.root,
+                    &session_command,
+                    &environment,
+                    true,
+                )?
+            } else {
+                super::super::runtime_session::prepare_claude_managed_session(
+                    home,
+                    group_id,
+                    actor_id,
+                    &binding.root,
+                    &session_command,
+                    &environment,
+                )?
+            }
         } else {
             None
         };
+        let resume_model = resume_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.model_change.as_deref());
         let resume_session_id = resume_attempt
             .as_ref()
             .map(|attempt| attempt.session_id.as_str())
@@ -95,12 +111,13 @@ impl AnalystSession {
             Ok(prepared) => {
                 // Transcript validation holds a large future. Keep it off the
                 // managed worker's stack, including unoptimized native builds.
-                Box::pin(claude::launch(
+                Box::pin(claude::launch_with_model(
                     prepared,
                     &binding.root,
                     &generation,
                     purpose,
                     resume_session_id,
+                    resume_model,
                 ))
                 .await
             }
