@@ -37,6 +37,12 @@ pub enum ActorAction {
     Start(ActorTarget),
     Stop(ActorTarget),
     Restart(ActorTarget),
+    /// Resume a specific saved Claude conversation in this actor's workspace.
+    ResumeSession {
+        #[command(flatten)]
+        target: ActorTarget,
+        session_id: String,
+    },
     Update {
         actor_id: String,
         #[arg(long = "group")]

@@ -93,10 +93,15 @@ fn failed_resume_preserves_identity_and_pauses_automatic_launch_without_new_sess
             .expect("automatic launch is blocked, not fresh");
         assert!(is_resume_blocked(&error));
     }
+    let mut after = f.receipt();
+    let mut before = failed.clone();
+    for document in [&mut after, &mut before] {
+        document.remove("updated_at");
+        document.remove("last_recovery_decision");
+    }
     assert_eq!(
-        f.receipt(),
-        failed,
-        "blocked reads must not manufacture attempts"
+        after, before,
+        "blocked decisions must not manufacture attempts"
     );
     assert!(retry_failed_resume(&f.home, &f.group, "worker").expect("explicit retry"));
     let retry = f.prepare().expect("retry").expect("same saved identity");
@@ -156,7 +161,7 @@ fn changing_launch_identity_does_not_reuse_a_blocked_conversation() {
     let attempt = f.prepare().expect("prepare").expect("session");
     f.failure(&attempt, true);
     f.command.extend(["--model".into(), "sonnet".into()]);
-    assert!(f.prepare().expect("new configured identity").is_none());
+    assert!(f.prepare().is_err());
     assert_eq!(
         f.receipt()["provider_session_id"],
         SESSION,

@@ -162,6 +162,7 @@ export default function App({
     toggleActorEnabled,
     relaunchActor,
     startNewActorSession,
+    resumeActorSession,
     editActor,
     removeActor,
     openActorInbox,
@@ -501,6 +502,7 @@ export default function App({
         onToggleActorEnabled={toggleActorEnabled}
         onRelaunchActor={relaunchActor}
         onNewActorSession={startNewActorSession}
+        onResumeActorSession={resumeActorSession}
         onEditActor={editActor}
         onRemoveActor={removeActor}
         onOpenActorInbox={openActorInbox}

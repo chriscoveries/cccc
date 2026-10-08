@@ -24,6 +24,7 @@ export interface ActorTabProps {
   onToggleEnabled: (isRunning: boolean) => void;
   onRelaunch: () => void;
   onNewSession: () => void;
+  onResumeSession: (sessionId: string) => void;
   onEdit: () => void;
   onRemove: () => void;
   onInbox: () => void;
@@ -49,6 +50,7 @@ export const ActorTab = memo(function ActorTab({
   onToggleEnabled,
   onRelaunch,
   onNewSession,
+  onResumeSession,
   onEdit,
   onRemove,
   onInbox,
@@ -90,6 +92,7 @@ export const ActorTab = memo(function ActorTab({
         onLaunch={() => onToggleEnabled(false)}
         onRelaunch={onRelaunch}
         onNewSession={onNewSession}
+        onResumeSession={onResumeSession}
         onEdit={onEdit}
         onRemove={onRemove}
         onInbox={onInbox}

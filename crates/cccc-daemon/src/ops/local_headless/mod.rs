@@ -21,10 +21,10 @@ pub(crate) use events::{
     append as append_event, append_with_dedupe as append_event_with_dedupe,
     contains_dedupe as contains_event_dedupe,
 };
-pub(crate) use supervisor::registered_running;
 pub(crate) use supervisor::{
     cancel_turn, respond_interaction, respond_permission, structured_state,
 };
+pub(crate) use supervisor::{registered_running, resumed_session_is};
 
 use cccc_core::HomeLayout;
 use serde::Serialize;
@@ -33,8 +33,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, OnceLock};
 
 pub use supervisor::{
-    detach_after_viewer_exit, ensure_viewer, kill_all_requests, running, start, status, stop,
-    stop_all, stop_group, submit_batch, supports,
+    detach_after_viewer_exit, ensure_viewer, kill_all_requests, running, start, start_with_policy,
+    status, stop, stop_all, stop_group, submit_batch, supports,
 };
 
 pub(super) fn uses_managed_session(actor: &cccc_contracts::Actor) -> bool {
@@ -114,7 +114,7 @@ fn managed_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-fn run_managed_launch<F, T>(future: F) -> std::io::Result<T>
+pub(crate) fn run_managed_launch<F, T>(future: F) -> std::io::Result<T>
 where
     F: Future<Output = std::io::Result<T>> + Send + 'static,
     T: Send + 'static,

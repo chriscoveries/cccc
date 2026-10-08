@@ -467,7 +467,7 @@ fn launcher_environment(environment: &BTreeMap<String, String>) -> BTreeMap<Stri
         .collect()
 }
 
-fn config_dir(environment: &BTreeMap<String, String>) -> io::Result<PathBuf> {
+fn config_path(environment: &BTreeMap<String, String>) -> io::Result<PathBuf> {
     let configured = environment.get("CLAUDE_CONFIG_DIR").cloned().or_else(|| {
         environment
             .get("HOME")
@@ -502,6 +502,16 @@ fn config_dir(environment: &BTreeMap<String, String>) -> io::Result<PathBuf> {
     if !path.is_absolute() {
         return invalid("CLAUDE_CONFIG_DIR must resolve to an absolute path");
     }
+    Ok(path)
+}
+
+/// Resolve launch identity without creating a provider directory during preflight.
+pub(super) fn existing_config_dir(environment: &BTreeMap<String, String>) -> io::Result<PathBuf> {
+    config_path(environment)?.canonicalize()
+}
+
+fn config_dir(environment: &BTreeMap<String, String>) -> io::Result<PathBuf> {
+    let path = config_path(environment)?;
     std::fs::create_dir_all(&path)?;
     path.canonicalize()
 }
