@@ -29,6 +29,20 @@ pub async fn run(home: HomeLayout) -> Result<()> {
 
 async fn run_with_restore(home: HomeLayout, restore: RuntimeRestoreSpawner) -> Result<()> {
     home.initialize().context("initialize Rust home")?;
+    let detach_claude = cccc_core::settings::detach_claude_on_exit(&home)?;
+    if detach_claude && !crate::ops::runtime_resume_enabled() {
+        anyhow::bail!(
+            "runtime.claude_daemon_exit=detach requires CCCC_RUNTIME_RESUME to be enabled"
+        );
+    }
+    if cfg!(windows) && detach_claude {
+        anyhow::bail!(
+            "runtime.claude_daemon_exit=detach is unsupported under the Windows daemon job object"
+        );
+    }
+    if detach_claude {
+        anyhow::bail!("runtime.claude_daemon_exit=detach is not available in this build");
+    }
     let paths = DaemonPaths::new(home);
     std::fs::create_dir_all(&paths.daemon_dir)?;
     let lock = claim_home(&paths)?;

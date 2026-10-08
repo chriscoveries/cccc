@@ -69,6 +69,7 @@ pub(crate) mod runtime_delivery;
 mod runtime_mcp;
 pub(crate) mod runtime_restore;
 mod runtime_session;
+pub(crate) use runtime_session::resume_enabled as runtime_resume_enabled;
 mod runtime_state;
 mod settings;
 mod task_list;

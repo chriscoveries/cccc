@@ -358,7 +358,7 @@ fn workspace_path(path: &Path) -> String {
         .into_owned()
 }
 
-fn resume_enabled() -> bool {
+pub(crate) fn resume_enabled() -> bool {
     std::env::var("CCCC_RUNTIME_RESUME")
         .ok()
         .map(|value| !NO_RESUME_VALUES.contains(&value.trim().to_ascii_lowercase().as_str()))

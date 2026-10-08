@@ -9,6 +9,8 @@ use cccc_contracts::CodexVoiceSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GlobalSettings {
+    #[serde(default, skip_serializing_if = "RuntimeSettings::is_default")]
+    pub runtime: RuntimeSettings,
     #[serde(default)]
     pub observability: Map<String, Value>,
     #[serde(default)]
@@ -20,6 +22,32 @@ pub struct GlobalSettings {
     pub codex_voice: CodexVoiceSettings,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeDaemonExit {
+    #[default]
+    Stop,
+    Detach,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSettings {
+    #[serde(default)]
+    pub claude_daemon_exit: ClaudeDaemonExit,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl RuntimeSettings {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+pub fn detach_claude_on_exit(home: &HomeLayout) -> io::Result<bool> {
+    Ok(load(home)?.runtime.claude_daemon_exit == ClaudeDaemonExit::Detach)
 }
 
 pub fn load(home: &HomeLayout) -> io::Result<GlobalSettings> {
@@ -189,6 +217,30 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn claude_exit_policy_defaults_to_stop_and_preserves_runtime_extensions() {
+        assert_eq!(
+            GlobalSettings::default().runtime.claude_daemon_exit,
+            ClaudeDaemonExit::Stop
+        );
+        let parsed: GlobalSettings =
+            serde_yaml::from_str("runtime:\n  claude_daemon_exit: detach\n  extension: true\n")
+                .expect("policy");
+        assert_eq!(parsed.runtime.claude_daemon_exit, ClaudeDaemonExit::Detach);
+        assert_eq!(parsed.runtime.extra["extension"], json!(true));
+        assert!(
+            serde_yaml::from_str::<GlobalSettings>("runtime:\n  claude_daemon_exit: typo\n")
+                .is_err()
+        );
+        assert!(
+            !serde_json::to_value(GlobalSettings::default())
+                .expect("default serialization")
+                .as_object()
+                .expect("object")
+                .contains_key("runtime")
+        );
+    }
 
     #[test]
     fn loads_canonical_python_yaml() {
