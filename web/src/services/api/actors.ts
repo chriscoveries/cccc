@@ -235,6 +235,15 @@ export async function newActorSession(groupId: string, actorId: string) {
   );
 }
 
+export async function resumeActorSession(groupId: string, actorId: string, sessionId: string) {
+  clearActorsReadOnlyRequest(groupId);
+  clearGroupsReadRequest();
+  return apiJson(
+    `/api/v1/groups/${encodeURIComponent(groupId)}/actors/${encodeURIComponent(actorId)}/resume_session`,
+    { method: "POST", body: JSON.stringify({ session_id: sessionId }) },
+  );
+}
+
 export async function fetchActorPrivateEnvKeys(groupId: string, actorId: string) {
   return apiJson<{
     group_id: string;

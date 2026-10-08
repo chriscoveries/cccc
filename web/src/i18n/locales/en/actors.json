@@ -31,6 +31,8 @@
   "sendInterruptLabel": "Send interrupt signal",
   "relaunch": "Relaunch",
   "relaunchAgent": "Relaunch agent",
+  "resumeSession": "Resume session…",
+  "resumeSessionPrompt": "Saved Claude session ID (UUID)",
   "newSession": "New Session",
   "newSessionAgent": "Start a new session",
   "newSessionConfirm": "Start a new session for this actor?",

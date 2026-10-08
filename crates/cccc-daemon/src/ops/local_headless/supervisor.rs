@@ -81,9 +81,18 @@ fn start_managed_agent(
     group: &GroupDoc,
     actor: &Actor,
     key: Key,
+    explicit: bool,
 ) -> io::Result<()> {
-    let cwd = working_directory(group, actor)?;
-    match launch_managed(home, group, actor, &cwd) {
+    let saved = if explicit && actor.runtime == ActorRuntime::Claude {
+        super::super::runtime_session::claude_explicit_workspace(home, &group.group_id, &actor.id)?
+    } else {
+        None
+    };
+    let cwd = match saved {
+        Some(path) => path,
+        None => working_directory(group, actor)?,
+    };
+    match launch_managed_with_policy(home, group, actor, &cwd, explicit) {
         Ok(app) => attach_managed(home, group, actor, key, cwd, app),
         Err(refusal) if super::workspace_trust::refused(actor, &refusal) => {
             super::workspace_trust::prompt(home, group, actor, key, cwd, refusal)
@@ -97,6 +106,16 @@ pub(super) fn launch_managed(
     group: &GroupDoc,
     actor: &Actor,
     cwd: &std::path::Path,
+) -> io::Result<AnalystSession> {
+    launch_managed_with_policy(home, group, actor, cwd, false)
+}
+
+fn launch_managed_with_policy(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    cwd: &std::path::Path,
+    explicit: bool,
 ) -> io::Result<AnalystSession> {
     let mut env = actor.env.clone();
     env.insert(
@@ -117,11 +136,16 @@ pub(super) fn launch_managed(
     };
     let launch_home = home.clone();
     run_managed_launch(
-        async move { AnalystSession::launch_actor(&launch_home, config).await }.instrument(
-            tracing::info_span!(
-                "actor_runtime_start", group_id = %group.group_id, actor_id = %actor.id
-            ),
-        ),
+        async move {
+            if explicit {
+                AnalystSession::launch_actor_with_policy(&launch_home, config, true).await
+            } else {
+                AnalystSession::launch_actor(&launch_home, config).await
+            }
+        }
+        .instrument(tracing::info_span!(
+            "actor_runtime_start", group_id = %group.group_id, actor_id = %actor.id
+        )),
     )
 }
 
@@ -216,10 +240,24 @@ fn cleanup_failed_start(item: &Session, primary: io::Error) -> io::Error {
 }
 
 pub fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Result<()> {
-    start_session(home, group, actor)
+    start_with_policy(home, group, actor, false)
 }
 
-fn start_session(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Result<()> {
+pub fn start_with_policy(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    explicit: bool,
+) -> io::Result<()> {
+    start_session(home, group, actor, explicit)
+}
+
+fn start_session(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    explicit: bool,
+) -> io::Result<()> {
     if !supports(actor) {
         return Ok(());
     }
@@ -229,8 +267,42 @@ fn start_session(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Resu
         return Ok(());
     }
     stop_locked(&key)?;
-
-    start_managed_agent(home, group, actor, key)
+    super::super::runtime_session::recovery_decision(
+        home,
+        &group.group_id,
+        &actor.id,
+        "attempt",
+        if explicit {
+            "explicit_start"
+        } else {
+            "automatic_start"
+        },
+    )?;
+    let result = start_managed_agent(home, group, actor, key.clone(), explicit);
+    let (action, reason) = match &result {
+        Ok(()) if lookup(&key).is_some_and(|item| item.running()) => {
+            ("started", "managed_session_attached".to_owned())
+        }
+        Ok(()) => ("block", "waiting_for_workspace_trust".to_owned()),
+        Err(error) if super::super::runtime_session::is_claude_resume_blocked(error) => {
+            ("block", error.to_string())
+        }
+        Err(error) => (
+            "failure",
+            format!(
+                "managed startup did not yield a started session ({:?})",
+                error.kind()
+            ),
+        ),
+    };
+    super::super::runtime_session::recovery_decision(
+        home,
+        &group.group_id,
+        &actor.id,
+        action,
+        &reason,
+    )?;
+    result
 }
 
 pub fn stop(group_id: &str, actor_id: &str) -> io::Result<()> {
@@ -376,6 +448,12 @@ pub async fn kill_all_requests() {
 #[must_use]
 pub fn running(group_id: &str, actor_id: &str) -> bool {
     registered_running(group_id, actor_id).unwrap_or(false)
+}
+
+/// Confirm explicit retargeting attached the managed provider, not a trust PTY.
+pub(crate) fn resumed_session_is(group_id: &str, actor_id: &str, session_id: &str) -> bool {
+    lookup(&(group_id.to_owned(), actor_id.to_owned()))
+        .is_some_and(|item| item.running() && item.managed.thread_id() == session_id)
 }
 
 /// A failed managed session still owns its attached terminal until cleanup

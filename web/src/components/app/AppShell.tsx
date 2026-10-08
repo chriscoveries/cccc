@@ -113,6 +113,7 @@ type AppShellProps = {
   onToggleActorEnabled: (actor: Actor, isRunning?: boolean) => void;
   onRelaunchActor: (actor: Actor) => void;
   onNewActorSession: (actor: Actor) => void;
+  onResumeActorSession: (actor: Actor, sessionId: string) => void;
   onEditActor: (actor: Actor) => void;
   onRemoveActor: (actor: Actor, activeTab: string) => void;
   onOpenActorInbox: (actor: Actor) => void;
@@ -199,6 +200,7 @@ export function AppShell({
   onToggleActorEnabled,
   onRelaunchActor,
   onNewActorSession,
+  onResumeActorSession,
   onEditActor,
   onRemoveActor,
   onOpenActorInbox,
@@ -343,6 +345,9 @@ export function AppShell({
                           }
                           onRelaunch={() => actor && onRelaunchActor(actor)}
                           onNewSession={() => actor && onNewActorSession(actor)}
+                          onResumeSession={(sessionId) =>
+                            actor && onResumeActorSession(actor, sessionId)
+                          }
                           onEdit={() => actor && onEditActor(actor)}
                           onRemove={() => actor && onRemoveActor(actor, activeTab)}
                           onInbox={() => actor && onOpenActorInbox(actor)}
