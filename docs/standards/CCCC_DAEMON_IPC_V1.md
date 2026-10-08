@@ -363,6 +363,18 @@ Result:
   pid: number;
   ts: string;
   ipc_v: 1;
+  disk?: {
+    scope: "cccc_home";
+    severity: "normal" | "warning" | "critical" | "unknown";
+    checked_at: string;
+    total_bytes?: number;
+    free_bytes?: number;
+    available_bytes?: number;
+    used_percent?: number;
+    volume_id?: string;
+    thresholds?: Record<string, number>;
+    error_kind?: string;
+  };
   capabilities: Record<string, unknown>;
   compatibility?: string;
   build?: { source_id: string };
@@ -405,6 +417,18 @@ Notes:
   exposes local paths only to administrators requesting `include_home`; ordinary
   authenticated ping and all health projections omit the executable path.
 - Ordinary business commands MUST NOT stop, signal, or replace a reachable daemon. Implementation replacement is restricted to explicit daemon lifecycle commands.
+
+#### `disk_events`
+
+Args: optional `cursor` (nonempty last-seen event ID), optional `limit` (integer 1–200; default 100). Read-only and global; no Group argument is required.
+
+Result: `{ events: DiskThresholdEvent[], cursor: string | null, has_more: boolean, gap: boolean }`. Events are chronological. Consume successive pages until `has_more=false`; persist the returned cursor. A missing cursor (journal replacement/truncation or an unknown ID) reports `gap=true` and a bounded first page. Consumers MUST handle that discontinuity explicitly. An unreadable or malformed journal returns `io_error` instead of silently skipping events.
+
+`ping.disk`, also exposed by authenticated Web health, describes only the filesystem containing `CCCC_HOME`, never host-wide or other job/build volumes. Known samples include `scope="cccc_home"`, an opaque `volume_id` (sample target), `checked_at`, `total_bytes`, `free_bytes`, non-root `available_bytes`, `used_percent`, `severity` (`normal`, `warning`, `critical`), and `thresholds`. Used percentage is the unrounded fraction `100 * (total_bytes - free_bytes) / (total_bytes - free_bytes + available_bytes)`, matching the `df` denominator for reserved blocks. Integer `df` displays round upward; consumers comparing those alarms must normalize rounding. Valid counters with a zero denominator report 100% as conservative pressure (not the `df` unknown display). A failed probe or invalid configuration returns `severity="unknown"` without invented byte counts; daemon ping itself remains available. Unauthenticated Web health remains minimal and exposes no disk fields.
+
+Defaults: warning at >=85% used capacity or available bytes <8 GiB; critical at >=90%. Configure `observability.disk_health` in `settings.yaml` with `warning_percent`, `critical_percent`, `minimum_available_bytes`, `recovery_percent` (default 1 percentage point), and `recovery_available_bytes` (default 1 GiB). Event hysteresis re-arms after sufficient recovery below the percentage threshold and above the available-space floor. Set both recovery margins to zero for immediate re-arming. Health always describes the current sample, independently of event hysteresis.
+
+The daemon samples on startup and every 30 seconds. Durable `CCCC_HOME/daemon/disk-events.jsonl` is the latch: one `disk.threshold_crossed` on a severity transition, including critical escalation and recovery (`direction="up"` or `"down"`). Repeated samples and daemon restarts do not duplicate a committed transition. Direct normal-to-critical samples emit one critical event. Event fields include `v=1`, `id`, `ts`, `scope="cccc_home"`, `episode_id`, `previous_severity`, `severity`, `direction`, and the measured `disk` sample. One pressure episode keeps its ID through escalation and recovery; a later episode gets a fresh ID. Failed publication is retried without suppressing measured health. No Group-ledger fanout, Actor messages, pause decisions or cleanup occur here; consumers own reaction policy.
 
 #### `shutdown`
 

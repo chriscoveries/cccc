@@ -41,6 +41,8 @@ async fn run_with_restore(home: HomeLayout, restore: RuntimeRestoreSpawner) -> R
     std::fs::write(&lifecycle.paths.pid, format!("{}\n", std::process::id()))?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let actor_activity = ActorActivityService::start(lifecycle.paths.home.clone());
+    let disk_health =
+        crate::server_disk_health::DiskHealthService::start(lifecycle.paths.home.clone());
     let dispatch_locks = DispatchLocks::default();
 
     let result = if use_tcp() {
@@ -62,6 +64,7 @@ async fn run_with_restore(home: HomeLayout, restore: RuntimeRestoreSpawner) -> R
         )
         .await
     };
+    disk_health.finish().await;
     actor_activity.finish().await;
     lifecycle.finish(result)
 }

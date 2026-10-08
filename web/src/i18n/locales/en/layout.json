@@ -249,5 +249,8 @@
     "failed": "Could not update {{group}}. Check the connection and try again.",
     "noActors": "Add an Agent to start this Group."
   },
-  "connectionInterruptedHint": "The page connection was interrupted. Reconnection is automatic; displayed information may be outdated."
+  "connectionInterruptedHint": "The page connection was interrupted. Reconnection is automatic; displayed information may be outdated.",
+  "diskSpaceWarning": "CCCC storage is low: {{available}} GiB available ({{percent}}% used).",
+  "diskSpaceCritical": "CCCC storage is critically low: {{available}} GiB available ({{percent}}% used).",
+  "diskSpaceUnknown": "CCCC storage capacity is unavailable."
 }
