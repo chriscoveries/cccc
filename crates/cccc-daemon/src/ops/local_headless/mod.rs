@@ -22,10 +22,10 @@ pub(crate) use events::{
     append as append_event, append_with_dedupe as append_event_with_dedupe,
     contains_dedupe as contains_event_dedupe,
 };
-pub(crate) use supervisor::registered_running;
 pub(crate) use supervisor::{
     cancel_turn, respond_interaction, respond_permission, structured_state,
 };
+pub(crate) use supervisor::{registered_running, resumed_session_is};
 
 use cccc_core::HomeLayout;
 use serde::Serialize;
@@ -35,7 +35,7 @@ use std::sync::atomic::AtomicBool;
 
 pub use supervisor::{
     detach_after_viewer_exit, ensure_viewer, kill_all_requests, ready_for_mail_notice, running,
-    start, status, stop, stop_all, stop_group, submit_batch, supports,
+    start, start_with_policy, status, stop, stop_all, stop_group, submit_batch, supports,
 };
 
 pub(super) fn uses_managed_session(actor: &cccc_contracts::Actor) -> bool {
@@ -111,7 +111,7 @@ fn managed_runtime() -> &'static tokio::runtime::Runtime {
     super::codex_voice_analyst::managed_runtime()
 }
 
-fn run_managed_launch<F, T>(future: F) -> std::io::Result<T>
+pub(crate) fn run_managed_launch<F, T>(future: F) -> std::io::Result<T>
 where
     F: Future<Output = std::io::Result<T>> + Send + 'static,
     T: Send + 'static,
