@@ -31,6 +31,7 @@ fn dispatch_result(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "ping" => Operation::new(Policy::Read, ping),
+        "disk_events" => Operation::new(Policy::Read, disk_events),
         "version" => Operation::new(Policy::Read, |_home, _request| {
             object(
                 json!({"version": env!("CARGO_PKG_VERSION"), "implementation": "rust", "compatibility": cccc_contracts::RUST_DAEMON_COMPATIBILITY}),
@@ -44,8 +45,9 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     })
 }
 
-fn ping(_home: &HomeLayout, _request: &DaemonRequest) -> OpResult {
+fn ping(home: &HomeLayout, _request: &DaemonRequest) -> OpResult {
     object(json!({
+        "disk": crate::disk_health::health(home),
         "pid": std::process::id(),
         "version": env!("CARGO_PKG_VERSION"),
         "build": cccc_core::build_info::current(),
@@ -53,6 +55,8 @@ fn ping(_home: &HomeLayout, _request: &DaemonRequest) -> OpResult {
         "ts": cccc_contracts::utc_now(),
         "ipc_v": 1,
         "capabilities": {
+            "disk_events": true,
+            "home_volume_disk_health": true,
             "events_stream": true,
             "remote_access": true,
             "presentation_browser_attach": false,
@@ -70,6 +74,25 @@ fn ping(_home: &HomeLayout, _request: &DaemonRequest) -> OpResult {
         "implementation": "rust",
         "compatibility": cccc_contracts::RUST_DAEMON_COMPATIBILITY,
     }))
+}
+
+fn disk_events(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let after = match request.args.get("cursor") {
+        None => None,
+        Some(Value::String(value)) if !value.is_empty() && value.len() <= 128 => {
+            Some(value.as_str())
+        }
+        _ => return Err(OpError::invalid("cursor must be a nonempty event id")),
+    };
+    let limit = match request.args.get("limit") {
+        None => 100,
+        Some(value) => value
+            .as_u64()
+            .filter(|limit| (1..=200).contains(limit))
+            .ok_or_else(|| OpError::invalid("limit must be an integer from 1 to 200"))?
+            as usize,
+    };
+    object(crate::disk_health::read_events(home, after, limit).map_err(OpError::io)?)
 }
 
 fn shutdown(request: &DaemonRequest) -> OpResult {
@@ -289,5 +312,73 @@ mod tests {
         let response = dispatch(&home, &request);
         assert!(!response.ok);
         assert_eq!(response.error.expect("invalid pid").code, "invalid_args");
+    }
+}
+
+#[cfg(test)]
+mod disk_health_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn ping_reports_capacity_of_the_initialized_home_volume() {
+        let temp = tempfile::tempdir().expect("valid test fixture");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("valid test fixture");
+        home.initialize().expect("valid test fixture");
+        let response = dispatch(
+            &home,
+            &DaemonRequest {
+                v: 1,
+                op: "ping".into(),
+                args: Map::new(),
+            },
+        );
+        assert!(response.ok);
+        let disk = &response.result["disk"];
+        assert_eq!(disk["scope"], "cccc_home");
+        assert!(disk["total_bytes"].as_u64().expect("byte count") > 0);
+        assert!(
+            disk["available_bytes"].as_u64().expect("byte count")
+                <= disk["total_bytes"].as_u64().expect("byte count")
+        );
+        assert!(
+            ["normal", "warning", "critical"]
+                .contains(&disk["severity"].as_str().expect("severity"))
+        );
+    }
+
+    #[test]
+    fn unavailable_home_volume_is_unknown_without_breaking_ping() {
+        let temp = tempfile::tempdir().expect("valid test fixture");
+        let home = HomeLayout::from_path(temp.path().join("missing")).expect("valid test fixture");
+        let response = dispatch(
+            &home,
+            &DaemonRequest {
+                v: 1,
+                op: "ping".into(),
+                args: Map::new(),
+            },
+        );
+        assert!(response.ok);
+        assert_eq!(response.result["disk"]["severity"], "unknown");
+        assert!(response.result["disk"]["available_bytes"].is_null());
+    }
+
+    #[test]
+    fn disk_event_reader_is_available_without_group_or_notifications() {
+        let temp = tempfile::tempdir().expect("valid test fixture");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("valid test fixture");
+        home.initialize().expect("valid test fixture");
+        let response = dispatch(
+            &home,
+            &DaemonRequest {
+                v: 1,
+                op: "disk_events".into(),
+                args: Map::new(),
+            },
+        );
+        assert!(response.ok, "disk_events failed: {:?}", response.error);
+        assert_eq!(response.result["events"], json!([]));
+        assert_eq!(response.result["gap"], false);
+        assert_eq!(response.result["has_more"], false);
     }
 }
