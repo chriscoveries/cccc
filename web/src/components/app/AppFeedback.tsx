@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import { useDiskHealth } from "../../hooks/useDiskHealth";
 import { classNames } from "../../utils/classNames";
 
 type AppNotice = { message: string; actionLabel?: string; onAction?: () => void };
@@ -21,6 +22,8 @@ export function AppFeedback({
   dismissNotice,
 }: AppFeedbackProps) {
   const { t } = useTranslation(["layout", "common"]);
+  const disk = useDiskHealth();
+  const diskWarning = disk && disk.severity !== "normal";
 
   const handleNoticeAction = () => {
     if (!notice?.onAction) return;
@@ -28,13 +31,39 @@ export function AppFeedback({
     dismissNotice();
   };
 
-  if (webReadOnly || (!errorMsg && !notice)) {
+  if ((webReadOnly || (!errorMsg && !notice)) && !diskWarning) {
     return null;
   }
 
   return (
     <div className="pointer-events-none fixed inset-x-0 top-4 z-[1200] flex flex-col items-center gap-3 px-4">
-      {errorMsg ? (
+      {diskWarning ? (
+        <div
+          role="alert"
+          className={classNames(
+            "pointer-events-auto w-full max-w-xl rounded-2xl border px-4 py-3 text-sm shadow-2xl glass-modal",
+            disk.severity === "critical"
+              ? "border-rose-500/30 text-rose-600 dark:text-rose-300"
+              : "border-amber-500/30 text-amber-700 dark:text-amber-300",
+          )}
+        >
+          {disk.severity === "unknown"
+            ? t("layout:diskSpaceUnknown", {
+                defaultValue: "CCCC storage capacity is unavailable.",
+              })
+            : t(
+                disk.severity === "critical"
+                  ? "layout:diskSpaceCritical"
+                  : "layout:diskSpaceWarning",
+                {
+                  defaultValue: `CCCC storage is ${disk.severity === "critical" ? "critically " : ""}low: ${(Number(disk.available_bytes) / 1024 ** 3).toFixed(1)} GiB available (${Number(disk.used_percent).toFixed(1)}% used).`,
+                  available: (Number(disk.available_bytes) / 1024 ** 3).toFixed(1),
+                  percent: Number(disk.used_percent).toFixed(1),
+                },
+              )}
+        </div>
+      ) : null}
+      {!webReadOnly && errorMsg ? (
         <div
           className={classNames(
             "pointer-events-auto flex w-full max-w-xl items-center gap-3 rounded-2xl px-4 py-3 text-sm shadow-2xl glass-modal animate-slide-up",
@@ -57,7 +86,7 @@ export function AppFeedback({
         </div>
       ) : null}
 
-      {notice ? (
+      {!webReadOnly && notice ? (
         <div
           className={classNames(
             "pointer-events-auto flex w-full max-w-xl items-center gap-3 rounded-2xl px-4 py-3 text-sm shadow-2xl glass-modal animate-slide-up",
