@@ -59,6 +59,8 @@ else:
     root = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"])
     mode = (root / "mode").read_text()
     if "--bg" in sys.argv:
+        with (root / "launch_arguments").open("a") as log:
+            log.write(json.dumps(sys.argv[1:]) + "\n")
         with (root / "launches").open("a") as log:
             log.write("resume\n" if "--resume" in sys.argv else "fresh\n")
         if mode == "untrusted":
