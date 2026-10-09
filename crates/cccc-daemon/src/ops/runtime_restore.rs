@@ -69,14 +69,43 @@ fn restore_group(home: &HomeLayout, store: &GroupStore, group_id: &str) -> Resul
             .map_err(OpError::io)?;
     }
     if !group.running || group.state == cccc_contracts::GroupState::Stopped {
+        for actor in &group.actors {
+            super::runtime_session::recovery_decision(
+                home,
+                &group.group_id,
+                &actor.id,
+                "skip",
+                "group_not_running",
+            )
+            .map_err(OpError::io)?;
+        }
         return Ok(());
     }
-    for actor in group
-        .actors
-        .iter()
-        .filter(|actor| should_restore_actor(group.state, actor))
-    {
+    for actor in &group.actors {
+        if !should_restore_actor(group.state, actor) {
+            super::runtime_session::recovery_decision(
+                home,
+                &group.group_id,
+                &actor.id,
+                "skip",
+                if !actor.enabled {
+                    "actor_disabled"
+                } else {
+                    "paused_headless_actor"
+                },
+            )
+            .map_err(OpError::io)?;
+            continue;
+        }
         if deepseek_restore_blocked(home, &group, actor) {
+            super::runtime_session::recovery_decision(
+                home,
+                &group.group_id,
+                &actor.id,
+                "block",
+                "deepseek_explicit_restart_required",
+            )
+            .map_err(OpError::io)?;
             tracing::info!(
                 group_id = %group.group_id,
                 actor_id = %actor.id,
