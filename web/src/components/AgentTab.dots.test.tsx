@@ -122,6 +122,7 @@ async function render(compact: boolean, currentActor = actor, groupId = "g_dot")
         onLaunch={mocks.launch}
         onRelaunch={vi.fn()}
         onNewSession={vi.fn()}
+        onResumeSession={vi.fn()}
         onEdit={vi.fn()}
         onRemove={vi.fn()}
         onInbox={vi.fn()}
