@@ -14,6 +14,10 @@ const ANTIGRAVITY_STARTUP_SETTLE: Duration = Duration::from_millis(1_500);
 #[path = "actor_delivery_startup_tests.rs"]
 mod startup_tests;
 
+#[cfg(all(test, unix))]
+#[path = "actor_delivery_respawn_tests.rs"]
+mod respawn_tests;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BatchOutcome {
     Delivered,
@@ -84,7 +88,7 @@ pub fn process_batch(
     if crate::ops::local_headless::uses_managed_delivery(&current_group.group_id, &current_actor) {
         return process_managed_batch(jobs, &job.home, &current_group, &current_actor, cancelled);
     }
-    let status = match ensure_running(&job.home, &current_group, &current_actor) {
+    let status = match ensure_running(&job.home, &current_group, &current_actor, cancelled) {
         Ok(Some(status)) => status,
         Ok(None) => return BatchOutcome::Retry,
         Err(reason) => return BatchOutcome::Terminal(reason),
@@ -151,6 +155,25 @@ pub fn process_batch(
     BatchOutcome::Retry
 }
 
+/// Wait out the restart backoff before automatically starting an actor that keeps exiting.
+/// Starts by a person go through `actor_runtime::apply` directly and never wait. Returns
+/// false if the worker was cancelled.
+fn respawn_backoff(group: &cccc_core::GroupDoc, actor: &Actor, cancelled: &AtomicBool) -> bool {
+    let delay = super::actor_respawn_backoff::begin_restart(&group.group_id, &actor.id);
+    if !delay.is_zero() {
+        tracing::warn!(
+            group_id = %group.group_id,
+            actor_id = %actor.id,
+            delay_ms = delay.as_millis() as u64,
+            "delaying automatic restart of an actor that keeps exiting"
+        );
+        if !interruptible_sleep(delay, cancelled) {
+            return false;
+        }
+    }
+    !cancelled.load(Ordering::Acquire)
+}
+
 fn process_deepseek_batch(
     jobs: &[DeliveryJob],
     home: &cccc_core::HomeLayout,
@@ -162,14 +185,21 @@ fn process_deepseek_batch(
         if crate::ops::deepseek_runtime::manual_restart_required(home, group, actor) {
             return BatchOutcome::Retry;
         }
-        match actor_runtime::apply(home, group, &actor.id, "actor.start") {
-            Ok(_) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
-            Ok(_) => return BatchOutcome::Retry,
-            Err(error) => {
-                return match terminal_reason(&error) {
-                    Some(reason) => BatchOutcome::Terminal(reason),
-                    None => BatchOutcome::Retry,
-                };
+        if !respawn_backoff(group, actor, cancelled) {
+            return BatchOutcome::Retry;
+        }
+        if !crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) {
+            let started = actor_runtime::apply(home, group, &actor.id, "actor.start");
+            super::actor_respawn_backoff::end_restart(&group.group_id, &actor.id);
+            match started {
+                Ok(_) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
+                Ok(_) => return BatchOutcome::Retry,
+                Err(error) => {
+                    return match terminal_reason(&error) {
+                        Some(reason) => BatchOutcome::Terminal(reason),
+                        None => BatchOutcome::Retry,
+                    };
+                }
             }
         }
     }
@@ -192,26 +222,33 @@ fn process_managed_batch(
     cancelled: &AtomicBool,
 ) -> BatchOutcome {
     if !crate::ops::local_headless::running(&group.group_id, &actor.id) {
-        match actor_runtime::apply(home, group, &actor.id, "actor.start") {
-            Ok(None) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {}
-            Ok(_) => return BatchOutcome::Retry,
-            Err(error) => {
-                if let Some(reason) = terminal_reason(&error) {
-                    return BatchOutcome::Terminal(reason);
+        if !respawn_backoff(group, actor, cancelled) {
+            return BatchOutcome::Retry;
+        }
+        if !crate::ops::local_headless::running(&group.group_id, &actor.id) {
+            let started = actor_runtime::apply(home, group, &actor.id, "actor.start");
+            super::actor_respawn_backoff::end_restart(&group.group_id, &actor.id);
+            match started {
+                Ok(None) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {}
+                Ok(_) => return BatchOutcome::Retry,
+                Err(error) => {
+                    if let Some(reason) = terminal_reason(&error) {
+                        return BatchOutcome::Terminal(reason);
+                    }
+                    if error.code == actor_runtime::CLAUDE_RESUME_FAILED {
+                        // Release this worker's claims but leave inbox/ledger messages pending.
+                        // Explicit recovery redispatches them; automatic startup must stop.
+                        super::actor_delivery::fail_jobs(jobs, &error.message);
+                        return BatchOutcome::Delivered;
+                    }
+                    tracing::warn!(
+                        group_id = %group.group_id,
+                        actor_id = %actor.id,
+                        message = %error.message,
+                        "failed to auto-wake managed actor for message delivery"
+                    );
+                    return BatchOutcome::Retry;
                 }
-                if error.code == actor_runtime::CLAUDE_RESUME_FAILED {
-                    // Release this worker's claims but leave inbox/ledger messages pending.
-                    // Explicit recovery redispatches them; automatic startup must stop.
-                    super::actor_delivery::fail_jobs(jobs, &error.message);
-                    return BatchOutcome::Delivered;
-                }
-                tracing::warn!(
-                    group_id = %group.group_id,
-                    actor_id = %actor.id,
-                    message = %error.message,
-                    "failed to auto-wake managed actor for message delivery"
-                );
-                return BatchOutcome::Retry;
             }
         }
     }
@@ -293,13 +330,26 @@ fn ensure_running(
     home: &cccc_core::HomeLayout,
     group: &cccc_core::GroupDoc,
     actor: &Actor,
+    cancelled: &AtomicBool,
 ) -> Result<Option<cccc_runtime::SessionStatus>, String> {
     if let Ok(status) = cccc_runtime::status(&group.group_id, &actor.id)
         && status.running
     {
         return Ok(Some(status));
     }
-    let status = match actor_runtime::apply(home, group, &actor.id, "actor.start") {
+    if !respawn_backoff(group, actor, cancelled) {
+        return Ok(None);
+    }
+    // A healthy Start leaves this worker's wait alive. Another path may have brought
+    // the runtime up while we slept; use it without launching or recording an attempt.
+    if let Ok(status) = cccc_runtime::status(&group.group_id, &actor.id)
+        && status.running
+    {
+        return Ok(Some(status));
+    }
+    let started = actor_runtime::apply(home, group, &actor.id, "actor.start");
+    super::actor_respawn_backoff::end_restart(&group.group_id, &actor.id);
+    let status = match started {
         Ok(Some(status)) if status.running => status,
         Ok(_) => return Ok(None),
         Err(error) => {
@@ -584,6 +634,29 @@ mod tests {
     }
 
     #[test]
+    fn automatic_restart_waits_out_the_backoff_and_honours_cancellation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("respawn backoff", "").expect("group");
+        let actor = Actor::new("dying");
+        let not_cancelled = AtomicBool::new(false);
+        assert!(
+            respawn_backoff(&group, &actor, &not_cancelled),
+            "the first automatic restart goes ahead at once"
+        );
+        super::super::actor_respawn_backoff::end_restart(&group.group_id, &actor.id);
+        let cancelled = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        assert!(
+            !respawn_backoff(&group, &actor, &cancelled),
+            "a restart inside the loop waits, and a cancelled worker gives up"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        super::super::actor_respawn_backoff::forget(&group.group_id, &actor.id);
+    }
+
+    #[test]
     fn disabled_actor_batch_does_not_start_or_change_its_lifecycle() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
@@ -613,6 +686,59 @@ mod tests {
         let saved = store.load(&group.group_id).expect("reload group");
         assert!(!saved.actors[0].enabled);
         assert!(cccc_runtime::status(&group.group_id, &actor.id).is_err());
+    }
+
+    type BatchFn = fn(
+        &[DeliveryJob],
+        &cccc_core::HomeLayout,
+        &cccc_core::GroupDoc,
+        &Actor,
+        &AtomicBool,
+    ) -> BatchOutcome;
+
+    /// All automatic delivery start paths consult the backoff: inside a restart loop a cancelled
+    /// worker gives up during the wait instead of launching, and the attempt is counted.
+    #[test]
+    fn all_automatic_start_paths_wait_out_the_restart_backoff() {
+        let paths: [(&str, ActorRuntime, BatchFn); 3] = [
+            (
+                "pty",
+                ActorRuntime::Custom,
+                |_, home, group, actor, cancelled| match ensure_running(
+                    home, group, actor, cancelled,
+                ) {
+                    Ok(Some(_)) => BatchOutcome::Delivered,
+                    Ok(None) => BatchOutcome::Retry,
+                    Err(reason) => BatchOutcome::Terminal(reason),
+                },
+            ),
+            ("managed", ActorRuntime::Claude, process_managed_batch),
+            ("deepseek", ActorRuntime::Deepseek, process_deepseek_batch),
+        ];
+        for (name, runtime, process) in paths {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+            let store = GroupStore::new(home.clone()).expect("store");
+            let group = store.create(&format!("backoff {name}"), "").expect("group");
+            let mut actor = Actor::new("dying");
+            actor.runtime = runtime;
+            let backoff = super::super::actor_respawn_backoff::begin_restart;
+            assert!(backoff(&group.group_id, &actor.id).is_zero());
+            super::super::actor_respawn_backoff::end_restart(&group.group_id, &actor.id);
+
+            let started = std::time::Instant::now();
+            assert!(matches!(
+                process(&[], &home, &group, &actor, &AtomicBool::new(true)),
+                BatchOutcome::Retry
+            ));
+            assert!(started.elapsed() < Duration::from_secs(1), "{name}");
+            assert_eq!(
+                backoff(&group.group_id, &actor.id),
+                Duration::from_secs(20),
+                "{name}: the automatic start must have been counted as a restart"
+            );
+            super::super::actor_respawn_backoff::forget(&group.group_id, &actor.id);
+        }
     }
 
     #[test]
