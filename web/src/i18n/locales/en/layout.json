@@ -1,4 +1,7 @@
 {
+  "diskSpaceWarning": "CCCC storage is low: {{available}} GiB available ({{percent}}% used).",
+  "diskSpaceCritical": "CCCC storage is critically low: {{available}} GiB available ({{percent}}% used).",
+  "diskSpaceUnknown": "CCCC storage capacity is unavailable.",
   "resizeComposer": "Resize input area (double-click or press Enter for automatic height)",
   "openSidebar": "Open sidebar",
   "closeSidebar": "Close sidebar",
