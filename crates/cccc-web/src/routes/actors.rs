@@ -29,6 +29,10 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/groups/{group_id}/actors/{actor_id}/new_session",
             post(new_session),
         )
+        .route(
+            "/api/v1/groups/{group_id}/actors/{actor_id}/resume_session",
+            post(resume_session),
+        )
         .merge(super::actor_assets::routes())
         .merge(super::actor_profiles::routes())
 }
@@ -113,6 +117,21 @@ async fn new_session(
     Path((group_id, actor_id)): Path<(String, String)>,
 ) -> ApiResult {
     lifecycle(&state, &group_id, &actor_id, "actor_new_session").await
+}
+async fn resume_session(
+    State(state): State<AppState>,
+    Path((group_id, actor_id)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let args = body_object(body)?;
+    call(
+        &state,
+        "actor_resume_session",
+        object(json!({
+            "group_id":group_id,"actor_id":actor_id,"session_id":args.get("session_id"),"by":"user"
+        })),
+    )
+    .await
 }
 async fn lifecycle(state: &AppState, group_id: &str, actor_id: &str, op: &str) -> ApiResult {
     call(
