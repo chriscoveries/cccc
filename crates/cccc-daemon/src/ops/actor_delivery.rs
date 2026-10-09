@@ -148,6 +148,15 @@ fn workers() -> &'static Mutex<HashMap<Key, DeliveryWorker>> {
     WORKERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(all(test, unix))]
+pub(super) fn worker_cancellation(group_id: &str, actor_id: &str) -> Option<Arc<AtomicBool>> {
+    workers()
+        .lock()
+        .expect("delivery workers")
+        .get(&(group_id.to_owned(), actor_id.to_owned()))
+        .map(|worker| Arc::clone(&worker.cancelled))
+}
+
 fn completions() -> &'static Mutex<VecDeque<DeliveryCompletion>> {
     static COMPLETIONS: OnceLock<Mutex<VecDeque<DeliveryCompletion>>> = OnceLock::new();
     COMPLETIONS.get_or_init(|| Mutex::new(VecDeque::new()))
@@ -1001,3 +1010,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "actor_delivery_start_continuity_tests.rs"]
+mod start_continuity_tests;
