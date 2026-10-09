@@ -28,6 +28,25 @@ pub fn apply(
     actor_id: &str,
     kind: &str,
 ) -> Result<Option<SessionStatus>, OpError> {
+    apply_with_policy(home, group, actor_id, kind, false)
+}
+
+pub fn apply_explicit(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor_id: &str,
+    kind: &str,
+) -> Result<Option<SessionStatus>, OpError> {
+    apply_with_policy(home, group, actor_id, kind, true)
+}
+
+fn apply_with_policy(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor_id: &str,
+    kind: &str,
+    explicit: bool,
+) -> Result<Option<SessionStatus>, OpError> {
     let stored_actor = group
         .actors
         .iter()
@@ -60,6 +79,14 @@ pub fn apply(
     if !matches!(kind, "actor.restart" | "actor.new_session")
         && actor_is_running(group, stored_actor)
     {
+        super::runtime_session::recovery_decision(
+            home,
+            &group.group_id,
+            actor_id,
+            "skip",
+            "already_running",
+        )
+        .map_err(OpError::io)?;
         // Saving config does not restart an existing session. Explicit restart
         // applies it; start remains idempotent across backend changes too.
         super::local_headless::ensure_viewer(&group.group_id, actor_id).map_err(OpError::io)?;
@@ -80,7 +107,12 @@ pub fn apply(
         // Pending trust recovery holds the start guard until its launch is
         // attached or discarded. Retire its ownership before removing the
         // receipt, so a late old launch cannot undo the explicit reset.
-        super::runtime_session::remove(home, &group.group_id, actor_id).map_err(OpError::io)?;
+        if actor.runtime == cccc_contracts::ActorRuntime::Claude {
+            super::runtime_session::archive_claude_new_session(home, &group.group_id, actor_id)
+                .map_err(OpError::io)?;
+        } else {
+            super::runtime_session::remove(home, &group.group_id, actor_id).map_err(OpError::io)?;
+        }
     }
     super::capabilities::apply_actor_startup_baseline(home, group, &actor);
     if actor.runtime == ActorRuntime::Deepseek {
@@ -88,18 +120,40 @@ pub fn apply(
         return Ok(None);
     }
     if super::local_headless::supports(&actor) {
-        start_local_headless(home, group, &actor)?;
+        start_local_headless(home, group, &actor, explicit)?;
         return Ok(None);
     }
     if is_structured(&actor) {
+        super::runtime_session::recovery_decision(
+            home,
+            &group.group_id,
+            actor_id,
+            "skip",
+            "structured_runtime_has_no_local_process",
+        )
+        .map_err(OpError::io)?;
         return Ok(None);
     }
     start(home, group, &actor).map(Some)
 }
 
-fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<(), OpError> {
+fn start_local_headless(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    explicit: bool,
+) -> Result<(), OpError> {
     let mut actor = environment::resolve_launch_actor(home, group, actor)?;
-    let cwd = working_directory(group, &actor)?;
+    let saved = if explicit && actor.runtime == cccc_contracts::ActorRuntime::Claude {
+        super::runtime_session::claude_explicit_workspace(home, &group.group_id, &actor.id)
+            .map_err(launch_error)?
+    } else {
+        None
+    };
+    let cwd = match saved {
+        Some(path) => path,
+        None => working_directory(group, &actor)?,
+    };
     let mut env = environment::launch_env(home, group, &actor);
     if super::local_headless::uses_managed_provider_cli(&actor) {
         super::runtime_mcp::prepare(home, actor.runtime, &actor.command, &cwd, &mut env)?;
@@ -107,7 +161,12 @@ fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> R
     actor.env = env;
     let _start_permit = crate::runtime_start_gate::permit(home)
         .map_err(|message| OpError::new("runtime_shutting_down", message))?;
-    super::local_headless::start(home, group, &actor).map_err(launch_error)
+    let result = if explicit {
+        super::local_headless::start_with_policy(home, group, &actor, true)
+    } else {
+        super::local_headless::start(home, group, &actor)
+    };
+    result.map_err(launch_error)
 }
 
 fn launch_error(error: std::io::Error) -> OpError {
@@ -200,7 +259,7 @@ pub fn start_group(home: &HomeLayout, group: &GroupDoc) -> Result<Vec<SessionSta
     let mut started_actor_ids = Vec::new();
     for actor in group.actors.iter().filter(|actor| actor.enabled) {
         let was_running = actor_is_running(group, actor);
-        match apply(home, group, &actor.id, "actor.start") {
+        match apply_explicit(home, group, &actor.id, "actor.start") {
             Ok(status) => {
                 if !was_running && actor_is_running(group, actor) {
                     started_actor_ids.push(actor.id.clone());
@@ -288,4 +347,36 @@ pub(super) fn working_directory(group: &GroupDoc, actor: &Actor) -> Result<PathB
 
 fn runtime_error(error: cccc_runtime::RuntimeError) -> OpError {
     OpError::new("runtime_error", error.to_string())
+}
+
+/// Resolve exactly the inputs used by managed Claude Start, without writing state.
+pub(super) fn validate_claude_retarget(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    session_id: &str,
+) -> Result<super::runtime_session::ClaudeRetarget, OpError> {
+    let actor = environment::resolve_launch_actor(home, group, actor)?;
+    if actor.runtime != ActorRuntime::Claude || !actor.runtime_mode.is_default() {
+        return Err(OpError::new(
+            "unsupported_runtime",
+            "Resume session is supported only for managed Claude actors",
+        ));
+    }
+    let command = if actor.command.is_empty() {
+        cccc_runtime::default_command(actor.runtime)
+    } else {
+        actor.command.clone()
+    };
+    let cwd = working_directory(group, &actor)?;
+    let env = environment::launch_env(home, group, &actor);
+    super::runtime_session::validate_claude_retarget(
+        home,
+        &group.group_id,
+        &actor.id,
+        &cwd,
+        &command,
+        &env,
+        session_id,
+    )
 }
