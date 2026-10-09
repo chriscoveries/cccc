@@ -143,6 +143,38 @@ export function useActorActions(groupId: string) {
     ],
   );
 
+  // Retarget a saved Claude conversation through the explicit lifecycle operation.
+  const resumeActorSession = useCallback(
+    async (actor: Actor, sessionId: string) => {
+      if (!groupId || !actor) return;
+      const actionKey = JSON.stringify([groupId, actor.id]);
+      if (!beginActorAction(actorActionInFlightRef, actionKey)) return;
+      changeActorBusy(groupId, actor.id, 1);
+      try {
+        const resp = await api.resumeActorSession(groupId, actor.id, sessionId);
+        if (!resp.ok) {
+          await Promise.all([refreshActors(groupId), refreshGroups()]);
+          showError(`${resp.error.code}: ${resp.error.message}`);
+        } else {
+          clearStreamingEventsForActor(actor.id, groupId);
+          await Promise.all([refreshActors(groupId), refreshGroups()]);
+        }
+        setTermEpochByActor((prev) => ({ ...prev, [actionKey]: (prev[actionKey] || 0) + 1 }));
+      } finally {
+        endActorAction(actorActionInFlightRef, actionKey);
+        changeActorBusy(groupId, actor.id, -1);
+      }
+    },
+    [
+      groupId,
+      changeActorBusy,
+      showError,
+      refreshActors,
+      refreshGroups,
+      clearStreamingEventsForActor,
+    ],
+  );
+
   // Remove actor
   const removeActor = useCallback(
     async (actor: Actor, currentActiveTab: string) => {
@@ -217,6 +249,7 @@ export function useActorActions(groupId: string) {
     toggleActorEnabled,
     relaunchActor,
     startNewActorSession,
+    resumeActorSession,
     editActor,
     removeActor,
     openActorInbox,
