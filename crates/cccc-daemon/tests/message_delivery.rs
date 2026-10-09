@@ -2232,7 +2232,10 @@ while True:
             .expect("startup fixture")
             .ledger_path(gid)
             .expect("startup fixture");
-        let deadline = std::time::Instant::now() + Duration::from_secs(12);
+        // The 10-second restart backoff and per-batch startup settling must fit
+        // before this fixture tears down the actor. Keep the full 70-message
+        // recovery and exactly-once assertions within a bounded wait.
+        let deadline = std::time::Instant::now() + Duration::from_secs(25);
         loop {
             let events = ledger::read_all(&ledger_path).expect("startup fixture");
             if ids.iter().all(|id| {
