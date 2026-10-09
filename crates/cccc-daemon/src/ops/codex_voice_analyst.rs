@@ -395,3 +395,5 @@ fn required_value<'a>(value: &'a str, name: &str) -> io::Result<&'a str> {
         Ok(value)
     }
 }
+
+pub(crate) use claude::validate_retarget as validate_claude_retarget;

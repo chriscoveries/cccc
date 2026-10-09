@@ -31,6 +31,8 @@
   "sendInterruptLabel": "割り込みシグナルを送信",
   "relaunch": "再起動",
   "relaunchAgent": "エージェントの再起動",
+  "resumeSession": "セッションを再開…",
+  "resumeSessionPrompt": "保存した Claude セッション ID（UUID）",
   "newSession": "New Session",
   "newSessionAgent": "新しいセッションを開始",
   "newSessionConfirm": "この actor で新しいセッションを開始しますか？",
