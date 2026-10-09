@@ -23,6 +23,11 @@ pub(super) struct Endpoint {
 }
 
 impl Endpoint {
+    #[cfg(test)]
+    pub(super) fn fixture(address: String, key_path: PathBuf) -> Self {
+        Self { address, key_path }
+    }
+
     pub(super) fn resolve(config_dir: &Path) -> io::Result<Self> {
         let config_dir = config_dir.canonicalize()?;
         let key_path = config_dir.join("daemon/control.key");
@@ -152,6 +157,153 @@ pub(super) async fn list(endpoint: &Endpoint) -> io::Result<Vec<Value>> {
                 "Claude Agent View list omitted jobs",
             )
         })
+}
+
+/// Native terminal input runs local commands; queued `reply` text does not.
+/// Only a nonce-bound native prompt marker proves that the resumed UI accepts input.
+#[derive(Default)]
+struct NativePromptMarks {
+    pending: Vec<u8>,
+    ready: bool,
+}
+
+impl NativePromptMarks {
+    fn feed(&mut self, bytes: &[u8], nonce: &str) {
+        const PREFIX: &[u8] = b"\x1b_cc-d-imark;";
+        const END: &[u8] = b"\x1b\\";
+        self.pending.extend_from_slice(bytes);
+        loop {
+            let Some(start) = self
+                .pending
+                .windows(PREFIX.len())
+                .position(|part| part == PREFIX)
+            else {
+                let keep = self.pending.len().saturating_sub(PREFIX.len() - 1);
+                self.pending.drain(..keep);
+                return;
+            };
+            self.pending.drain(..start);
+            let Some(end) = self.pending[PREFIX.len()..]
+                .windows(END.len())
+                .position(|part| part == END)
+            else {
+                if self.pending.len() > PREFIX.len() + 512 {
+                    self.pending.drain(..PREFIX.len());
+                    continue;
+                }
+                return;
+            };
+            let end = PREFIX.len() + end;
+            if end - PREFIX.len() <= 512
+                && let Ok(mark) = serde_json::from_slice::<Value>(&self.pending[PREFIX.len()..end])
+                && mark.get("kind").and_then(Value::as_str) == Some("prompt_idle")
+                && mark.get("nonce").and_then(Value::as_str) == Some(nonce)
+            {
+                self.ready = true;
+            }
+            self.pending.drain(..end + END.len());
+        }
+    }
+}
+
+pub(super) fn validate_model(model: &str) -> io::Result<()> {
+    if model.is_empty()
+        || model.len() > 200
+        || !model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/[]".contains(&byte))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Claude model switch could not be confirmed: invalid model identifier",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn model_input(
+    endpoint: &Endpoint,
+    short: &str,
+    model: &str,
+    verify_session: impl FnOnce() -> io::Result<()>,
+) -> io::Result<PlatformStream> {
+    validate_model(model)?;
+    let mut stream = connect(endpoint).await?;
+    write_frame(
+        &mut stream,
+        &json!({
+            "proto":PROTOCOL_VERSION, "op":"attach", "short":short, "auth":endpoint.auth()?,
+            "cols":120, "rows":40,
+            "attachId":format!("cccc-model-{}", uuid::Uuid::new_v4().simple()),
+            "caps":{"ssh":false, "colorLevel":0, "terminal":null, "mux":null, "imark":true},
+        }),
+    )
+    .await?;
+    let response = tokio::time::timeout(REQUEST_TIMEOUT, read_frame(&mut stream))
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Claude model switch attach timed out",
+            )
+        })??;
+    require_ok(response.clone(), "attach")?;
+    let nonce = response.get("imarkNonce").and_then(Value::as_str)
+        .filter(|nonce| nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported,
+            "Claude model switch could not be confirmed: native prompt readiness is unsupported"))?;
+    let mut marks = NativePromptMarks::default();
+    let mut screen = super::cache_confirmation::Screen::default();
+    // Attach acknowledges the supervisor connection before a resumed worker is
+    // ready. Native writes made during that interval can be dropped.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut output = [0_u8; 8192];
+    loop {
+        let state = tokio::time::timeout_at(
+            deadline,
+            request(
+                endpoint,
+                json!({"proto":PROTOCOL_VERSION,"op":"has","short":short}),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Claude model switch could not be confirmed: worker did not become ready",
+            )
+        })??;
+        require_ok(state.clone(), "has")?;
+        if state.get("alive").and_then(Value::as_bool) == Some(true)
+            && state.get("ready").and_then(Value::as_bool) == Some(true)
+            && marks.ready
+            && screen.empty_prompt()
+        {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Claude model switch could not be confirmed: worker did not become ready",
+            ));
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+            read = stream.read(&mut output) => {
+                let count = read?;
+                if count == 0 { return Err(io::Error::new(io::ErrorKind::BrokenPipe,
+                    "Claude model switch could not be confirmed: worker attachment closed")); }
+                marks.feed(&output[..count], nonce);
+                screen.feed(&output[..count])?;
+            }
+        }
+    }
+    verify_session()?;
+    stream
+        .write_all(format!("/model {model}\r").as_bytes())
+        .await?;
+    stream.flush().await?;
+    Ok(stream)
 }
 
 pub(super) async fn interrupt(endpoint: &Endpoint, short: &str) -> io::Result<()> {
@@ -305,6 +457,114 @@ fn read_small_secret(path: &Path, max_bytes: u64) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_marks_ignore_stale_nonce_and_handle_split_terminal_frames() {
+        let mut marks = NativePromptMarks::default();
+        marks.feed(
+            b"\x1b_cc-d-imark;{\"kind\":\"prompt_idle\",\"nonce\":\"stale\"}\x1b\\",
+            "current",
+        );
+        assert!(!marks.ready);
+        marks.feed(b"terminal repaint\x1b_cc-d-im", "current");
+        marks.feed(
+            b"ark;{\"kind\":\"prompt_idle\",\"nonce\":\"current\"}\x1b",
+            "current",
+        );
+        assert!(!marks.ready);
+        marks.feed(b"\\", "current");
+        assert!(marks.ready);
+        let mut junk = NativePromptMarks::default();
+        junk.feed(&vec![b'x'; 8192], "current");
+        assert!(junk.pending.len() < 32);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn model_command_waits_for_native_worker_readiness() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let temp = tempfile::tempdir().expect("fixture directory");
+        let address = temp.path().join("control.sock");
+        let key_path = temp.path().join("control.key");
+        std::fs::write(&key_path, "0123456789abcdef0123456789abcdef").expect("control key");
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .expect("key permissions");
+        let listener = tokio::net::UnixListener::bind(&address).expect("listener");
+        let endpoint = Endpoint {
+            address: address.to_string_lossy().into_owned(),
+            key_path,
+        };
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("native attachment");
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.expect("attach request");
+            let request: Value = serde_json::from_str(&line).expect("request JSON");
+            assert_eq!(request["op"], "attach");
+            assert!(request["caps"]["terminal"].is_null());
+            assert!(request["caps"]["mux"].is_null());
+            stream
+                .get_mut()
+                .write_all(b"{\"ok\":true,\"op\":\"attach\",\"imarkNonce\":\"0123456789abcdef0123456789abcdef\"}\n")
+                .await
+                .expect("attach ack");
+            for ready in [false, true] {
+                let (has, _) = listener.accept().await.expect("readiness probe");
+                let mut has = BufReader::new(has);
+                line.clear();
+                has.read_line(&mut line).await.expect("has request");
+                let request: Value = serde_json::from_str(&line).expect("has JSON");
+                assert_eq!(request["op"], "has");
+                if !ready {
+                    let mut byte = [0];
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(30), stream.read(&mut byte))
+                            .await
+                            .is_err(),
+                        "no terminal command may precede worker readiness"
+                    );
+                }
+                has.get_mut()
+                    .write_all(
+                        format!(
+                            "{{\"ok\":true,\"op\":\"has\",\"alive\":true,\"ready\":{ready}}}\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("readiness response");
+            }
+            let mut byte = [0];
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), stream.read(&mut byte))
+                    .await
+                    .is_err(),
+                "worker readiness alone does not prove the prompt accepts input"
+            );
+            stream.get_mut().write_all("\x1b_cc-d-imark;{\"kind\":\"prompt_idle\",\"nonce\":\"0123456789abcdef0123456789abcdef\"}\x1b\\\x1b[?2026h\x1b[2J\x1b[H❯\r\n⏵⏵ bypass permissions on (shift+tab to cycle)\x1b[?2026l".as_bytes())
+                .await.expect("native prompt marker");
+            let (has, _) = listener.accept().await.expect("confirmed readiness probe");
+            let mut has = BufReader::new(has);
+            line.clear();
+            has.read_line(&mut line).await.expect("final has request");
+            has.get_mut()
+                .write_all(b"{\"ok\":true,\"op\":\"has\",\"alive\":true,\"ready\":true}\n")
+                .await
+                .expect("final readiness response");
+            let mut command = [0_u8; 12];
+            stream
+                .read_exact(&mut command)
+                .await
+                .expect("native model command");
+            assert_eq!(&command, b"/model opus\r");
+        });
+        let stream = model_input(&endpoint, "01234567", "opus", || Ok(()))
+            .await
+            .expect("model input");
+        server.await.expect("server task");
+        drop(stream);
+    }
 
     #[test]
     fn provider_busy_is_retryable_but_protocol_drift_is_not() {

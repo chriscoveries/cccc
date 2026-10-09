@@ -8,7 +8,7 @@ vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => k
 
 import { ActorQuickControls } from "./ActorQuickControls";
 
-async function render(running: boolean, onRemove: () => void) {
+async function render(running: boolean, onRemove: () => void, onResumeSession?: () => void) {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -31,6 +31,7 @@ async function render(running: boolean, onRemove: () => void) {
         onTakeover={vi.fn()}
         onHistory={vi.fn()}
         onNewSession={vi.fn()}
+        onResumeSession={onResumeSession}
         onRestart={vi.fn()}
         onStop={vi.fn()}
         onEdit={vi.fn()}
@@ -66,6 +67,30 @@ describe("ActorQuickControls", () => {
       removeButton.click();
     });
     expect(onRemove).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("offers Resume session when the actor supports it", async () => {
+    const resume = vi.fn();
+    const { root, host } = await render(false, vi.fn(), resume);
+    const entry = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent === "resumeSession",
+    );
+    expect(entry).toBeDefined();
+    await act(async () => entry?.click());
+    expect(resume).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("omits Resume session for unsupported actors", async () => {
+    const { root, host } = await render(false, vi.fn());
+    expect(
+      Array.from(document.querySelectorAll("button")).some(
+        (button) => button.textContent === "resumeSession",
+      ),
+    ).toBe(false);
     await act(async () => root.unmount());
     host.remove();
   });
