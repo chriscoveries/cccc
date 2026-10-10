@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 // Tool and image snapshots can occupy several MiB in a single lifecycle
-// event. This bounds one HTTP chunk of the event stream; raising it lets a
-// large event through instead of failing the whole actor session.
+// event. This bounds the bytes buffered for one not-yet-terminated event;
+// raising it lets a large event through instead of failing the whole actor
+// session. An event larger than the limit still ends the stream.
 const SSE_BUFFER_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
