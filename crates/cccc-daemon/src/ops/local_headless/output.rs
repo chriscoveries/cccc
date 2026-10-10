@@ -340,6 +340,9 @@ pub(super) fn emit(session: &Session, kind: &str, data: Map<String, Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::HeadlessStatus;
+    use cccc_core::HomeLayout;
+    use crate::ops::codex_voice_analyst::AnalystSession;
 
     #[test]
     fn an_untracked_codex_turn_is_adopted_until_its_completion() {
@@ -388,6 +391,67 @@ mod tests {
             StartedTurnDisposition::Conflict
         );
     }
+    /// Exercise the real settle path against a live `Session`, not just the
+    /// classifier. A failed completion must leave status error with the
+    /// provider's reason, and the next successful turn must clear both status
+    /// and reason back to idle — the recovery the fix exists to make possible.
+    #[tokio::test]
+    async fn a_failed_turn_clears_on_the_next_success_through_a_real_session() {
+        use std::sync::{Arc, Mutex, atomic::AtomicBool};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().canonicalize().expect("config");
+        let (_listener, _directory) =
+            crate::ops::local_headless::supervisor::control_fixture::bind(&config);
+        let home = HomeLayout::from_path(config.join("home")).expect("home");
+        let status = Mutex::new(HeadlessStatus {
+            status: "working".into(),
+            task_id: None,
+            updated_at: String::new(),
+            pid: None,
+            reason: None,
+        });
+        let session = Session {
+            home,
+            group_id: "g-session-roundtrip".into(),
+            actor_id: "claude-1".into(),
+            managed: Arc::new(AnalystSession::claude_for_shutdown_test(
+                &config,
+                "abcdef01",
+                Vec::new(),
+                true,
+            )),
+            has_terminal: AtomicBool::new(false),
+            viewer: Mutex::new(None),
+            status,
+            stopped: AtomicBool::new(false),
+            stop_lock: Mutex::new(()),
+            startup_prompt: Mutex::new(None),
+            active_turn: Mutex::new(None),
+        };
+
+        // A rejected turn: status error carrying the provider's own text.
+        session.set_status_with_reason(
+            "error",
+            None,
+            Some("APIError 400 reasoning encrypted_content".into()),
+        );
+        assert_eq!(session.status.lock().expect("status").status, "error");
+        assert_eq!(
+            session.status.lock().expect("status").reason.as_deref(),
+            Some("APIError 400 reasoning encrypted_content")
+        );
+
+        // The next successful turn must clear the stale failure entirely.
+        session.set_status("idle", None);
+        let state = session.status.lock().expect("status");
+        assert_eq!(state.status, "idle");
+        assert_eq!(
+            state.reason, None,
+            "a recovered turn must not keep displaying the previous failure"
+        );
+    }
+
     /// Classify a completion the way `complete_turn` does, including the
     /// turn-id guard. `None` means the turn was ignored; otherwise the settle
     /// decision, with the reported status for context.
