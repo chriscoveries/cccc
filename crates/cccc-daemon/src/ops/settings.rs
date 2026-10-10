@@ -45,6 +45,16 @@ const SECTION_SETTING_KEYS: &[(&str, &str, &str)] = &[
         "notify_lines",
     ),
     ("panorama_enabled", "features", "panorama_enabled"),
+    (
+        "reap_leftover_processes",
+        "runtime",
+        "reap_leftover_processes",
+    ),
+    (
+        "reap_leftover_after_hours",
+        "runtime",
+        "reap_leftover_after_hours",
+    ),
 ];
 
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {

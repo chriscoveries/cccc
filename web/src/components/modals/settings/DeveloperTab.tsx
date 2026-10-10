@@ -6,6 +6,7 @@ import { Button } from "../../ui/button";
 // DeveloperTab configures developer mode.
 import { useTranslation } from "react-i18next";
 import { SelectCombobox } from "../../SelectCombobox";
+import { LeftoverSection } from "./LeftoverSection";
 import {
   inputClass,
   labelClass,
@@ -69,6 +70,8 @@ interface DeveloperTabProps {
   } | null;
   onPreviewRegistry: () => void;
   onReconcileRegistry: () => void;
+  leftoverBusy: boolean;
+  onSaveLeftover: (patch: Partial<import("../../../types").GroupSettings>) => Promise<unknown>;
 }
 
 export function DeveloperTab({
@@ -111,6 +114,8 @@ export function DeveloperTab({
   registryResult,
   onPreviewRegistry,
   onReconcileRegistry,
+  leftoverBusy,
+  onSaveLeftover,
 }: DeveloperTabProps) {
   const { t } = useTranslation("settings");
   const [copyStatus, setCopyStatus] = useState<"" | "copied" | "copyFailed">("");
@@ -569,6 +574,15 @@ export function DeveloperTab({
           <pre className={`${preClass()} mt-0 max-h-[260px] overflow-y-auto`}>
             <code>{logText || "—"}</code>
           </pre>
+        </div>
+
+        <div className={settingsWorkspaceBodyClass}>
+          <LeftoverSection
+            isDark={_isDark}
+            groupId={groupId}
+            busy={leftoverBusy}
+            onSave={onSaveLeftover}
+          />
         </div>
       </div>
     </div>

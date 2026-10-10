@@ -45,6 +45,7 @@ mod groups;
 mod hermes_runtime;
 mod im;
 pub(crate) mod local_headless;
+mod leftover;
 mod maintenance;
 mod membership;
 pub(crate) use membership::ReachRestore;
@@ -113,6 +114,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         runtime_state::resolve_operation,
         maintenance::resolve_operation,
         im::resolve_operation,
+        leftover::resolve_operation,
         memory::resolve_operation,
         context::resolve_operation,
         settings::resolve_operation,

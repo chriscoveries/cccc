@@ -13,17 +13,19 @@ pub async fn run(home: &HomeLayout, product_version: &str, all_runtimes: bool) -
     let xvfb = find_command("Xvfb");
     let x11vnc = find_command("x11vnc");
     let daemon = daemon_status(home).await;
+    let leftovers = leftover_processes(home).await;
     println!(
         "{}",
-        serde_json::to_string_pretty(&report(
+        serde_json::to_string_pretty(&report(&ReportInputs {
             home,
             product_version,
-            browser.as_deref(),
-            xvfb.as_deref(),
-            x11vnc.as_deref(),
+            browser: browser.as_deref(),
+            xvfb: xvfb.as_deref(),
+            x11vnc: x11vnc.as_deref(),
             daemon,
+            leftovers,
             all_runtimes,
-        ))?
+        }))?
     );
     Ok(())
 }
@@ -52,15 +54,49 @@ async fn daemon_status(home: &HomeLayout) -> Value {
     }
 }
 
-fn report(
-    home: &HomeLayout,
-    product_version: &str,
-    browser: Option<&Path>,
-    xvfb: Option<&Path>,
-    x11vnc: Option<&Path>,
+async fn leftover_processes(home: &HomeLayout) -> Value {
+    // Best effort: doctor must report even when the daemon is down, in which
+    // case there is nobody to attribute processes against — report none
+    // rather than a guess.
+    let client = DaemonClient::new(home.clone()).with_timeout(Duration::from_millis(2000));
+    let request = DaemonRequest {
+        v: 1,
+        op: "leftover_processes".into(),
+        args: Default::default(),
+    };
+    match client.call(&request).await {
+        Ok(response) if response.ok => json!({
+            "count": response.result.get("count").cloned().unwrap_or(Value::Null),
+            "leftovers": response.result.get("leftovers").cloned().unwrap_or(Value::Null),
+        }),
+        Ok(response) => json!({
+            "count": Value::Null,
+            "error": response.error.map(|error| error.message),
+        }),
+        Err(error) => json!({"count": Value::Null, "error": error.to_string()}),
+    }
+}
+
+struct ReportInputs<'a> {
+    home: &'a HomeLayout,
+    product_version: &'a str,
+    browser: Option<&'a Path>,
+    xvfb: Option<&'a Path>,
+    x11vnc: Option<&'a Path>,
     daemon: Value,
+    leftovers: Value,
     all_runtimes: bool,
-) -> Value {
+}
+
+fn report(inputs: &ReportInputs<'_>) -> Value {
+    let home = inputs.home;
+    let product_version = inputs.product_version;
+    let browser = inputs.browser;
+    let xvfb = inputs.xvfb;
+    let x11vnc = inputs.x11vnc;
+    let daemon = inputs.daemon.clone();
+    let leftovers = inputs.leftovers.clone();
+    let all_runtimes = inputs.all_runtimes;
     let linux = cfg!(target_os = "linux");
     let mut runtimes = cccc_runtime::detect_runtimes();
     if !all_runtimes {
@@ -73,6 +109,7 @@ fn report(
         "home":home.root(),
         "installation":installation::report(),
         "daemon":daemon,
+        "leftover_processes":leftovers,
         "runtimes":runtimes,
         "pty":{
             "supported":true,
@@ -119,19 +156,21 @@ mod tests {
         let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
         let browser = Path::new("/usr/bin/google-chrome");
         let xvfb = Path::new("/usr/bin/Xvfb");
-        let value = report(
-            &home,
-            "0.4.33",
-            Some(browser),
-            Some(xvfb),
-            None,
-            json!({"running":false}),
-            false,
-        );
+        let value = report(&ReportInputs {
+            home: &home,
+            product_version: "0.4.33",
+            browser: Some(browser),
+            xvfb: Some(xvfb),
+            x11vnc: None,
+            daemon: json!({"running":false}),
+            leftovers: json!({"count":1,"leftovers":[]}),
+            all_runtimes: false,
+        });
         assert_eq!(value["version"], "0.4.33");
         assert!(value["installation"]["path_status"].is_string());
         assert!(value["installation"]["command_candidates"].is_array());
         assert_eq!(value["daemon"]["running"], false);
+        assert_eq!(value["leftover_processes"]["count"], 1);
         assert_eq!(value["projected_browser"]["mode"], "hybrid");
         assert_eq!(
             value["projected_browser"]["web_model_mode"],
@@ -169,15 +208,16 @@ mod tests {
     fn linux_system_browser_contract_requires_xvfb() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
-        let value = report(
-            &home,
-            "0.4.33",
-            Some(Path::new("/usr/bin/chromium")),
-            None,
-            None,
-            json!({"running":false}),
-            true,
-        );
+        let value = report(&ReportInputs {
+            home: &home,
+            product_version: "0.4.33",
+            browser: Some(Path::new("/usr/bin/chromium")),
+            xvfb: None,
+            x11vnc: None,
+            daemon: json!({"running":false}),
+            leftovers: json!({"count":Value::Null}),
+            all_runtimes: true,
+        });
         assert_eq!(
             value["projected_browser"]["system_browser_available"],
             !cfg!(target_os = "linux")
