@@ -80,6 +80,7 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
             // foreman notice wants the same at-most-once treatment.
             if include_unread && !cancelled.load(Ordering::Acquire) {
                 tick_leftovers(home, group_id, cancelled);
+                tick_actor_memory(home, group_id, cancelled);
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -90,8 +91,7 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
 /// One leftover-process pass for a group: notify the foreman about new
 /// batches and, when opted in, reap what is old enough. Returned notices are
 /// dispatched like any other tick notification.
-fn tick_leftovers(home: &HomeLayout, group_id: &str, cancelled: &AtomicBool) {
-    let Ok(store) = GroupStore::new(home.clone()) else {
+fn tick_leftovers(home: &HomeLayout, group_id: &str, cancelled: &AtomicBool) {    let Ok(store) = GroupStore::new(home.clone()) else {
         return;
     };
     let Ok(group) = store.load(group_id) else {
@@ -107,6 +107,30 @@ fn tick_leftovers(home: &HomeLayout, group_id: &str, cancelled: &AtomicBool) {
             }
         }
         Err(error) => tracing::warn!(%error, %group_id, "leftover tick failed"),
+    }
+}
+
+/// One memory-ceiling pass for a group: sample capped actors, restart what is
+/// over limit while idle (at most one restart per actor per 30 minutes).
+/// Returned restart/failure notices are dispatched like any other tick
+/// notification.
+fn tick_actor_memory(home: &HomeLayout, group_id: &str, cancelled: &AtomicBool) {
+    let Ok(store) = GroupStore::new(home.clone()) else {
+        return;
+    };
+    let Ok(group) = store.load(group_id) else {
+        return;
+    };
+    match super::actor_memory::tick(home, &group) {
+        Ok(events) => {
+            for event in events {
+                if cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                super::actor_delivery::dispatch(home, &group, &event);
+            }
+        }
+        Err(error) => tracing::warn!(%error, %group_id, "actor memory tick failed"),
     }
 }
 
