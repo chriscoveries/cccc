@@ -603,3 +603,133 @@ fn mail_wake_skips_paused_stopped_disabled_and_read_mail() {
     cccc_core::inbox::consume_unread(&fixture.home, &group, "peer", "peer", 10).expect("read");
     assert!(fixture.tick(Some(true)).is_empty(), "read Mail");
 }
+
+impl MailWake {
+    fn card(&self, fields: serde_json::Value) {
+        let mut op = json!({"op":"task.create","title":"PRIVATE_CARD_TITLE"})
+            .as_object()
+            .cloned()
+            .expect("card op");
+        op.extend(fields.as_object().cloned().expect("card fields"));
+        cccc_core::context::ContextStore::new(self.home.clone())
+            .expect("contexts")
+            .sync(&self.group_id, &[op], None, "user", false)
+            .expect("create card");
+    }
+
+    fn system_event(&self, kind: &str, data: serde_json::Value, age_seconds: i64) {
+        let mut event = Event::new(kind, &self.group_id);
+        event.by = "system".into();
+        event.ts = (chrono::Utc::now() - chrono::Duration::seconds(age_seconds)).to_rfc3339();
+        event.data = data.as_object().cloned().expect("event data");
+        self.append(&event);
+    }
+}
+
+fn card_notices(notices: &[Event]) -> Vec<&Event> {
+    notices
+        .iter()
+        .filter(|event| event.data["kind"] == "task_notice")
+        .collect()
+}
+
+#[test]
+fn task_wake_off_never_reminds_about_cards() {
+    for delivery in [json!({}), json!({"task_wake_on_idle":false})] {
+        let fixture = MailWake::new(delivery);
+        fixture.card(json!({"status":"active","assignee":"peer"}));
+        assert!(card_notices(&fixture.tick(Some(true))).is_empty());
+    }
+}
+
+#[test]
+fn task_wake_reminds_an_idle_managed_session_about_its_active_cards_once_per_interval() {
+    let fixture = MailWake::new(json!({"task_wake_on_idle":true}));
+    fixture.card(json!({"status":"active","assignee":"peer"}));
+    fixture.card(json!({"status":"active","assignee":"peer"}));
+    let notices = fixture.tick(Some(true));
+    let cards = card_notices(&notices);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].data["target_actor_id"], "peer");
+    assert_eq!(
+        cards[0].data["context"]["task_ids"],
+        json!(["T001", "T002"])
+    );
+    assert!(
+        !serde_json::to_string(cards[0])
+            .expect("notice json")
+            .contains("PRIVATE_CARD_TITLE"),
+        "reminders name cards, never their content"
+    );
+    assert!(
+        card_notices(&fixture.tick(Some(true))).is_empty(),
+        "at most one reminder per interval"
+    );
+}
+
+#[test]
+fn task_wake_reminds_again_only_after_a_quiet_interval() {
+    let fixture = MailWake::new(json!({"task_wake_on_idle":true,"task_wake_interval_seconds":600}));
+    fixture.card(json!({"status":"active","assignee":"peer"}));
+    fixture.system_event(
+        "system.notify",
+        json!({"kind":"task_notice","target_actor_id":"peer"}),
+        1_200,
+    );
+    assert_eq!(card_notices(&fixture.tick(Some(true))).len(), 1);
+
+    let recent = MailWake::new(json!({"task_wake_on_idle":true,"task_wake_interval_seconds":600}));
+    recent.card(json!({"status":"active","assignee":"peer"}));
+    let mut message = Event::new("chat.message", &recent.group_id);
+    message.by = "peer".into();
+    message.data = json!({"text":"working on it","to":["user"],"message_mode":"send"})
+        .as_object()
+        .cloned()
+        .expect("message");
+    recent.append(&message);
+    assert!(
+        card_notices(&recent.tick(Some(true))).is_empty(),
+        "a lane that spoke within the interval is not prompted"
+    );
+
+    let restarted = MailWake::new(json!({"task_wake_on_idle":true}));
+    restarted.card(json!({"status":"active","assignee":"peer"}));
+    restarted.system_event("actor.start", json!({"actor_id":"peer"}), 30);
+    assert!(
+        card_notices(&restarted.tick(Some(true))).is_empty(),
+        "a fresh session already sees its cards at bootstrap"
+    );
+}
+
+#[test]
+fn task_wake_waits_for_idle_and_ignores_pty_actors() {
+    let fixture = MailWake::new(json!({"task_wake_on_idle":true}));
+    fixture.card(json!({"status":"active","assignee":"peer"}));
+    assert!(
+        card_notices(&fixture.tick(Some(false))).is_empty(),
+        "working"
+    );
+    assert!(card_notices(&fixture.tick(None)).is_empty(), "PTY");
+    assert_eq!(card_notices(&fixture.tick(Some(true))).len(), 1);
+}
+
+#[test]
+fn task_wake_skips_cards_that_are_not_the_actors_to_move() {
+    for fields in [
+        json!({"status":"planned","assignee":"peer"}),
+        json!({"status":"done","assignee":"peer"}),
+        json!({"status":"active"}),
+        json!({"status":"active","assignee":"other"}),
+        json!({"status":"active","assignee":"peer","blocked_by":["T009"]}),
+        json!({"status":"active","assignee":"peer","waiting_on":"user"}),
+        json!({"status":"active","assignee":"peer","waiting_on":"actor"}),
+        json!({"status":"active","assignee":"peer","waiting_on":"external"}),
+    ] {
+        let fixture = MailWake::new(json!({"task_wake_on_idle":true}));
+        fixture.card(fields.clone());
+        assert!(
+            card_notices(&fixture.tick(Some(true))).is_empty(),
+            "{fields}"
+        );
+    }
+}

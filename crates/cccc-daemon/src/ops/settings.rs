@@ -30,6 +30,12 @@ const SECTION_SETTING_KEYS: &[(&str, &str, &str)] = &[
         "delivery",
         "mail_wake_min_age_seconds",
     ),
+    ("task_wake_on_idle", "delivery", "task_wake_on_idle"),
+    (
+        "task_wake_interval_seconds",
+        "delivery",
+        "task_wake_interval_seconds",
+    ),
     (
         "terminal_transcript_visibility",
         "terminal_transcript",
@@ -70,7 +76,7 @@ fn group_settings(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     authorize(&group, request)?;
     let mut patch = patch(request)?;
     patch.remove("by");
-    validate_mail_wake(&patch)?;
+    validate_idle_wake(&patch)?;
     let settings_value = store(home)?
         .mutate(&group.group_id, |doc| {
             let mut flat = match doc.extra.remove("settings") {
@@ -116,25 +122,28 @@ fn group_settings(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     }))
 }
 
-/// `null` removes either override.
-fn validate_mail_wake(patch: &Map<String, Value>) -> Result<(), OpError> {
-    if patch
-        .get("mail_wake_on_idle")
-        .is_some_and(|value| !value.is_null() && !value.is_boolean())
-    {
-        return Err(OpError::new(
-            "invalid_args",
-            "mail_wake_on_idle must be a boolean",
-        ));
+/// `null` removes any of these overrides.
+fn validate_idle_wake(patch: &Map<String, Value>) -> Result<(), OpError> {
+    for key in ["mail_wake_on_idle", "task_wake_on_idle"] {
+        if patch
+            .get(key)
+            .is_some_and(|value| !value.is_null() && !value.is_boolean())
+        {
+            return Err(OpError::new(
+                "invalid_args",
+                format!("{key} must be a boolean"),
+            ));
+        }
     }
-    if patch
-        .get("mail_wake_min_age_seconds")
-        .is_some_and(|value| !value.is_null() && value.as_i64().is_none_or(|seconds| seconds < 0))
-    {
-        return Err(OpError::new(
-            "invalid_args",
-            "mail_wake_min_age_seconds must be a nonnegative integer",
-        ));
+    for key in ["mail_wake_min_age_seconds", "task_wake_interval_seconds"] {
+        if patch.get(key).is_some_and(|value| {
+            !value.is_null() && value.as_i64().is_none_or(|seconds| seconds < 0)
+        }) {
+            return Err(OpError::new(
+                "invalid_args",
+                format!("{key} must be a nonnegative integer"),
+            ));
+        }
     }
     Ok(())
 }

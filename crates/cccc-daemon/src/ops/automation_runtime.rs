@@ -75,15 +75,18 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
 }
 
 /// Running actors that may receive unread notices and, only when the group
-/// opted into `delivery.mail_wake_on_idle`, whether each running managed
-/// session reports an ended turn. PTY and status-unknown actors are absent
-/// from the map and keep the ordinary notice timer.
+/// opted into `delivery.mail_wake_on_idle` or `delivery.task_wake_on_idle`,
+/// whether each running managed session reports an ended turn. PTY and
+/// status-unknown actors are absent from the map and keep the ordinary
+/// notice timer.
 fn delivery_and_managed_idle(group: &GroupDoc) -> (HashSet<String>, HashMap<String, bool>) {
     let running = actors::visible(group)
         .filter(|actor| actor.enabled)
         .filter(|actor| actor_runtime_status::resolve(group, actor).running)
         .collect::<Vec<_>>();
-    let managed_idle = if cccc_core::automation::mail_wake_on_idle(group) {
+    let managed_idle = if cccc_core::automation::mail_wake_on_idle(group)
+        || cccc_core::automation::task_wake_on_idle(group)
+    {
         running
             .iter()
             .filter(|actor| local_headless::supports(actor))

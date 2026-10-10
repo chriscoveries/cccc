@@ -351,7 +351,7 @@ pub fn pending_sources(
                     .get("kind")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if matches!(notice_kind, "mail_notice" | "reply_notice") {
+                if matches!(notice_kind, "mail_notice" | "reply_notice" | "task_notice") {
                     event.data.get("target_actor_id").and_then(Value::as_str)
                         == Some(actor.id.as_str())
                 } else {

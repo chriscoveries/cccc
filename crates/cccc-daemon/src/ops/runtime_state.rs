@@ -900,7 +900,7 @@ fn turn_event_targets_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> 
     if event.kind == "system.notify"
         && matches!(
             event.data.get("kind").and_then(Value::as_str),
-            Some("mail_notice" | "reply_notice")
+            Some("mail_notice" | "reply_notice" | "task_notice")
         )
     {
         return event.data.get("target_actor_id").and_then(Value::as_str) == Some(actor_id);
