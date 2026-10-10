@@ -186,6 +186,18 @@ pub fn tick_group_with_idle_actors(
     )
 }
 
+/// Whether the group opted into reminding idle managed sessions about the
+/// active cards assigned to them.
+#[must_use]
+pub fn task_wake_on_idle(group: &GroupDoc) -> bool {
+    group
+        .extra
+        .get("delivery")
+        .and_then(|delivery| delivery.get("task_wake_on_idle"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn tick_group_inner(
     home: &HomeLayout,
     group_id: &str,
@@ -355,7 +367,11 @@ fn tick_unread(
     let mail_after = delivery_timing_value(group, "mail_notice_after_seconds", 1_800);
     let mail_idle_after = delivery_timing_value(group, "mail_notice_idle_after_seconds", 60);
     let reply_after = delivery_timing_value(group, "reply_notice_after_seconds", 900);
-    if mail_after <= 0 && reply_after <= 0 {
+    // Card reminders are independent of the Mail notice timers: turning
+    // Mail notices off must not silently turn off card reminders, and the
+    // opt-in default is off either way.
+    let card_wake = task_wake_on_idle(group);
+    if mail_after <= 0 && reply_after <= 0 && !card_wake {
         return Ok(());
     }
     let eligible = actors::visible(group)
@@ -366,12 +382,21 @@ fn tick_unread(
     if eligible.is_empty() {
         return Ok(());
     }
+    // Cards are read only when an eligible managed session reports idle.
+    // `idle_actor_ids` is upstream's own idle set, the same one the Mail
+    // notice gate uses, so a card reminder and a Mail notice agree about
+    // what "idle" means.
+    let held_cards = if card_wake && eligible.iter().any(|a| idle_actor_ids.contains(&a.id)) {
+        Some(assigned_cards(home, &group.group_id)?)
+    } else {
+        None
+    };
     let ledger_path = store.ledger_path(&group.group_id)?;
     let cursors = inbox::cursors(home, &group.group_id)?;
     // Project only the notices while borrowing history. Release the index read
     // lock before appending, since append also updates that same index.
     let notices = ledger::inspect(&ledger_path, |events, positions| {
-        unread_notices(
+        let mut notices = unread_notices(
             group,
             &eligible,
             events,
@@ -383,7 +408,18 @@ fn tick_unread(
                 idle_actor_ids,
             },
             reply_after,
-        )
+        );
+        if let Some(held_cards) = &held_cards {
+            notices.extend(card_notices(
+                group,
+                &eligible,
+                events,
+                held_cards,
+                idle_actor_ids,
+                delivery_timing_value(group, "task_wake_interval_seconds", 1_800).max(60),
+            ));
+        }
+        notices
     })?;
     for event in notices {
         ledger::append(&ledger_path, &event)?;
@@ -705,6 +741,134 @@ fn unread_notices(
         }
     }
     notices
+}
+
+/// Active cards each actor is the assignee of, excluding blocked cards and
+/// cards waiting on the user, an actor, or an external party.
+fn assigned_cards(home: &HomeLayout, group_id: &str) -> io::Result<HashMap<String, Vec<String>>> {
+    let context = crate::context::ContextStore::new(home.clone())?.load(group_id)?;
+    let text = |task: &Map<String, Value>, key: &str| {
+        task.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+    let mut held = HashMap::<String, Vec<String>>::new();
+    for task in &context.tasks {
+        let blocked = task
+            .get("blocked_by")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty());
+        let assignee = text(task, "assignee");
+        if text(task, "status") != "active"
+            || assignee.is_empty()
+            || blocked
+            || matches!(
+                text(task, "waiting_on").as_str(),
+                "user" | "actor" | "external"
+            )
+        {
+            continue;
+        }
+        held.entry(assignee).or_default().push(text(task, "id"));
+    }
+    Ok(held)
+}
+
+/// One content-free reminder to an idle managed session that holds active,
+/// unblocked cards and has been quiet for `interval`. Quiet means no message
+/// from the actor, no session start, and no earlier card reminder in that
+/// window, so a working lane is never prompted and an idle one at most once
+/// per `interval`.
+///
+/// The notice names only card ids: titles and task content stay out of it, so
+/// a reminder cannot become a channel for work text an actor did not ask for.
+fn card_notices(
+    group: &GroupDoc,
+    eligible: &[&cccc_contracts::Actor],
+    events: &[Event],
+    held_cards: &HashMap<String, Vec<String>>,
+    idle_actor_ids: &HashSet<String>,
+    interval: i64,
+) -> Vec<Event> {
+    let now = Utc::now().timestamp();
+    // Newest timestamp per actor, not the last ledger position: an
+    // out-of-order event must not reopen a window a later one closed.
+    let mut last_activity = HashMap::<&str, i64>::new();
+    // A group start or resume restarts every actor's quiet window, as it
+    // does the Mail notice window.
+    let mut group_resume: Option<i64> = None;
+    for event in events {
+        let resumed = event.kind == "group.start"
+            || (event.kind == "group.set_state"
+                && matches!(
+                    event.data.get("new_state").and_then(Value::as_str),
+                    Some("active" | "idle")
+                ));
+        if resumed {
+            let at = timestamp(&event.ts, now);
+            group_resume = Some(group_resume.map_or(at, |seen| seen.max(at)));
+            continue;
+        }
+        let actor_id = match event.kind.as_str() {
+            "chat.message" => Some(event.by.as_str()),
+            "actor.start" | "actor.restart" | "actor.new_session" => {
+                event.data.get("actor_id").and_then(Value::as_str)
+            }
+            "system.notify"
+                if event.data.get("kind").and_then(Value::as_str) == Some("task_notice") =>
+            {
+                event.data.get("target_actor_id").and_then(Value::as_str)
+            }
+            _ => None,
+        };
+        if let Some(actor_id) = actor_id {
+            let at = timestamp(&event.ts, now);
+            last_activity
+                .entry(actor_id)
+                .and_modify(|seen| *seen = (*seen).max(at))
+                .or_insert(at);
+        }
+    }
+    eligible
+        .iter()
+        .filter(|actor| idle_actor_ids.contains(&actor.id))
+        .filter(|actor| {
+            last_activity
+                .get(actor.id.as_str())
+                .copied()
+                .max(group_resume)
+                .is_none_or(|at| now - at >= interval)
+        })
+        .filter_map(|actor| {
+            let cards = held_cards.get(&actor.id).filter(|cards| !cards.is_empty())?;
+            let mut event = Event::new("system.notify", &group.group_id);
+            event.by = "system".into();
+            event.data = json!({
+                "kind":"task_notice",
+                "priority":"normal",
+                "title":"Cards waiting",
+                "message":format!(
+                    "You are the assignee of {} active card(s): {}. Continue the next step, or update each card with cccc_task if it is done, blocked, or waiting on someone.",
+                    cards.len(),
+                    cards.join(", ")
+                ),
+                "target_actor_id":actor.id,
+                "im_visibility":"internal",
+                "context":{
+                    "actor_id":actor.id,
+                    "actor_created_at":actor.created_at,
+                    "task_ids":cards,
+                    "count":cards.len(),
+                },
+            })
+            .as_object()
+            .cloned()
+            .expect("card reminder data");
+            Some(event)
+        })
+        .collect()
 }
 
 fn delivery_timing_value(group: &GroupDoc, key: &str, default: i64) -> i64 {
