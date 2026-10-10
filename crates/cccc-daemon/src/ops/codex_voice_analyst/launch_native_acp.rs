@@ -132,13 +132,19 @@ impl AnalystSession {
             Err(error) => {
                 protocol.close().await;
                 process.stop()?;
-                return Err(io::Error::new(
-                    error.kind(),
+                // A resume failure already carries its own diagnosis and names
+                // the recovery. Re-wrapping it as an initialization failure
+                // would discard exactly the information that makes it
+                // actionable, so pass that one through unchanged.
+                let message = if error.to_string().contains(native_acp::RESUME_RECOVERY_HINT) {
+                    error.to_string()
+                } else {
                     format!(
                         "{} ACP initialization failed; check native CLI login and launch options. Attempted sessions are never replaced automatically: {error}",
                         native_acp::name(runtime)
-                    ),
-                ));
+                    )
+                };
+                return Err(io::Error::new(error.kind(), message));
             }
         };
         if purpose != SessionPurpose::VoiceSecretary {
