@@ -462,7 +462,7 @@ fn tick_unread(
                 delivery_timing_value(group, "task_wake_interval_seconds", 1_800).max(60),
             ));
         }
-        notices (Remind idle managed sessions about their active tasks (opt-in))
+        notices
     })?;
     for event in notices {
         ledger::append(&ledger_path, &event)?;

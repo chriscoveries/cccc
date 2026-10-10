@@ -152,6 +152,8 @@ export function SettingsModal({
   const [mailNoticeIdleAfterSeconds, setMailNoticeIdleAfterSeconds] = useState(60);
   const [mailWakeOnIdle, setMailWakeOnIdle] = useState(false);
   const [mailWakeMinAgeSeconds, setMailWakeMinAgeSeconds] = useState(60);
+  const [taskWakeOnIdle, setTaskWakeOnIdle] = useState(false);
+  const [taskWakeIntervalSeconds, setTaskWakeIntervalSeconds] = useState(1800);
   const [replyNoticeAfterSeconds, setReplyNoticeAfterSeconds] = useState(900);
   const [idleSeconds, setIdleSeconds] = useState(0);
   const [keepaliveSeconds, setKeepaliveSeconds] = useState(120);
@@ -336,6 +338,8 @@ export function SettingsModal({
         current,
         previous?.mail_notice_idle_after_seconds ?? 60,
         settings.mail_notice_idle_after_seconds ?? 60,
+      ),
+    );
     setMailWakeOnIdle((current) =>
       sync(current, previous?.mail_wake_on_idle ?? false, settings.mail_wake_on_idle ?? false),
     );
@@ -344,6 +348,16 @@ export function SettingsModal({
         current,
         previous?.mail_wake_min_age_seconds ?? 60,
         settings.mail_wake_min_age_seconds ?? 60,
+      ),
+    );
+    setTaskWakeOnIdle((current) =>
+      sync(current, previous?.task_wake_on_idle ?? false, settings.task_wake_on_idle ?? false),
+    );
+    setTaskWakeIntervalSeconds((current) =>
+      sync(
+        current,
+        previous?.task_wake_interval_seconds ?? 1800,
+        settings.task_wake_interval_seconds ?? 1800,
       ),
     );
     setReplyNoticeAfterSeconds((current) =>
@@ -843,6 +857,8 @@ export function SettingsModal({
       mail_notice_idle_after_seconds: mailNoticeIdleAfterSeconds,
       mail_wake_on_idle: mailWakeOnIdle,
       mail_wake_min_age_seconds: mailWakeMinAgeSeconds,
+      task_wake_on_idle: taskWakeOnIdle,
+      task_wake_interval_seconds: taskWakeIntervalSeconds,
       reply_notice_after_seconds: replyNoticeAfterSeconds,
     });
   };
@@ -1749,6 +1765,10 @@ export function SettingsModal({
                     setMailWakeOnIdle={setMailWakeOnIdle}
                     mailWakeMinAgeSeconds={mailWakeMinAgeSeconds}
                     setMailWakeMinAgeSeconds={setMailWakeMinAgeSeconds}
+                    taskWakeOnIdle={taskWakeOnIdle}
+                    setTaskWakeOnIdle={setTaskWakeOnIdle}
+                    taskWakeIntervalSeconds={taskWakeIntervalSeconds}
+                    setTaskWakeIntervalSeconds={setTaskWakeIntervalSeconds}
                     mailNoticeAfterSeconds={mailNoticeAfterSeconds}
                     setMailNoticeAfterSeconds={setMailNoticeAfterSeconds}
                     mailNoticeIdleAfterSeconds={mailNoticeIdleAfterSeconds}
