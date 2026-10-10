@@ -37,6 +37,12 @@ pub enum ActorAction {
     Start(ActorTarget),
     Stop(ActorTarget),
     Restart(ActorTarget),
+    /// Discard the actor's attempted session and start a fresh one.
+    ///
+    /// The recovery for an ACP session that cannot be resumed: attempted
+    /// sessions are never replaced automatically, so a session whose data has
+    /// gone missing leaves the actor down until this is run.
+    NewSession(ActorTarget),
     Update {
         actor_id: String,
         #[arg(long = "group")]
