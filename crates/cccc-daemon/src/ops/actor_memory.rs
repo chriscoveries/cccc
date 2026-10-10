@@ -8,19 +8,22 @@
 //! ledger event plus one targeted foreman notice per restart; a failed
 //! restart is recorded the same way, never swallowed.
 //!
-//! Two deliberate limits. Only managed sessions are enforced: PTY idleness is
-//! a heuristic and cannot prove never-mid-turn, so a PTY lane is never
-//! restarted by this pass. And a restart is only attempted for a currently
+//! Two deliberate limits. Only managed sessions are enforced by default:
+//! PTY idleness is output-silence, not proof of no turn, so a PTY lane
+//! restarts only under the explicit `memory_limit_restart_pty` opt-in and
+//! only after ten quiet minutes — and that restart is a FRESH session, since
+//! PTY lanes have no resume. A restart is only attempted for a currently
 //! running session whose provider root is ownership-verified (recorded pid
 //! plus start-time identity, rechecked at admission) — never a blind
 //! fresh start.
 
 use std::collections::HashMap;
 use std::io;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cccc_contracts::Event;
+use cccc_contracts::{Event, RuntimeStateSource};
 use cccc_core::{GroupDoc, HomeLayout};
+use cccc_runtime::ActivitySnapshot;
 use serde_json::{Value, json};
 
 use super::actor_runtime_status;
@@ -30,6 +33,12 @@ use super::actor_memory_sampling as sampling;
 /// restarts. The marker is written *before* the restart is attempted, so a
 /// crash mid-restart still holds the window (fail quiet, never hot-loop).
 const RESTART_COOLDOWN_SECS: u64 = 1800;
+
+/// Output-silence window that counts as PTY-quiet. A lane that produced no
+/// output for this long, with no newer input waiting, is treated as idle —
+/// with the explicit caveat (documented on the setting) that silence is not
+/// proof of no turn, which is why this path is opt-in and restarts fresh.
+const PTY_QUIET_SECS: u64 = 600;
 
 /// Cooldown file name inside the group's state dir.
 const COOLDOWN_FILE: &str = "actor_memory.json";
@@ -85,6 +94,31 @@ fn write_cooldown(home: &HomeLayout, group_id: &str, actor_id: &str, at: u64) ->
 /// between the sample and the restart.
 fn managed_idle(group_id: &str, actor_id: &str) -> bool {
     super::local_headless::ready_for_mail_notice(group_id, actor_id)
+}
+
+/// PTY-quiet test over a terminal activity snapshot: output silent for the
+/// whole window, and no input newer than that output (an unanswered delivery
+/// may still be running). Fresh sessions with no output yet are NOT quiet —
+/// silence must be observed, not assumed.
+pub fn pty_quiet_for(snapshot: &ActivitySnapshot, quiet: Duration) -> bool {
+    let Some(output) = &snapshot.last_output else {
+        return false;
+    };
+    if output.age < quiet {
+        return false;
+    }
+    match &snapshot.last_input {
+        None => true,
+        Some(input) => input.age >= output.age,
+    }
+}
+
+/// Live PTY-quiet check for an actor. False on any error (no session, lock
+/// poison): an unreadable tracker never authorises a restart.
+fn pty_quiet_live(group_id: &str, actor_id: &str) -> bool {
+    cccc_runtime::activity(group_id, actor_id)
+        .map(|snapshot| pty_quiet_for(&snapshot, Duration::from_secs(PTY_QUIET_SECS)))
+        .unwrap_or(false)
 }
 
 /// Provider root of the actor's live tree: the recorded session pid, with
@@ -148,10 +182,18 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
         if marks.get(&actor.id).is_some_and(|at| now < at.saturating_add(RESTART_COOLDOWN_SECS)) {
             continue;
         }
-        // Idle first (cheap snapshot); sampling only happens for idle lanes.
-        if !managed_idle(&group.group_id, &actor.id) {
+        // Idle first (cheap snapshots); sampling only happens for idle lanes.
+        // Managed sessions gate on no-turn-and-idle; PTY lanes gate on the
+        // explicit opt-in plus output silence (fresh restart, no resume).
+        let idle_managed = managed_idle(&group.group_id, &actor.id);
+        let idle_pty = !idle_managed
+            && actor.memory_limit_restart_pty
+            && actor.runtime_state_source == RuntimeStateSource::Terminal
+            && pty_quiet_live(&group.group_id, &actor.id);
+        if !idle_managed && !idle_pty {
             continue;
         }
+        let fresh_restart = !idle_managed;
         let Some((root, started)) = live_root(group, &actor.id) else {
             continue;
         };
@@ -173,7 +215,14 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
         if !fresh_actor.enabled || fresh_actor.memory_limit_mb == 0 {
             continue;
         }
-        if !managed_idle(&group.group_id, &actor.id) {
+        if fresh_restart {
+            if !(fresh_actor.memory_limit_restart_pty
+                && fresh_actor.runtime_state_source == RuntimeStateSource::Terminal
+                && pty_quiet_live(&group.group_id, &actor.id))
+            {
+                continue;
+            }
+        } else if !managed_idle(&group.group_id, &actor.id) {
             continue;
         }
         // Reserve the cooldown window BEFORE attempting: a crash mid-restart
@@ -195,7 +244,11 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
                 limit_mb as u64,
                 rss_mb,
                 "restarted",
-                "session resumed by actor.restart.",
+                if fresh_restart {
+                    "fresh session: PTY lanes have no resume."
+                } else {
+                    "session resumed by actor.restart."
+                },
             )?),
             Err(error) => out.push(emit(
                 home,
@@ -268,8 +321,8 @@ mod tests {
             .unwrap_or_default()
             .len();
         assert_eq!(before, after, "a quiet tick must not append");
-        // ... and a PTY actor with a limit is observed but never restarted:
-        // idleness here is unprovable, so no event, no cooldown file.
+        // ... and a PTY actor with a limit but WITHOUT the opt-in is never
+        // restarted either: the opt-in defaults off.
         let mut cela = group.clone();
         let mut actor = cccc_contracts::Actor::new("pty-lane");
         actor.memory_limit_mb = 1;
@@ -293,5 +346,67 @@ mod tests {
         assert_eq!(event.data["to"], json!(["@foreman"]));
         assert_eq!(event.data["context"]["outcome"], "restarted");
         assert_eq!(event.data["context"]["rss_mb"], 1024);
+    }
+}
+
+#[cfg(test)]
+mod pty_quiet_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn snapshot(out_age_secs: Option<u64>, in_age_secs: Option<u64>) -> ActivitySnapshot {
+        let instant = |age: u64| cccc_runtime::ActivityInstant {
+            at: SystemTime::now(),
+            age: Duration::from_secs(age),
+        };
+        ActivitySnapshot {
+            last_output: out_age_secs.map(instant),
+            last_input: in_age_secs.map(instant),
+            recent_output: Vec::new(),
+            output_bytes_since_input: 0,
+        }
+    }
+
+    const QUIET: Duration = Duration::from_secs(PTY_QUIET_SECS);
+
+    #[test]
+    fn quiet_needs_old_output_and_no_newer_input() {
+        // Old output, older input: quiet.
+        assert!(pty_quiet_for(&snapshot(Some(1200), Some(1300)), QUIET));
+        // Old output, no input at all: quiet.
+        assert!(pty_quiet_for(&snapshot(Some(1200), None), QUIET));
+        // Recent output: working, however old the input.
+        assert!(!pty_quiet_for(&snapshot(Some(60), Some(3600)), QUIET));
+        // Input newer than the last output: a delivery may be running.
+        assert!(!pty_quiet_for(&snapshot(Some(1200), Some(60)), QUIET));
+        // Never any output: silence unobserved, not quiet.
+        assert!(!pty_quiet_for(&snapshot(None, None), QUIET));
+        assert!(!pty_quiet_for(&snapshot(None, Some(5000)), QUIET));
+        // Boundary: exactly the window counts as quiet.
+        assert!(pty_quiet_for(&snapshot(Some(600), Some(600)), QUIET));
+    }
+
+    #[test]
+    fn fresh_session_is_not_quiet() {
+        // A live PTY session that produced no output yet must not read as
+        // quiet: quietness is observed silence, and there is nothing to
+        // observe yet.
+        assert!(!pty_quiet_live("no-such-group", "no-such-actor"));
+    }
+
+    #[test]
+    fn pty_opt_in_round_trips_and_defaults_off() {
+        let plain =
+            serde_json::to_value(cccc_contracts::Actor::new("pty-worker")).expect("serialize");
+        assert!(plain.get("memory_limit_restart_pty").is_none());
+        let mut configured = plain;
+        configured["memory_limit_restart_pty"] = serde_json::json!(true);
+        let actor: cccc_contracts::Actor =
+            serde_json::from_value(configured).expect("configured actor");
+        assert!(actor.memory_limit_restart_pty);
+        assert_eq!(
+            serde_json::to_value(actor).expect("serialize")["memory_limit_restart_pty"],
+            serde_json::json!(true)
+        );
     }
 }

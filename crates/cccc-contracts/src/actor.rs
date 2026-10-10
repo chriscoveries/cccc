@@ -223,10 +223,20 @@ pub struct Actor {
     /// rejected at deserialization.
     #[serde(default, skip_serializing_if = "is_zero_mb")]
     pub memory_limit_mb: u32,
+    /// Opt-in: a PTY lane over its `memory_limit_mb` may restart after 10
+    /// quiet minutes. PTY idleness is output-silence, not proof of no turn,
+    /// and a PTY restart is a FRESH session (no resume) — both stated in the
+    /// setting help. Default false: PTY lanes are never restarted.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub memory_limit_restart_pty: bool,
 }
 
 fn is_zero_mb(value: &u32) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Actor {
@@ -259,6 +269,7 @@ impl Actor {
             generation: String::new(),
             updated_at: now,
             memory_limit_mb: 0,
+            memory_limit_restart_pty: false,
         }
     }
 
