@@ -1,8 +1,10 @@
 //! The `send` / `message_send` op is the only caller-facing hop that stamps an
 //! arbitrary `by` into the group ledger. These tests pin the send-identity
-//! rule from cwflab-kilo's design (event 5ffd552e): `by` must be blank,
-//! `user`, `system`, an actor of the target group (`actors::find`), or a
-//! `connect:*` peer name — plus the daemon's own `nomcp-advisory` writer.
+//! rule: `by` must be blank, `user`, `system`, an actor of the target group
+//! (`actors::find`), or a `connect:*` peer name — plus the daemon's own
+//! `nomcp-advisory` writer. The identity that is validated is also the identity
+//! that is recorded: a `by` with surrounding whitespace must not land in the
+//! ledger as a name `actors::find` would no longer match.
 
 use cccc_contracts::{DaemonRequest, DaemonResponse};
 use cccc_core::HomeLayout;
@@ -240,4 +242,54 @@ fn connect_sender_is_recorded_verbatim() {
         by, "connect:peer-box-1",
         "the connect name must not be rewritten"
     );
+}
+
+/// The gate validates a trimmed `by`, so the ledger must record that same
+/// trimmed identity. Before the canonicalisation fix this landed as " peer1 ",
+/// which `actors::find` no longer matches — a name the gate exists to prevent.
+#[test]
+fn send_records_the_validated_identity_not_the_raw_whitespace_form() {
+    let (_temp, home, group_id) = fixture("identity-normalization");
+    for op in ["send", "message_send"] {
+        let response = call_raw(
+            &home,
+            op,
+            json!({
+                "group_id": group_id,
+                "by": " peer1 ",
+                "to": ["peer2"],
+                "text": "identity normalization boundary",
+                "message_mode": "mail"
+            }),
+        );
+        assert!(
+            response.ok,
+            "a member with surrounding whitespace should be accepted: {:?}",
+            response.error
+        );
+        assert_eq!(
+            response.result["event"]["by"], "peer1",
+            "the validated member must be the identity recorded in the ledger"
+        );
+    }
+}
+
+/// A whitespace-only `by` is not an identity; it must fall back to the "user"
+/// default rather than recording an empty sender.
+#[test]
+fn send_records_the_user_default_when_by_is_only_whitespace() {
+    let (_temp, home, group_id) = fixture("identity-blank");
+    let response = call_raw(
+        &home,
+        "send",
+        json!({
+            "group_id": group_id,
+            "by": "   ",
+            "to": ["peer2"],
+            "text": "blank identity",
+            "message_mode": "mail"
+        }),
+    );
+    assert!(response.ok, "blank identity should default, not fail");
+    assert_eq!(response.result["event"]["by"], "user");
 }

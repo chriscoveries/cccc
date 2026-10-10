@@ -66,7 +66,32 @@ const SEND_OP_ALLOWLIST: [&str; 1] = ["nomcp-advisory"];
 pub(super) fn send_as_caller(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group = load(home, request)?;
     require_send_identity(&group, request)?;
-    send(home, request, "chat.message")
+    // Validate and record must agree on the same string. require_send_identity
+    // trims, and send_with_audience_policy re-reads `by` from the request to
+    // stamp the event, so a caller sending " peer1 " would otherwise pass the
+    // member check and then land in the ledger as " peer1 " — a name no later
+    // actors::find matches, which is exactly the forged-identity shape this
+    // gate exists to prevent. Canonicalise once, here, so the recorded
+    // identity is the identity that was validated. This mirrors
+    // send_cross_group, which trims the same way at its own boundary.
+    let mut request = request.clone();
+    canonicalize_send_identity(&mut request);
+    send(home, &request, "chat.message")
+}
+
+/// Records the same trimmed `by` that `require_send_identity` validated.
+fn canonicalize_send_identity(request: &mut DaemonRequest) {
+    let Some(by) = request.args.get("by").and_then(Value::as_str) else {
+        return;
+    };
+    let trimmed = by.trim();
+    if trimmed.is_empty() {
+        // An absent identity defaults to "user" downstream; dropping the empty
+        // string keeps that default instead of recording "".
+        request.args.remove("by");
+    } else if trimmed != by {
+        request.args.insert("by".into(), Value::String(trimmed.to_owned()));
+    }
 }
 
 fn require_send_identity(group: &GroupDoc, request: &DaemonRequest) -> Result<(), OpError> {
