@@ -24,6 +24,10 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/groups/{group_id}/automation/reset_baseline",
             post(automation_reset),
         )
+        .route(
+            "/api/v1/groups/{group_id}/leftover-processes",
+            get(leftover_processes),
+        )
 }
 
 async fn settings_get(State(state): State<AppState>, Path(group_id): Path<String>) -> ApiResult {
@@ -78,6 +82,16 @@ fn projected_settings(group: &Value) -> Value {
                 "notify_lines",
             ),
             ("panorama_enabled", "features", "panorama_enabled"),
+            (
+                "reap_leftover_processes",
+                "runtime",
+                "reap_leftover_processes",
+            ),
+            (
+                "reap_leftover_after_hours",
+                "runtime",
+                "reap_leftover_after_hours",
+            ),
         ] {
             if let Some(value) = group
                 .get(section)
@@ -112,7 +126,9 @@ fn projected_settings(group: &Value) -> Value {
         "terminal_transcript_visibility":"foreman",
         "terminal_transcript_notify_tail":true,
         "terminal_transcript_notify_lines":20,
-        "panorama_enabled":false
+        "panorama_enabled":false,
+        "reap_leftover_processes":false,
+        "reap_leftover_after_hours":24
     });
     if let (Some(target), Some(source)) = (settings.as_object_mut(), stored.as_object()) {
         cccc_core::settings::merge(target, source);
@@ -136,6 +152,18 @@ async fn automation_get(State(state): State<AppState>, Path(group_id): Path<Stri
         &state,
         "group_automation_state",
         object(json!({"group_id":group_id,"by":"user"})),
+    )
+    .await
+}
+
+async fn leftover_processes(
+    State(state): State<AppState>,
+    Path(group_id): Path<String>,
+) -> ApiResult {
+    call(
+        &state,
+        "leftover_processes",
+        object(json!({"group_id":group_id})),
     )
     .await
 }
