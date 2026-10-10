@@ -2,11 +2,13 @@ use cccc_contracts::{DaemonRequest, Event};
 use cccc_core::automation::{ScheduledAction, TickResult};
 use cccc_core::{GroupDoc, GroupStore, HomeLayout, actors, inbox};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::dispatch::dispatch;
-use crate::ops::{actor_delivery, actor_runtime, actor_runtime_status, group_runtime};
+use crate::ops::{
+    actor_delivery, actor_runtime, actor_runtime_status, group_runtime, local_headless,
+};
 
 pub fn prepare_exited() -> BTreeMap<String, Vec<cccc_runtime::SessionStatus>> {
     let exited = match actor_runtime::reap_exited() {
@@ -51,27 +53,22 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
     if cancelled.load(Ordering::Acquire) {
         return;
     }
-    let delivery_actor_ids = if include_unread {
+    let (delivery_actor_ids, managed_idle) = if include_unread {
         GroupStore::new(home.clone())
             .and_then(|store| store.load(group_id))
-            .map(|group| {
-                actors::visible(&group)
-                    .filter(|actor| actor.enabled)
-                    .filter(|actor| actor_runtime_status::resolve(&group, actor).running)
-                    .map(|actor| actor.id.clone())
-                    .collect::<HashSet<_>>()
-            })
+            .map(|group| delivery_and_managed_idle(&group))
             .unwrap_or_default()
     } else {
-        HashSet::new()
+        (HashSet::new(), HashMap::new())
     };
     let idle_actor_ids = idle_actor_ids(group_id, &delivery_actor_ids);
-    match cccc_core::automation::tick_group_with_idle_actors(
+    match cccc_core::automation::tick_group_for_delivery_actors_with_managed_idle(
         home,
         group_id,
         include_unread,
         &delivery_actor_ids,
         &idle_actor_ids,
+        &managed_idle,
     ) {
         Ok(result) => apply(home, result, cancelled),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -89,6 +86,34 @@ fn idle_actor_ids(group_id: &str, actor_ids: &HashSet<String>) -> HashSet<String
         .filter(|actor_id| super::local_headless::ready_for_mail_notice(group_id, actor_id))
         .cloned()
         .collect()
+}
+
+/// Running actors that may receive unread notices and, only when the group
+/// opted into `delivery.mail_wake_on_idle`, whether each running managed
+/// session reports an ended turn. PTY and status-unknown actors are absent
+/// from the map and keep the ordinary notice timer.
+fn delivery_and_managed_idle(group: &GroupDoc) -> (HashSet<String>, HashMap<String, bool>) {
+    let running = actors::visible(group)
+        .filter(|actor| actor.enabled)
+        .filter(|actor| actor_runtime_status::resolve(group, actor).running)
+        .collect::<Vec<_>>();
+    let managed_idle = if cccc_core::automation::mail_wake_on_idle(group) {
+        running
+            .iter()
+            .filter(|actor| local_headless::supports(actor))
+            .filter_map(|actor| {
+                let status = local_headless::status(&group.group_id, &actor.id)?;
+                Some((actor.id.clone(), status.status == "idle"))
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    (
+        running.iter().map(|actor| actor.id.clone()).collect(),
+        managed_idle,
+    )
+
 }
 
 fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {

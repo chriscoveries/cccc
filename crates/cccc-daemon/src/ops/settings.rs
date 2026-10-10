@@ -29,6 +29,12 @@ const SECTION_SETTING_KEYS: &[(&str, &str, &str)] = &[
         "delivery",
         "reply_notice_after_seconds",
     ),
+    ("mail_wake_on_idle", "delivery", "mail_wake_on_idle"),
+    (
+        "mail_wake_min_age_seconds",
+        "delivery",
+        "mail_wake_min_age_seconds",
+    ),
     (
         "terminal_transcript_visibility",
         "terminal_transcript",
@@ -69,6 +75,7 @@ fn group_settings(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     authorize(&group, request)?;
     let mut patch = patch(request)?;
     patch.remove("by");
+    validate_mail_wake(&patch)?;
     let settings_value = store(home)?
         .mutate(&group.group_id, |doc| {
             let mut flat = match doc.extra.remove("settings") {
@@ -112,6 +119,29 @@ fn group_settings(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         "settings": settings_value,
         "event": event,
     }))
+}
+
+/// `null` removes either override.
+fn validate_mail_wake(patch: &Map<String, Value>) -> Result<(), OpError> {
+    if patch
+        .get("mail_wake_on_idle")
+        .is_some_and(|value| !value.is_null() && !value.is_boolean())
+    {
+        return Err(OpError::new(
+            "invalid_args",
+            "mail_wake_on_idle must be a boolean",
+        ));
+    }
+    if patch
+        .get("mail_wake_min_age_seconds")
+        .is_some_and(|value| !value.is_null() && value.as_i64().is_none_or(|seconds| seconds < 0))
+    {
+        return Err(OpError::new(
+            "invalid_args",
+            "mail_wake_min_age_seconds must be a nonnegative integer",
+        ));
+    }
+    Ok(())
 }
 
 fn section_target(key: &str) -> Option<(&'static str, &'static str)> {

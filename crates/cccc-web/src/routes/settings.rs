@@ -62,6 +62,12 @@ fn projected_settings(group: &Value) -> Value {
                 "delivery",
                 "reply_notice_after_seconds",
             ),
+            ("mail_wake_on_idle", "delivery", "mail_wake_on_idle"),
+            (
+                "mail_wake_min_age_seconds",
+                "delivery",
+                "mail_wake_min_age_seconds",
+            ),
             (
                 "terminal_transcript_visibility",
                 "terminal_transcript",
@@ -109,6 +115,8 @@ fn projected_settings(group: &Value) -> Value {
         "mail_notice_after_seconds":1800,
         "mail_notice_idle_after_seconds":60,
         "reply_notice_after_seconds":900,
+        "mail_wake_on_idle":false,
+        "mail_wake_min_age_seconds":60,
         "terminal_transcript_visibility":"foreman",
         "terminal_transcript_notify_tail":true,
         "terminal_transcript_notify_lines":20,

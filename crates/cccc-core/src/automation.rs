@@ -149,7 +149,7 @@ pub fn tick_group(
     group_id: &str,
     include_unread: bool,
 ) -> io::Result<TickResult> {
-    tick_group_inner(home, group_id, include_unread, None, &HashSet::new())
+    tick_group_inner(home, group_id, include_unread, None, &HashSet::new(), None)
 }
 
 pub fn tick_group_for_delivery_actors(
@@ -164,6 +164,7 @@ pub fn tick_group_for_delivery_actors(
         include_unread,
         Some(delivery_actor_ids),
         &HashSet::new(),
+        None,
     )
 }
 
@@ -183,7 +184,41 @@ pub fn tick_group_with_idle_actors(
         include_unread,
         Some(delivery_actor_ids),
         idle_actor_ids,
+        None,
     )
+}
+
+/// Like [`tick_group_for_delivery_actors`], also giving each actor with a
+/// running managed session whether that session reports an ended turn
+/// (`true`) or is busy (`false`). Only the opt-in `delivery.mail_wake_on_idle`
+/// policy reads `managed_idle`.
+pub fn tick_group_for_delivery_actors_with_managed_idle(
+    home: &HomeLayout,
+    group_id: &str,
+    include_unread: bool,
+    delivery_actor_ids: &HashSet<String>,
+    idle_actor_ids: &HashSet<String>,
+    managed_idle: &HashMap<String, bool>,
+) -> io::Result<TickResult> {
+    tick_group_inner(
+        home,
+        group_id,
+        include_unread,
+        Some(delivery_actor_ids),
+        idle_actor_ids,
+        Some(managed_idle),
+    )
+}
+
+/// Whether the group opted into notifying idle managed sessions about Mail.
+#[must_use]
+pub fn mail_wake_on_idle(group: &GroupDoc) -> bool {
+    group
+        .extra
+        .get("delivery")
+        .and_then(|delivery| delivery.get("mail_wake_on_idle"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn tick_group_inner(
@@ -192,6 +227,7 @@ fn tick_group_inner(
     include_unread: bool,
     delivery_actor_ids: Option<&HashSet<String>>,
     idle_actor_ids: &HashSet<String>,
+    managed_idle: Option<&HashMap<String, bool>>,
 ) -> io::Result<TickResult> {
     let store = GroupStore::new(home.clone())?;
     let mut result = TickResult::default();
@@ -209,6 +245,7 @@ fn tick_group_inner(
             &group,
             delivery_actor_ids,
             idle_actor_ids,
+            managed_idle,
             &mut result,
         )?;
     }
@@ -350,12 +387,18 @@ fn tick_unread(
     group: &GroupDoc,
     delivery_actor_ids: Option<&HashSet<String>>,
     idle_actor_ids: &HashSet<String>,
+    managed_idle: Option<&HashMap<String, bool>>,
     result: &mut TickResult,
 ) -> io::Result<()> {
     let mail_after = delivery_timing_value(group, "mail_notice_after_seconds", 1_800);
     let mail_idle_after = delivery_timing_value(group, "mail_notice_idle_after_seconds", 60);
     let reply_after = delivery_timing_value(group, "reply_notice_after_seconds", 900);
-    if mail_after <= 0 && reply_after <= 0 {
+    let no_managed_sessions = HashMap::new();
+    let wake = mail_wake_on_idle(group).then(|| MailWake {
+        min_age: delivery_timing_value(group, "mail_wake_min_age_seconds", 60),
+        managed_idle: managed_idle.unwrap_or(&no_managed_sessions),
+    });
+    if mail_after <= 0 && reply_after <= 0 && wake.is_none() {
         return Ok(());
     }
     let eligible = actors::visible(group)
@@ -383,6 +426,8 @@ fn tick_unread(
                 idle_actor_ids,
             },
             reply_after,
+            wake,
+
         )
     })?;
     for event in notices {
@@ -420,7 +465,10 @@ fn unread_notices(
     cursors: &BTreeMap<String, String>,
     mail_delays: MailDelays<'_>,
     reply_after: i64,
+    wake: Option<MailWake<'_>>,
+
 ) -> Vec<Event> {
+    let wake = wake.as_ref();
     let mut notices = Vec::new();
     let generations = inbox::actor_generation_positions(events);
     let now = Utc::now().timestamp();
@@ -622,7 +670,37 @@ fn unread_notices(
             }
         }
 
-        if mail_after > 0 && !mail_pending.is_empty() {
+        let managed_idle = wake.and_then(|wake| Some((wake, *wake.managed_idle.get(&actor.id)?)));
+        if let Some((wake, idle)) = managed_idle {
+            // A busy managed session is notified once its turn ends.
+            if idle {
+                let claims = mail_claims
+                    .get(&(actor.id.clone(), actor.created_at.clone()))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                // Notices from before claims named their sources keep the
+                // original batch latch.
+                let unknown_claim = claims
+                    .iter()
+                    .any(|(_, claimed)| !claimed.iter().any(|source| positions.contains_key(source)));
+                let claimed = claims
+                    .iter()
+                    .flat_map(|(_, sources)| sources.iter().map(String::as_str))
+                    .collect::<HashSet<_>>();
+                let actor_resume = actor_resumes.get(&actor.id).copied();
+                if !unknown_claim {
+                    notices.extend(idle_wake_notice(
+                        group,
+                        actor,
+                        &mail_pending,
+                        &claimed,
+                        wake.min_age,
+                        [resume_at, actor_resume],
+                        now,
+                    ));
+                }
+            }
+        } else if mail_after > 0 && !mail_pending.is_empty() {
             let pending_ids = mail_pending
                 .iter()
                 .map(|event| event.id.clone())
@@ -705,6 +783,57 @@ fn unread_notices(
         }
     }
     notices
+}
+
+/// Mail and reply notice timing for one unread tick.
+/// Opt-in `delivery.mail_wake_on_idle` policy for one tick.
+#[derive(Clone, Copy)]
+struct MailWake<'a> {
+    min_age: i64,
+    /// Whether each actor's running managed session reports an ended turn.
+    /// This is the runtime's own turn signal, never an inferred idle
+    /// heuristic; actors without one keep the ordinary notice timer.
+    managed_idle: &'a HashMap<String, bool>,
+}
+
+/// One content-free notice per new Mail batch for an idle managed session.
+/// Mail an earlier notice already claimed is never claimed again, so an
+/// ignored notice cannot repeat, but it no longer holds back notices for
+/// later Mail.
+fn idle_wake_notice(
+    group: &GroupDoc,
+    actor: &cccc_contracts::Actor,
+    mail_pending: &[&Event],
+    claimed: &HashSet<&str>,
+    min_age: i64,
+    resumes: [Option<i64>; 2],
+    now: i64,
+) -> Option<Event> {
+    // Each source must itself be `min_age` old, counted from the latest
+    // group or session start; younger Mail waits for a later notice.
+    let floor = resumes.into_iter().flatten().max();
+    let aged = mail_pending
+        .iter()
+        .filter(|event| !claimed.contains(event.id.as_str()))
+        .filter(|event| {
+            let at = timestamp(&event.ts, now).max(floor.unwrap_or(i64::MIN));
+            now - at >= min_age
+        })
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    (!aged.is_empty()).then(|| {
+        notice_event(
+            group,
+            actor,
+            "mail_notice",
+            "Mail waiting",
+            &format!(
+                "You have {} Mail item(s) waiting. Call cccc_inbox_read when appropriate.",
+                mail_pending.len()
+            ),
+            aged,
+        )
+    })
 }
 
 fn delivery_timing_value(group: &GroupDoc, key: &str, default: i64) -> i64 {

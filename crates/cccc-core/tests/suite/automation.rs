@@ -2,7 +2,7 @@
 use cccc_contracts::{Actor, Event, GroupState};
 use cccc_core::{GroupStore, HomeLayout, actors, automation, ledger};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[test]
 fn canonical_interval_rule_starts_its_clock_and_emits_once_when_due() {
@@ -449,4 +449,266 @@ fn scheduled_action_remains_due_until_its_owner_confirms_completion() {
         1,
         "returning an action is not proof that the daemon applied it"
     );
+}
+
+struct MailWake {
+    _temp: tempfile::TempDir,
+    home: HomeLayout,
+    store: GroupStore,
+    group_id: String,
+}
+
+impl MailWake {
+    fn new(delivery: serde_json::Value) -> Self {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("mail wake", "").expect("group");
+        store
+            .mutate(&group.group_id, |group| {
+                group.state = GroupState::Active;
+                actors::add(group, Actor::new("peer"))?;
+                group.extra.insert("delivery".into(), delivery);
+                Ok(())
+            })
+            .expect("delivery settings");
+        Self {
+            _temp: temp,
+            home,
+            store,
+            group_id: group.group_id,
+        }
+    }
+
+    fn append(&self, event: &Event) {
+        let path = self.store.ledger_path(&self.group_id).expect("ledger");
+        ledger::append(&path, event).expect("append");
+    }
+
+    fn mail(&self, age_seconds: i64, to: serde_json::Value) -> Event {
+        let mut event = Event::new("chat.message", &self.group_id);
+        event.by = "user".into();
+        event.ts = (chrono::Utc::now() - chrono::Duration::seconds(age_seconds)).to_rfc3339();
+        event.data = json!({"text":"PRIVATE_MAIL_BODY","to":to,"message_mode":"mail"})
+            .as_object()
+            .cloned()
+            .expect("mail data");
+        self.append(&event);
+        event
+    }
+
+    /// `managed`: `Some(idle)` for a running managed session, `None` for PTY.
+    fn tick(&self, managed: Option<bool>) -> Vec<Event> {
+        let managed_idle = managed
+            .map(|idle| HashMap::from([("peer".to_owned(), idle)]))
+            .unwrap_or_default();
+        automation::tick_group_for_delivery_actors_with_managed_idle(
+            &self.home,
+            &self.group_id,
+            true,
+            &HashSet::from(["peer".to_owned()]),
+            &managed_idle,
+        )
+        .expect("tick")
+        .notifications
+    }
+
+    fn accept(&self, notice: &Event) {
+        let mut event = Event::new("runtime.delivery", &self.group_id);
+        event.by = "system".into();
+        event.data = json!({"source_event_id":notice.id,"actor_id":"peer","state":"accepted"})
+            .as_object()
+            .cloned()
+            .expect("delivery data");
+        self.append(&event);
+    }
+
+    fn mutate(&self, change: impl FnOnce(&mut cccc_core::GroupDoc)) {
+        self.store
+            .mutate(&self.group_id, |group| {
+                change(group);
+                Ok(())
+            })
+            .expect("mutate group");
+    }
+
+    fn group(&self) -> cccc_core::GroupDoc {
+        self.store.load(&self.group_id).expect("group")
+    }
+}
+
+#[test]
+fn mail_wake_off_keeps_the_timer_and_batch_latch_for_managed_sessions() {
+    for delivery in [
+        json!({"mail_notice_after_seconds":1800}),
+        json!({"mail_notice_after_seconds":1800,"mail_wake_on_idle":false}),
+    ] {
+        let young = MailWake::new(delivery.clone());
+        young.mail(120, json!(["peer"]));
+        assert!(
+            young.tick(Some(true)).is_empty(),
+            "young Mail waits for the timer"
+        );
+        let fixture = MailWake::new(delivery);
+        fixture.mail(7_200, json!(["peer"]));
+        let first = fixture.tick(Some(true));
+        assert_eq!(first.len(), 1, "the timer notice is unchanged");
+        fixture.accept(&first[0]);
+        fixture.mail(7_200, json!(["peer"]));
+        assert!(
+            fixture.tick(Some(true)).is_empty(),
+            "without the opt-in, an unresolved batch still holds later Mail"
+        );
+    }
+}
+
+#[test]
+fn mail_wake_notifies_an_idle_managed_session_once_without_reading_mail() {
+    let fixture = MailWake::new(json!({"mail_wake_on_idle":true}));
+    let mail = fixture.mail(120, json!(["peer"]));
+    let notices = fixture.tick(Some(true));
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].data["kind"], "mail_notice");
+    assert_eq!(
+        notices[0].data["context"]["source_event_ids"],
+        json!([mail.id])
+    );
+    assert!(
+        !serde_json::to_string(&notices[0])
+            .expect("notice json")
+            .contains("PRIVATE_MAIL_BODY")
+    );
+    assert!(
+        fixture.tick(Some(true)).is_empty(),
+        "a notified batch never repeats"
+    );
+    let group = fixture.group();
+    assert_eq!(
+        cccc_core::inbox::list_unread(&fixture.home, &group, "peer", 10)
+            .expect("unread")
+            .len(),
+        1
+    );
+    assert!(
+        cccc_core::inbox::cursors(&fixture.home, &fixture.group_id)
+            .expect("cursors")
+            .is_empty(),
+        "the notice never advances the Mail cursor"
+    );
+}
+
+#[test]
+fn mail_wake_waits_for_a_busy_managed_session_to_end_its_turn() {
+    let fixture = MailWake::new(json!({"mail_wake_on_idle":true}));
+    fixture.mail(7_200, json!(["peer"]));
+    assert!(
+        fixture.tick(Some(false)).is_empty(),
+        "a working session is not interrupted, even past the timer"
+    );
+    assert_eq!(fixture.tick(Some(true)).len(), 1);
+}
+
+#[test]
+fn mail_wake_notifies_new_mail_after_an_ignored_notice() {
+    let fixture = MailWake::new(json!({"mail_wake_on_idle":true}));
+    fixture.mail(120, json!(["peer"]));
+    let first = fixture.tick(Some(true));
+    assert_eq!(first.len(), 1);
+    fixture.accept(&first[0]);
+    assert!(fixture.tick(Some(true)).is_empty());
+
+    let second = fixture.mail(120, json!(["peer"]));
+    let notices = fixture.tick(Some(true));
+    assert_eq!(
+        notices.len(),
+        1,
+        "later Mail is not held by the ignored batch"
+    );
+    assert_eq!(
+        notices[0].data["context"]["source_event_ids"],
+        json!([second.id])
+    );
+    assert!(fixture.tick(Some(true)).is_empty());
+}
+
+#[test]
+fn mail_wake_names_only_sources_that_reached_the_minimum_age() {
+    let fixture = MailWake::new(json!({"mail_wake_on_idle":true}));
+    let old = fixture.mail(120, json!(["peer"]));
+    let young = fixture.mail(0, json!(["peer"]));
+    let notices = fixture.tick(Some(true));
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        notices[0].data["context"]["source_event_ids"],
+        json!([old.id]),
+        "young Mail is not claimed by a notice issued for older Mail"
+    );
+    fixture.mutate(|group| {
+        group.extra.get_mut("delivery").expect("delivery")["mail_wake_min_age_seconds"] = json!(0);
+    });
+    let later = fixture.tick(Some(true));
+    assert_eq!(later.len(), 1);
+    assert_eq!(
+        later[0].data["context"]["source_event_ids"],
+        json!([young.id])
+    );
+}
+
+#[test]
+fn mail_wake_leaves_pty_actors_on_the_timer_and_latch() {
+    let young = MailWake::new(json!({"mail_wake_on_idle":true}));
+    young.mail(120, json!(["peer"]));
+    assert!(
+        young.tick(None).is_empty(),
+        "young Mail waits for the timer"
+    );
+    let fixture = MailWake::new(json!({"mail_wake_on_idle":true}));
+    fixture.mail(7_200, json!(["peer"]));
+    let first = fixture.tick(None);
+    assert_eq!(first.len(), 1);
+    fixture.accept(&first[0]);
+    fixture.mail(7_200, json!(["peer"]));
+    assert!(fixture.tick(None).is_empty());
+}
+
+#[test]
+fn mail_wake_respects_minimum_age_and_excludes_broadcast_mail() {
+    for to in [
+        json!(["@all"]),
+        json!(["@peers"]),
+        json!(["@foreman"]),
+        json!([]),
+    ] {
+        let fixture = MailWake::new(json!({"mail_wake_on_idle":true}));
+        fixture.mail(7_200, to.clone());
+        assert!(fixture.tick(Some(true)).is_empty(), "{to}");
+    }
+    let fixture = MailWake::new(json!({"mail_wake_on_idle":true}));
+    fixture.mail(30, json!(["peer"]));
+    assert!(
+        fixture.tick(Some(true)).is_empty(),
+        "default minimum age is 60s"
+    );
+    fixture.mutate(|group| {
+        group.extra.get_mut("delivery").expect("delivery")["mail_wake_min_age_seconds"] = json!(0);
+    });
+    assert_eq!(fixture.tick(Some(true)).len(), 1);
+}
+
+#[test]
+fn mail_wake_skips_paused_stopped_disabled_and_read_mail() {
+    for state in [GroupState::Paused, GroupState::Stopped] {
+        let fixture = MailWake::new(json!({"mail_wake_on_idle":true}));
+        fixture.mail(120, json!(["peer"]));
+        fixture.mutate(|group| group.state = state);
+        assert!(fixture.tick(Some(true)).is_empty(), "{state:?}");
+    }
+    let fixture = MailWake::new(json!({"mail_wake_on_idle":true}));
+    fixture.mail(120, json!(["peer"]));
+    fixture.mutate(|group| group.actors[0].enabled = false);
+    assert!(fixture.tick(Some(true)).is_empty(), "disabled");
+    fixture.mutate(|group| group.actors[0].enabled = true);
+    let group = fixture.group();
+    cccc_core::inbox::consume_unread(&fixture.home, &group, "peer", "peer", 10).expect("read");
+    assert!(fixture.tick(Some(true)).is_empty(), "read Mail");
 }

@@ -4388,6 +4388,30 @@ it does not copy message bodies, repeat, escalate, or create another Inbox
 obligation. Bootstrap, the next explicit Push, and low-frequency coordination
 responses MAY carry a passive `mail_pending` count without writing a notice.
 
+A Group MAY opt into `delivery.mail_wake_on_idle` (boolean, default `false`).
+With it absent or `false`, the behavior above is unchanged. With it `true`,
+actors whose running managed session reports its own turn state follow a
+different Mail notice rule. That state is the session's turn signal, not an
+inferred idle detector.
+
+- While the session reports a turn in progress, no Mail notice is written.
+- Once it reports `idle`, concrete-recipient Mail that no earlier notice
+  claimed, and that is at least `delivery.mail_wake_min_age_seconds` old
+  (nonnegative integer, default `60`), receives one content-free `mail_notice`
+  naming only those sources.
+- A source is never claimed twice, so a notice never repeats. Mail arriving
+  after an unanswered notice may form a new batch instead of waiting behind
+  it. Notices whose claims name no known source keep the batch latch.
+
+The notice carries no message bodies, does not deliver or promote Mail, and
+does not advance the Mail cursor. Broadcast-like Mail stays excluded. PTY
+actors, and actors without a managed session status, keep
+`mail_notice_after_seconds` and the batch latch. Paused or stopped Groups and
+disabled or non-running actors remain ineligible. The existing unread
+maintenance tick reads managed status; no polling loop is added.
+`group_settings_update` accepts the patch keys `mail_wake_on_idle` and
+`mail_wake_min_age_seconds`; `null` removes an override.
+
 A `request_reply` obligation starts its timer only after an accepted runtime
 delivery. If no matching `reply_to`
 message or cancellation has closed it by `reply_notice_after_seconds`, an
