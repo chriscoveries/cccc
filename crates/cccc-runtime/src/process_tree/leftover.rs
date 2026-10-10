@@ -337,8 +337,9 @@ fn tree_pids(pid: i32) -> Vec<i32> {
 
 /// True while `/proc/<pid>` exists and is not a zombie. A zombie still proves
 /// identity but cannot be signalled; for reaping purposes it counts as gone
-/// (its parent, not us, must reap it).
-#[cfg(unix)]
+/// (its parent, not us, must reap it). Same rule as the abrupt-exit guard,
+/// which treats zombie-only groups as ended (`guard.rs`).
+#[cfg(target_os = "linux")]
 fn pid_alive(pid: i32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
@@ -350,6 +351,26 @@ fn pid_alive(pid: i32) -> bool {
         // 'Z' is zombie: gone for our purposes.
         Some(state) => state != "Z",
         None => false,
+    }
+}
+
+/// Same contract on macOS via `ps -o state=`: a zombie ('Z') counts as gone,
+/// mirroring the guard, which macOS refuses to signal. Anything unparseable
+/// counts as gone too — the pre-TERM identity recheck already established
+/// this pid was ours, so a vanishing pid is success, not a reason to KILL an
+/// unknown successor.
+#[cfg(target_os = "macos")]
+fn pid_alive(pid: i32) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "state=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .output()
+    else {
+        return false;
+    };
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "" => false,
+        state => !state.starts_with('Z'),
     }
 }
 
