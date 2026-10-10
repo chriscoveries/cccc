@@ -4409,6 +4409,23 @@ maintenance tick reads managed status; no polling loop is added.
 `group_settings_update` accepts the patch keys `mail_wake_on_idle` and
 `mail_wake_min_age_seconds`; `null` removes an override.
 
+A Group MAY also opt into `delivery.task_wake_on_idle` (boolean, default
+`false`). With it `true`, an actor whose running managed session reports
+`idle` may receive one `system.notify(kind="task_notice")` targeted at it
+when all of these hold:
+
+- it is the `assignee` of at least one `active` task with an empty
+  `blocked_by` and a `waiting_on` other than `user`, `actor` or `external`;
+- it has been quiet for `delivery.task_wake_interval_seconds` (nonnegative
+  integer, default `1800`, floored at `60`): no message from it, no session
+  start, and no earlier `task_notice` to it in that window.
+
+The notice names only the task IDs (`context.task_ids`); it does not copy
+titles or other task content and does not change any task. A busy session,
+PTY actors, and actors without a managed session status are never sent one.
+`group_settings_update` accepts `task_wake_on_idle` and
+`task_wake_interval_seconds`; `null` removes an override.
+
 A `request_reply` obligation starts its timer only after an accepted runtime
 delivery. If no matching `reply_to`
 message or cancellation has closed it by `reply_notice_after_seconds`, an
