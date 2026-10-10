@@ -232,6 +232,37 @@ fn append_locked(file: &mut File, encoded: &[u8]) -> io::Result<()> {
     file.sync_data()
 }
 
+/// Stream canonical history in order without populating the shared full-ledger index.
+/// Memory is proportional to one record, including compressed segments.
+/// The callback holds the ledger read lock; do not append from the callback.
+pub fn visit_oldest_first(path: &Path, mut visit: impl FnMut(Event)) -> io::Result<()> {
+    let _lock = acquire_reader_lock(path)?;
+    let group_id = ledger_group_id(path);
+    for source in source_paths(path)? {
+        let reader: Box<dyn BufRead> = if is_gzip(&source) {
+            Box::new(BufReader::new(GzDecoder::new(File::open(&source)?)))
+        } else {
+            let file = File::open(&source)?;
+            FileExt::lock_shared(&file)?;
+            Box::new(BufReader::new(file))
+        };
+        let mut line = Vec::new();
+        let mut reader = reader;
+        let mut number = 0;
+        while reader.read_until(b'\n', &mut line)? > 0 {
+            number += 1;
+            let raw = trim_ascii(&line);
+            if !raw.is_empty()
+                && let Some(event) = decode_event_line(raw, &source, number, &group_id)
+            {
+                visit(event);
+            }
+            line.clear();
+        }
+    }
+    Ok(())
+}
+
 pub fn read_all(path: &Path) -> io::Result<Vec<Event>> {
     crate::ledger_index::inspect(path, |events, _| events.to_vec())
 }
@@ -512,17 +543,17 @@ pub fn events_after(path: &Path, event_id: &str, limit: usize) -> io::Result<Vec
     if event_id.trim().is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
-    crate::ledger_index::inspect(path, |events, positions| {
-        let Some(index) = positions.get(event_id).copied() else {
-            return Vec::new();
-        };
-        events
-            .iter()
-            .skip(index.saturating_add(1))
-            .take(limit)
-            .cloned()
-            .collect()
-    })
+    let mut found = false;
+    let mut retained = Vec::new();
+    visit_oldest_first(path, |event| {
+        if event.id == event_id {
+            found = true;
+            retained.clear();
+        } else if found && retained.len() < limit {
+            retained.push(event);
+        }
+    })?;
+    Ok(retained)
 }
 
 /// Compute a projection without cloning the full history. The callback holds
@@ -775,6 +806,20 @@ mod tests {
 
     #[test]
     fn forward_reads_wait_for_an_in_progress_append() {
+        assert_forward_read_waits(read_all);
+    }
+
+    #[test]
+    fn streaming_reads_wait_for_an_in_progress_append() {
+        fn streamed(path: &Path) -> io::Result<Vec<Event>> {
+            let mut events = Vec::new();
+            visit_oldest_first(path, |event| events.push(event))?;
+            Ok(events)
+        }
+        assert_forward_read_waits(streamed);
+    }
+
+    fn assert_forward_read_waits(read: fn(&Path) -> io::Result<Vec<Event>>) {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("ledger.jsonl");
         let event = Event::new("chat.message", "g_test");
@@ -793,7 +838,7 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let read_path = path.clone();
         let reader = std::thread::spawn(move || {
-            sender.send(read_all(&read_path)).expect("send read result");
+            sender.send(read(&read_path)).expect("send read result");
         });
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(
@@ -892,6 +937,13 @@ mod tests {
         assert_eq!(
             replay.iter().map(|event| &event.id).collect::<Vec<_>>(),
             vec![&second.id, &third.id]
+        );
+        append(&path, &first).expect("append repeated reconnect anchor");
+        let final_event = Event::new("chat.message", "g_test");
+        append(&path, &final_event).expect("append final record");
+        assert_eq!(
+            events_after(&path, &first.id, 10).expect("replay after last anchor"),
+            vec![final_event]
         );
     }
 
@@ -1121,5 +1173,14 @@ mod tests {
         let events = read_all(&path).expect("read all");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, event.id);
+        let mut streamed = Vec::new();
+        visit_oldest_first(&path, |event| streamed.push(event)).expect("stream gzip history");
+        assert_eq!(streamed, events);
+        let active = Event::new("chat.message", "g_test");
+        append(&path, &active).expect("append active record");
+        assert_eq!(
+            events_after(&path, &event.id, 1).expect("replay archive to active"),
+            vec![active]
+        );
     }
 }
