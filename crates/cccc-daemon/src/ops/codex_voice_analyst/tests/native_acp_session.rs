@@ -495,7 +495,11 @@ async fn failed_resume_names_the_recovery_instead_of_blaming_login() {
     };
     assert!(
         message.contains(native_acp::RESUME_RECOVERY_HINT),
-        "the error must name the recovery command, got: {message}"
+        "the error must identify the failure as a resume failure, got: {message}"
+    );
+    assert!(
+        message.contains("cccc actor new-session"),
+        "the error must name the command that starts a new session: {message}"
     );
     assert!(
         message.contains(&id),
