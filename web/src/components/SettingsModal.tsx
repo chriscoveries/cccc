@@ -835,6 +835,10 @@ export function SettingsModal({
     });
   };
 
+  const handleSaveLeftoverSettings = async (patch: Partial<GroupSettings>) => {
+    await saveGroupSettings(patch);
+  };
+
   const handleSaveAutomationSettings = async () => {
     await saveGroupSettings({
       actor_idle_timeout_seconds: idleSeconds,
@@ -1979,6 +1983,8 @@ export function SettingsModal({
                     registryResult={registryResult}
                     onPreviewRegistry={loadRegistryPreview}
                     onReconcileRegistry={handleReconcileRegistry}
+                    leftoverBusy={obsBusy}
+                    onSaveLeftover={handleSaveLeftoverSettings}
                   />
                 )}
               </Suspense>

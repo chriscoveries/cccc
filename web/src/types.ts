@@ -800,6 +800,8 @@ export type GroupSettings = {
   mail_notice_after_seconds: number;
   mail_notice_idle_after_seconds: number;
   reply_notice_after_seconds: number;
+  reap_leftover_processes?: boolean;
+  reap_leftover_after_hours?: number;
 
   terminal_transcript_visibility: "off" | "foreman" | "all";
   terminal_transcript_notify_tail: boolean;

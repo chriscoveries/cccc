@@ -26,6 +26,23 @@ export async function fetchDebugSnapshot(groupId: string) {
   );
 }
 
+export interface LeftoverProcess {
+  pid: number;
+  pgid: number;
+  comm: string;
+  actor_id: string;
+  group_id: string;
+  class: string;
+  started_secs: number;
+  age_secs: number;
+}
+
+export async function fetchLeftoverProcesses(groupId: string) {
+  return apiJson<{ leftovers: LeftoverProcess[]; count: number }>(
+    `/api/v1/groups/${encodeURIComponent(groupId)}/leftover-processes`,
+  );
+}
+
 export async function fetchTerminalTail(
   groupId: string,
   actorId: string,
