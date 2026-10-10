@@ -859,8 +859,24 @@ fn card_notices(
     interval: i64,
 ) -> Vec<Event> {
     let now = Utc::now().timestamp();
+    // Newest timestamp per actor, not the last ledger position: an
+    // out-of-order event must not reopen a window a later one closed.
     let mut last_activity = HashMap::<&str, i64>::new();
+    // A group start or resume restarts every actor's quiet window, as it
+    // does the Mail notice window.
+    let mut group_resume: Option<i64> = None;
     for event in events {
+        let resumed = event.kind == "group.start"
+            || (event.kind == "group.set_state"
+                && matches!(
+                    event.data.get("new_state").and_then(Value::as_str),
+                    Some("active" | "idle")
+                ));
+        if resumed {
+            let at = timestamp(&event.ts, now);
+            group_resume = Some(group_resume.map_or(at, |seen| seen.max(at)));
+            continue;
+        }
         let actor_id = match event.kind.as_str() {
             "chat.message" => Some(event.by.as_str()),
             "actor.start" | "actor.restart" | "actor.new_session" => {
@@ -874,7 +890,11 @@ fn card_notices(
             _ => None,
         };
         if let Some(actor_id) = actor_id {
-            last_activity.insert(actor_id, timestamp(&event.ts, now));
+            let at = timestamp(&event.ts, now);
+            last_activity
+                .entry(actor_id)
+                .and_modify(|seen| *seen = (*seen).max(at))
+                .or_insert(at);
         }
     }
     eligible
@@ -883,6 +903,8 @@ fn card_notices(
         .filter(|actor| {
             last_activity
                 .get(actor.id.as_str())
+                .copied()
+                .max(group_resume)
                 .is_none_or(|at| now - at >= interval)
         })
         .filter_map(|actor| {
