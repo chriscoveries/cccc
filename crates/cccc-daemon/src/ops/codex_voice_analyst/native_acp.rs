@@ -6,14 +6,9 @@ use std::{io, path::Path, time::Duration};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(40);
 
-/// Phrase carried by a failed `session/load` so the launch wrapper can pass
-/// that diagnosis through instead of re-labelling it an initialization
-/// failure. Kept as a marker rather than a typed error so the public error
-/// string is the only contract callers already handle.
-///
-/// Deliberately neutral: it must match every variant's wording, so it names
-/// the failure and never a specific recovery command. The recovery is
-/// appended separately, and differs between variants.
+/// Marks a failed `session/load` so the launch wrapper passes that
+/// diagnosis through instead of relabelling it an initialization failure.
+/// It names the failure, never a recovery command.
 pub(super) const RESUME_RECOVERY_HINT: &str = "could not resume ACP session";
 
 pub(super) struct Options {
@@ -213,9 +208,7 @@ pub(super) async fn initialize(
             // Naming it as one sends the operator to re-authenticate a CLI that
             // is working fine, while the actual recovery -- starting a fresh
             // session -- is never tried, because attempted sessions are never
-            // replaced automatically. This variant only corrects the
-            // diagnosis, so it names recoveries that already exist in every
-            // build rather than a CLI command this change does not add.
+            // replaced automatically.
             return Err(io::Error::new(
                 error.kind(),
                 format!(
