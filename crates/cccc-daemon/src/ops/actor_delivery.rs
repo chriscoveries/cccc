@@ -311,7 +311,7 @@ fn event_targets_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool 
     if event.kind == "system.notify"
         && matches!(
             event.data.get("kind").and_then(serde_json::Value::as_str),
-            Some("mail_notice" | "reply_notice")
+            Some("mail_notice" | "reply_notice" | "task_notice")
         )
     {
         return event

@@ -896,6 +896,10 @@
     "mailIdleNoticeHelp": "When the recipient Agent is idle, unread Mail is announced after this long (several Mail become one notice). While it is busy, the notice waits until it is idle, at the latest by the delay above. Applies only to managed Agents that report their working state; others are notified by the delay above. 0 turns early notices off.",
     "replyNotice": "Reply Notice After (sec)",
     "replyNoticeHelp": "Send one content-free reminder if a requested reply is still open. 0 disables the notice.",
+    "taskWakeOnIdle": "Remind idle actors about their cards",
+    "taskWakeOnIdleHelp": "When a managed session reports idle and holds active cards assigned to it, send one reminder naming the card IDs. The actor must have been quiet for the interval below.",
+    "taskWakeInterval": "Card reminder interval (seconds)",
+    "taskWakeIntervalHelp": "How long an idle actor must be quiet before it is reminded about its cards.",
     "saveDelivery": "Save Delivery Settings"
   },
   "messaging": {
