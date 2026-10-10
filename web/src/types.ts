@@ -804,6 +804,8 @@ export type GroupSettings = {
   terminal_transcript_visibility: "off" | "foreman" | "all";
   terminal_transcript_notify_tail: boolean;
   terminal_transcript_notify_lines: number;
+  task_wake_on_idle: boolean;
+  task_wake_interval_seconds: number;
 };
 
 export type BuiltinAssistantPolicy = {

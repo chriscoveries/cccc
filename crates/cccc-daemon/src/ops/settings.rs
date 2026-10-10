@@ -29,6 +29,12 @@ const SECTION_SETTING_KEYS: &[(&str, &str, &str)] = &[
         "delivery",
         "reply_notice_after_seconds",
     ),
+    ("task_wake_on_idle", "delivery", "task_wake_on_idle"),
+    (
+        "task_wake_interval_seconds",
+        "delivery",
+        "task_wake_interval_seconds",
+    ),
     (
         "terminal_transcript_visibility",
         "terminal_transcript",

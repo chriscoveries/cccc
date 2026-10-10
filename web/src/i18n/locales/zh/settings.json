@@ -888,6 +888,10 @@
     "mailIdleNoticeHelp": "收件 Agent 空闲时，未读 Mail 等这么久就提醒（多封合并为一条）；Agent 忙时等它空闲再提醒，最晚按上方时间。仅对能上报工作状态的托管 Agent 生效，其他 Agent 按上方时间提醒。0 表示不提前提醒。",
     "replyNotice": "回复提醒等待（秒）",
     "replyNoticeHelp": "请求的回复仍未完成时发送一次不含正文的提醒。0 表示关闭提醒。",
+    "taskWakeOnIdle": "提醒空闲 actor 处理卡片",
+    "taskWakeOnIdleHelp": "当受管会话报告空闲且持有分配给自己的活跃卡片时，发送一次仅含卡片 ID 的提醒。该 actor 必须静默达到下方间隔。",
+    "taskWakeInterval": "卡片提醒间隔（秒）",
+    "taskWakeIntervalHelp": "空闲 actor 在收到卡片提醒前需静默的时长。",
     "saveDelivery": "保存投递设置"
   },
   "messaging": {

@@ -450,3 +450,224 @@ fn scheduled_action_remains_due_until_its_owner_confirms_completion() {
         "returning an action is not proof that the daemon applied it"
     );
 }
+
+/// A managed session that reports idle, holds active cards, and has been
+/// quiet for the interval, is reminded about them once per interval.
+#[test]
+fn card_wake_reminds_an_idle_actor_about_its_active_cards_once_per_interval() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("card wake", "").expect("group");
+    let configure = |delivery: serde_json::Value| {
+        store
+            .mutate(&group.group_id, |group| {
+                group.extra.insert("delivery".into(), delivery.clone());
+                Ok(())
+            })
+            .expect("delivery settings");
+    };
+    store
+        .mutate(&group.group_id, |group| {
+            group.state = GroupState::Active;
+            actors::add(group, Actor::new("peer"))?;
+            Ok(())
+        })
+        .expect("actor");
+    configure(json!({"task_wake_on_idle":true,"task_wake_interval_seconds":600}));
+
+    let create_card = |fields: serde_json::Value| {
+        let mut op = json!({"op":"task.create","title":"PRIVATE_CARD_TITLE"})
+            .as_object()
+            .cloned()
+            .expect("card op");
+        op.extend(fields.as_object().cloned().expect("card fields"));
+        cccc_core::context::ContextStore::new(home.clone())
+            .expect("contexts")
+            .sync(&group.group_id, &[op], None, "user", false)
+            .expect("create card");
+    };
+    create_card(json!({"status":"active","assignee":"peer"}));
+
+    let eligible = HashSet::from(["peer".to_owned()]);
+    let idle = HashSet::from(["peer".to_owned()]);
+    let tick = |idle: &HashSet<String>| {
+        automation::tick_group_with_idle_actors(&home, &group.group_id, true, &eligible, idle)
+            .expect("tick")
+    };
+    fn card_notices(result: &cccc_core::automation::TickResult) -> Vec<&Event> {
+        result
+            .notifications
+            .iter()
+            .filter(|event| event.data["kind"] == "task_notice")
+            .collect()
+    }
+
+    let due = tick(&idle);
+    let notices = card_notices(&due);
+    assert_eq!(notices.len(), 1, "{:?}", due.notifications);
+    assert_eq!(notices[0].data["target_actor_id"], "peer");
+    assert_eq!(notices[0].by, "system");
+    assert_eq!(notices[0].data["im_visibility"], "internal");
+    // The notice names card ids and nothing else: no title, no task content.
+    let ids = notices[0].data["context"]["task_ids"]
+        .as_array()
+        .expect("task_ids");
+    assert_eq!(ids.len(), 1);
+    let rendered = notices[0].data["message"].as_str().unwrap_or_default();
+    assert!(rendered.contains(ids[0].as_str().unwrap_or_default()));
+    assert!(
+        !rendered.contains("PRIVATE_CARD_TITLE"),
+        "card content leaked into the notice: {rendered}"
+    );
+
+    // One-shot: a second tick in the same window stays silent.
+    assert!(card_notices(&tick(&idle)).is_empty());
+
+    // A busy actor is never prompted.
+    assert!(card_notices(&tick(&HashSet::new())).is_empty());
+}
+
+#[test]
+fn card_wake_is_off_unless_the_group_opts_in() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("card wake off", "").expect("group");
+    store
+        .mutate(&group.group_id, |group| {
+            group.state = GroupState::Active;
+            actors::add(group, Actor::new("peer"))?;
+            Ok(())
+        })
+        .expect("actor");
+    let op = json!({"op":"task.create","title":"t","status":"active","assignee":"peer"})
+        .as_object()
+        .cloned()
+        .expect("card op");
+    cccc_core::context::ContextStore::new(home.clone())
+        .expect("contexts")
+        .sync(&group.group_id, &[op], None, "user", false)
+        .expect("create card");
+
+    let eligible = HashSet::from(["peer".to_owned()]);
+    let idle = HashSet::from(["peer".to_owned()]);
+    let result = automation::tick_group_with_idle_actors(
+        &home,
+        &group.group_id,
+        true,
+        &eligible,
+        &idle,
+    )
+    .expect("tick");
+    assert!(
+        !result
+            .notifications
+            .iter()
+            .any(|event| event.data["kind"] == "task_notice"),
+        "card notice without the opt-in"
+    );
+}
+
+#[test]
+fn card_wake_skips_cards_that_are_not_the_actors_to_move() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("card wake filter", "").expect("group");
+    store
+        .mutate(&group.group_id, |group| {
+            group.state = GroupState::Active;
+            actors::add(group, Actor::new("peer"))?;
+            group.extra.insert("delivery".into(), json!({"task_wake_on_idle":true}));
+            Ok(())
+        })
+        .expect("actor");
+    let card = |fields: serde_json::Value| {
+        let mut op = json!({"op":"task.create","title":"t"})
+            .as_object()
+            .cloned()
+            .expect("card op");
+        op.extend(fields.as_object().cloned().expect("fields"));
+        cccc_core::context::ContextStore::new(home.clone())
+            .expect("contexts")
+            .sync(&group.group_id, &[op], None, "user", false)
+            .expect("create card");
+    };
+    // None of these are work this actor should be reminded to move: not
+    // active, assigned elsewhere, blocked, or waiting on the user.
+    card(json!({"status":"planned","assignee":"peer"}));
+    card(json!({"status":"active","assignee":"other"}));
+    card(json!({"status":"active","assignee":"peer","blocked_by":["T1"]}));
+    card(json!({"status":"active","assignee":"peer","waiting_on":"user"}));
+
+    let eligible = HashSet::from(["peer".to_owned()]);
+    let result = automation::tick_group_with_idle_actors(
+        &home,
+        &group.group_id,
+        true,
+        &eligible,
+        &HashSet::from(["peer".to_owned()]),
+    )
+    .expect("tick");
+    assert!(
+        !result
+            .notifications
+            .iter()
+            .any(|event| event.data["kind"] == "task_notice"),
+        "reminded about a card that is not this actor's to move"
+    );
+}
+
+#[test]
+fn card_wake_waits_for_the_quiet_interval_before_reminding() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("card wake interval", "").expect("group");
+    store
+        .mutate(&group.group_id, |group| {
+            group.state = GroupState::Active;
+            actors::add(group, Actor::new("peer"))?;
+            group.extra.insert(
+                "delivery".into(),
+                json!({"task_wake_on_idle":true,"task_wake_interval_seconds":3600}),
+            );
+            Ok(())
+        })
+        .expect("actor");
+    let op = json!({"op":"task.create","title":"t","status":"active","assignee":"peer"})
+        .as_object()
+        .cloned()
+        .expect("card op");
+    cccc_core::context::ContextStore::new(home.clone())
+        .expect("contexts")
+        .sync(&group.group_id, &[op], None, "user", false)
+        .expect("create card");
+
+    // A message from the actor two minutes ago closes its quiet window.
+    let mut message = Event::new("chat.message", &group.group_id);
+    message.by = "peer".into();
+    message.ts = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    message.data = json!({"text":"working","to":["user"]})
+        .as_object()
+        .cloned()
+        .expect("message");
+    ledger::append(
+        &store.ledger_path(&group.group_id).expect("ledger"),
+        &message,
+    )
+    .expect("append");
+
+    let eligible = HashSet::from(["peer".to_owned()]);
+    let idle = HashSet::from(["peer".to_owned()]);
+    let result = automation::tick_group_with_idle_actors(&home, &group.group_id, true, &eligible, &idle)
+        .expect("tick");
+    assert!(
+        !result
+            .notifications
+            .iter()
+            .any(|event| event.data["kind"] == "task_notice"),
+        "reminded inside the quiet window"
+    );
+}

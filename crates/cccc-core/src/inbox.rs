@@ -289,6 +289,9 @@ pub fn is_for_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
         ) {
             return false;
         }
+        if event.data.get("kind").and_then(Value::as_str) == Some("task_notice") {
+            return false;
+        }
         let direct_target = ["target_actor_id", "actor_id"].iter().find_map(|key| {
             event
                 .data

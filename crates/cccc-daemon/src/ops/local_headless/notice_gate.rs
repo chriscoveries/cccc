@@ -22,10 +22,22 @@ use serde_json::Value;
 
 use super::{BatchSubmission, Session};
 
-/// An early Mail notice whose `deliver_by` has not passed yet.
+/// An early Mail or card notice whose `deliver_by` has not passed yet.
 fn held_notice(event: &Event, now: DateTime<Utc>) -> bool {
     event.kind == "system.notify"
-        && event.data.get("kind").and_then(Value::as_str) == Some("mail_notice")
+        && matches!(
+            event.data.get("kind").and_then(Value::as_str),
+            // Both notices mean "you have something waiting", so both are
+            // routed through this gate rather than a second mechanism.
+            //
+            // In practice a `task_notice` carries no `deliver_by`: it is
+            // minted only for an Actor the daemon has just observed idle, so
+            // there is nothing to hold it until. Listing it here makes the
+            // gate the single place that decides interruption, and the
+            // check keeps working unchanged if a card notice ever gains a
+            // delivery deadline.
+            Some("mail_notice" | "task_notice")
+        )
         && event
             .data
             .get("context")
@@ -41,6 +53,7 @@ pub(super) fn held_batch(events: &[Event], now: DateTime<Utc>) -> bool {
 }
 
 impl Session {
+    /// Whether this Actor may receive a waiting-work notice now.
     pub(super) fn ready_for_mail_notice(&self) -> bool {
         self.active_turn.lock().is_ok_and(|turn| turn.is_none())
             && self.status.lock().is_ok_and(|state| state.status == "idle")

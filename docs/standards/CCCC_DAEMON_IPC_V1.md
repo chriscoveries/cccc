@@ -1830,12 +1830,33 @@ Args:
 Patch keys used by CCCC include:
 - Messaging: `default_send_to`
 - Delivery: `mail_notice_after_seconds` (default 1800, zero disables),
-  `reply_notice_after_seconds` (default 900, zero disables)
+  `mail_notice_idle_after_seconds` (default 60; the shorter wait an Actor
+  whose managed session reports idle is held to instead of
+  `mail_notice_after_seconds`),
+  `reply_notice_after_seconds` (default 900, zero disables),
+  `task_wake_on_idle` (boolean, default false),
+  `task_wake_interval_seconds` (nonnegative integer, default 1800, floored at 60)
 - Automation: `actor_idle_timeout_seconds`, `keepalive_delay_seconds`,
   `keepalive_max_per_actor`,
   `silence_timeout_seconds`, `help_nudge_interval_seconds`,
   `help_nudge_min_messages`
 - Terminal transcript: `terminal_transcript_visibility`, `terminal_transcript_notify_tail`, `terminal_transcript_notify_lines`
+
+With `task_wake_on_idle` `true`, an Actor whose running managed session
+reports `idle` MAY receive one `system.notify(kind="task_notice")` targeted at
+it when all of these hold:
+
+- it is the `assignee` of at least one `active` task with an empty
+  `blocked_by` and a `waiting_on` other than `user`, `actor` or `external`;
+- it has been quiet for `task_wake_interval_seconds`: no message from it, no
+  session start, no Group start or resume, and no earlier `task_notice` to it
+  in that window, judged by the newest timestamp of each.
+
+The notice names only the task IDs (`context.task_ids`); it does not copy
+titles or other task content and does not change any task. A busy session, a
+session whose state is unknown, and a PTY Actor are never sent one. The notice
+is routed like a Mail notice, through the same admission gate, and its delivery
+is subject to the same Group pause rules.
 
 Result:
 ```ts
