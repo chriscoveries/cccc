@@ -119,6 +119,9 @@ fn scan_proc() -> Vec<TaggedProcess> {
             .map(|text| text.trim().to_owned())
             .unwrap_or_default();
         // `stat` is read-only and portable; failure just loses the pgid.
+        // Fields after the last ')' are: state, ppid, pgrp, ... — pgrp is
+        // the THIRD token (an earlier revision read ppid here and labelled
+        // it pgid; the own-tree exclusion below depends on the real pgrp).
         let pgid = std::fs::read_to_string(format!("{base}/stat"))
             .ok()
             .and_then(|stat| {
@@ -126,6 +129,7 @@ fn scan_proc() -> Vec<TaggedProcess> {
                 let after = stat.rsplit(')').next()?;
                 let mut fields = after.split_whitespace();
                 fields.next()?; // state
+                fields.next()?; // ppid
                 fields.next().and_then(|field| field.parse::<i32>().ok()) // pgrp
             })
             .unwrap_or(0);
@@ -142,17 +146,48 @@ fn scan_proc() -> Vec<TaggedProcess> {
     tagged
 }
 
-/// Terminate one process, escalating from TERM to KILL. Returns true when the
-/// pid is gone afterwards. Best effort throughout: a process that exits
-/// between the checks is a success, not an error.
-pub fn terminate_process(pid: i32, grace: std::time::Duration) -> bool {
+/// Terminate a leftover and the tree under it, escalating from TERM to KILL.
+/// Returns true when the pid is gone afterwards. Best effort throughout: a
+/// process that exits between the checks is a success, not an error.
+///
+/// - `expected_started_secs` re-verifies identity immediately before the
+///   first signal: a recycled pid (same number, newer start) aborts, `false`.
+///   Zero means "unknown" (a fallback scan hit) and skips the check — the age
+///   gate already keeps such processes out of the reaper.
+/// - When the pid leads its own sane process group (`pid == pgid > 1`), the
+///   whole group is signalled, the way the abrupt-exit guard does: killing
+///   one shell must not leave its children behind. Otherwise the pid plus its
+///   currently-visible descendants are signalled.
+pub fn terminate_process(
+    pid: i32,
+    pgid: i32,
+    expected_started_secs: u64,
+    grace: std::time::Duration,
+) -> bool {
     #[cfg(unix)]
     {
+        if pid <= 1 {
+            return false;
+        }
+        if expected_started_secs > 0
+            && current_started_secs(pid) != Some(expected_started_secs)
+        {
+            // Recycled pid (or exit race): not ours to signal.
+            return false;
+        }
         // Send TERM through kill(1): nix is not a dependency of this crate,
         // and a shell-free direct exec keeps this auditable.
-        let _ = std::process::Command::new("kill")
-            .args(["-s", "TERM", &pid.to_string()])
-            .status();
+        if pgid > 1 && pid == pgid {
+            let _ = std::process::Command::new("kill")
+                .args(["-s", "TERM", &format!("-{pgid}")])
+                .status();
+        } else {
+            for victim in tree_pids(pid) {
+                let _ = std::process::Command::new("kill")
+                    .args(["-s", "TERM", &victim.to_string()])
+                    .status();
+            }
+        }
         let deadline = std::time::Instant::now() + grace;
         loop {
             if !pid_alive(pid) {
@@ -163,17 +198,141 @@ pub fn terminate_process(pid: i32, grace: std::time::Duration) -> bool {
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        let _ = std::process::Command::new("kill")
-            .args(["-s", "KILL", &pid.to_string()])
-            .status();
+        if pgid > 1 && pid == pgid {
+            let _ = std::process::Command::new("kill")
+                .args(["-s", "KILL", &format!("-{pgid}")])
+                .status();
+        } else {
+            for victim in tree_pids(pid) {
+                let _ = std::process::Command::new("kill")
+                    .args(["-s", "KILL", &victim.to_string()])
+                    .status();
+            }
+        }
         std::thread::sleep(std::time::Duration::from_millis(500));
         !pid_alive(pid)
     }
     #[cfg(not(unix))]
     {
-        let _ = (pid, grace);
+        let _ = (pid, pgid, expected_started_secs, grace);
         false
     }
+}
+
+/// Current start time of a pid in unix seconds, same source the scan uses.
+/// `None` when the pid is gone or unreadable.
+#[cfg(target_os = "linux")]
+fn current_started_secs(pid: i32) -> Option<u64> {
+    let base = format!("/proc/{pid}");
+    std::fs::metadata(&base)
+        .and_then(|meta| meta.modified())
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .ok()
+        .filter(|secs| *secs > 0)
+}
+
+/// Same contract via a single-pid `ps` etime lookup.
+#[cfg(target_os = "macos")]
+fn current_started_secs(pid: i32) -> Option<u64> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .output()
+        .ok()?;
+    let elapsed = super::macos::parse_etime(&String::from_utf8_lossy(&output.stdout))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let started = now.checked_sub(elapsed)?;
+    (started > 0).then_some(started)
+}
+
+/// Pids of `pid` plus its currently-visible descendants (children,
+/// grandchildren), oldest-first. Best effort: an exit race just shrinks the
+/// set, and anything spawned later is caught by the pre-KILL re-snapshot.
+#[cfg(target_os = "linux")]
+fn tree_pids(pid: i32) -> Vec<i32> {
+    let mut children: std::collections::HashMap<i32, Vec<i32>> = std::collections::HashMap::new();
+    let mut all = vec![pid];
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return all;
+    };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let Ok(candidate) = name.to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if candidate <= 0 {
+            continue;
+        }
+        let ppid = std::fs::read_to_string(format!("/proc/{candidate}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let after = stat.rsplit(')').next()?;
+                let mut fields = after.split_whitespace();
+                fields.next()?; // state
+                fields.next()?.parse::<i32>().ok() // ppid
+            });
+        if let Some(ppid) = ppid {
+            children.entry(ppid).or_default().push(candidate);
+        }
+    }
+    // Breadth-first from the root pid; the root itself stays first so a
+    // group-leader check elsewhere keeps working on ordered output.
+    let mut queue = vec![pid];
+    while let Some(parent) = queue.pop() {
+        if let Some(kids) = children.remove(&parent) {
+            for kid in kids {
+                if !all.contains(&kid) {
+                    all.push(kid);
+                    queue.push(kid);
+                }
+            }
+        }
+    }
+    all
+}
+
+/// Same contract via one `ps -A -o pid=,ppid=` pass.
+#[cfg(target_os = "macos")]
+fn tree_pids(pid: i32) -> Vec<i32> {
+    let mut children: std::collections::HashMap<i32, Vec<i32>> = std::collections::HashMap::new();
+    let mut all = vec![pid];
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid="])
+        .env("LC_ALL", "C")
+        .output()
+    else {
+        return all;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut tokens = line.split_whitespace();
+        let (Some(candidate), Some(ppid)) = (tokens.next(), tokens.next()) else {
+            continue;
+        };
+        let (Ok(candidate), Ok(ppid)) = (candidate.parse::<i32>(), ppid.parse::<i32>()) else {
+            continue;
+        };
+        if candidate <= 0 || ppid < 0 {
+            continue;
+        }
+        children.entry(ppid).or_default().push(candidate);
+    }
+    let mut queue = vec![pid];
+    while let Some(parent) = queue.pop() {
+        if let Some(kids) = children.remove(&parent) {
+            for kid in kids {
+                if !all.contains(&kid) {
+                    all.push(kid);
+                    queue.push(kid);
+                }
+            }
+        }
+    }
+    all
 }
 
 /// True while `/proc/<pid>` exists and is not a zombie. A zombie still proves
@@ -262,8 +421,86 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let pid = child.id() as i32;
-        assert!(terminate_process(pid, std::time::Duration::from_secs(2)));
+        let started = current_started_secs(pid).expect("start time");
+        assert!(terminate_process(pid, 0, started, std::time::Duration::from_secs(2)));
         let _ = child.wait();
         assert!(!pid_alive(pid));
+    }
+
+    /// C2: a group leader's whole tree goes, not just the leader. A shell
+    /// that spawned a child in its own group must not leave the child behind.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_group_leader_clears_its_children() {
+        use std::os::unix::process::CommandExt as _;
+        let mut leader = std::process::Command::new("sh")
+            .args(["-c", "sleep 300 & wait"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn leader");
+        let pid = leader.id() as i32;
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let tree = tree_pids(pid);
+        // The shell plus its sleep child: more than the leader alone.
+        assert!(tree.len() >= 2, "expected a child, got {tree:?}");
+        let started = current_started_secs(pid).expect("start time");
+        assert!(terminate_process(pid, pid, started, std::time::Duration::from_secs(5)));
+        let _ = leader.wait();
+        for member in tree {
+            assert!(!pid_alive(member), "straggler survived: {member}");
+        }
+    }
+
+    /// C3: a recycled pid (same number, newer start) is never signalled.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_process_aborts_on_start_time_mismatch() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as i32;
+        // Claim it started at epoch: nothing alive matches that fingerprint.
+        assert!(!terminate_process(pid, 0, 1, std::time::Duration::from_secs(2)));
+        // And the process is untouched.
+        assert!(pid_alive(pid));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The scan reports the real process group, not the parent pid: the
+    /// own-tree exclusion depends on it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scan_reports_pgrp_not_ppid() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .env("CCCC_ACTOR_ID", "pgid-check")
+            .env("CCCC_GROUP_ID", "pgid-check-group")
+            .spawn()
+            .expect("spawn sleep");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let found = scan_tagged_processes()
+            .into_iter()
+            .find(|process| process.pid == child.id() as i32)
+            .expect("tagged child is found");
+        // A plain spawn shares our process group: pgid == our pgid, while
+        // ppid would be our pid. They must differ here (we are not pid 1's
+        // group leader in the test harness... assert the weaker invariant:
+        // pgid reads as OUR pgid, not our pid).
+        let own_pgid = std::fs::read_to_string("/proc/self/stat")
+            .ok()
+            .and_then(|stat| {
+                let after = stat.rsplit(')').next()?;
+                let mut fields = after.split_whitespace();
+                fields.next()?;
+                fields.next()?;
+                fields.next().and_then(|field| field.parse::<i32>().ok())
+            })
+            .unwrap_or(0);
+        assert!(own_pgid > 0);
+        assert_eq!(found.pgid, own_pgid);
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
