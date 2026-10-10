@@ -452,3 +452,68 @@ async fn disconnect_before_admission_keeps_attempted_receipt() {
     assert_eq!(frames.matches("\"method\": \"session/new\"").count(), 1);
     assert_eq!(frames.matches("\"method\": \"session/prompt\"").count(), 1);
 }
+
+/// A failed `session/load` must not be reported as an initialization or login
+/// failure. The wrapper used to relabel every handshake error that way, which
+/// pointed the operator at a CLI that was working fine while the actual
+/// recovery was never named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_resume_names_the_recovery_instead_of_blaming_login() {
+    let (temp, home, program) = fixture(ActorRuntime::Devin);
+    let group = cccc_core::GroupStore::new(home.clone())
+        .expect("store")
+        .create("fixture", "")
+        .expect("group");
+    let launch = || ActorLaunchConfig {
+        workdir: temp.path().into(),
+        group_id: group.group_id.clone(),
+        actor_id: "worker".into(),
+        runtime: ActorRuntime::Devin,
+        runtime_mode: RuntimeMode::Acp,
+        command: vec![program.clone()],
+        environment: environment(temp.path()),
+    };
+    let session = AnalystSession::launch_actor(&home, launch())
+        .await
+        .expect("session");
+    let mut events = session.subscribe();
+    session
+        .start_turn(session.generation(), "delivery-1", "fixture task")
+        .await
+        .expect("turn");
+    assert_eq!(
+        terminal(&mut events).await["params"]["turn"]["status"],
+        "completed"
+    );
+    let id = session.thread_id().to_owned();
+    session.stop(session.generation()).await.expect("stop");
+    // Only now make the stored session unloadable.
+    std::fs::write(temp.path().join("fixture_reject_load"), "").expect("force load failure");
+    let message = match AnalystSession::launch_actor(&home, launch()).await {
+        Ok(_) => panic!("resume must fail"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        message.contains(native_acp::RESUME_RECOVERY_HINT),
+        "the error must name the recovery command, got: {message}"
+    );
+    assert!(
+        message.contains(&id),
+        "the error must name the session that would not load, got: {message}"
+    );
+    assert!(
+        !message.contains("initialization failed"),
+        "a resume failure must not be reported as an initialization failure: {message}"
+    );
+    assert!(
+        !message.contains("check native CLI login"),
+        "a resume failure must not send the operator to re-authenticate: {message}"
+    );
+    let frames =
+        std::fs::read_to_string(temp.path().join("fixture_requests.jsonl")).expect("frames");
+    assert_eq!(
+        frames.matches("\"method\": \"session/new\"").count(),
+        1,
+        "a failed resume must still not replace attempted work"
+    );
+}
