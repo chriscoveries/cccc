@@ -680,6 +680,8 @@
     "notebookSectionLockedConnecting": "Finish the current Google sign-in flow and the Work and Memory notebook controls will appear here."
   },
   "automation": {
+    "foremanSweep": "Hourly foreman card sweep",
+    "foremanSweepHelp": "Notify @foreman to review cards. Existing custom schedules and messages are preserved.",
     "title": "Automation",
     "description": "Configure built-in automation and scheduled rules. Settings are stored in",
     "configPathFallback": "CCCC_HOME/.../group.yaml",
