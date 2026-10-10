@@ -799,6 +799,8 @@ export type GroupSettings = {
   mail_notice_after_seconds: number;
   mail_wake_on_idle?: boolean;
   mail_wake_min_age_seconds?: number;
+  task_wake_on_idle?: boolean;
+  task_wake_interval_seconds?: number;
   reply_notice_after_seconds: number;
 
   terminal_transcript_visibility: "off" | "foreman" | "all";

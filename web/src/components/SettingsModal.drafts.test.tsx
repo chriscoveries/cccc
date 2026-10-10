@@ -104,6 +104,8 @@ describe("settings draft and save continuity", () => {
       mail_notice_after_seconds: 300,
       mail_wake_on_idle: false,
       mail_wake_min_age_seconds: 60,
+      task_wake_on_idle: false,
+      task_wake_interval_seconds: 1800,
       reply_notice_after_seconds: 900,
     });
     await act(async () =>
@@ -134,10 +136,39 @@ describe("settings draft and save continuity", () => {
       reply_notice_after_seconds: 900,
       mail_wake_on_idle: true,
       mail_wake_min_age_seconds: 90,
+      task_wake_on_idle: false,
+      task_wake_interval_seconds: 1800,
     });
     await render(settings, "g2", "Save delivery");
     expect(tabs.delivery!.mailWakeOnIdle).toBe(false);
     expect(tabs.delivery!.mailWakeMinAgeSeconds).toBe(60);
+  });
+  it("loads and saves card idle opt-ins while preserving dirty drafts through refresh", async () => {
+    await render({ ...settings, task_wake_on_idle: true, task_wake_interval_seconds: 900 });
+    await act(async () =>
+      useModalStore.getState().openSettingsTarget({ scope: "group", tab: "delivery" }),
+    );
+    await vi.waitFor(() => expect(tabs.delivery?.taskWakeOnIdle).toBe(true));
+    expect(tabs.delivery!.taskWakeIntervalSeconds).toBe(900);
+    await act(async () => tabs.delivery!.setTaskWakeIntervalSeconds(600));
+    await render(
+      { ...settings, task_wake_on_idle: true, task_wake_interval_seconds: 1200 },
+      "g1",
+      "Save delivery",
+    );
+    expect(tabs.delivery!.taskWakeIntervalSeconds).toBe(600);
+    await act(async () => tabs.delivery!.onSave());
+    expect(save).toHaveBeenLastCalledWith({
+      mail_notice_after_seconds: 1800,
+      reply_notice_after_seconds: 900,
+      mail_wake_on_idle: false,
+      mail_wake_min_age_seconds: 60,
+      task_wake_on_idle: true,
+      task_wake_interval_seconds: 600,
+    });
+    await render(settings, "g2", "Save delivery");
+    expect(tabs.delivery!.taskWakeOnIdle).toBe(false);
+    expect(tabs.delivery!.taskWakeIntervalSeconds).toBe(1800);
   });
   it("reports confirmed save and failure locally without moving focus or losing the draft", async () => {
     await render();
