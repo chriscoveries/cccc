@@ -10,7 +10,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(40);
 /// that diagnosis through instead of re-labelling it an initialization
 /// failure. Kept as a marker rather than a typed error so the public error
 /// string is the only contract callers already handle.
-pub(super) const RESUME_RECOVERY_HINT: &str = "cccc actor new-session";
+///
+/// Deliberately neutral: it must match every variant's wording, so it names
+/// the failure and never a specific recovery command. The recovery is
+/// appended separately, and differs between variants.
+pub(super) const RESUME_RECOVERY_HINT: &str = "could not resume ACP session";
 
 pub(super) struct Options {
     pub command: Vec<String>,
@@ -209,11 +213,13 @@ pub(super) async fn initialize(
             // Naming it as one sends the operator to re-authenticate a CLI that
             // is working fine, while the actual recovery -- starting a fresh
             // session -- is never tried, because attempted sessions are never
-            // replaced automatically.
+            // replaced automatically. This variant only corrects the
+            // diagnosis, so it names recoveries that already exist in every
+            // build rather than a CLI command this change does not add.
             return Err(io::Error::new(
                 error.kind(),
                 format!(
-                    "could not resume ACP session {} ({error}). This is not a login or launch failure; the CLI is running. Recover with `cccc actor new-session <actor>`, which clears the attempted session and starts a fresh one",
+                    "{RESUME_RECOVERY_HINT} {} ({error}). This is not a login or launch failure. If the session data is gone, recover by starting a new session: Web: the actor menu -> New session; daemon op actor_new_session, which discards the saved session",
                     resume.unwrap_or_default()
                 ),
             ));

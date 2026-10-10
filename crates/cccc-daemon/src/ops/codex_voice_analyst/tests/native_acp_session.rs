@@ -495,7 +495,7 @@ async fn failed_resume_names_the_recovery_instead_of_blaming_login() {
     };
     assert!(
         message.contains(native_acp::RESUME_RECOVERY_HINT),
-        "the error must name the recovery command, got: {message}"
+        "the error must identify the failure as a resume failure, got: {message}"
     );
     assert!(
         message.contains(&id),
@@ -508,6 +508,20 @@ async fn failed_resume_names_the_recovery_instead_of_blaming_login() {
     assert!(
         !message.contains("check native CLI login"),
         "a resume failure must not send the operator to re-authenticate: {message}"
+    );
+    // Every recovery this message names must already exist. A CLI command
+    // would be advice the operator cannot follow in this variant.
+    assert!(
+        message.contains("actor_new_session"),
+        "the error must name the existing recovery operation, got: {message}"
+    );
+    assert!(
+        message.contains("the actor menu"),
+        "the error must name the existing Web recovery, got: {message}"
+    );
+    assert!(
+        !message.contains("cccc actor new-session"),
+        "this variant does not add that CLI command and must not advise it: {message}"
     );
     let frames =
         std::fs::read_to_string(temp.path().join("fixture_requests.jsonl")).expect("frames");
