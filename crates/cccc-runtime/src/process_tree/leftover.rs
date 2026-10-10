@@ -41,8 +41,14 @@ pub fn scan_tagged_processes() -> Vec<TaggedProcess> {
     {
         scan_proc()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
+        super::macos::scan_macos()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        // Windows has no portable peer-environ read; an unverifiable
+        // implementation would be worse than this explicit gap.
         Vec::new()
     }
 }
@@ -50,6 +56,10 @@ pub fn scan_tagged_processes() -> Vec<TaggedProcess> {
 /// Parse a NUL-separated `/proc/<pid>/environ` block. Returns the
 /// `(actor_id, group_id)` pair when both are present and non-blank after
 /// trimming; anything else is not attributable and stays invisible.
+///
+/// Linux-only in production (the macOS path parses `ps` output instead), but
+/// compiled under test everywhere so the contract stays checked.
+#[cfg(any(test, target_os = "linux"))]
 pub fn parse_environ_tags(block: &[u8]) -> Option<(String, String)> {
     let mut actor: Option<&str> = None;
     let mut group: Option<&str> = None;
