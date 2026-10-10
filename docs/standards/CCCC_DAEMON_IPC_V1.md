@@ -4421,7 +4421,8 @@ when all of these hold:
   `blocked_by` and a `waiting_on` other than `user`, `actor` or `external`;
 - it has been quiet for `delivery.task_wake_interval_seconds` (nonnegative
   integer, default `1800`, floored at `60`): no message from it, no session
-  start, and no earlier `task_notice` to it in that window.
+  start, no Group start or resume, and no earlier `task_notice` to it in that
+  window, judged by the newest timestamp of each.
 
 The notice names only the task IDs (`context.task_ids`); it does not copy
 titles or other task content and does not change any task. A busy session,

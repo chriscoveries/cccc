@@ -811,6 +811,38 @@ fn task_wake_reminds_again_only_after_a_quiet_interval() {
 }
 
 #[test]
+fn task_wake_keeps_the_newest_activity_and_restarts_on_group_start() {
+    let fixture = MailWake::new(json!({"task_wake_on_idle":true}));
+    fixture.card(json!({"status":"active","assignee":"peer"}));
+    fixture.system_event(
+        "system.notify",
+        json!({"kind":"task_notice","target_actor_id":"peer"}),
+        30,
+    );
+    // Logged later, but older: it must not reopen the window.
+    let mut message = Event::new("chat.message", &fixture.group_id);
+    message.by = "peer".into();
+    message.ts = (chrono::Utc::now() - chrono::Duration::seconds(7_200)).to_rfc3339();
+    message.data = json!({"text":"old","to":["user"],"message_mode":"send"})
+        .as_object()
+        .cloned()
+        .expect("message");
+    fixture.append(&message);
+    assert!(
+        card_notices(&fixture.tick(Some(true))).is_empty(),
+        "a recent reminder still closes the window"
+    );
+
+    let resumed = MailWake::new(json!({"task_wake_on_idle":true}));
+    resumed.card(json!({"status":"active","assignee":"peer"}));
+    resumed.system_event("group.start", json!({}), 30);
+    assert!(
+        card_notices(&resumed.tick(Some(true))).is_empty(),
+        "a group start restarts the quiet window"
+    );
+}
+
+#[test]
 fn task_wake_waits_for_idle_and_ignores_pty_actors() {
     let fixture = MailWake::new(json!({"task_wake_on_idle":true}));
     fixture.card(json!({"status":"active","assignee":"peer"}));
