@@ -17,6 +17,9 @@ Native teams give you the smoothest experience inside one vendor and one session
 **vs. parallel task runners (worktree/task-board tools).**
 These tools excel at fanning out isolated tasks in parallel. CCCC's focus is the coordination layer they intentionally skip: agents that talk to each other, choose whether a message should interrupt or wait in Mail, hand off tracked work, and expose delivery/read/reply state — plus daemon-owned lifecycle and IM-side operations. The two approaches compose well: keep a task runner for fan-out and use CCCC as the durable coordination plane.
 
+
+> Long-lived Actors can accumulate git worktrees that no runtime cleans up, because a runtime only cleans up on an interactive exit and a CCCC Actor is stopped and restarted rather than exited. Claude Code removes a clean worktree when an interactive `--worktree` session ends, and sweeps the ones it created for subagents and background sessions past `cleanupPeriodDays`; a session that is never backgrounded is never swept, and worktrees you made with `git worktree add` are never touched. Remove them yourself with `git worktree list --porcelain` to see them, `git worktree remove <path>`, which refuses a worktree with uncommitted work, and `git worktree prune` to forget entries whose directory is gone. Check first that no Actor is working in the worktree and that its commits are merged or pushed, and avoid `--force`; if git reports it locked, run `git worktree unlock <path>`. See the [runtimes guide](runtimes.md).
+
 **vs. IM assistant gateways (personal-assistant products that live in your chat app).**
 Those products put a general assistant in your messenger. CCCC is built for delivery-grade collaboration on real work: tracked tasks with owners and outcomes, explicit delivery/read/reply semantics, multi-agent groups bound to a repository scope, and a tiered token and capability-allowlist security model.
 
