@@ -38,6 +38,12 @@ pub enum ActorAction {
     Stop(ActorTarget),
     Restart(ActorTarget),
     /// Resume a specific saved Claude conversation in this actor's workspace.
+    /// Discard the actor's attempted session and start a fresh one.
+    ///
+    /// The recovery for an ACP session that cannot be resumed: attempted
+    /// sessions are never replaced automatically, so a session whose data has
+    /// gone missing leaves the actor down until this is run.
+    NewSession(ActorTarget),
     ResumeSession {
         #[command(flatten)]
         target: ActorTarget,
