@@ -499,7 +499,7 @@ async fn failed_resume_names_the_recovery_instead_of_blaming_login() {
     );
     assert!(
         message.contains("cccc actor new-session"),
-        "this variant adds that command, so the error must name it: {message}"
+        "the error must name the command that starts a new session: {message}"
     );
     assert!(
         message.contains(&id),
