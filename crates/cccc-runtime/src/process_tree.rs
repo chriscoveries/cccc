@@ -1,6 +1,7 @@
 //! Process resources reachable independently of session/protocol shutdown locks.
 #[cfg(unix)]
 mod guard;
+pub mod leftover;
 mod resource;
 mod spawn;
 use resource::Resource;
