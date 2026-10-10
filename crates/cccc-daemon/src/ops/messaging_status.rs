@@ -17,8 +17,9 @@ pub fn statuses(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     if event_ids.is_empty() {
         return object(json!({"statuses": {}}));
     }
-    let statuses =
-        StatusSnapshot::with(home, &group_id, |snapshot| snapshot.for_events(&event_ids))?;
+    let statuses = StatusSnapshot::with(home, &group_id, &event_ids, |snapshot| {
+        snapshot.for_events(&event_ids)
+    })?;
     object(json!({"statuses": statuses}))
 }
 
@@ -27,19 +28,26 @@ pub(super) fn for_events(
     group_id: &str,
     event_ids: &[String],
 ) -> Result<BTreeMap<String, Value>, OpError> {
-    StatusSnapshot::with(home, group_id, |snapshot| snapshot.for_events(event_ids))
+    StatusSnapshot::with(home, group_id, event_ids, |snapshot| {
+        snapshot.for_events(event_ids)
+    })
 }
 
 pub fn read_status(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group_id = required_arg(request, "group_id")?;
     let event_id = required_arg(request, "event_id")?;
-    let read_status = StatusSnapshot::with(home, &group_id, |snapshot| {
-        snapshot
-            .for_events(std::slice::from_ref(&event_id))
-            .remove(&event_id)
-            .and_then(|value| value.get("read_status").cloned())
-            .unwrap_or_else(|| json!({}))
-    })?;
+    let read_status = StatusSnapshot::with(
+        home,
+        &group_id,
+        std::slice::from_ref(&event_id),
+        |snapshot| {
+            snapshot
+                .for_events(std::slice::from_ref(&event_id))
+                .remove(&event_id)
+                .and_then(|value| value.get("read_status").cloned())
+                .unwrap_or_else(|| json!({}))
+        },
+    )?;
     object(json!({"event_id": event_id, "read_status": read_status}))
 }
 
@@ -60,6 +68,7 @@ impl StatusSnapshot<'_> {
     fn with<T>(
         home: &HomeLayout,
         group_id: &str,
+        event_ids: &[String],
         use_snapshot: impl FnOnce(&StatusSnapshot<'_>) -> T,
     ) -> Result<T, OpError> {
         let group = store(home)?
@@ -67,7 +76,129 @@ impl StatusSnapshot<'_> {
             .map_err(|_| OpError::new("group_not_found", format!("group not found: {group_id}")))?;
         let path = store(home)?.ledger_path(group_id).map_err(OpError::io)?;
         let cursors = inbox::cursors(home, group_id).map_err(OpError::io)?;
-        ledger::inspect_status(&path, |events, positions, _replied_by| {
+        let requested = event_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+        let cursor_ids = cursors.values().map(String::as_str).collect::<HashSet<_>>();
+        // Keep only records needed to derive this page's status. The full
+        // telemetry history must never enter the shared ledger index.
+        let mut retained = BTreeMap::<String, (usize, Event)>::new();
+        let mut sequence = 0;
+        ledger::visit_oldest_first(&path, |event| {
+            let position = sequence;
+            sequence += 1;
+            let source = event.data.get("source_event_id").and_then(Value::as_str);
+            let reply = event.data.get("reply_to").and_then(Value::as_str);
+            if requested.contains(event.id.as_str())
+                || cursor_ids.contains(event.id.as_str())
+            {
+                retained.insert(format!("id:{}", event.id), (position, event.clone()));
+            }
+            // Page records and outcome dependencies have independent retention.
+            let key = if event.kind == "actor.add" {
+                event
+                    .data
+                    .get("actor")
+                    .and_then(|actor| actor.get("id"))
+                    .and_then(Value::as_str)
+                    .map(|id| format!("actor:{id}"))
+            } else if event.kind == "chat.message" && reply.is_some_and(|id| requested.contains(id))
+            {
+                let author = super::connect_messages::stored_message(&event)
+                    .ok()
+                    .filter(|message| {
+                        event.by == format!("connect:{}", message.source.instance_id)
+                            && message.reply_to.is_some()
+                    })
+                    .map(|message| {
+                        connect_reply_author(&message.source.instance_id, &message.sender)
+                    })
+                    .unwrap_or_else(|| event.by.clone());
+                Some(format!("reply:{}:{author}", reply.unwrap_or_default()))
+            } else if source.is_some_and(|id| requested.contains(id)) {
+                match event.kind.as_str() {
+                    "runtime.delivery"
+                        if event.data.get("state").and_then(Value::as_str).is_some() =>
+                    {
+                        Some(format!(
+                            "delivery:{}:{}",
+                            source.unwrap_or_default(),
+                            event
+                                .data
+                                .get("actor_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                        ))
+                    }
+                    "chat.reply_request.cancelled" => {
+                        Some(format!("cancel:{}", source.unwrap_or_default()))
+                    }
+                    "chat.cross_group_receipt"
+                        if event.by == "system"
+                            && event.data.get("transport").and_then(Value::as_str)
+                                == Some("connect") =>
+                    {
+                        Some(format!("receipt:{}", source.unwrap_or_default()))
+                    }
+                    _ if cccc_core::group_bridge_retirement::is_retired_receipt(&event) => {
+                        Some(format!("retired:{}", source.unwrap_or_default()))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(key) = key {
+                if (key.starts_with("reply:") || key.starts_with("cancel:"))
+                    && retained.contains_key(&key)
+                {
+                    return;
+                }
+                retained.insert(key, (position, event));
+            }
+        })
+        .map_err(OpError::io)?;
+        let cancellation_ids = retained
+            .values()
+            .filter(|(_, event)| event.kind == "chat.reply_request.cancelled")
+            .map(|(_, event)| event.id.clone())
+            .collect::<HashSet<_>>();
+        if !cancellation_ids.is_empty() {
+            let mut position = 0;
+            ledger::visit_oldest_first(&path, |event| {
+                if event.kind == "chat.cross_group_receipt"
+                    && event.by == "system"
+                    && event.data.get("transport").and_then(Value::as_str) == Some("connect")
+                    && event
+                        .data
+                        .get("source_event_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| cancellation_ids.contains(id))
+                {
+                    let source = event
+                        .data
+                        .get("source_event_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    retained.insert(format!("receipt:{source}"), (position, event));
+                }
+                position += 1;
+            })
+            .map_err(OpError::io)?;
+        }
+        let mut selected = retained.into_values().collect::<Vec<_>>();
+        selected.sort_by_key(|(position, _)| *position);
+        selected.dedup_by_key(|(position, _)| *position);
+        let events = selected
+            .into_iter()
+            .map(|(_, event)| event)
+            .collect::<Vec<_>>();
+        let positions = events
+            .iter()
+            .enumerate()
+            .map(|(position, event)| (event.id.clone(), position))
+            .collect::<HashMap<_, _>>();
+        let events = events.as_slice();
+        let positions = &positions;
+        Ok({
             let cursor_positions = cursors
                 .into_iter()
                 .filter_map(|(actor_id, event_id)| {
@@ -84,7 +215,17 @@ impl StatusSnapshot<'_> {
                 let source = event.data.get("source_event_id")?.as_str()?;
                 Some((source.to_owned(), json!({"state":event.data.get("status"), "error":event.data.get("error"), "remote_event_id":event.data.get("remote_event_id")})))
             }).collect();
-            let retired_bridge = events.iter().filter(|event| cccc_core::group_bridge_retirement::is_retired_receipt(event)).filter_map(|event| event.data.get("source_event_id")?.as_str().map(str::to_owned)).collect();
+            let retired_bridge = events
+                .iter()
+                .filter(|event| cccc_core::group_bridge_retirement::is_retired_receipt(event))
+                .filter_map(|event| {
+                    event
+                        .data
+                        .get("source_event_id")?
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .collect();
             use_snapshot(&StatusSnapshot {
                 group,
                 events,
@@ -98,7 +239,6 @@ impl StatusSnapshot<'_> {
                 retired_bridge,
             })
         })
-        .map_err(OpError::io)
     }
 
     fn for_events(&self, event_ids: &[String]) -> BTreeMap<String, Value> {
