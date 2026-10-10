@@ -285,7 +285,7 @@ pub fn is_for_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
     if event.kind == "system.notify" {
         if matches!(
             event.data.get("kind").and_then(Value::as_str),
-            Some("mail_notice" | "reply_notice")
+            Some("mail_notice" | "reply_notice" | "leftover_batch")
         ) {
             return false;
         }
