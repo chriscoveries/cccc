@@ -149,6 +149,8 @@ export function SettingsModal({
 
   // Automation + delivery settings state
   const [mailNoticeAfterSeconds, setMailNoticeAfterSeconds] = useState(1800);
+  const [mailWakeOnIdle, setMailWakeOnIdle] = useState(false);
+  const [mailWakeMinAgeSeconds, setMailWakeMinAgeSeconds] = useState(60);
   const [replyNoticeAfterSeconds, setReplyNoticeAfterSeconds] = useState(900);
   const [idleSeconds, setIdleSeconds] = useState(0);
   const [keepaliveSeconds, setKeepaliveSeconds] = useState(120);
@@ -326,6 +328,16 @@ export function SettingsModal({
         current,
         previous?.mail_notice_after_seconds ?? 1800,
         settings.mail_notice_after_seconds ?? 1800,
+      ),
+    );
+    setMailWakeOnIdle((current) =>
+      sync(current, previous?.mail_wake_on_idle ?? false, settings.mail_wake_on_idle ?? false),
+    );
+    setMailWakeMinAgeSeconds((current) =>
+      sync(
+        current,
+        previous?.mail_wake_min_age_seconds ?? 60,
+        settings.mail_wake_min_age_seconds ?? 60,
       ),
     );
     setReplyNoticeAfterSeconds((current) =>
@@ -821,6 +833,8 @@ export function SettingsModal({
   const handleSaveDeliverySettings = async () => {
     await saveGroupSettings({
       mail_notice_after_seconds: mailNoticeAfterSeconds,
+      mail_wake_on_idle: mailWakeOnIdle,
+      mail_wake_min_age_seconds: mailWakeMinAgeSeconds,
       reply_notice_after_seconds: replyNoticeAfterSeconds,
     });
   };
@@ -1723,6 +1737,10 @@ export function SettingsModal({
                   <DeliveryTab
                     isDark={isDark}
                     busy={busy}
+                    mailWakeOnIdle={mailWakeOnIdle}
+                    setMailWakeOnIdle={setMailWakeOnIdle}
+                    mailWakeMinAgeSeconds={mailWakeMinAgeSeconds}
+                    setMailWakeMinAgeSeconds={setMailWakeMinAgeSeconds}
                     mailNoticeAfterSeconds={mailNoticeAfterSeconds}
                     setMailNoticeAfterSeconds={setMailNoticeAfterSeconds}
                     replyNoticeAfterSeconds={replyNoticeAfterSeconds}

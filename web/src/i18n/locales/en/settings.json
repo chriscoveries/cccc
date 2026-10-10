@@ -680,6 +680,8 @@
     "notebookSectionLockedConnecting": "Finish the current Google sign-in flow and the Work and Memory notebook controls will appear here."
   },
   "automation": {
+    "foremanSweep": "Hourly foreman card sweep",
+    "foremanSweepHelp": "Notify @foreman to review cards. Existing custom schedules and messages are preserved.",
     "title": "Automation",
     "description": "Configure built-in automation and scheduled rules. Settings are stored in",
     "configPathFallback": "CCCC_HOME/.../group.yaml",
@@ -888,6 +890,9 @@
     "overrideBadge": "Override"
   },
   "delivery": {
+    "mailWakeOnIdle": "Notify idle agents about new Mail",
+    "mailWakeOnIdleHelp": "When an agent’s session finishes its turn with Mail waiting, send it a short reminder (managed runtimes only). Off keeps the 30-minute reminder.",
+    "mailWakeMinAge": "Minimum Mail age (seconds)",
     "title": "Delivery",
     "description": "Control runtime delivery pacing and the single reminder allowed for Mail and Send + Reply.",
     "mailNotice": "Mail Notice After (sec)",

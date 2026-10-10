@@ -70,7 +70,7 @@ describe("settings draft and save continuity", () => {
     window.localStorage.clear();
     useModalStore.setState({ settingsTarget: null });
   });
-  const render = async (value = settings, groupId = "g1") => {
+  const render = async (value = settings, groupId = "g1", expectedTab = "Save messaging") => {
     await act(async () =>
       root.render(
         <SettingsModal
@@ -87,7 +87,7 @@ describe("settings draft and save continuity", () => {
         />,
       ),
     );
-    await vi.waitFor(() => expect(host.textContent).toContain("Save messaging"));
+    await vi.waitFor(() => expect(host.textContent).toContain(expectedTab));
   };
   it("keeps dirty fields through refresh while accepting changes to clean fields", async () => {
     await render();
@@ -102,6 +102,8 @@ describe("settings draft and save continuity", () => {
     await act(async () => tabs.delivery!.onSave());
     expect(save).toHaveBeenCalledWith({
       mail_notice_after_seconds: 300,
+      mail_wake_on_idle: false,
+      mail_wake_min_age_seconds: 60,
       reply_notice_after_seconds: 900,
     });
     await act(async () =>
@@ -111,6 +113,31 @@ describe("settings draft and save continuity", () => {
     expect(tabs.messaging!.defaultSendTo).toBe("broadcast");
     await render(settings, "g2");
     expect(tabs.messaging!.defaultSendTo).toBe("foreman");
+  });
+  it("loads and saves Mail idle opt-ins while preserving dirty drafts through refresh", async () => {
+    await render({ ...settings, mail_wake_on_idle: true, mail_wake_min_age_seconds: 120 });
+    await act(async () =>
+      useModalStore.getState().openSettingsTarget({ scope: "group", tab: "delivery" }),
+    );
+    await vi.waitFor(() => expect(tabs.delivery?.mailWakeOnIdle).toBe(true));
+    expect(tabs.delivery!.mailWakeMinAgeSeconds).toBe(120);
+    await act(async () => tabs.delivery!.setMailWakeMinAgeSeconds(90));
+    await render(
+      { ...settings, mail_wake_on_idle: true, mail_wake_min_age_seconds: 150 },
+      "g1",
+      "Save delivery",
+    );
+    expect(tabs.delivery!.mailWakeMinAgeSeconds).toBe(90);
+    await act(async () => tabs.delivery!.onSave());
+    expect(save).toHaveBeenLastCalledWith({
+      mail_notice_after_seconds: 1800,
+      reply_notice_after_seconds: 900,
+      mail_wake_on_idle: true,
+      mail_wake_min_age_seconds: 90,
+    });
+    await render(settings, "g2", "Save delivery");
+    expect(tabs.delivery!.mailWakeOnIdle).toBe(false);
+    expect(tabs.delivery!.mailWakeMinAgeSeconds).toBe(60);
   });
   it("reports confirmed save and failure locally without moving focus or losing the draft", async () => {
     await render();

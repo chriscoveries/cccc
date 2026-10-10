@@ -15,6 +15,10 @@ import {
 interface DeliveryTabProps {
   isDark: boolean;
   busy: boolean;
+  mailWakeOnIdle: boolean;
+  setMailWakeOnIdle: (v: boolean) => void;
+  mailWakeMinAgeSeconds: number;
+  setMailWakeMinAgeSeconds: (v: number) => void;
   mailNoticeAfterSeconds: number;
   setMailNoticeAfterSeconds: (v: number) => void;
   replyNoticeAfterSeconds: number;
@@ -41,6 +45,33 @@ export function DeliveryTab(props: DeliveryTabProps) {
         </div>
 
         <div className={`${settingsWorkspaceBodyClass} grid grid-cols-1 gap-3 lg:grid-cols-2`}>
+          <div className={`${settingsWorkspaceFieldsClass} lg:col-span-2`}>
+            <label className="flex items-center gap-2 text-sm text-[var(--color-text-primary)]">
+              <input
+                type="checkbox"
+                checked={props.mailWakeOnIdle}
+                disabled={busy}
+                onChange={(event) => props.setMailWakeOnIdle(event.target.checked)}
+              />
+              {t("delivery.mailWakeOnIdle")}
+            </label>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              {t("delivery.mailWakeOnIdleHelp")}
+            </p>
+            {props.mailWakeOnIdle && (
+              <NumberInputRow
+                isDark={isDark}
+                label={t("delivery.mailWakeMinAge")}
+                value={props.mailWakeMinAgeSeconds}
+                formatValue={false}
+                onChange={(value) =>
+                  props.setMailWakeMinAgeSeconds(
+                    Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0,
+                  )
+                }
+              />
+            )}
+          </div>
           <div className={settingsWorkspaceFieldsClass}>
             <NumberInputRow
               isDark={isDark}

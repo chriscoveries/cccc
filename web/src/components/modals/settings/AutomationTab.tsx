@@ -20,6 +20,7 @@ import {
   isValidId,
   nowId,
 } from "./automationUtils";
+import { withForemanSweep } from "./foremanSweep";
 import { AutomationPoliciesSection } from "./AutomationPoliciesSection";
 import { AutomationRuleEditorModal } from "./AutomationRuleEditorModal";
 import { AutomationRuleList } from "./AutomationRuleList";
@@ -677,6 +678,22 @@ export function AutomationTab(props: AutomationTabProps) {
             </div>
           </div>
         </div>
+
+        <label className="flex items-center gap-2 text-sm text-[var(--color-text-primary)]">
+          <input
+            type="checkbox"
+            disabled={rulesBusy || !ruleset}
+            checked={Boolean(draft.rules.find((rule) => rule.id === "foreman-scan")?.enabled)}
+            onChange={(event) =>
+              void persistRuleset(withForemanSweep(draft, event.target.checked), {
+                failureMessage: t("automation.failedToSave"),
+                versionConflictMessage: t("automation.versionConflict"),
+              })
+            }
+          />
+          {t("automation.foremanSweep")}
+        </label>
+        <p className="text-xs text-[var(--color-text-muted)]">{t("automation.foremanSweepHelp")}</p>
 
         <AutomationRuleList
           isDark={isDark}
