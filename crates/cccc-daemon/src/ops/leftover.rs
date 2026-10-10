@@ -389,7 +389,12 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
             if !is_running(group, &leftover.actor_id)
                 || stale_now(home, &leftover.group_id, &leftover.actor_id, leftover.started_secs)
             {
-                cccc_runtime::terminate_process(leftover.pid, REAP_GRACE);
+                cccc_runtime::terminate_process(
+                    leftover.pid,
+                    leftover.pgid,
+                    leftover.started_secs,
+                    REAP_GRACE,
+                );
             }
         }
     }
