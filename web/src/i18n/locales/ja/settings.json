@@ -896,6 +896,10 @@
     "mailIdleNoticeHelp": "受信 Agent がアイドルなら、未読 Mail をこの時間後に通知します（複数の Mail は 1 件にまとめます）。作業中はアイドルになるまで待ち、遅くとも上の時間に通知します。作業状態を報告する管理下の Agent にのみ適用され、それ以外は上の時間に通知します。0 で早期通知をオフにします。",
     "replyNotice": "返信通知まで (秒)",
     "replyNoticeHelp": "要求した返信が未完了なら本文なしの通知を一度送ります。0 で無効化。",
+    "taskWakeOnIdle": "アイドル状態の Actor にカードを通知する",
+    "taskWakeOnIdleHelp": "管理セッションがアイドルで、割り当てられたアクティブなカードを持つ場合、カード ID のみを含む通知を 1 回送信します。下の間隔の間、Actor は静かでなければなりません。",
+    "taskWakeInterval": "カード通知の間隔 (秒)",
+    "taskWakeIntervalHelp": "アイドル状態の Actor がカードについて通知されるまでの静寂時間。",
     "saveDelivery": "配信設定の保存"
   },
   "messaging": {
