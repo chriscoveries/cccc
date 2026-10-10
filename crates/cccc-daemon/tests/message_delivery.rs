@@ -212,6 +212,64 @@ fn empty_recipients_follow_the_group_default_policy() {
 }
 
 #[test]
+fn mail_wake_settings_are_validated_and_stored_under_delivery() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(
+        &home,
+        "group_create",
+        json!({"title":"mail-wake-settings","by":"user"}),
+    );
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    let update = |patch: Value| {
+        call_raw(
+            &home,
+            "group_settings_update",
+            json!({"group_id":group_id,"by":"user","patch":patch}),
+        )
+    };
+    for invalid in [
+        json!({"mail_wake_on_idle":"yes"}),
+        json!({"mail_wake_on_idle":1}),
+        json!({"mail_wake_min_age_seconds":-1}),
+        json!({"mail_wake_min_age_seconds":"60"}),
+    ] {
+        let response = update(invalid.clone());
+        assert!(!response.ok, "{invalid} must be rejected");
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("invalid_args")
+        );
+    }
+
+    let updated = update(json!({"mail_wake_on_idle":true,"mail_wake_min_age_seconds":30}));
+    assert!(updated.ok);
+    assert_eq!(updated.result["settings"]["mail_wake_on_idle"], json!(true));
+    assert_eq!(
+        updated.result["settings"]["mail_wake_min_age_seconds"],
+        json!(30)
+    );
+    let group = GroupStore::new(home.clone())
+        .expect("store")
+        .load(group_id)
+        .expect("group");
+    assert_eq!(
+        group.extra["delivery"],
+        json!({"mail_wake_on_idle":true,"mail_wake_min_age_seconds":30})
+    );
+    assert!(cccc_core::automation::mail_wake_on_idle(&group));
+
+    assert!(update(json!({"mail_wake_on_idle":null})).ok);
+    let group = GroupStore::new(home.clone())
+        .expect("store")
+        .load(group_id)
+        .expect("group");
+    assert!(!cccc_core::automation::mail_wake_on_idle(&group));
+}
+
+#[test]
 fn send_reply_and_inbox_enforce_audience_domains() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
