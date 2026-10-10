@@ -175,6 +175,7 @@ pub(super) fn attach_managed(
             task_id: None,
             updated_at: utc_now(),
             pid: app.process_id(),
+            reason: None,
         }),
         stopped: AtomicBool::new(false),
         stop_lock: Mutex::new(()),
