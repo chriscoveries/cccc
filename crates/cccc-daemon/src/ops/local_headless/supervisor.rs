@@ -12,9 +12,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use tracing::Instrument;
 
+// Reachable from the `output` sibling module's session-level settle test,
+// which needs the same fake control socket.
 #[cfg(all(test, unix))]
 #[path = "control_fixture.rs"]
-mod control_fixture;
+pub(in crate::ops::local_headless) mod control_fixture;
 #[cfg(all(test, unix))]
 #[path = "notice_gate_tests.rs"]
 mod notice_gate_tests;
