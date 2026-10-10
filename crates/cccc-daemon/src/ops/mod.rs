@@ -132,3 +132,6 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
 }
 
 mod connect_cancellation;
+
+#[cfg(test)]
+mod actor_memory_tests;
