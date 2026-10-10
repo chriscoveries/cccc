@@ -192,7 +192,14 @@ pub fn check(home: &HomeLayout) -> Vec<Leftover> {
             group_id: process.group_id.clone(),
             class,
             started_secs: process.started_secs,
-            age_secs: now.saturating_sub(process.started_secs),
+            // Unknown start (0, e.g. a macOS fallback hit) must never read
+            // as ancient: such a process is listed and notified, but the age
+            // gate below keeps it out of the reaper.
+            age_secs: if process.started_secs == 0 {
+                0
+            } else {
+                now.saturating_sub(process.started_secs)
+            },
         });
     }
     leftovers.sort_by_key(|leftover| (leftover.group_id.clone(), leftover.actor_id.clone(), leftover.pid));
