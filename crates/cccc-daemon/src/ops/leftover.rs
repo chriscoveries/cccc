@@ -206,18 +206,41 @@ pub fn check(home: &HomeLayout) -> Vec<Leftover> {
     leftovers
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn pgid_of(pid: i32) -> i32 {
-    // Same field the scan parses (`stat` field 4, pgrp); no subprocess, no
-    // new dependency. Failure degrades to 0, which matches nothing tagged.
+    // `stat` fields after the last ')' are state, ppid, pgrp: the group is
+    // the THIRD token (an earlier revision took ppid here). No subprocess,
+    // no new dependency. Failure degrades to 0, which matches nothing tagged.
     std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
         .and_then(|stat| {
             let after = stat.rsplit(')').next()?;
             let mut fields = after.split_whitespace();
-            fields.next()?;
-            fields.next().and_then(|field| field.parse::<i32>().ok())
+            fields.next()?; // state
+            fields.next()?; // ppid
+            fields.next().and_then(|field| field.parse::<i32>().ok()) // pgrp
         })
+        .unwrap_or(0)
+}
+
+/// Parse `ps -o pgid= -p <pid>` output: one integer, blank on failure.
+/// Anything else (empty, non-numeric, non-positive) degrades to `None`, and
+/// the caller maps that to pgid 0 — unknown, never a group kill.
+/// Production use is macOS-only today; the unit test below runs everywhere.
+#[cfg(any(test, target_os = "macos"))]
+fn parse_ps_pgid(text: &str) -> Option<i32> {
+    text.trim().parse::<i32>().ok().filter(|pgid| *pgid > 0)
+}
+
+#[cfg(target_os = "macos")]
+fn pgid_of(pid: i32) -> i32 {
+    std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|text| parse_ps_pgid(&text))
         .unwrap_or(0)
 }
 
@@ -586,5 +609,35 @@ mod tests {
         let group = fixture_group(&home, &["peer"]);
         assert!(!read_bool(&group, "runtime", "reap_leftover_processes"));
         assert_eq!(read_hours(&group), 24);
+    }
+
+    #[test]
+    fn ps_pgid_output_parses_to_positive_pgid_only() {
+        assert_eq!(parse_ps_pgid("  4261\n"), Some(4261));
+        assert_eq!(parse_ps_pgid("4261"), Some(4261));
+        assert_eq!(parse_ps_pgid(""), None);
+        assert_eq!(parse_ps_pgid("  \n"), None);
+        assert_eq!(parse_ps_pgid("0\n"), None);
+        assert_eq!(parse_ps_pgid("-3\n"), None);
+        assert_eq!(parse_ps_pgid("nope\n"), None);
+    }
+
+    /// pgid_of must return the process GROUP, not the parent pid. A child
+    /// placed in its own group is its own leader (pgid == pid); the old code
+    /// returned its ppid (our pid) here instead.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pgid_of_group_leader_is_its_own_pid() {
+        use std::os::unix::process::CommandExt as _;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("spawn group leader");
+        let pid = child.id() as i32;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(pgid_of(pid), pid);
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
