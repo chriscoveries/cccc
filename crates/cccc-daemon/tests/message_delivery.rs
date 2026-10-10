@@ -235,6 +235,8 @@ fn mail_wake_settings_are_validated_and_stored_under_delivery() {
         json!({"mail_wake_on_idle":1}),
         json!({"mail_wake_min_age_seconds":-1}),
         json!({"mail_wake_min_age_seconds":"60"}),
+        json!({"task_wake_on_idle":"on"}),
+        json!({"task_wake_interval_seconds":-5}),
     ] {
         let response = update(invalid.clone());
         assert!(!response.ok, "{invalid} must be rejected");
@@ -260,6 +262,17 @@ fn mail_wake_settings_are_validated_and_stored_under_delivery() {
         json!({"mail_wake_on_idle":true,"mail_wake_min_age_seconds":30})
     );
     assert!(cccc_core::automation::mail_wake_on_idle(&group));
+
+    assert!(update(json!({"task_wake_on_idle":true,"task_wake_interval_seconds":900})).ok);
+    let group = GroupStore::new(home.clone())
+        .expect("store")
+        .load(group_id)
+        .expect("group");
+    assert!(cccc_core::automation::task_wake_on_idle(&group));
+    assert_eq!(
+        group.extra["delivery"]["task_wake_interval_seconds"],
+        json!(900)
+    );
 
     assert!(update(json!({"mail_wake_on_idle":null})).ok);
     let group = GroupStore::new(home.clone())
