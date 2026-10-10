@@ -6,7 +6,10 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::Duration;
 
-const SSE_BUFFER_LIMIT: usize = 512 * 1024;
+// Tool and image snapshots can occupy several MiB in a single lifecycle
+// event. This bounds one HTTP chunk of the event stream; raising it lets a
+// large event through instead of failing the whole actor session.
+const SSE_BUFFER_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ObservedUserMessage {
