@@ -6,6 +6,12 @@ use std::{io, path::Path, time::Duration};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(40);
 
+/// Phrase carried by a failed `session/load` so the launch wrapper can pass
+/// that diagnosis through instead of re-labelling it an initialization
+/// failure. Kept as a marker rather than a typed error so the public error
+/// string is the only contract callers already handle.
+pub(super) const RESUME_RECOVERY_HINT: &str = "cccc actor new-session";
+
 pub(super) struct Options {
     pub command: Vec<String>,
     pub model: Option<String>,
@@ -311,7 +317,31 @@ pub(super) async fn initialize(
     } else {
         "session/new"
     };
-    let result = protocol.request(method, params, HANDSHAKE_TIMEOUT).await?;
+    // Port semantic merge (T631): BOTH halves are needed. The v0.4.43
+    // session-identity check (a resumed session must come back with the
+    // identity that was attempted) and the resume-failure relabel (a failed
+    // session/load is not an initialization or login failure) guard
+    // different outcomes: the first fires when the server answers with a
+    // different session, the second when there is no answer at all. Keeping
+    // only one leaves either a mislabelled outage or a silent identity swap.
+    let result = match protocol.request(method, params, HANDSHAKE_TIMEOUT).await {
+        Ok(result) => result,
+        Err(error) if resume.is_some() => {
+            // A failed session/load is not an initialization or login failure.
+            // Naming it as one sends the operator to re-authenticate a CLI that
+            // is working fine, while the actual recovery -- starting a fresh
+            // session -- is never tried, because attempted sessions are never
+            // replaced automatically.
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "could not resume ACP session {} ({error}). This is not a login or launch failure; the CLI is running. Recover with `cccc actor new-session <actor>`, which clears the attempted session and starts a fresh one",
+                    resume.unwrap_or_default()
+                ),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     if !result.is_object() {
         return Err(io::Error::other(
             "Official ACP server returned an invalid session response",
