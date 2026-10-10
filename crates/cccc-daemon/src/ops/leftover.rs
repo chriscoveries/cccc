@@ -109,6 +109,21 @@ fn is_running(group: &GroupDoc, actor_id: &str) -> bool {
         .is_some_and(|actor| actor_runtime_status::resolve(group, actor).running)
 }
 
+/// Spawn-to-record skew allowance, in seconds. The daemon spawns a lane's
+/// processes and only then appends the actor.start event; on a restart that
+/// gap measured 2-6s live (T461, f315ee35 restart). A process started within
+/// this window before the recorded session start belongs to that session,
+/// not to a dead one. Orders of magnitude below real staleness (hours+), so
+/// genuine strays still flag.
+const SESSION_START_SKEW_SECS: u64 = 30;
+
+/// Whether a process start predates a session start by more than the
+/// spawn-to-record skew. Unknown starts (0) never count as stale: staleness
+/// must be proven, and the age gate already keeps unknowns out of the reaper.
+fn is_stale(started_secs: u64, latest_start_secs: i64) -> bool {
+    started_secs > 0 && latest_start_secs > 0 && started_secs + SESSION_START_SKEW_SECS < latest_start_secs as u64
+}
+
 /// Classify one tagged process. `None` means live (or ours): not a leftover.
 fn classify(
     process: &TaggedProcess,
@@ -139,8 +154,9 @@ fn classify(
         .unwrap_or(0);
     if running {
         // A running actor's current session owns everything started after its
-        // latest session start. Older processes predate a restart: stale.
-        if latest_start > 0 && process.started_secs < latest_start as u64 {
+        // latest session start. Older processes predate a restart: stale —
+        // unless they fall inside the spawn-to-record skew (T461).
+        if is_stale(process.started_secs, latest_start) {
             return Some("stale_generation");
         }
         return None;
@@ -441,7 +457,7 @@ fn stale_now(home: &HomeLayout, group_id: &str, actor_id: &str, started_secs: u6
     let latest = session_starts(&events)
         .remove(actor_id)
         .unwrap_or(0);
-    (started_secs as i64) < latest
+    is_stale(started_secs, latest)
 }
 
 #[cfg(test)]
@@ -639,5 +655,90 @@ mod tests {
         assert_eq!(pgid_of(pid), pid);
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn staleness_needs_more_than_spawn_to_record_skew() {
+        let now = now_secs();
+        // Inside the skew: same session, not stale.
+        assert!(!is_stale(now.saturating_sub(4), now as i64));
+        assert!(!is_stale(now, now as i64));
+        // Genuinely old: stale.
+        assert!(is_stale(now.saturating_sub(3600), now as i64));
+        // Unknown start: never stale (proveness required; age gate handles it).
+        assert!(!is_stale(0, now as i64));
+        // No recorded start: never stale.
+        assert!(!is_stale(now, 0));
+    }
+
+    /// T461: after a daemon restart the lane's processes spawn first and the
+    /// actor.start event lands 2-6s later. A tick in that window must not
+    /// flag the new session's own processes as stale_generation.
+    #[test]
+    fn restart_spawn_skew_does_not_flag_the_new_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("home");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("skew", "").expect("group");
+        let mut actor = Actor::new("live");
+        actor.runtime = cccc_contracts::ActorRuntime::Codex;
+        group.actors.push(actor);
+        store.save(&group).expect("save");
+        let group = store.load(&group.group_id).expect("reload");
+        cccc_runtime::start(cccc_runtime::LaunchSpec {
+            group_id: group.group_id.clone(),
+            actor_id: "live".into(),
+            runner: cccc_contracts::RunnerKind::Pty,
+            command: vec!["sleep".into(), "60".into()],
+            cwd: temp.path().to_owned(),
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        })
+        .expect("fixture PTY session");
+        struct Cleanup(String, String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = cccc_runtime::stop(&self.0, &self.1);
+            }
+        }
+        let _cleanup = Cleanup(group.group_id.clone(), "live".into());
+        assert!(
+            super::super::actor_runtime_status::resolve(
+                &group,
+                group.actors.iter().find(|a| a.id == "live").expect("actor")
+            )
+            .running,
+            "fixture session must read as running"
+        );
+        let mut groups = HashMap::new();
+        groups.insert(group.group_id.clone(), group);
+        let gid = groups.keys().next().expect("fixture group").clone();
+        let now = now_secs();
+        // Recorded session start lands "now"; the lane's process spawned 4s
+        // earlier (the T461 window). Still the same session: live.
+        let starts =
+            HashMap::from([(gid.clone(), HashMap::from([("live".to_owned(), now as i64)]))]);
+        assert_eq!(
+            classify(&tagged(42431, &gid, "live", now.saturating_sub(4)), &groups, &starts, 1, 2),
+            None
+        );
+        // An hour-older process is genuinely stale.
+        assert_eq!(
+            classify(
+                &tagged(42432, &gid, "live", now.saturating_sub(3600)),
+                &groups,
+                &starts,
+                1,
+                2
+            ),
+            Some("stale_generation")
+        );
+        // Unknown start on a running actor: live, never stale.
+        assert_eq!(
+            classify(&tagged(42433, &gid, "live", 0), &groups, &starts, 1, 2),
+            None
+        );
     }
 }
