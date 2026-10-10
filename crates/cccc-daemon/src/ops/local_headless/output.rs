@@ -185,18 +185,106 @@ fn complete_turn(session: &Session, message: &Value) {
     let Some(current) = active_turn.as_ref() else {
         return;
     };
+    let turn_id = current.turn_id.clone();
+    let Some(settled) = settle_decision(&turn_id, message) else {
+        // A completion for some other turn is not this session's to settle.
+        return;
+    };
+    active_turn.take();
+    // A completed turn is not automatically a successful turn. Providers report
+    // failure out of band (ACP stopReason, a model API error surfaced as an
+    // errored assistant message), and reporting "idle" for a rejected turn hid
+    // a broken lane behind a healthy one. Classify before settling.
+    match settled.failure {
+        Some(reason) => {
+            emit(
+                session,
+                "headless.turn.failed",
+                Map::from_iter([
+                    ("turn_id".into(), json!(turn_id)),
+                    ("status".into(), json!(settled.status)),
+                    ("error".into(), json!(reason)),
+                ]),
+            );
+            session.set_status_with_reason("error", None, Some(reason));
+        }
+        None => session.set_status("idle", None),
+    }
+}
+
+/// Decide how a turn completion settles. `None` means the completion names a
+/// different turn and must be ignored; this is the guard that existed before
+/// failure classification and must keep applying to both outcomes.
+fn settle_decision(active_turn_id: &str, message: &Value) -> Option<TurnOutcome> {
     let reported_turn_id = message
         .pointer("/params/turn/id")
         .and_then(Value::as_str)
         .unwrap_or_default();
     if !reported_turn_id.is_empty()
-        && !current.turn_id.is_empty()
-        && reported_turn_id != current.turn_id
+        && !active_turn_id.is_empty()
+        && reported_turn_id != active_turn_id
     {
-        return;
+        return None;
     }
-    active_turn.take();
-    session.set_status("idle", None);
+    Some(turn_outcome(message))
+}
+
+/// Normalise a turn completion into (status, error).
+///
+/// Claude (`claude/transcript.rs`) and the ACP adapters
+/// (`acp/events.rs::settle_turn`) both publish `params.turn.status` plus
+/// `params.turn.error`. Codex republishes the provider frame unchanged, so a
+/// missing status means the provider reported no outcome rather than success.
+/// `error` may be a string or an object; normalise both to text.
+fn turn_outcome(message: &Value) -> TurnOutcome {
+    let status = message
+        .pointer("/params/turn/status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("completed")
+        .to_ascii_lowercase();
+    let error = message
+        .pointer("/params/turn/error")
+        .filter(|error| !error.is_null())
+        .map(error_text);
+    let failure = settle_failure(&status, error);
+    TurnOutcome { status, failure }
+}
+
+fn error_text(error: &Value) -> String {
+    match error {
+        Value::String(text) if !text.trim().is_empty() => text.trim().to_owned(),
+        Value::String(_) => "turn failed without a reported reason".to_owned(),
+        Value::Object(_) => ["message", "error", "detail", "reason"]
+            .into_iter()
+            .find_map(|field| {
+                error
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| error.to_string()),
+        other => other.to_string(),
+    }
+}
+
+struct TurnOutcome {
+    status: String,
+    /// The provider-reported cause when the turn did not succeed.
+    failure: Option<String>,
+}
+
+fn settle_failure(status: &str, error: Option<String>) -> Option<String> {
+    if status == "completed" {
+        return None;
+    }
+    Some(error.unwrap_or_else(|| match status {
+        "failed" => "provider reported the turn failed without a reason".to_owned(),
+        other => format!("turn ended with status {other}"),
+    }))
 }
 
 fn active_context(session: &Session) -> Option<String> {
@@ -270,5 +358,116 @@ mod tests {
             observe_started_turn(&active_turn, "turn-overlap"),
             StartedTurnDisposition::Conflict
         );
+    }
+    /// Classify a completion the way `complete_turn` does, including the
+    /// turn-id guard. Returns (status, reason) on failure and None when the
+    /// turn settles successfully.
+    fn classify(active_turn_id: &str, message: Value) -> Option<(String, String)> {
+        let outcome = settle_decision(active_turn_id, &message)?;
+        outcome
+            .failure
+            .map(|reason| (outcome.status, reason))
+    }
+
+    // Claude publishes status+error via claude/transcript.rs settle_turn.
+    // ACP (OpenCode/Kilo) publishes the same shape via acp/events.rs settle_turn.
+    // Codex republishes the provider frame unchanged.
+    const CLAUDE_FAILED: &str = r#"{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"failed","error":"ACP turn stopped: provider_error"}}}"#;
+    const ACP_OPENCODE_FAILED: &str = r#"{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"failed","error":"ACP turn stopped: max_tokens"}}}"#;
+    const CODEX_FAILED: &str = r#"{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"failed","error":{"message":"reasoning encrypted_content was not issued to this caller","code":"api_error"}}}}"#;
+    const KILO_CANCELLED: &str = r#"{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"cancelled","error":null}}}"#;
+
+    #[test]
+    fn a_failed_completion_is_reported_as_a_failure_with_its_reason() {
+        for (runtime, fixture, expected) in [
+            ("claude", CLAUDE_FAILED, "ACP turn stopped"),
+            ("opencode", ACP_OPENCODE_FAILED, "ACP turn stopped"),
+            ("codex", CODEX_FAILED, "encrypted_content"),
+        ] {
+            let (status, reason) =
+                classify("turn-1", json!(fixture_parse(fixture))).expect("failure");
+            assert_eq!(status, "failed", "{runtime}");
+            assert!(reason.contains(expected), "{runtime} reason was {reason:?}");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_completion_is_a_failure_and_not_a_success() {
+        let (status, reason) =
+            classify("turn-1", json!(fixture_parse(KILO_CANCELLED))).expect("failure");
+        assert_eq!(status, "cancelled");
+        assert_eq!(reason, "turn ended with status cancelled");
+    }
+
+    #[test]
+    fn a_successful_completion_settles_idle() {
+        assert!(
+            classify(
+                "turn-1",
+                json!(fixture_parse(
+                    r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed","error":null}}}"#
+                ))
+            )
+            .is_none()
+        );
+        // A provider that reports no status at all is not claiming failure.
+        assert!(
+            classify(
+                "turn-1",
+                json!(fixture_parse(r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}"#))
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_failed_turn_that_reports_no_reason_still_fails_loudly() {
+        let (_, reason) = classify(
+            "turn-1",
+            json!(fixture_parse(
+                r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"failed"}}}"#
+            )),
+        )
+        .expect("failure");
+        assert_eq!(
+            reason,
+            "provider reported the turn failed without a reason"
+        );
+    }
+
+    #[test]
+    fn a_completion_for_another_turn_is_ignored_whatever_its_outcome() {
+        let failing = fixture_parse(
+            r#"{"method":"turn/completed","params":{"turn":{"id":"turn-other","status":"failed","error":"wrong turn"}}}"#,
+        );
+        let succeeding =
+            fixture_parse(r#"{"method":"turn/completed","params":{"turn":{"id":"turn-other","status":"completed"}}}"#);
+        for message in [failing, succeeding] {
+            assert!(classify("turn-main", json!(message)).is_none());
+        }
+    }
+
+    /// A failed turn must not leave the session permanently in error: the next
+    /// successful completion settles it back to idle.
+    #[test]
+    fn a_successful_turn_after_a_failed_one_clears_the_error() {
+        assert!(
+            classify("turn-1", json!(fixture_parse(CODEX_FAILED)))
+                .is_some_and(|(_, reason)| reason.contains("encrypted_content"))
+        );
+        assert!(
+            classify(
+                "turn-2",
+                json!(fixture_parse(
+                    r#"{"method":"turn/completed","params":{"turn":{"id":"turn-2","status":"completed"}}}"#
+                ))
+            )
+            .is_none(),
+            "the next successful turn must settle idle, clearing the stale reason"
+        );
+    }
+
+    fn fixture_parse(fixture: &str) -> Value {
+        serde_json::from_str(fixture.trim()).expect("fixture json")
     }
 }
