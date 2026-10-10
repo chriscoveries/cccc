@@ -118,6 +118,9 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
                 }
             }
         }
+        ActorAction::NewSession(target) => {
+            lifecycle(client, home, "actor_new_session", target).await?
+        }
     };
     print(response)
 }

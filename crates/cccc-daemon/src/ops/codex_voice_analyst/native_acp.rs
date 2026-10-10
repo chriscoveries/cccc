@@ -6,11 +6,10 @@ use std::{io, path::Path, time::Duration};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(40);
 
-/// Phrase carried by a failed `session/load` so the launch wrapper can pass
-/// that diagnosis through instead of re-labelling it an initialization
-/// failure. Kept as a marker rather than a typed error so the public error
-/// string is the only contract callers already handle.
-pub(super) const RESUME_RECOVERY_HINT: &str = "cccc actor new-session";
+/// Marks a failed `session/load` so the launch wrapper passes that
+/// diagnosis through instead of relabelling it an initialization failure.
+/// It names the failure, never a recovery command.
+pub(super) const RESUME_RECOVERY_HINT: &str = "could not resume ACP session";
 
 pub(super) struct Options {
     pub command: Vec<String>,
@@ -213,7 +212,7 @@ pub(super) async fn initialize(
             return Err(io::Error::new(
                 error.kind(),
                 format!(
-                    "could not resume ACP session {} ({error}). This is not a login or launch failure; the CLI is running. Recover with `cccc actor new-session <actor>`, which clears the attempted session and starts a fresh one",
+                    "{RESUME_RECOVERY_HINT} {} ({error}). This is not a login or launch failure. If the session data is gone, recover by starting a new session: `cccc actor new-session <actor>`, which discards the saved session",
                     resume.unwrap_or_default()
                 ),
             ));
