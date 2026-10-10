@@ -21,6 +21,10 @@ interface DeliveryTabProps {
   setMailNoticeIdleAfterSeconds: (v: number) => void;
   replyNoticeAfterSeconds: number;
   setReplyNoticeAfterSeconds: (v: number) => void;
+  taskWakeOnIdle: boolean;
+  setTaskWakeOnIdle: (v: boolean) => void;
+  taskWakeIntervalSeconds: number;
+  setTaskWakeIntervalSeconds: (v: number) => void;
   onSave: () => void;
 }
 
@@ -68,6 +72,31 @@ export function DeliveryTab(props: DeliveryTabProps) {
               value={props.replyNoticeAfterSeconds}
               onChange={props.setReplyNoticeAfterSeconds}
               helperText={t("delivery.replyNoticeHelp")}
+            />
+          </div>
+
+          <div className={`${settingsWorkspaceFieldsClass} lg:col-span-2`}>
+            <label className="inline-flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
+              <input
+                type="checkbox"
+                checked={props.taskWakeOnIdle}
+                onChange={(e) => props.setTaskWakeOnIdle(e.target.checked)}
+                className="h-4 w-4"
+              />
+              {t("delivery.taskWakeOnIdle")}
+            </label>
+            <div className="mt-2 text-xs text-[var(--color-text-muted)]">
+              {t("delivery.taskWakeOnIdleHelp")}
+            </div>
+          </div>
+
+          <div className={settingsWorkspaceFieldsClass}>
+            <NumberInputRow
+              isDark={isDark}
+              label={t("delivery.taskWakeInterval")}
+              value={props.taskWakeIntervalSeconds}
+              onChange={props.setTaskWakeIntervalSeconds}
+              helperText={t("delivery.taskWakeIntervalHelp")}
             />
           </div>
         </div>
