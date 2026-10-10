@@ -2,6 +2,11 @@
 #[cfg(unix)]
 mod guard;
 pub mod leftover;
+// Pure parsers + stub-driven scan are platform-independent and unit-tested
+// everywhere (this is how the macOS path is proven on Linux CI); only the
+// live `ps` entry point below is macOS-gated.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) mod macos;
 mod resource;
 mod spawn;
 use resource::Resource;
