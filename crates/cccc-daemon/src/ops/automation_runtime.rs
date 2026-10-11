@@ -134,48 +134,34 @@ fn tick_actor_memory(home: &HomeLayout, group_id: &str, cancelled: &AtomicBool) 
     }
 }
 
-/// How long a plain PTY lane's output must have been quiet, with no newer
-/// input, before Mail and card notices treat it as idle. Long enough that a
-/// TUI thinking silently between bursts is not interrupted.
-const PTY_NOTICE_QUIET: std::time::Duration = std::time::Duration::from_secs(120);
-
-/// Actors that are idle. Waiting Mail reaches them promptly and held cards
-/// remind them; actors that are working, waiting on approval, or whose state
-/// is unknown keep the longer interruption-avoiding delay. A managed session
-/// reports its own turn state; a plain PTY lane counts as idle once its
-/// output has been quiet for `PTY_NOTICE_QUIET` with no newer input. Managed
-/// delivery rechecks this at admission, since the Actor may start work in
-/// between.
+/// Actors whose runtime confirms no turn in flight. Waiting Mail reaches them
+/// promptly and held cards remind them; actors that are working, waiting on
+/// approval, or whose state is unknown keep the longer interruption-avoiding
+/// delay. Only a runtime with turn state can confirm idle: a managed session
+/// reports no active turn and an idle status. Output quiet alone NEVER
+/// counts: a quiet PTY lane may be mid-turn (QB-2 proved a quiet-busy write
+/// kills the running turn), and no output pattern distinguishes a silent turn
+/// from a free lane. Lanes without a managed session therefore keep the busy
+/// delay; they can regain prompt notices by running managed. Delivery
+/// rechecks this at admission, since the Actor may start work in between.
 fn idle_actor_ids(group_id: &str, actor_ids: &HashSet<String>) -> HashSet<String> {
     actor_ids
         .iter()
         .filter(|actor_id| {
-            let managed = super::local_headless::running(group_id, actor_id);
             notice_idle(
-                managed,
-                managed && super::local_headless::ready_for_mail_notice(group_id, actor_id),
-                (!managed)
-                    .then(|| cccc_runtime::activity(group_id, actor_id).ok())
-                    .flatten()
-                    .as_ref(),
+                super::local_headless::running(group_id, actor_id),
+                super::local_headless::ready_for_mail_notice(group_id, actor_id),
             )
         })
         .cloned()
         .collect()
 }
 
-/// Idle decision for one actor. A managed session decides alone, so its PTY
-/// tracker never overrides a live turn; a PTY lane needs a readable activity
-/// snapshot showing quiet output and no input newer than that output.
-fn notice_idle(
-    managed: bool,
-    managed_ready: bool,
-    pty: Option<&cccc_runtime::ActivitySnapshot>,
-) -> bool {
-    if managed {
-        return managed_ready;
-    }
-    pty.is_some_and(|snapshot| super::actor_memory::pty_quiet_for(snapshot, PTY_NOTICE_QUIET))
+/// Idle decision for one actor. A managed session with no turn in flight is
+/// idle; anything else (busy, unknown, or unmanaged) is not. There is
+/// deliberately no quiet-output fallback: quiet is not turn state.
+fn notice_idle(managed: bool, managed_ready: bool) -> bool {
+    managed && managed_ready
 }
 
 fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
@@ -576,49 +562,33 @@ mod tests {
 
 
 #[cfg(test)]
-mod notice_idle_tests {
+mod verified_idle_tests {
     use super::notice_idle;
-    use cccc_runtime::{ActivityInstant, ActivitySnapshot};
-    use std::time::{Duration, SystemTime};
 
-    fn snapshot(out_age_secs: Option<u64>, in_age_secs: Option<u64>) -> ActivitySnapshot {
-        let instant = |age: u64| ActivityInstant {
-            at: SystemTime::now(),
-            age: Duration::from_secs(age),
-        };
-        ActivitySnapshot {
-            last_output: out_age_secs.map(instant),
-            last_input: in_age_secs.map(instant),
-            recent_output: Vec::new(),
-            output_bytes_since_input: 0,
-        }
+    #[test]
+    fn managed_idle_session_is_idle() {
+        assert!(notice_idle(true, true));
     }
 
     #[test]
-    fn managed_session_decides_alone() {
-        let quiet = snapshot(Some(600), None);
-        assert!(notice_idle(true, true, None));
-        // A busy managed turn is never overridden by a quiet PTY tracker.
-        assert!(!notice_idle(true, false, Some(&quiet)));
+    fn managed_busy_session_is_not_idle() {
+        assert!(!notice_idle(true, false));
     }
 
     #[test]
-    fn quiet_pty_lane_is_idle() {
-        assert!(notice_idle(false, false, Some(&snapshot(Some(121), None))));
-        // Input older than the last output was answered: still idle.
-        assert!(notice_idle(false, false, Some(&snapshot(Some(200), Some(400)))));
+    fn quiet_without_runtime_confirmation_is_not_idle() {
+        // SLEEP-200 regression: a PTY lane quiet for any length of time may
+        // still be mid-turn (QB-2: a quiet-busy write killed the running
+        // turn). Output quiet alone never counts; only a runtime with turn
+        // state confirms idle.
+        assert!(!notice_idle(false, false));
+        // A managed flag without readiness is still not idle.
+        assert!(!notice_idle(true, false));
     }
 
     #[test]
-    fn recent_output_or_newer_input_is_not_idle() {
-        assert!(!notice_idle(false, false, Some(&snapshot(Some(30), None))));
-        // A delivery newer than the last output: the TUI has not answered yet.
-        assert!(!notice_idle(false, false, Some(&snapshot(Some(300), Some(10)))));
-    }
-
-    #[test]
-    fn unreadable_tracker_is_not_idle() {
-        assert!(!notice_idle(false, false, None));
-        assert!(!notice_idle(false, false, Some(&snapshot(None, None))));
+    fn unknown_actor_is_not_idle() {
+        // No session reports anything, so Mail keeps the longer delay.
+        assert!(!notice_idle(false, false));
     }
 }
