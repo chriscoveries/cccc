@@ -221,11 +221,43 @@ fn tick_group_inner(
             &group,
             delivery_actor_ids,
             idle_actor_ids,
+            UnreadPass::Scheduled,
             &mut result,
         )?;
     }
     if state != previous {
         state::save(&store, group_id, &state)?;
+    }
+    Ok(result)
+}
+
+/// Announce waiting Mail right away to `idle_actor_ids`, the recipients of a
+/// Mail just written that are idle now, instead of on the next unread tick.
+/// Only Mail notices are issued, under the tick's rules: one notice per unread
+/// batch, `deliver_by` at the busy delay, and nothing when early notices are
+/// off (`mail_notice_idle_after_seconds` 0). Recipients that are busy keep the
+/// tick's delays.
+pub fn notify_idle_mail(
+    home: &HomeLayout,
+    group_id: &str,
+    idle_actor_ids: &HashSet<String>,
+) -> io::Result<TickResult> {
+    let mut result = TickResult::default();
+    if idle_actor_ids.is_empty() {
+        return Ok(result);
+    }
+    let store = GroupStore::new(home.clone())?;
+    let group = store.load(group_id)?;
+    if matches!(group.state, GroupState::Active | GroupState::Idle) {
+        tick_unread(
+            home,
+            &store,
+            &group,
+            Some(idle_actor_ids),
+            idle_actor_ids,
+            UnreadPass::IdleMailNow,
+            &mut result,
+        )?;
     }
     Ok(result)
 }
@@ -356,17 +388,29 @@ fn scheduled_at(
     timestamp.map_or_else(String::new, |value| value.to_rfc3339())
 }
 
+/// The periodic unread tick, or the pass that runs as Mail is written.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnreadPass {
+    Scheduled,
+    IdleMailNow,
+}
+
 fn tick_unread(
     home: &HomeLayout,
     store: &GroupStore,
     group: &GroupDoc,
     delivery_actor_ids: Option<&HashSet<String>>,
     idle_actor_ids: &HashSet<String>,
+    pass: UnreadPass,
     result: &mut TickResult,
 ) -> io::Result<()> {
     let mail_after = delivery_timing_value(group, "mail_notice_after_seconds", 1_800);
     let mail_idle_after = delivery_timing_value(group, "mail_notice_idle_after_seconds", 60);
-    let reply_after = delivery_timing_value(group, "reply_notice_after_seconds", 900);
+    // Reply notices stay with the periodic tick.
+    let reply_after = match pass {
+        UnreadPass::Scheduled => delivery_timing_value(group, "reply_notice_after_seconds", 900),
+        UnreadPass::IdleMailNow => 0,
+    };
     // Card reminders are independent of the Mail notice timers: turning
     // Mail notices off must not silently turn off card reminders, and the
     // opt-in default is off either way.
@@ -406,6 +450,7 @@ fn tick_unread(
                 busy: mail_after,
                 idle: mail_idle_after,
                 idle_actor_ids,
+                now: pass == UnreadPass::IdleMailNow,
             },
             reply_after,
         );
@@ -431,17 +476,24 @@ fn tick_unread(
 /// How long unread Mail waits before its notice. Mail exists so senders do not
 /// interrupt work: while an actor works, or its state is unknown, the notice
 /// waits `busy`; once the actor is idle it only waits `idle`, which batches a
-/// burst of Mail into one notice. `busy <= 0` turns Mail notices off.
+/// burst of Mail into one notice. `busy <= 0` turns Mail notices off; `idle <= 0`
+/// turns early notices off. With `now`, an idle actor is notified at once: the
+/// pass that runs as Mail is written.
 struct MailDelays<'a> {
     busy: i64,
     idle: i64,
     idle_actor_ids: &'a HashSet<String>,
+    now: bool,
 }
 
 impl MailDelays<'_> {
     fn for_actor(&self, actor_id: &str) -> i64 {
         if self.busy > 0 && self.idle > 0 && self.idle_actor_ids.contains(actor_id) {
-            self.idle.min(self.busy)
+            if self.now {
+                0
+            } else {
+                self.idle.min(self.busy)
+            }
         } else {
             self.busy
         }
