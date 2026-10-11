@@ -506,11 +506,7 @@ it("closes a cancelled turn as idle and never as an error", async () => {
     actor_id: "acp",
     type: "headless.turn.cancelled",
     ts: "2026-10-03T00:00:00Z",
-    data: {
-      turn_id: "acp-turn",
-      stream_id: "generation:acp-turn",
-      status: "cancelled",
-    },
+    data: { turn_id: "acp-turn", stream_id: "generation:acp-turn", status: "cancelled" },
   };
   try {
     await act(async () => root.render(<Probe />));
@@ -522,9 +518,7 @@ it("closes a cancelled turn as idle and never as an error", async () => {
     // No turn.started was emitted, so there is no streaming event left open.
     expect(bucket().streamingEvents).toHaveLength(0);
     expect(useGroupStore.getState().actors[0]!.effective_working_state).toBe("idle");
-    expect(useGroupStore.getState().actors[0]!.effective_working_reason).toBe(
-      "headless_turn_idle",
-    );
+    expect(useGroupStore.getState().actors[0]!.effective_working_reason).toBe("headless_turn_idle");
   } finally {
     await act(async () => {
       connection!.cleanup();

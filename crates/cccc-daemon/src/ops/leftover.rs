@@ -128,7 +128,11 @@ fn classify(
     let Some(group) = groups.get(&process.group_id) else {
         return Some("group_gone");
     };
-    let Some(actor) = group.actors.iter().find(|actor| actor.id == process.actor_id) else {
+    let Some(actor) = group
+        .actors
+        .iter()
+        .find(|actor| actor.id == process.actor_id)
+    else {
         return Some("actor_gone");
     };
     let running = actor_runtime_status::resolve(group, actor).running;
@@ -202,7 +206,13 @@ pub fn check(home: &HomeLayout) -> Vec<Leftover> {
             },
         });
     }
-    leftovers.sort_by_key(|leftover| (leftover.group_id.clone(), leftover.actor_id.clone(), leftover.pid));
+    leftovers.sort_by_key(|leftover| {
+        (
+            leftover.group_id.clone(),
+            leftover.actor_id.clone(),
+            leftover.pid,
+        )
+    });
     leftovers
 }
 
@@ -410,7 +420,12 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
                 continue;
             }
             if !is_running(group, &leftover.actor_id)
-                || stale_now(home, &leftover.group_id, &leftover.actor_id, leftover.started_secs)
+                || stale_now(
+                    home,
+                    &leftover.group_id,
+                    &leftover.actor_id,
+                    leftover.started_secs,
+                )
             {
                 cccc_runtime::terminate_process(
                     leftover.pid,
@@ -438,9 +453,7 @@ fn stale_now(home: &HomeLayout, group_id: &str, actor_id: &str, started_secs: u6
         return false;
     };
     let events = cccc_core::ledger::read_all(&path).unwrap_or_default();
-    let latest = session_starts(&events)
-        .remove(actor_id)
-        .unwrap_or(0);
+    let latest = session_starts(&events).remove(actor_id).unwrap_or(0);
     (started_secs as i64) < latest
 }
 
@@ -556,7 +569,10 @@ mod tests {
         // — but staleness only matters for running actors; a stopped actor
         // reports actor_stopped either way.
         let mut starts = HashMap::new();
-        starts.insert(gid.clone(), HashMap::from([("peer".to_owned(), now as i64)]));
+        starts.insert(
+            gid.clone(),
+            HashMap::from([("peer".to_owned(), now as i64)]),
+        );
         let old = tagged(42425, &gid, "peer", now.saturating_sub(3600));
         assert_eq!(
             classify(&old, &groups, &starts, 1, 2),
@@ -567,12 +583,18 @@ mod tests {
         let mut first = Event::new("actor.start", &gid);
         first.by = "system".into();
         first.ts = chrono::Utc::now().to_rfc3339();
-        first.data = json!({"actor_id": "peer"}).as_object().expect("object").clone();
+        first.data = json!({"actor_id": "peer"})
+            .as_object()
+            .expect("object")
+            .clone();
         let mut events = vec![first];
         let mut older = Event::new("actor.start", &gid);
         older.by = "system".into();
         older.ts = "2020-01-01T00:00:00Z".into();
-        older.data = json!({"actor_id": "peer"}).as_object().expect("object").clone();
+        older.data = json!({"actor_id": "peer"})
+            .as_object()
+            .expect("object")
+            .clone();
         events.push(older);
         let map = session_starts(&events);
         assert!(map["peer"] > 1_700_000_000);

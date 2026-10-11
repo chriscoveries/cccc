@@ -90,7 +90,9 @@ fn canonicalize_send_identity(request: &mut DaemonRequest) {
         // string keeps that default instead of recording "".
         request.args.remove("by");
     } else if trimmed != by {
-        request.args.insert("by".into(), Value::String(trimmed.to_owned()));
+        request
+            .args
+            .insert("by".into(), Value::String(trimmed.to_owned()));
     }
 }
 

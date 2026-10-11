@@ -169,9 +169,7 @@ pub fn terminate_process(
         if pid <= 1 {
             return false;
         }
-        if expected_started_secs > 0
-            && current_started_secs(pid) != Some(expected_started_secs)
-        {
+        if expected_started_secs > 0 && current_started_secs(pid) != Some(expected_started_secs) {
             // Recycled pid (or exit race): not ours to signal.
             return false;
         }
@@ -443,7 +441,12 @@ mod tests {
             .expect("spawn sleep");
         let pid = child.id() as i32;
         let started = current_started_secs(pid).expect("start time");
-        assert!(terminate_process(pid, 0, started, std::time::Duration::from_secs(2)));
+        assert!(terminate_process(
+            pid,
+            0,
+            started,
+            std::time::Duration::from_secs(2)
+        ));
         let _ = child.wait();
         assert!(!pid_alive(pid));
     }
@@ -465,7 +468,12 @@ mod tests {
         // The shell plus its sleep child: more than the leader alone.
         assert!(tree.len() >= 2, "expected a child, got {tree:?}");
         let started = current_started_secs(pid).expect("start time");
-        assert!(terminate_process(pid, pid, started, std::time::Duration::from_secs(5)));
+        assert!(terminate_process(
+            pid,
+            pid,
+            started,
+            std::time::Duration::from_secs(5)
+        ));
         let _ = leader.wait();
         for member in tree {
             assert!(!pid_alive(member), "straggler survived: {member}");
@@ -482,7 +490,12 @@ mod tests {
             .expect("spawn sleep");
         let pid = child.id() as i32;
         // Claim it started at epoch: nothing alive matches that fingerprint.
-        assert!(!terminate_process(pid, 0, 1, std::time::Duration::from_secs(2)));
+        assert!(!terminate_process(
+            pid,
+            0,
+            1,
+            std::time::Duration::from_secs(2)
+        ));
         // And the process is untouched.
         assert!(pid_alive(pid));
         let _ = child.kill();

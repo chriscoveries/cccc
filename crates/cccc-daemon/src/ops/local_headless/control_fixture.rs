@@ -14,7 +14,9 @@ impl Drop for ControlDirectory {
 
 // `bind` is used by the session-level settle test in the `output` sibling
 // module, which is outside this module's subtree.
-pub(in crate::ops::local_headless) fn bind(config: &Path) -> (tokio::net::UnixListener, ControlDirectory) {
+pub(in crate::ops::local_headless) fn bind(
+    config: &Path,
+) -> (tokio::net::UnixListener, ControlDirectory) {
     let digest = format!("{:x}", Sha256::digest(config.to_string_lossy().as_bytes()));
     let directory = PathBuf::from("/tmp")
         .join(format!(

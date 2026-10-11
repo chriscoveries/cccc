@@ -50,8 +50,7 @@ pub(crate) const DEFAULT_BROWSER_IDLE_TIMEOUT: std::time::Duration =
 
 /// Floor for CCCC_BROWSER_IDLE_SECS: below this, a sweep would retire surfaces that
 /// are still in use between two CDP messages.
-pub(crate) const MIN_BROWSER_IDLE_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(60);
+pub(crate) const MIN_BROWSER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Clamp a raw CCCC_BROWSER_IDLE_SECS value. Unset, blank, unparseable and `0` all
 /// mean the default - a `0` must not become `Duration::ZERO`, which retires every

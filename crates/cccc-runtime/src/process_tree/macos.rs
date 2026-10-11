@@ -82,14 +82,9 @@ pub fn parse_ps_scan_line(line: &str) -> Option<(i32, i32, u64, String, String, 
         }
     }
     match (actor, group) {
-        (Some(actor), Some(group)) => Some((
-            pid,
-            pgid,
-            elapsed,
-            comm,
-            actor.to_owned(),
-            group.to_owned(),
-        )),
+        (Some(actor), Some(group)) => {
+            Some((pid, pgid, elapsed, comm, actor.to_owned(), group.to_owned()))
+        }
         _ => None,
     }
 }
@@ -97,15 +92,17 @@ pub fn parse_ps_scan_line(line: &str) -> Option<(i32, i32, u64, String, String, 
 /// Scan with an injected `ps` output supplier. Production passes a closure
 /// running the real `ps`; tests pass canned output, which is how this path
 /// is proven on Linux CI. `now_secs` anchors elapsed-to-start conversion.
-pub fn scan_macos_with(now_secs: u64, ps_output: &dyn Fn() -> Option<String>) -> Vec<TaggedProcess> {
+pub fn scan_macos_with(
+    now_secs: u64,
+    ps_output: &dyn Fn() -> Option<String>,
+) -> Vec<TaggedProcess> {
     let own_pid = std::process::id() as i32;
     let Some(output) = ps_output() else {
         return Vec::new();
     };
     let mut tagged = Vec::new();
     for line in output.lines() {
-        let Some((pid, pgid, elapsed, comm, actor_id, group_id)) = parse_ps_scan_line(line)
-        else {
+        let Some((pid, pgid, elapsed, comm, actor_id, group_id)) = parse_ps_scan_line(line) else {
             continue;
         };
         if pid == own_pid {
@@ -150,7 +147,10 @@ mod tests {
     fn etime_parses_bsd_shapes() {
         assert_eq!(parse_etime("00:05"), Some(5));
         assert_eq!(parse_etime("13:47:52"), Some(13 * 3600 + 47 * 60 + 52));
-        assert_eq!(parse_etime("13-15:00:53"), Some(13 * 86400 + 15 * 3600 + 53));
+        assert_eq!(
+            parse_etime("13-15:00:53"),
+            Some(13 * 86400 + 15 * 3600 + 53)
+        );
         assert_eq!(parse_etime("1-00:00:01"), Some(86401));
         assert_eq!(parse_etime(""), None);
         assert_eq!(parse_etime("garbage"), None);
@@ -160,21 +160,41 @@ mod tests {
 
     #[test]
     fn ps_line_parser_finds_lane_tags() {
-        let line = " 4261 4261 13-15:00:42 node /x/codex CCCC_ACTOR_ID=peer-a CCCC_GROUP_ID=g1 OTHER=1";
+        let line =
+            " 4261 4261 13-15:00:42 node /x/codex CCCC_ACTOR_ID=peer-a CCCC_GROUP_ID=g1 OTHER=1";
         assert_eq!(
             parse_ps_scan_line(line),
-            Some((4261, 4261, 13 * 86400 + 15 * 3600 + 42, "node".into(), "peer-a".into(), "g1".into()))
+            Some((
+                4261,
+                4261,
+                13 * 86400 + 15 * 3600 + 42,
+                "node".into(),
+                "peer-a".into(),
+                "g1".into()
+            ))
         );
         // No tags: invisible.
-        assert_eq!(parse_ps_scan_line("4261 4261 00:05 node --flag OTHER=1"), None);
+        assert_eq!(
+            parse_ps_scan_line("4261 4261 00:05 node --flag OTHER=1"),
+            None
+        );
         // Half-tagged: invisible.
         assert_eq!(
             parse_ps_scan_line("4261 4261 00:05 node CCCC_ACTOR_ID=a"),
             None
         );
-        assert_eq!(parse_ps_scan_line("not-a-pid 9 00:05 node CCCC_ACTOR_ID=a CCCC_GROUP_ID=g"), None);
-        assert_eq!(parse_ps_scan_line("0 0 00:05 node CCCC_ACTOR_ID=a CCCC_GROUP_ID=g"), None);
-        assert_eq!(parse_ps_scan_line("4261 4261 bogus node CCCC_ACTOR_ID=a CCCC_GROUP_ID=g"), None);
+        assert_eq!(
+            parse_ps_scan_line("not-a-pid 9 00:05 node CCCC_ACTOR_ID=a CCCC_GROUP_ID=g"),
+            None
+        );
+        assert_eq!(
+            parse_ps_scan_line("0 0 00:05 node CCCC_ACTOR_ID=a CCCC_GROUP_ID=g"),
+            None
+        );
+        assert_eq!(
+            parse_ps_scan_line("4261 4261 bogus node CCCC_ACTOR_ID=a CCCC_GROUP_ID=g"),
+            None
+        );
         // Unparsable pgid degrades to 0 (single-pid signalling), not rejection.
         assert_eq!(
             parse_ps_scan_line("4261 ?? 00:05 node CCCC_ACTOR_ID=a CCCC_GROUP_ID=g"),
@@ -186,7 +206,8 @@ mod tests {
     fn stubbed_ps_output_drives_the_scan_without_syscalls() {
         let output = "  PID PGID ELAPSED COMMAND\n\
             1001 1001 00:10:00 sleep 600 CCCC_ACTOR_ID=a CCCC_GROUP_ID=g\n\
-            1002 1002 00:00:05 node x OTHER=1\n".to_owned();
+            1002 1002 00:00:05 node x OTHER=1\n"
+            .to_owned();
         let tagged = scan_macos_with(1_700_000_000, &|| Some(output.clone()));
         assert_eq!(tagged.len(), 1);
         assert_eq!(tagged[0].pid, 1001);

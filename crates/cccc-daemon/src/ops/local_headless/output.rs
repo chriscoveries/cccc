@@ -339,10 +339,13 @@ pub(super) fn emit(session: &Session, kind: &str, data: Map<String, Value>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(unix)]
     use super::super::HeadlessStatus;
-    use cccc_core::HomeLayout;
+    use super::*;
+    #[cfg(unix)]
     use crate::ops::codex_voice_analyst::AnalystSession;
+    #[cfg(unix)]
+    use cccc_core::HomeLayout;
 
     #[test]
     fn an_untracked_codex_turn_is_adopted_until_its_completion() {
@@ -395,6 +398,7 @@ mod tests {
     /// classifier. A failed completion must leave status error with the
     /// provider's reason, and the next successful turn must clear both status
     /// and reason back to idle — the recovery the fix exists to make possible.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_failed_turn_clears_on_the_next_success_through_a_real_session() {
         use std::sync::{Arc, Mutex, atomic::AtomicBool};

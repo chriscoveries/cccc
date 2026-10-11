@@ -1,4 +1,7 @@
 {
+  "diskSpaceWarning": "CCCC のストレージ空き容量が不足しています：空き容量 {{available}} GiB（使用率 {{percent}}%）。",
+  "diskSpaceCritical": "CCCC のストレージ空き容量が著しく不足しています：空き容量 {{available}} GiB（使用率 {{percent}}%）。",
+  "diskSpaceUnknown": "CCCC のストレージ容量を取得できません。",
   "resizeComposer": "入力欄の高さを調整（ダブルクリックまたは Enter で自動調整に戻す）",
   "openSidebar": "サイドバーを開く",
   "closeSidebar": "サイドバーを閉じる",
