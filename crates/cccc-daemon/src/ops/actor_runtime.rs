@@ -78,14 +78,21 @@ fn apply_with_policy(
     if !matches!(kind, "actor.restart" | "actor.new_session")
         && actor_is_running(group, stored_actor)
     {
-        super::runtime_session::recovery_decision(
-            home,
-            &group.group_id,
-            actor_id,
-            "skip",
-            "already_running",
-        )
-        .map_err(OpError::io)?;
+        // A registered Claude trust owner keeps the receipt's pending
+        // decision: a foreign-runtime or duplicate start must not overwrite
+        // `block/waiting_for_workspace_trust` before the owner retires.
+        if !super::local_headless::waiting_for_workspace_trust(&group.group_id, actor_id)
+            .map_err(OpError::io)?
+        {
+            super::runtime_session::recovery_decision(
+                home,
+                &group.group_id,
+                actor_id,
+                "skip",
+                "already_running",
+            )
+            .map_err(OpError::io)?;
+        }
         // Saving config does not restart an existing session. Explicit restart
         // applies it; start remains idempotent across backend changes too.
         super::local_headless::ensure_viewer(&group.group_id, actor_id).map_err(OpError::io)?;
