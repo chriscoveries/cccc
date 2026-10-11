@@ -220,6 +220,27 @@ RSS by 307.577 MB. This repeat is higher than the original 525.054 MB startup
 result. Both measurements are retained rather than attributing ordinary provider
 heap variation to a default-path guard change.
 
+## OpenCode version separation
+
+Every OpenCode number in this report is version 1.19.0 (embedded Bun 1.3.14,
+native executable SHA-256
+`135ac3f86c43f2a22328a3554fec5f0bc57d71576077902661bc38dac34871fd`),
+including the `daemon-opencode-final` (525.054 MB startup) and
+`daemon-opencode-default-fix` (618.288 MB startup) daemon cases. No number in
+this report was measured with OpenCode v2.
+
+A v2 probe was attempted on claw against the installed OpenCode 2.0.11
+(`/usr/local/bin/opencode`, `@opencode/cli@2.0.11`). Reachable: bare
+`opencode acp` answers `initialize` (protocolVersion 1, agent OpenCode 2.0.11)
+and `session/new`. Blocked, twice, on changed surfaces: the v1 launch flags
+`acp --hostname/--port/--cwd` are rejected (`Unrecognized flag`), and the v1
+`OPENCODE_CONFIG_CONTENT` shape is ignored — a prompt then fails with
+`Model exo-free has been deprecated` (`provider.invalid-request`) instead of
+reaching the loopback fixture. So no v2 RSS is claimed here, and the branch's
+managed OpenCode launch stays on the v1 surface it pins above. A v2 measurement
+needs v2 launch/config-shape support first; that is a separate task, not a
+correction to any number above.
+
 ## Validation
 
 Native launcher: two regressions fail on the exact parent when a selected native

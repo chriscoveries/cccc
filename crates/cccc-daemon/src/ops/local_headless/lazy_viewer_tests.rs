@@ -259,3 +259,157 @@ fn headless_delivery_does_not_start_a_viewer_and_waits_between_turns() {
     assert!(!item.stopped.load(Ordering::Acquire));
     stop(&group.group_id, &actor.id).expect("stop");
 }
+
+/// At-most-once across the two uncertain seams. A prompt result that arrives
+/// after its turn was cancelled is still exactly one execution: resubmission
+/// reuses the admission receipt and never touches the provider again. A busy
+/// error that arrives after the provider recorded the prompt fences the
+/// delegation instead of queueing a retry, so the worker settles it ambiguous
+/// rather than executing it twice.
+#[test]
+fn late_admission_and_post_execution_busy_are_never_retried() {
+    let temp = tempfile::tempdir().expect("provider root");
+    let home = HomeLayout::from_path(temp.path().join("cccc")).expect("home");
+    let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+    let group = store.create("headless at-most-once", "").expect("group");
+    let mut actor = Actor::new("kilo");
+    actor.runtime = ActorRuntime::Kilo;
+    actor
+        .env
+        .insert("CCCC_OPENCODE_HEADLESS".into(), "1".into());
+    store
+        .mutate(&group.group_id, |doc| {
+            doc.actors.push(actor.clone());
+            Ok(())
+        })
+        .expect("actor");
+    let group = store.load(&group.group_id).expect("group");
+    let root = temp.path().to_owned();
+    let app = run_managed_launch(async move { AnalystSession::acp_for_headless_test(&root).await })
+        .expect("ACP fixture");
+    attach_managed(
+        &home,
+        &group,
+        &actor,
+        (group.group_id.clone(), actor.id.clone()),
+        temp.path().into(),
+        app,
+    )
+    .expect("attach");
+    let item = lookup(&(group.group_id.clone(), actor.id.clone())).expect("session");
+    let event = |text: &str| {
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "user".into();
+        event.data = json!({"text":text,"to":["kilo"]})
+            .as_object()
+            .expect("object")
+            .clone();
+        event
+    };
+    let prompts = || {
+        std::fs::read_to_string(temp.path().join("prompts.jsonl"))
+            .map(|contents| contents.lines().map(str::to_owned).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let cancelled = AtomicBool::new(false);
+    let wait_idle = || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while item.status.lock().expect("status").status != "idle" {
+            assert!(std::time::Instant::now() < deadline, "ACP turn must settle");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+
+    // Late admission: cancel the held turn, then let the provider reply.
+    let held = event("HOLD");
+    assert!(submit_batch(
+        &home,
+        &group,
+        &actor,
+        std::slice::from_ref(&held),
+        &cancelled
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while item.status.lock().expect("status").status != "working" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "ACP admission must report working"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        super::super::lazy_viewer::interrupt(&group.group_id, &actor.id, b"\x03")
+            .expect("ACP cancel")
+    );
+    std::fs::write(temp.path().join("finish-hold"), "").expect("release hold");
+    wait_idle();
+    assert_eq!(prompts().len(), 1, "cancelled turn executed exactly once");
+    assert!(
+        submit_batch(
+            &home,
+            &group,
+            &actor,
+            std::slice::from_ref(&held),
+            &cancelled
+        ),
+        "late result reuses the admission receipt"
+    );
+    assert_eq!(
+        prompts().len(),
+        1,
+        "resubmission after a late result must not touch the provider"
+    );
+
+    // Post-execution busy: the provider recorded the prompt, then complained.
+    let busy = event("EXECBUSY");
+    assert!(
+        !submit_batch(
+            &home,
+            &group,
+            &actor,
+            std::slice::from_ref(&busy),
+            &cancelled
+        ),
+        "uncertain admission is not silently queued for retry"
+    );
+    assert_eq!(prompts().len(), 2, "busy prompt executed exactly once");
+    assert!(
+        !submit_batch(
+            &home,
+            &group,
+            &actor,
+            std::slice::from_ref(&busy),
+            &cancelled
+        ),
+        "fenced delegation must not resubmit"
+    );
+    assert_eq!(
+        prompts().len(),
+        2,
+        "a busy error must never cause a second execution"
+    );
+    let job = crate::ops::actor_delivery::DeliveryJob {
+        home: home.clone(),
+        group: group.clone(),
+        actor: actor.clone(),
+        event: busy.clone(),
+    };
+    assert!(
+        crate::ops::actor_delivery_worker::process_batch(
+            std::slice::from_ref(&job),
+            &mut String::new(),
+            &cancelled
+        ),
+        "uncertain busy source must settle without blocking the queue"
+    );
+    assert_eq!(
+        crate::ops::runtime_delivery::latest_state(&home, &group.group_id, &actor.id, &busy.id)
+            .expect("outcome")
+            .expect("record")
+            .0,
+        "ambiguous"
+    );
+
+    assert!(!item.stopped.load(Ordering::Acquire));
+    stop(&group.group_id, &actor.id).expect("stop");
+}

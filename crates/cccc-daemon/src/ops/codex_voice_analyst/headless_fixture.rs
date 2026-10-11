@@ -25,6 +25,13 @@ def prompt(request):
         (root / 'rejected').write_text('')
         send({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32602,'message':'fixture pre-admission rejection'}})
         return
+    if 'EXECBUSY' in text:
+        # Sloppy provider: it records (executes) the prompt, then reports
+        # busyness instead of a result. At-most-once forbids resubmission.
+        with (root / 'prompts.jsonl').open('a') as file:
+            file.write(json.dumps(text) + '\n')
+        send({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32603,'message':'provider already processing previous prompt'}})
+        return
     with (root / 'prompts.jsonl').open('a') as file:
         file.write(json.dumps(text) + '\n')
     send({'jsonrpc':'2.0','method':'session/update','params':{
@@ -32,6 +39,9 @@ def prompt(request):
             'sessionUpdate':'user_message_chunk','content':{'type':'text','text':text}}}})
     if 'FIRST' in text:
         while not (root / 'finish-first').exists() and not cancel.is_set():
+            time.sleep(.01)
+    if 'HOLD' in text:
+        while not (root / 'finish-hold').exists() and not cancel.is_set():
             time.sleep(.01)
     send({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'cancelled' if cancel.is_set() else 'end_turn'}})
 for line in sys.stdin:

@@ -1,7 +1,19 @@
 use super::*;
 use cccc_contracts::ActorRuntime;
 use std::fs;
+
 use std::path::PathBuf;
+
+/// Canonical form of a path the launcher derives through `canonicalize`
+/// (native cache, tree-sitter resources): on Windows with a `\\?\` verbatim
+/// prefix, and anywhere with symlinks resolved (macOS /tmp). Expectations on
+/// those derived paths must canonicalize the same way; plain launch argv is
+/// never canonicalized and keeps verbatim expectations.
+fn canonical(path: &Path) -> String {
+    fs::canonicalize(path)
+        .map(|resolved| resolved.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+}
 
 fn npm_install(root: &Path, local: bool) -> (PathBuf, PathBuf) {
     let modules = root.join("node_modules");
@@ -150,7 +162,7 @@ fn official_kilo_npm_cache_bypasses_the_resident_node_shim() {
             ActorRuntime::Kilo,
         )
         .expect("native npm cache");
-        assert_eq!(prepared.launch_prefix, [cached.to_string_lossy()]);
+        assert_eq!(prepared.launch_prefix, [canonical(&cached)]);
     }
 }
 
@@ -348,10 +360,7 @@ fn native_kilo_binary_override_keeps_npm_tree_sitter_resources() {
     .expect("native override");
     assert_eq!(prepared.launch_prefix, [external.to_string_lossy()]);
     command::configure_native_resources(&prepared.executable, &prepared.launch_prefix, &mut env);
-    assert_eq!(
-        env["KILO_TREE_SITTER_WASM_DIR"],
-        resources.to_string_lossy()
-    );
+    assert_eq!(env["KILO_TREE_SITTER_WASM_DIR"], canonical(&resources));
 }
 
 #[test]

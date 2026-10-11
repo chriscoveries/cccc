@@ -174,8 +174,14 @@ impl AnalystSession {
         };
         let turn_id = match turn_result {
             Ok(turn_id) => turn_id,
+            // Client-side WouldBlock (active turn, full receipt queue) never
+            // sent anything: safe to requeue on every path. A busyness report
+            // that arrived as the reply to a sent prompt may follow execution,
+            // so headless delivery fences it instead of retrying; legacy
+            // voice turns keep the historical retry.
             Err(error)
                 if error.kind() == io::ErrorKind::WouldBlock
+                    && !(capacity.is_some() && acp::prompt_is_busy(&error))
                     || (capacity.is_some() && acp::prompt_was_rejected(&error)) =>
             {
                 return Err(error);

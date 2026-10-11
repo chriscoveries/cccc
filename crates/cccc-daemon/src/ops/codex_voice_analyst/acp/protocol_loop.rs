@@ -843,7 +843,10 @@ fn prompt_admission_error(error: io::Error) -> io::Error {
         .and_then(|reply| reply.get("code").and_then(Value::as_i64))
         .is_some_and(|code| matches!(code, -32602..=-32600));
     if provider_busy {
-        io::Error::new(io::ErrorKind::WouldBlock, message)
+        // Still WouldBlock for the legacy voice path; the marker lets
+        // headless delivery fence it instead (post-execution busy may have
+        // run). See `start_turn_with_limit`.
+        io::Error::new(io::ErrorKind::WouldBlock, super::PromptBusy(message))
     } else if rejected_request {
         // Invalid request/method/params is an explicit protocol rejection.
         // An internal/provider failure can follow execution: keep it uncertain.
@@ -872,12 +875,19 @@ mod tests {
             r#"ACP request failed: {"code":-32603,"message":"session is busy"}"#,
         ));
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        // The marker preserves the legacy voice retry while letting headless
+        // delivery fence a post-execution busy instead (at-most-once).
+        assert!(super::super::prompt_is_busy(&error));
+        assert!(!super::super::prompt_is_busy(&io::Error::other(
+            "transport lost"
+        )));
 
         let error = prompt_admission_error(io::Error::other(
             r#"ACP request failed: {"code":-32603,"message":"provider failed"}"#,
         ));
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(!super::super::prompt_was_rejected(&error));
+        assert!(!super::super::prompt_is_busy(&error));
         let rejected = prompt_admission_error(io::Error::other(
             r#"ACP request failed: {"code":-32602,"message":"invalid params"}"#,
         ));
