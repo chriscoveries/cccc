@@ -323,11 +323,13 @@ pub(super) async fn initialize(
             // Naming it as one sends the operator to re-authenticate a CLI that
             // is working fine, while the actual recovery -- starting a fresh
             // session -- is never tried, because attempted sessions are never
-            // replaced automatically.
+            // replaced automatically. The provider diagnostic is bounded before
+            // the recovery wrapper is added, so the whole message stays bounded.
+            let diagnostic: String = error.to_string().chars().take(1400).collect();
             return Err(io::Error::new(
                 error.kind(),
                 format!(
-                    "{RESUME_RECOVERY_HINT} {} ({error}). This is not a login or launch failure. If the session data is gone, recover by starting a new session: `cccc actor new-session <actor>`, which discards the saved session",
+                    "{RESUME_RECOVERY_HINT} {} ({diagnostic}). This is not a login or launch failure. If the session data is gone, recover by starting a new session: `cccc actor new-session <actor>`, which discards the saved session",
                     resume.unwrap_or_default()
                 ),
             ));
