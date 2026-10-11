@@ -14,6 +14,7 @@ pub(super) const RESUME_RECOVERY_HINT: &str = "could not resume ACP session";
 pub(super) struct Options {
     pub command: Vec<String>,
     pub model: Option<String>,
+    pub provider: Option<String>,
     pub mode: Option<String>,
     pub unrestricted: bool,
 }
@@ -21,6 +22,7 @@ pub(super) struct Options {
 pub(crate) fn name(runtime: ActorRuntime) -> &'static str {
     match runtime {
         ActorRuntime::Copilot => "copilot",
+        ActorRuntime::Cline => "cline",
         ActorRuntime::Devin => "devin",
         ActorRuntime::Cursor => "cursor",
         _ => unreachable!("native ACP runtime was validated at launch"),
@@ -28,7 +30,13 @@ pub(crate) fn name(runtime: ActorRuntime) -> &'static str {
 }
 
 pub(super) fn options(runtime: ActorRuntime, command: &[String]) -> io::Result<Options> {
-    let default = cccc_runtime::default_command(runtime);
+    // The PTY default enables auto-approval; choosing ACP alone must not
+    // imply that permission grant when no command was explicitly supplied.
+    let default = if runtime == ActorRuntime::Cline {
+        vec!["cline".into()]
+    } else {
+        cccc_runtime::default_command(runtime)
+    };
     let command = if command.is_empty() {
         &default
     } else {
@@ -40,6 +48,7 @@ pub(super) fn options(runtime: ActorRuntime, command: &[String]) -> io::Result<O
     let stem = Path::new(program).file_stem().and_then(|s| s.to_str());
     let valid = match runtime {
         ActorRuntime::Copilot => stem == Some("copilot"),
+        ActorRuntime::Cline => stem == Some("cline"),
         ActorRuntime::Devin => stem == Some("devin"),
         ActorRuntime::Cursor => matches!(stem, Some("agent" | "cursor-agent")),
         _ => false,
@@ -52,6 +61,7 @@ pub(super) fn options(runtime: ActorRuntime, command: &[String]) -> io::Result<O
     let mut result = Options {
         command: vec![program.clone()],
         model: None,
+        provider: None,
         mode: None,
         unrestricted: false,
     };
@@ -61,12 +71,17 @@ pub(super) fn options(runtime: ActorRuntime, command: &[String]) -> io::Result<O
             .split_once('=')
             .map_or((argument.as_str(), None), |(k, v)| (k, Some(v)));
         match (runtime, flag) {
-            (_, "--model") => {
+            (_, "--model") | (ActorRuntime::Cline, "-m") => {
                 let value = value(inline, &mut args)?;
                 result.model = Some(value.clone());
                 // Devin/Cursor root CLI model flags do not select ACP models.
-                // Apply the advertised ID after new/load instead.
-                if runtime == ActorRuntime::Copilot {
+                // Apply the advertised ID after new/load instead. Copilot
+                // takes the model on the launch command itself. Cline's
+                // ACP session reads CLINE_MODEL from the launch env (its -m
+                // flag is parsed but does not feed session creation on
+                // 3.0.70), so the value is carried in Options for the launch
+                // env and the flag is kept so argv matches the declared command.
+                if matches!(runtime, ActorRuntime::Copilot | ActorRuntime::Cline) {
                     result.command.extend([flag.into(), value]);
                 }
             }
@@ -101,11 +116,39 @@ pub(super) fn options(runtime: ActorRuntime, command: &[String]) -> io::Result<O
             }
             (ActorRuntime::Cursor, "--force" | "--yolo" | "-f")
             | (ActorRuntime::Copilot, "--allow-all" | "--yolo")
+            | (ActorRuntime::Cline, "--yolo" | "-y")
                 if inline.is_none() =>
             {
                 result.unrestricted = true;
                 result.command.push(flag.into());
             }
+            (ActorRuntime::Cline, "-P" | "--provider") => {
+                let value = value(inline, &mut args)?;
+                // cline's ACP session reads CLINE_PROVIDER from the launch env;
+                // the flag is kept so argv matches the declared command.
+                result.provider = Some(value.clone());
+                result.command.extend([flag.into(), value]);
+            }
+            (ActorRuntime::Cline, "-k" | "--key") => {
+                let value = value(inline, &mut args)?;
+                result.command.extend([flag.into(), value]);
+            }
+            (ActorRuntime::Cline, "--auto-approve") => {
+                let approval = value(inline, &mut args)?;
+                match approval.as_str() {
+                    "true" => result.unrestricted = true,
+                    "false" => result.unrestricted = false,
+                    _ => return Err(invalid("Cline auto-approve requires true or false")),
+                }
+                result.command.extend([flag.into(), approval]);
+            }
+            (ActorRuntime::Cline, "--thinking" | "--compaction") => {
+                result
+                    .command
+                    .extend([flag.into(), value(inline, &mut args)?]);
+            }
+            // The ACP entry point replaces Cline's default interactive TUI.
+            (ActorRuntime::Cline, "--tui") if inline.is_none() => {}
             (ActorRuntime::Cursor, "--plan") | (ActorRuntime::Copilot, "--plan")
                 if inline.is_none() =>
             {
@@ -145,6 +188,14 @@ pub(super) fn options(runtime: ActorRuntime, command: &[String]) -> io::Result<O
             if !result.command.iter().any(|arg| arg == "--no-auto-update") {
                 result.command.push("--no-auto-update".into());
             }
+        }
+        ActorRuntime::Cline => {
+            // ACP selects the transport without changing permission intent.
+            // `--data-dir` isolation is enforced by the launch env
+            // (CLINE_DATA_DIR + local session backend), not this flag.
+            // session/cancel is an ACP notification. Sending it as a request
+            // with an ID returns -32601 and does not test cancellation.
+            result.command.push("--acp".into());
         }
         ActorRuntime::Devin | ActorRuntime::Cursor => result.command.push("acp".into()),
         _ => unreachable!(),
@@ -224,6 +275,30 @@ pub(super) async fn initialize(
         .filter(|id| valid_id(id))
         .ok_or_else(|| io::Error::other("Official ACP server returned an invalid session ID"))?
         .to_owned();
+    if runtime == ActorRuntime::Cline {
+        // A loaded session can retain provider-side auto-approval. Establish
+        // configured intent before connecting any managed prompt reader.
+        let configured = protocol.request(
+            "session/set_config_option",
+            json!({"sessionId":id,"configId":"auto_approve","type":"boolean","value":options.unrestricted}),
+            HANDSHAKE_TIMEOUT,
+        ).await?;
+        let mut confirmations = configured["configOptions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|option| option["id"] == "auto_approve");
+        if confirmations
+            .next()
+            .and_then(|option| option["currentValue"].as_bool())
+            != Some(options.unrestricted)
+            || confirmations.next().is_some()
+        {
+            return Err(io::Error::other(
+                "Cline ACP did not confirm the requested approval policy",
+            ));
+        }
+    }
     if let Some(model) = &options.model {
         let model = advertised_model(runtime, &result, model)?;
         // Reapply explicit intent on both new and load; CLI flags alone do not
@@ -245,6 +320,32 @@ pub(super) async fn initialize(
                     HANDSHAKE_TIMEOUT,
                 )
                 .await?;
+        } else if runtime == ActorRuntime::Cline {
+            // Native Cline may fall back to its catalog default even when
+            // CLINE_MODEL is explicit. Its config operation accepts custom
+            // provider model IDs and also applies them to a loaded session.
+            let result = protocol
+                .request(
+                    "session/set_config_option",
+                    json!({"sessionId":id,"configId":"model","value":model}),
+                    HANDSHAKE_TIMEOUT,
+                )
+                .await?;
+            let mut acknowledgements = result["configOptions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|option| option["id"] == "model");
+            if acknowledgements
+                .next()
+                .and_then(|option| option["currentValue"].as_str())
+                != Some(model)
+                || acknowledgements.next().is_some()
+            {
+                return Err(io::Error::other(
+                    "Cline ACP did not confirm the requested model",
+                ));
+            }
         }
     }
     if let Some(mode) = &options.mode {
@@ -362,6 +463,41 @@ mod tests {
             assert_eq!(intent.model.as_deref(), Some("exact-id"));
             assert!(!intent.command.iter().any(|arg| arg.starts_with("--model")));
         }
+    }
+    #[test]
+    fn cline_permission_intent_is_never_silently_elevated() {
+        for command in [
+            vec![],
+            vec!["cline".into()],
+            vec!["cline".into(), "--auto-approve".into(), "false".into()],
+        ] {
+            let intent = options(ActorRuntime::Cline, &command).expect("restricted");
+            assert!(!intent.unrestricted);
+            assert!(
+                !intent
+                    .command
+                    .windows(2)
+                    .any(|pair| pair == ["--auto-approve", "true"])
+            );
+        }
+        let explicit = options(
+            ActorRuntime::Cline,
+            &["cline".into(), "--auto-approve".into(), "true".into()],
+        )
+        .expect("explicit approval");
+        assert!(explicit.unrestricted);
+        assert!(
+            options(ActorRuntime::Cline, &["cline".into(), "--yolo".into()])
+                .expect("yolo")
+                .unrestricted
+        );
+        assert!(
+            options(
+                ActorRuntime::Cline,
+                &["cline".into(), "--auto-approve".into(), "maybe".into()]
+            )
+            .is_err()
+        );
     }
     #[test]
     fn defaults_keep_native_autonomy_and_explicit_commands_keep_their_policy() {

@@ -53,7 +53,7 @@ impl RuntimeMode {
 
     pub fn validate(self, runtime: ActorRuntime) -> Result<(), &'static str> {
         if self == Self::Acp && !runtime.supports_acp_mode() {
-            return Err("runtime_mode=acp requires Antigravity, Copilot, Devin or Cursor");
+            return Err("runtime_mode=acp requires Antigravity, Copilot, Cline, Devin or Cursor");
         }
         Ok(())
     }
@@ -90,7 +90,7 @@ impl ActorRuntime {
     pub const fn supports_acp_mode(self) -> bool {
         matches!(
             self,
-            Self::Antigravity | Self::Copilot | Self::Devin | Self::Cursor
+            Self::Antigravity | Self::Copilot | Self::Cline | Self::Devin | Self::Cursor
         )
     }
 
@@ -383,6 +383,7 @@ mod tests {
             ActorRuntime::Copilot,
             ActorRuntime::Devin,
             ActorRuntime::Cursor,
+            ActorRuntime::Cline,
         ] {
             assert_eq!(runtime.runner_for(RuntimeMode::Default), RunnerKind::Pty);
             assert_eq!(

@@ -9,7 +9,7 @@ from pathlib import Path
 session_id = ""
 active = None
 pending_permission = None
-home = Path(os.environ["HOME"])
+home = Path(os.environ["CLINE_DATA_DIR"] if Path(sys.argv[0]).name == "cline" else os.environ["HOME"])
 sessions_path = home / "fixture_sessions.json"
 sessions = json.loads(sessions_path.read_text()) if sessions_path.exists() else []
 with open(Path.cwd() / "fixture_launch.jsonl", "a") as log:
@@ -60,6 +60,15 @@ for line in sys.stdin:
     elif method in ("session/set_config_option", "session/set_model") and params.get("value", params.get("modelId")) == "unavailable":
         emit({"id": request["id"], "error": {"code": -32602, "message": "Unavailable model"}})
         continue
+    elif method == "session/set_config_option" and params.get("configId") == "auto_approve":
+        if params.get("type") != "boolean" or not isinstance(params.get("value"), bool):
+            emit({"id": request["id"], "error": {"code": -32602, "message": "boolean config requires type discriminator"}})
+            continue
+        selected = True if (Path.cwd() / "fixture_ignore_approval_selection").exists() else params["value"]
+        result = {"configOptions": [{"id": "auto_approve", "currentValue": selected}]}
+    elif method == "session/set_config_option" and params.get("configId") == "model":
+        selected = "fixture-default" if (Path.cwd() / "fixture_ignore_model_selection").exists() else params["value"]
+        result = {"configOptions": [{"id": "model", "currentValue": selected}]}
     elif method == "session/prompt":
         if active is not None:
             emit({"id": request["id"], "error": {"code": -32000, "message": "Concurrent prompt"}})
@@ -110,6 +119,9 @@ for line in sys.stdin:
         finish()
         result = {}
     elif method == "session/cancel":
+        if "id" in request:
+            emit({"id": request["id"], "error": {"code": -32601, "message": "cancel is a notification"}})
+            continue
         finish("cancelled")
         continue
     else:

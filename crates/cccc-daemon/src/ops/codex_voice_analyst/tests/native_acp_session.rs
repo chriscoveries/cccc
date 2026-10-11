@@ -58,6 +58,73 @@ async fn wait_interaction(session: &AnalystSession) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cline_approval_intent_is_confirmed_on_new_and_load() {
+    for approval in [None, Some(false), Some(true)] {
+        let (temp, home, program) = fixture(ActorRuntime::Cline);
+        let mut config = LaunchConfig::new(temp.path());
+        config.runtime = ActorRuntime::Cline;
+        config.runtime_mode = RuntimeMode::Acp;
+        config.command = vec![program];
+        if let Some(approval) = approval {
+            config
+                .command
+                .extend(["--auto-approve".into(), approval.to_string()]);
+        }
+        config.environment = environment(temp.path());
+        let session = AnalystSession::launch(&home, config.clone())
+            .await
+            .expect("new");
+        let id = session.thread_id().to_owned();
+        cccc_core::fs::write_json(
+            &home.daemon_dir().join("codex_voice_analyst.json"),
+            &json!({"thread_id":id,"materialized":false}),
+        )
+        .expect("voice receipt");
+        let mut events = session.subscribe();
+        session
+            .start_turn(session.generation(), "materialize", "fixture")
+            .await
+            .expect("turn");
+        terminal(&mut events).await;
+        session.stop(session.generation()).await.expect("stop");
+        config.resume_thread_id = Some(id.clone());
+        let resumed = AnalystSession::launch(&home, config.clone())
+            .await
+            .expect("load");
+        assert_eq!(resumed.thread_id(), id);
+        resumed.stop(resumed.generation()).await.expect("stop");
+        let frames =
+            std::fs::read_to_string(temp.path().join("fixture_requests.jsonl")).expect("frames");
+        let selections: Vec<Value> = frames
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("frame"))
+            .filter(|frame| {
+                frame["method"] == "session/set_config_option"
+                    && frame["params"]["configId"] == "auto_approve"
+            })
+            .collect();
+        assert_eq!(
+            selections.len(),
+            2,
+            "approval must be applied after new and load"
+        );
+        assert!(
+            selections
+                .iter()
+                .all(|frame| frame["params"]["value"] == approval.unwrap_or(false))
+        );
+        if approval != Some(true) {
+            std::fs::write(temp.path().join("fixture_ignore_approval_selection"), "")
+                .expect("sticky unrestricted provider");
+            assert!(
+                AnalystSession::launch(&home, config).await.is_err(),
+                "mismatched provider approval must refuse launch"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_model_is_applied_after_both_new_and_load_and_rejection_is_visible() {
     for (runtime, requested, selected, method, field) in [
         (
@@ -71,6 +138,13 @@ async fn explicit_model_is_applied_after_both_new_and_load_and_rejection_is_visi
             ActorRuntime::Devin,
             "Fixture model",
             "fixture-model-medium",
+            "session/set_config_option",
+            "value",
+        ),
+        (
+            ActorRuntime::Cline,
+            "configured-custom-model",
+            "configured-custom-model",
             "session/set_config_option",
             "value",
         ),
@@ -108,7 +182,11 @@ async fn explicit_model_is_applied_after_both_new_and_load_and_rejection_is_visi
         let selections: Vec<Value> = frames
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).expect("fixture frame"))
-            .filter(|frame| frame["method"] == method)
+            .filter(|frame| {
+                frame["method"] == method
+                    && (method != "session/set_config_option"
+                        || frame["params"]["configId"] == "model")
+            })
             .collect();
         assert_eq!(selections.len(), 2);
         assert!(
@@ -127,6 +205,7 @@ async fn native_acp_actors_isolate_empty_and_attempted_sessions_and_inject_mcp()
         ActorRuntime::Copilot,
         ActorRuntime::Devin,
         ActorRuntime::Cursor,
+        ActorRuntime::Cline,
     ] {
         let (temp, home, program) = fixture(runtime);
         let group = cccc_core::GroupStore::new(home.clone())
@@ -175,6 +254,26 @@ async fn native_acp_actors_isolate_empty_and_attempted_sessions_and_inject_mcp()
         assert!(resumed.thread_resumed);
         resumed.stop(resumed.generation()).await.expect("stop");
         second.stop(second.generation()).await.expect("stop second");
+        if runtime == ActorRuntime::Cline {
+            for actor in ["alpha", "beta"] {
+                let settings = home
+                    .root()
+                    .join("cline")
+                    .join(format!("{}--{actor}", group.group_id))
+                    .join("settings/cline_mcp_settings.json");
+                let document: Value =
+                    serde_json::from_slice(&std::fs::read(settings).expect("settings"))
+                        .expect("settings json");
+                assert_eq!(
+                    document["mcpServers"]["cccc"]["transport"]["env"]["CCCC_ACTOR_ID"],
+                    actor
+                );
+                assert_eq!(
+                    document["mcpServers"]["cccc"]["transport"]["env"]["CCCC_GROUP_ID"],
+                    group.group_id
+                );
+            }
+        }
         std::fs::write(temp.path().join("fixture_reject_load"), "").expect("force load failure");
         assert!(
             AnalystSession::launch_actor(&home, launch("alpha"))
@@ -229,6 +328,75 @@ async fn native_acp_actors_isolate_empty_and_attempted_sessions_and_inject_mcp()
             );
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cline_active_turn_cancel_is_a_notification_and_next_turn_progresses() {
+    let (temp, home, program) = fixture(ActorRuntime::Cline);
+    let group = cccc_core::GroupStore::new(home.clone())
+        .expect("store")
+        .create("fixture", "")
+        .expect("group");
+    let config = ActorLaunchConfig {
+        workdir: temp.path().into(),
+        group_id: group.group_id,
+        actor_id: "subject".into(),
+        runtime: ActorRuntime::Cline,
+        runtime_mode: RuntimeMode::Acp,
+        command: vec![program],
+        environment: environment(temp.path()),
+    };
+    let session = AnalystSession::launch_actor(&home, config)
+        .await
+        .expect("launch");
+    let mut events = session.subscribe();
+    session
+        .start_turn(session.generation(), "held", "HOLD")
+        .await
+        .expect("held turn");
+    session
+        .interrupt(session.generation(), "held")
+        .await
+        .expect("cancel");
+    assert_eq!(
+        terminal(&mut events).await["params"]["turn"]["status"],
+        "cancelled"
+    );
+    session
+        .start_turn(session.generation(), "next", "next small turn")
+        .await
+        .expect("next turn");
+    assert_eq!(
+        terminal(&mut events).await["params"]["turn"]["status"],
+        "completed"
+    );
+    session.stop(session.generation()).await.expect("stop");
+    let frames =
+        std::fs::read_to_string(temp.path().join("fixture_requests.jsonl")).expect("frames");
+    let cancel: Value = frames
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("frame"))
+        .find(|frame| frame["method"] == "session/cancel")
+        .expect("cancel frame");
+    assert!(
+        cancel.get("id").is_none(),
+        "ACP cancellation must be a notification"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cline_explicit_model_cannot_silently_fall_back_to_a_default() {
+    let (temp, home, program) = fixture(ActorRuntime::Cline);
+    std::fs::write(temp.path().join("fixture_ignore_model_selection"), "").expect("force mismatch");
+    let mut config = LaunchConfig::new(temp.path());
+    config.runtime = ActorRuntime::Cline;
+    config.runtime_mode = RuntimeMode::Acp;
+    config.command = vec![program, "--model".into(), "configured-custom-model".into()];
+    config.environment = environment(temp.path());
+    assert!(
+        AnalystSession::launch(&home, config).await.is_err(),
+        "a model acknowledgement must bind the explicit requested model"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

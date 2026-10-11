@@ -1943,5 +1943,5 @@ export function getActorAccentColor(actorId?: string, isDark: boolean = true) {
 }
 
 export function supportsAcpMode(runtime?: string | null): boolean {
-  return ["antigravity", "copilot", "devin", "cursor"].includes(runtime || "");
+  return ["antigravity", "copilot", "devin", "cursor", "cline"].includes(runtime || "");
 }

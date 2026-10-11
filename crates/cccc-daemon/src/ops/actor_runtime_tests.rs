@@ -274,6 +274,89 @@ fn relaunch_preserves_runtime_metadata_but_new_session_clears_it() {
     cccc_runtime::stop(&group_id, "peer1").expect("stop");
 }
 
+#[cfg(unix)]
+#[test]
+fn cline_public_restart_resumes_but_new_session_uses_a_new_id() {
+    use std::os::unix::fs::PermissionsExt;
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = super::local_headless::stop(&self.0, "peer1");
+        }
+    }
+    let temp = tempfile::tempdir().expect("fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("fixture", "").expect("group");
+    let _cleanup = Cleanup(group.group_id.clone());
+    let program = temp.path().join("cline");
+    std::fs::write(
+        &program,
+        include_str!("codex_voice_analyst/tests/native_acp_fixture.py"),
+    )
+    .expect("CLI");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).expect("executable");
+    store
+        .mutate(&group.group_id, |group| {
+            group.scopes.push(Scope {
+                scope_key: "s_project".into(),
+                url: temp.path().to_string_lossy().into_owned(),
+                label: "fixture".into(),
+                git_remote: String::new(),
+            });
+            group.active_scope_key = "s_project".into();
+            let mut actor = Actor::new("peer1");
+            actor.runtime = ActorRuntime::Cline;
+            actor.runtime_mode = cccc_contracts::RuntimeMode::Acp;
+            actor.command = vec![program.to_string_lossy().into_owned()];
+            actor.env.insert(
+                "HOME".into(),
+                temp.path().join("provider").to_string_lossy().into_owned(),
+            );
+            actor
+                .env
+                .insert("ACP_FIXTURE_CLI".into(), "/bin/true".into());
+            actor.normalize_runtime_constraints();
+            actors::add(group, actor)
+        })
+        .expect("actor");
+    let started = request(&home, "actor_start", &group.group_id);
+    assert!(started.ok, "{started:?}");
+    let path = super::runtime_session::native_acp::receipt_path(
+        &home,
+        &group.group_id,
+        "peer1",
+        ActorRuntime::Cline,
+    )
+    .expect("receipt");
+    let receipt: serde_json::Value = cccc_core::fs::read_json(&path).expect("first receipt");
+    let old = receipt["provider_session_id"]
+        .as_str()
+        .expect("session")
+        .to_owned();
+    // Seed the offline provider's durable history and use the production
+    // attempt API, so Restart takes load rather than replacing an empty ID.
+    super::runtime_session::native_acp::PromptReceipt::actor(path.clone(), old.clone(), false)
+        .mark_attempted()
+        .expect("attempt receipt");
+    cccc_core::fs::write_json(
+        &home
+            .root()
+            .join("cline")
+            .join(format!("{}--peer1", group.group_id))
+            .join("fixture_sessions.json"),
+        &json!([old]),
+    )
+    .expect("provider history");
+    assert!(request(&home, "actor_restart", &group.group_id).ok);
+    let resumed: serde_json::Value = cccc_core::fs::read_json(&path).expect("resumed receipt");
+    assert_eq!(resumed["provider_session_id"], old);
+    assert!(request(&home, "actor_new_session", &group.group_id).ok);
+    let fresh: serde_json::Value = cccc_core::fs::read_json(&path).expect("fresh receipt");
+    assert_ne!(fresh["provider_session_id"], old);
+    assert_eq!(fresh["attempted"], false);
+}
+
 #[test]
 fn new_session_ledger_failure_restores_runtime_metadata_and_stops_replacement() {
     let temp = tempfile::tempdir().expect("tempdir");

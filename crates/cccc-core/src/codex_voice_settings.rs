@@ -80,6 +80,7 @@ pub fn supports_structured_runtime(
             | ActorRuntime::Grok
             | ActorRuntime::Opencode
             | ActorRuntime::Kilo
+            | ActorRuntime::Cline
     ) && mode.validate(runtime).is_ok()
         && (!runtime.supports_acp_mode() || mode == cccc_contracts::RuntimeMode::Acp)
 }

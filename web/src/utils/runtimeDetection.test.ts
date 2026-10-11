@@ -20,6 +20,11 @@ describe("host Runtime detection", () => {
     expect(runtimeDetectionKey("antigravity", nativeOnly, "ready", "acp")).toBe("missing");
     expect(runtimeDetectionKey("antigravity", nativeOnly, "ready")).toBe("detected");
   });
+  it("uses the Cline ACP installation result independently of its TUI", () => {
+    const cline = { ...info, name: "cline", display_name: "Cline" };
+    expect(runtimeDetectionKey("cline", cline, "ready", "acp")).toBe("detected");
+    expect(runtimeDetectionKey("cline", cline, "ready", "default")).toBe("missing");
+  });
   it("does not call incomplete, loading or failed detection a missing installation", () => {
     for (const status of ["idle", "loading"] as const)
       expect(runtimeDetectionKey("codex", undefined, status)).toBe("checking");

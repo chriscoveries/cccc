@@ -112,6 +112,7 @@ pub(crate) fn retire_all(home: &HomeLayout, group: &str, actor: &str) -> std::io
         ActorRuntime::Copilot,
         ActorRuntime::Devin,
         ActorRuntime::Cursor,
+        ActorRuntime::Cline,
     ] {
         match std::fs::remove_file(receipt_path(home, group, actor, runtime)?) {
             Ok(()) => {}
@@ -120,4 +121,54 @@ pub(crate) fn retire_all(home: &HomeLayout, group: &str, actor: &str) -> std::io
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cline_receipt_cannot_survive_actor_slot_recreation_or_removal() {
+        let temp = tempfile::tempdir().expect("home");
+        let home = HomeLayout::from_path(temp.path()).expect("layout");
+        let group = GroupStore::new(home.clone())
+            .expect("store")
+            .create("fixture", "")
+            .expect("group");
+        let receipt =
+            receipt_path(&home, &group.group_id, "subject", ActorRuntime::Cline).expect("receipt");
+        let other =
+            receipt_path(&home, &group.group_id, "other", ActorRuntime::Cline).expect("other");
+        for path in [&receipt, &other] {
+            cccc_core::fs::write_json(path, &json!({"provider_session_id":"old-cline-session"}))
+                .expect("seed");
+        }
+        let request = |op: &str| {
+            crate::handle_request(&home, &cccc_contracts::DaemonRequest {
+            v: 1, op: op.into(),
+            args: json!({"group_id":group.group_id,"actor_id":"subject","by":"user","runtime":"custom","command":["/bin/true"],"enabled":false})
+                .as_object().expect("args").clone(),
+        })
+        };
+        assert!(
+            request("actor_add").ok,
+            "add stopped actor into reused slot"
+        );
+        assert!(
+            !receipt.exists(),
+            "add must retire an old Cline pointer even when the new actor uses another runtime"
+        );
+        assert!(other.exists(), "another actor's pointer must survive");
+        cccc_core::fs::write_json(
+            &receipt,
+            &json!({"provider_session_id":"old-cline-session"}),
+        )
+        .expect("seed removal");
+        assert!(request("actor_remove").ok, "remove actor");
+        assert!(
+            !receipt.exists(),
+            "remove must retire all surfaces for the actor"
+        );
+        assert!(other.exists());
+    }
 }

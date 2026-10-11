@@ -46,7 +46,10 @@ impl AnalystSession {
                 )
                 .await
             }
-            ActorRuntime::Copilot | ActorRuntime::Devin | ActorRuntime::Cursor => {
+            ActorRuntime::Copilot
+            | ActorRuntime::Devin
+            | ActorRuntime::Cursor
+            | ActorRuntime::Cline => {
                 Self::launch_native_acp(
                     home,
                     binding,
