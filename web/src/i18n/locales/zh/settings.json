@@ -672,6 +672,8 @@
     "notebookSectionLockedConnecting": "完成当前 Google 登录后，这里会显示工作 / 记忆笔记本的查看、绑定与管理。"
   },
   "automation": {
+    "foremanSweep": "Foreman 每小时巡检任务卡",
+    "foremanSweepHelp": "通知 @foreman 检查任务卡。保留已有的自定义计划和消息。",
     "title": "自动化",
     "description": "配置内建自动化和定时规则。设置存储在",
     "configPathFallback": "CCCC_HOME/…/group.yaml",
@@ -1195,6 +1197,20 @@
     "copyBuildInfo": "复制构建信息",
     "copied": "已复制",
     "copyFailed": "复制失败，请选中上方内容进行复制。",
+    "leftoverTitle": "残留智能体进程",
+    "leftoverHint": "带有 Group/Actor 身份标记、但不属于任何活跃会话的智能体进程。包括已结束的 Group、已移除的 Actor、已替换的会话和已停止的 Actor。",
+    "leftoverRefresh": "立即扫描",
+    "leftoverFailed": "无法扫描残留进程。",
+    "leftoverNone": "未发现残留智能体进程。",
+    "leftoverPid": "PID",
+    "leftoverActor": "Actor",
+    "leftoverClass": "原因",
+    "leftoverAge": "存续时间",
+    "leftoverComm": "命令",
+    "leftoverReap": "自动清理残留进程",
+    "leftoverReapHelp": "仅对归属明确且超过下方存续时间的残留进程发送 TERM，宽限期后发送 KILL。绝不触及正在运行的守护进程的进程树。默认关闭。",
+    "leftoverReapHours": "最短存续时间（小时，0 表示禁用时间限制）",
+    "leftoverSave": "保存残留进程设置",
     "buildMismatchHint": "这些组件使用了不同构建。请检查实际运行的 CCCC 安装；重启或刷新前先保存草稿。"
   },
   "webAccess": {

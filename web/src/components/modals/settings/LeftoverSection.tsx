@@ -4,11 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "../../ui/button";
 import { fetchLeftoverProcesses, type LeftoverProcess } from "../../../services/api/diagnostics";
 import type { GroupSettings } from "../../../types";
-import {
-  inputClass,
-  labelClass,
-  settingsWorkspaceSectionClass,
-} from "./types";
+import { inputClass, labelClass, settingsWorkspaceSectionClass } from "./types";
 
 interface LeftoverSectionProps {
   isDark: boolean;
@@ -146,7 +142,11 @@ export function LeftoverSection({ isDark: _isDark, groupId, busy, onSave }: Left
             min={0}
             disabled={busy || saving}
             onChange={(e) =>
-              setReapHours(Number.isFinite(Number(e.target.value)) ? Math.max(0, Math.trunc(Number(e.target.value))) : 0)
+              setReapHours(
+                Number.isFinite(Number(e.target.value))
+                  ? Math.max(0, Math.trunc(Number(e.target.value)))
+                  : 0,
+              )
             }
             className={inputClass()}
           />

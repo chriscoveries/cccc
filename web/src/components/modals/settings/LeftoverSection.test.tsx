@@ -51,7 +51,10 @@ describe("LeftoverSection", () => {
     expect(host.textContent).toContain("(2)");
   });
   it("saves the reap toggle with a floored age", async () => {
-    vi.mocked(api.fetchLeftoverProcesses).mockResolvedValue({ ok: true, result: { count: 0, leftovers: [] } });
+    vi.mocked(api.fetchLeftoverProcesses).mockResolvedValue({
+      ok: true,
+      result: { count: 0, leftovers: [] },
+    });
     const save = vi.fn();
     await render({ onSave: save });
     const boxes = Array.from(host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));

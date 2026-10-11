@@ -680,6 +680,8 @@
     "notebookSectionLockedConnecting": "現在の Google サインインが完了すると、ここに作業 / メモリノートブックの表示・バインド・管理が現れます。"
   },
   "automation": {
+    "foremanSweep": "毎時の Foreman カード点検",
+    "foremanSweepHelp": "@foreman にカードの確認を通知します。既存のカスタムスケジュールとメッセージは保持します。",
     "title": "自動化",
     "description": "組み込み自動化とスケジュール済みルールを構成します。設定は次の場所に保存されます",
     "configPathFallback": "CCCC_HOME/.../group.yaml",
@@ -1203,6 +1205,20 @@
     "copyBuildInfo": "ビルド情報をコピー",
     "copied": "コピーしました",
     "copyFailed": "コピーできませんでした。上の値を選択してコピーしてください。",
+    "leftoverTitle": "残留レーンプロセス",
+    "leftoverHint": "グループ/Actor の識別情報が付いた、稼働中のセッションに所有されていないレーンプロセスです。終了したグループ、削除された Actor、置き換えられたセッション、停止した Actor が対象です。",
+    "leftoverRefresh": "今すぐスキャン",
+    "leftoverFailed": "残留プロセスをスキャンできませんでした。",
+    "leftoverNone": "残留レーンプロセスは見つかりませんでした。",
+    "leftoverPid": "PID",
+    "leftoverActor": "Actor",
+    "leftoverClass": "原因",
+    "leftoverAge": "経過時間",
+    "leftoverComm": "コマンド",
+    "leftoverReap": "残留プロセスを自動的に回収",
+    "leftoverReapHelp": "下の経過時間を超え、所属が確認できる残留プロセスだけに TERM を送り、猶予期間後に KILL を送ります。稼働中のデーモンのプロセスツリーには一切触れません。既定では無効です。",
+    "leftoverReapHours": "最小経過時間（時間、0 で時間制限を無効化）",
+    "leftoverSave": "残留プロセス設定を保存",
     "buildMismatchHint": "コンポーネントのビルドが異なります。実行中の CCCC を確認してください。再起動や再読み込みの前に下書きを保存してください。"
   },
   "webAccess": {
