@@ -235,7 +235,9 @@ pub fn started_secs_of(_pid: i32) -> Option<u64> {
 
 /// Sum resident KiB over `root` plus currently-visible descendants. Pids that
 /// vanish mid-scan contribute nothing. Returns `(total_kib, counted)`.
-pub fn tree_rss_kib(root: i32) -> (u64, usize) {    let mut total = 0u64;
+#[allow(dead_code)]
+pub fn tree_rss_kib(root: i32) -> (u64, usize) {
+    let mut total = 0u64;
     let mut counted = 0usize;
     for pid in tree_pids(root) {
         if let Some(kb) = rss_kb_of(pid) {
@@ -244,6 +246,60 @@ pub fn tree_rss_kib(root: i32) -> (u64, usize) {    let mut total = 0u64;
         }
     }
     (total, counted)
+}
+
+/// Parse `VmSwap: <kb> kB` out of a Linux `/proc/<pid>/status` body.
+/// Returns swap KiB. Anything unparseable is `None`.
+pub fn parse_vmswap_kb(status: &str) -> Option<u64> {
+    for line in status.lines() {
+        let Some(rest) = line.strip_prefix("VmSwap:") else {
+            continue;
+        };
+        let num: String = rest
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|ch| ch.is_ascii_digit())
+            .collect();
+        if num.is_empty() {
+            continue;
+        }
+        if let Ok(kb) = num.parse::<u64>() {
+            return Some(kb);
+        }
+    }
+    None
+}
+
+/// Swap KiB of one pid, or `None` when unreadable.
+#[cfg(target_os = "linux")]
+fn swap_kb_of(pid: i32) -> Option<u64> {
+    let body = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    parse_vmswap_kb(&body)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn swap_kb_of(_pid: i32) -> Option<u64> {
+    None
+}
+
+/// Sum resident + swap KiB over `root` plus currently-visible descendants.
+/// Returns `(rss_kib, swap_kib, counted)`.
+pub fn tree_rss_and_swap_kib(root: i32) -> (u64, u64, usize) {
+    let mut rss = 0u64;
+    let mut swap = 0u64;
+    let mut counted = 0usize;
+    for pid in tree_pids(root) {
+        if let Some(kb) = rss_kb_of(pid) {
+            rss = rss.saturating_add(kb);
+            counted += 1;
+        }
+        if let Some(kb) = swap_kb_of(pid) {
+            swap = swap.saturating_add(kb);
+        }
+    }
+    (rss, swap, counted)
 }
 
 #[cfg(test)]
@@ -257,6 +313,15 @@ mod tests {
         assert_eq!(parse_vmrss_kb("Name:\tsleep\n"), None);
         assert_eq!(parse_vmrss_kb("VmRSS:\t kB\n"), None);
         assert_eq!(parse_vmrss_kb(""), None);
+    }
+
+    #[test]
+    fn vmswap_parses_kilobytes() {
+        let status = "Name:\tsleep\nVmRSS:\t   12345 kB\nVmSwap:\t   6789 kB\n";
+        assert_eq!(parse_vmswap_kb(status), Some(6789));
+        assert_eq!(parse_vmswap_kb("Name:\tsleep\n"), None);
+        assert_eq!(parse_vmswap_kb("VmSwap:\t kB\n"), None);
+        assert_eq!(parse_vmswap_kb(""), None);
     }
 
     #[test]

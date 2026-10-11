@@ -400,6 +400,7 @@ fn recipient_snapshot(
         active_scope_key: String::new(),
         scopes: vec![],
         automation: Default::default(),
+        memory_limit_mb: 0,
         extra: Default::default(),
         actors: target
             .actors

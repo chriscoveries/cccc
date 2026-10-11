@@ -76,6 +76,7 @@ mod tests {
             scopes: Vec::new(),
             actors: vec![Actor::new("lead"), Actor::new("peer")],
             automation: Map::new(),
+            memory_limit_mb: 0,
             extra: Map::new(),
         }
     }

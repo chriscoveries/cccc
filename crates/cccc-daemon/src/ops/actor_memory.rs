@@ -175,7 +175,11 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
     let now = now_secs();
     let marks = read_cooldowns(home, &group.group_id);
     for actor in group.actors.iter().filter(|actor| actor.enabled) {
-        let limit_mb = actor.memory_limit_mb;
+        let limit_mb = if actor.memory_limit_mb > 0 {
+            actor.memory_limit_mb
+        } else {
+            group.memory_limit_mb
+        };
         if limit_mb == 0 {
             continue;
         }
@@ -197,7 +201,8 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
         let Some((root, started)) = live_root(group, &actor.id) else {
             continue;
         };
-        let (total_kib, _counted) = sampling::tree_rss_kib(root);
+        let (rss_kib, swap_kib, _counted) = sampling::tree_rss_and_swap_kib(root);
+        let total_kib = rss_kib.saturating_add(swap_kib);
         if total_kib / 1024 <= limit_mb as u64 {
             continue;
         }
@@ -212,7 +217,12 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
         let Some(fresh_actor) = fresh.actors.iter().find(|a| a.id == actor.id) else {
             continue;
         };
-        if !fresh_actor.enabled || fresh_actor.memory_limit_mb == 0 {
+        let fresh_limit_mb = if fresh_actor.memory_limit_mb > 0 {
+            fresh_actor.memory_limit_mb
+        } else {
+            fresh.memory_limit_mb
+        };
+        if !fresh_actor.enabled || fresh_limit_mb == 0 {
             continue;
         }
         if fresh_restart {
@@ -282,6 +292,8 @@ fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use cccc_contracts::Actor;
 
     #[test]
     fn cooldown_window_holds_then_releases() {
@@ -303,6 +315,68 @@ mod tests {
         let path = cooldown_path(&home, &gid).expect("path");
         std::fs::write(&path, "{ not json").expect("corrupt");
         assert!(read_cooldowns(&home, &gid).is_empty());
+    }
+
+    #[test]
+    fn group_default_limit_applies_when_actor_has_none() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("home");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+        let group = store.create("group-default", "").expect("group");
+        let mut group = group;
+        group.memory_limit_mb = 512;
+        let mut actor = cccc_contracts::Actor::new("lane-without-limit");
+        actor.memory_limit_mb = 0;
+        actor.runtime_state_source = RuntimeStateSource::ManagedSession;
+        group.actors.push(actor);
+        store.save(&group).expect("save");
+        let reloaded = store.load(&group.group_id).expect("reload");
+        assert_eq!(reloaded.memory_limit_mb, 512);
+        let actor = &reloaded.actors[0];
+        assert_eq!(actor.memory_limit_mb, 0);
+        // The tick resolves the group default for actors without a per-actor value.
+        let limit_mb = if actor.memory_limit_mb > 0 {
+            actor.memory_limit_mb
+        } else {
+            reloaded.memory_limit_mb
+        };
+        assert_eq!(limit_mb, 512);
+    }
+
+    #[test]
+    fn actor_limit_overrides_group_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("home");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+        let group = store.create("actor-override", "").expect("group");
+        let mut group = group;
+        group.memory_limit_mb = 512;
+        let mut actor = cccc_contracts::Actor::new("lane-with-own-limit");
+        actor.memory_limit_mb = 128;
+        actor.runtime_state_source = RuntimeStateSource::ManagedSession;
+        group.actors.push(actor);
+        store.save(&group).expect("save");
+        let reloaded = store.load(&group.group_id).expect("reload");
+        let actor = &reloaded.actors[0];
+        let limit_mb = if actor.memory_limit_mb > 0 {
+            actor.memory_limit_mb
+        } else {
+            reloaded.memory_limit_mb
+        };
+        assert_eq!(limit_mb, 128);
+    }
+
+    #[test]
+    fn zero_group_default_means_no_limit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("home");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+        let group = store.create("zero-default", "").expect("group");
+        let reloaded = store.load(&group.group_id).expect("reload");
+        assert_eq!(reloaded.memory_limit_mb, 0);
     }
 
     #[test]

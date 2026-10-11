@@ -52,6 +52,10 @@ pub struct GroupDoc {
     pub actors: Vec<Actor>,
     #[serde(default)]
     pub automation: Map<String, Value>,
+    /// Group-wide default memory limit in MiB. Per-actor `memory_limit_mb`
+    /// overrides this. 0 = off (no limit). Default 0 for backward compat.
+    #[serde(default)]
+    pub memory_limit_mb: u32,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -109,6 +113,7 @@ impl GroupStore {
             scopes: Vec::new(),
             actors: Vec::new(),
             automation: Map::new(),
+            memory_limit_mb: 0,
             extra: Map::new(),
         };
         let dir = self.group_dir(&group.group_id)?;
