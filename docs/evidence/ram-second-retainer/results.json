@@ -1,0 +1,258 @@
+{
+  "baseline_commit": "c909183d2338abe2210438d2a8c57c416882359e",
+  "code_commit": "df313b43208c386ad6f52a8b7326c4faf643f5d2",
+  "host": "claw",
+  "runtime_hot_cap_bytes_per_actor": 2000000,
+  "runtime_archive_budget_bytes_per_actor": 10485760,
+  "runtime_archive_enabled": true,
+  "default_daemon_hot_cap_bytes_per_actor": 10485760,
+  "default_daemon_archive_enabled": false,
+  "short_runtime_live_heap_bytes": {
+    "baseline": {
+      "output_deque_headers": 28311552,
+      "output_payload_and_mode_probe": 3203271,
+      "terminal_mirror": 6840072,
+      "other": 150669
+    },
+    "candidate": {
+      "output_deque_headers": 27648,
+      "output_payload_and_mode_probe": 2695744,
+      "terminal_mirror": 6839304,
+      "other": 150741
+    }
+  },
+  "short_runtime_peak_heap_mb_decimal": {
+    "baseline": 38.81,
+    "candidate": 9.98
+  },
+  "short_runtime_peak_rss_mb_decimal_with_heaptrack": {
+    "baseline": 71.6,
+    "candidate": 26.07
+  },
+  "validation": {
+    "author_unit_tests_passed": 158,
+    "integration_tests_passed": 6,
+    "clippy_runtime_all_targets_deny_warnings": "pass",
+    "changed_rust_fmt": "pass",
+    "unchanged_repository_fmt_hunks": 36,
+    "independent_reviewer": "lab-hermes2",
+    "independent_review_event": "e420c4e650ef4498be8e42eb5bf717f0",
+    "independent_final_unit_tests_passed": 163,
+    "independent_boundary_probes_passed": 5,
+    "differential_sequences": 67000,
+    "differential_divergences": 0,
+    "focused_serial_process_tree_tests_passed": 32
+  },
+  "daemon_profiles": {
+    "baseline": {
+      "manifest": {
+        "binary": "/home/ghrunner/sol-b-ram-evidence/baseline-cccc",
+        "pid": 1046936,
+        "groups": [
+          "g_1142e0e7b57f",
+          "g_081d7ff5907b",
+          "g_0f881345921c",
+          "g_2d12ccae7544",
+          "g_1d62f1b41459",
+          "g_460de8d78bd3"
+        ],
+        "actors": 18,
+        "seconds": 120
+      },
+      "binary_sha256": "e62f6a4024cc2f7885aed1150584f44ffdc1ef9f37a790ff8c03d036896fc7e9",
+      "peak_allocation_families_bytes": {
+        "other": 1420328,
+        "terminal_mirror": 10093080,
+        "output_payload_and_mode_probe": 3202604,
+        "output_deque_headers": 14155776
+      },
+      "peak_heap_exact_bytes": 28871788,
+      "final_sample": {
+        "seconds": "122",
+        "rss_kib": "96720",
+        "total_cursor": "3310231",
+        "ledger_bytes": "33542"
+      },
+      "total_profile_runtime_seconds": 169.5,
+      "peak_rss_heaptrack": "100.86M"
+    },
+    "candidate": {
+      "manifest": {
+        "binary": "/home/ghrunner/sol-b-ram-evidence/candidate-cccc",
+        "pid": 1258271,
+        "groups": [
+          "g_9b52376b78f1",
+          "g_5b6866119834",
+          "g_2e8d21794d1a",
+          "g_e880bfa3bc40",
+          "g_1b7b9deffa20",
+          "g_c9f1bc8ef249"
+        ],
+        "actors": 18,
+        "seconds": 120
+      },
+      "binary_sha256": "b01b47f40b040d614eaae290a188fc22cf313a3ccab43cd0d2649d6722b7bddf",
+      "peak_allocation_families_bytes": {
+        "output_deque_headers": 55296,
+        "output_payload_and_mode_probe": 5562944,
+        "terminal_mirror": 10094040,
+        "other": 591977
+      },
+      "peak_heap_exact_bytes": 16304257,
+      "final_sample": {
+        "seconds": "120",
+        "rss_kib": "71000",
+        "total_cursor": "5230605",
+        "ledger_bytes": "29900"
+      },
+      "total_profile_runtime_seconds": 124.67,
+      "peak_rss_heaptrack": "73.05M"
+    }
+  },
+  "hashes": {
+    "baseline_output_rs": "d2661e5409d631cbcfc54dc0e08e34c43b5bf1a1e8523e63c09f672465d09c2d",
+    "candidate_output_rs": "4df3925806e9c7ac4f863d652835b398c6f3486935215b27d3b7d9837963ad71",
+    "baseline_runtime_binary": "1cf97d60cd7abd228a3a17ea1de9472a823d66d9d397a5d352787dff914d10fe",
+    "candidate_runtime_binary": "b30b8fcc410c9c71adcae2945db3b67bcebbcc158594a68f8c7957b486eaa83d",
+    "crates/cccc-runtime/examples/pty_ram_soak.rs": "d1a03c540ead8a40894473ef919b45d53dab2aaa497366b7681c880613906420",
+    "scripts/pty_ram_daemon.py": "bede544d9c2d720bdd4e196111564d2631f6ee3a9799d6cdfc61df40d90a3a93",
+    "scripts/pty_ram_watch.py": "8153cae72ca556b7bcc86bd089a770327d45d00b91f2d42df7f6a8b60e591934",
+    "scripts/pty_ram_summary.py": "6ecfdcbafadf015d99bc576722bdecfcbb9dc8e40bdcb88564f1130cce76194f"
+  },
+  "completed_at_utc": "2026-10-11T03:53:51.052024+00:00",
+  "long_runtime_soaks": [
+    {
+      "csv": "baseline-soak-v3.csv",
+      "csv_sha256": "eb18557292eed8fa1255d87bebb59f3613b49f790582eb2e8386029fdaa63c47",
+      "metadata": {
+        "pid": "666193",
+        "duration": "7200",
+        "actors": "18",
+        "write_bytes": "2",
+        "interval_ms": "1",
+        "cols": "80",
+        "rows": "24"
+      },
+      "samples": 646,
+      "final_seconds": 7202,
+      "completed_requested_seconds": true,
+      "final_rss_kib": 822464,
+      "peak_sampled_rss_kib": 839668,
+      "last_900_seconds_samples": 84,
+      "last_900_seconds_rss_kib": {
+        "median": 833272.0,
+        "min": 781488,
+        "max": 839668
+      },
+      "final_total_cursor": 231878454,
+      "final_snapshot_bytes": 157572,
+      "archive_actors": 18,
+      "min_archive_payload_bytes": 10486003,
+      "max_archive_payload_bytes": 10549171,
+      "all_actors_passed_hot_cap": true,
+      "watch_last_900_process_seconds": {
+        "requested_start_seconds": 6300,
+        "requested_end_seconds": 7200,
+        "samples": 90,
+        "first_utc": "2026-10-11T03:28:00.227320+00:00",
+        "last_utc": "2026-10-11T03:42:50.819235+00:00",
+        "all_actors_alive": true,
+        "metrics": {
+          "rss_kib": {
+            "median": 833266.0,
+            "min": 781532,
+            "max": 839668
+          },
+          "swap_kib": {
+            "median": 472.0,
+            "min": 472,
+            "max": 28552
+          },
+          "rss_plus_swap_kib": {
+            "median": 835050.0,
+            "min": 810084,
+            "max": 840160
+          },
+          "mem_available_kib": {
+            "median": 8900140.0,
+            "min": 4733132,
+            "max": 12133784
+          }
+        }
+      }
+    },
+    {
+      "csv": "candidate-soak.csv",
+      "csv_sha256": "1c3c2b0a3c19bed25f4fa5124ecd829b0eb92d5fd0814e09b57ae70ece4fad83",
+      "metadata": {
+        "pid": "697225",
+        "duration": "7200",
+        "actors": "18",
+        "write_bytes": "2",
+        "interval_ms": "1",
+        "cols": "80",
+        "rows": "24"
+      },
+      "samples": 713,
+      "final_seconds": 7200,
+      "completed_requested_seconds": true,
+      "final_rss_kib": 48208,
+      "peak_sampled_rss_kib": 48248,
+      "last_900_seconds_samples": 90,
+      "last_900_seconds_rss_kib": {
+        "median": 48208.0,
+        "min": 48208,
+        "max": 48248
+      },
+      "final_total_cursor": 237470718,
+      "final_snapshot_bytes": 157572,
+      "archive_actors": 18,
+      "min_archive_payload_bytes": 10489264,
+      "max_archive_payload_bytes": 10549633,
+      "all_actors_passed_hot_cap": true,
+      "watch_last_900_process_seconds": {
+        "requested_start_seconds": 6300,
+        "requested_end_seconds": 7200,
+        "samples": 90,
+        "first_utc": "2026-10-11T03:38:00.632362+00:00",
+        "last_utc": "2026-10-11T03:52:51.110129+00:00",
+        "all_actors_alive": true,
+        "metrics": {
+          "rss_kib": {
+            "median": 48208.0,
+            "min": 48208,
+            "max": 48248
+          },
+          "swap_kib": {
+            "median": 472.0,
+            "min": 472,
+            "max": 472
+          },
+          "rss_plus_swap_kib": {
+            "median": 48680.0,
+            "min": 48680,
+            "max": 48720
+          },
+          "mem_available_kib": {
+            "median": 6421514.0,
+            "min": 4680388,
+            "max": 9136624
+          }
+        }
+      }
+    }
+  ],
+  "artifact_sha256": {
+    "archive-check.json": "4773744b3cc3a6536c7e851b4b78f31762fc52598c1f83078d0b98a02adf198c",
+    "baseline-daemon-summary.json": "668f74ceeb10889fc224b160a2b16d8cfea1024d361a9ede81a98e7642f21846",
+    "baseline-daemon.csv": "b58355a02311fdeaa2d4f7161c405f3748d0eea3680634337694694a34e55575",
+    "baseline-long-summary.json": "079dae94866d6f737a8f2120a56be23292fd95b07bce79e19a59cf5a92a4c8fe",
+    "baseline-soak-v3.csv": "eb18557292eed8fa1255d87bebb59f3613b49f790582eb2e8386029fdaa63c47",
+    "candidate-daemon-summary.json": "5f7fa105513b30d792024714ef1523d13b23527756f13b1c0419be1b49eee769",
+    "candidate-daemon.csv": "b6691f301d9ed3c81d16ec7b215d81a8b6a221848b1c1f89f0d1e684e4264dd1",
+    "candidate-soak.csv": "1c3c2b0a3c19bed25f4fa5124ecd829b0eb92d5fd0814e09b57ae70ece4fad83",
+    "fmt-unchanged-comparison.txt": "25d88fe07430788fd3938f49be64afc969c87dd6746334465fdbee458a2c8c81",
+    "long-run-summary.json": "53c7e38ab2de97773408770057832693e3be1da3779fa55f33b22c3596c9a64a",
+    "soak-memory-watch.csv": "73f99baa43af8a6bd6234b5634f5a0d51bf40f4d8a0a25581ca80b4266e2f6e8"
+  }
+}

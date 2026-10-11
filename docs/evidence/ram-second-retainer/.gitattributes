@@ -1,0 +1,2 @@
+# Preserve the measured CSV byte streams and their recorded SHA-256 hashes.
+*.csv -text

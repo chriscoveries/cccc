@@ -1,0 +1,32 @@
+{
+  "manifest": {
+    "binary": "/home/ghrunner/sol-b-ram-evidence/baseline-cccc",
+    "pid": 1046936,
+    "groups": [
+      "g_1142e0e7b57f",
+      "g_081d7ff5907b",
+      "g_0f881345921c",
+      "g_2d12ccae7544",
+      "g_1d62f1b41459",
+      "g_460de8d78bd3"
+    ],
+    "actors": 18,
+    "seconds": 120
+  },
+  "binary_sha256": "e62f6a4024cc2f7885aed1150584f44ffdc1ef9f37a790ff8c03d036896fc7e9",
+  "peak_allocation_families_bytes": {
+    "other": 1420328,
+    "terminal_mirror": 10093080,
+    "output_payload_and_mode_probe": 3202604,
+    "output_deque_headers": 14155776
+  },
+  "peak_heap_exact_bytes": 28871788,
+  "final_sample": {
+    "seconds": "122",
+    "rss_kib": "96720",
+    "total_cursor": "3310231",
+    "ledger_bytes": "33542"
+  },
+  "total_profile_runtime_seconds": 169.5,
+  "peak_rss_heaptrack": "100.86M"
+}
