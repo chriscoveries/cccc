@@ -175,10 +175,9 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
     let now = now_secs();
     let marks = read_cooldowns(home, &group.group_id);
     for actor in group.actors.iter().filter(|actor| actor.enabled) {
-        let limit_mb = if actor.memory_limit_mb > 0 {
-            actor.memory_limit_mb
-        } else {
-            group.memory_limit_mb
+        let limit_mb = match actor.memory_limit_mb {
+            Some(n) => n,
+            None => group.memory_limit_mb,
         };
         if limit_mb == 0 {
             continue;
@@ -191,7 +190,7 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
         // explicit opt-in plus output silence (fresh restart, no resume).
         let idle_managed = managed_idle(&group.group_id, &actor.id);
         let idle_pty = !idle_managed
-            && actor.memory_limit_restart_pty
+            && actor.memory_limit_restart_pty.unwrap_or(group.memory_limit_restart_pty)
             && actor.runtime_state_source == RuntimeStateSource::Terminal
             && pty_quiet_live(&group.group_id, &actor.id);
         if !idle_managed && !idle_pty {
@@ -217,16 +216,15 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
         let Some(fresh_actor) = fresh.actors.iter().find(|a| a.id == actor.id) else {
             continue;
         };
-        let fresh_limit_mb = if fresh_actor.memory_limit_mb > 0 {
-            fresh_actor.memory_limit_mb
-        } else {
-            fresh.memory_limit_mb
+        let fresh_limit_mb = match fresh_actor.memory_limit_mb {
+            Some(n) => n,
+            None => fresh.memory_limit_mb,
         };
         if !fresh_actor.enabled || fresh_limit_mb == 0 {
             continue;
         }
         if fresh_restart {
-            if !(fresh_actor.memory_limit_restart_pty
+            if !(fresh_actor.memory_limit_restart_pty.unwrap_or(fresh.memory_limit_restart_pty)
                 && fresh_actor.runtime_state_source == RuntimeStateSource::Terminal
                 && pty_quiet_live(&group.group_id, &actor.id))
             {
@@ -327,19 +325,18 @@ mod tests {
         let mut group = group;
         group.memory_limit_mb = 512;
         let mut actor = cccc_contracts::Actor::new("lane-without-limit");
-        actor.memory_limit_mb = 0;
+        actor.memory_limit_mb = None;
         actor.runtime_state_source = RuntimeStateSource::ManagedSession;
         group.actors.push(actor);
         store.save(&group).expect("save");
         let reloaded = store.load(&group.group_id).expect("reload");
         assert_eq!(reloaded.memory_limit_mb, 512);
         let actor = &reloaded.actors[0];
-        assert_eq!(actor.memory_limit_mb, 0);
+        assert_eq!(actor.memory_limit_mb, None);
         // The tick resolves the group default for actors without a per-actor value.
-        let limit_mb = if actor.memory_limit_mb > 0 {
-            actor.memory_limit_mb
-        } else {
-            reloaded.memory_limit_mb
+        let limit_mb = match actor.memory_limit_mb {
+            Some(n) => n,
+            None => reloaded.memory_limit_mb,
         };
         assert_eq!(limit_mb, 512);
     }
@@ -354,18 +351,90 @@ mod tests {
         let mut group = group;
         group.memory_limit_mb = 512;
         let mut actor = cccc_contracts::Actor::new("lane-with-own-limit");
-        actor.memory_limit_mb = 128;
+        actor.memory_limit_mb = Some(128);
         actor.runtime_state_source = RuntimeStateSource::ManagedSession;
         group.actors.push(actor);
         store.save(&group).expect("save");
         let reloaded = store.load(&group.group_id).expect("reload");
         let actor = &reloaded.actors[0];
-        let limit_mb = if actor.memory_limit_mb > 0 {
-            actor.memory_limit_mb
-        } else {
-            reloaded.memory_limit_mb
+        let limit_mb = match actor.memory_limit_mb {
+            Some(n) => n,
+            None => reloaded.memory_limit_mb,
         };
         assert_eq!(limit_mb, 128);
+    }
+
+    #[test]
+    fn actor_some_zero_means_explicitly_off_even_with_group_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("home");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+        let group = store.create("explicit-off", "").expect("group");
+        let mut group = group;
+        group.memory_limit_mb = 512;
+        let mut actor = cccc_contracts::Actor::new("lane-explicit-off");
+        actor.memory_limit_mb = Some(0);
+        actor.runtime_state_source = RuntimeStateSource::ManagedSession;
+        group.actors.push(actor);
+        store.save(&group).expect("save");
+        let reloaded = store.load(&group.group_id).expect("reload");
+        let actor = &reloaded.actors[0];
+        let limit_mb = match actor.memory_limit_mb {
+            Some(n) => n,
+            None => reloaded.memory_limit_mb,
+        };
+        assert_eq!(limit_mb, 0, "Some(0) must mean off, not inherit");
+    }
+
+    #[test]
+    fn pty_group_default_flag_inherited_by_actor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("home");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+        let group = store.create("pty-group-flag", "").expect("group");
+        let mut group = group;
+        group.memory_limit_mb = 512;
+        group.memory_limit_restart_pty = true;
+        let mut actor = cccc_contracts::Actor::new("pty-inherit");
+        actor.memory_limit_mb = Some(1);
+        actor.memory_limit_restart_pty = None;
+        actor.runtime_state_source = RuntimeStateSource::Terminal;
+        group.actors.push(actor);
+        store.save(&group).expect("save");
+        let reloaded = store.load(&group.group_id).expect("reload");
+        let actor = &reloaded.actors[0];
+        assert_eq!(
+            actor.memory_limit_restart_pty.unwrap_or(reloaded.memory_limit_restart_pty),
+            true,
+            "None must inherit group true"
+        );
+    }
+
+    #[test]
+    fn pty_actor_explicit_false_overrides_group_true() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("home");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+        let group = store.create("pty-override", "").expect("group");
+        let mut group = group;
+        group.memory_limit_mb = 512;
+        group.memory_limit_restart_pty = true;
+        let mut actor = cccc_contracts::Actor::new("pty-explicit-off");
+        actor.memory_limit_mb = Some(1);
+        actor.memory_limit_restart_pty = Some(false);
+        actor.runtime_state_source = RuntimeStateSource::Terminal;
+        group.actors.push(actor);
+        store.save(&group).expect("save");
+        let reloaded = store.load(&group.group_id).expect("reload");
+        let actor = &reloaded.actors[0];
+        assert_eq!(
+            actor.memory_limit_restart_pty.unwrap_or(reloaded.memory_limit_restart_pty),
+            false,
+            "Some(false) must override group true"
+        );
     }
 
     #[test]
@@ -399,7 +468,7 @@ mod tests {
         // restarted either: the opt-in defaults off.
         let mut cela = group.clone();
         let mut actor = cccc_contracts::Actor::new("pty-lane");
-        actor.memory_limit_mb = 1;
+        actor.memory_limit_mb = Some(1);
         cela.actors.push(actor);
         store.save(&cela).expect("save");
         let reloaded = store.load(&group.group_id).expect("reload");
@@ -477,7 +546,7 @@ mod pty_quiet_tests {
         configured["memory_limit_restart_pty"] = serde_json::json!(true);
         let actor: cccc_contracts::Actor =
             serde_json::from_value(configured).expect("configured actor");
-        assert!(actor.memory_limit_restart_pty);
+        assert_eq!(actor.memory_limit_restart_pty, Some(true));
         assert_eq!(
             serde_json::to_value(actor).expect("serialize")["memory_limit_restart_pty"],
             serde_json::json!(true)

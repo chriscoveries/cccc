@@ -217,26 +217,17 @@ pub struct Actor {
     #[serde(default)]
     pub updated_at: String,
     /// Per-actor resident-memory ceiling in MiB. Zero (the default) means no
-    /// ceiling: the field is omitted from serialized actors when zero, and any
-    /// nonzero value is enforced while the actor is idle, never mid-turn.
-    /// Plain `u32` so negative, fractional, string and overflowing inputs are
-    /// rejected at deserialization.
-    #[serde(default, skip_serializing_if = "is_zero_mb")]
-    pub memory_limit_mb: u32,
+    /// Per-actor memory ceiling in MiB. `None` = inherit group default,
+    /// `Some(0)` = explicitly off (no limit), `Some(n)` = n MiB ceiling.
+    /// Enforced while the actor is idle, never mid-turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_limit_mb: Option<u32>,
     /// Opt-in: a PTY lane over its `memory_limit_mb` may restart after 10
     /// quiet minutes. PTY idleness is output-silence, not proof of no turn,
     /// and a PTY restart is a FRESH session (no resume) — both stated in the
-    /// setting help. Default false: PTY lanes are never restarted.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub memory_limit_restart_pty: bool,
-}
-
-fn is_zero_mb(value: &u32) -> bool {
-    *value == 0
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
+    /// setting help. `None` = inherit group default, `Some(true/false)` = explicit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_limit_restart_pty: Option<bool>,
 }
 
 impl Actor {
@@ -268,8 +259,8 @@ impl Actor {
             created_at: now.clone(),
             generation: String::new(),
             updated_at: now,
-            memory_limit_mb: 0,
-            memory_limit_restart_pty: false,
+            memory_limit_mb: None,
+            memory_limit_restart_pty: None,
         }
     }
 

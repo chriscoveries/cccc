@@ -401,6 +401,7 @@ fn recipient_snapshot(
         scopes: vec![],
         automation: Default::default(),
         memory_limit_mb: 0,
+        memory_limit_restart_pty: false,
         extra: Default::default(),
         actors: target
             .actors

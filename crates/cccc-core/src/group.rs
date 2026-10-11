@@ -56,6 +56,10 @@ pub struct GroupDoc {
     /// overrides this. 0 = off (no limit). Default 0 for backward compat.
     #[serde(default)]
     pub memory_limit_mb: u32,
+    /// Group-wide default for PTY restart opt-in. Per-actor
+    /// `memory_limit_restart_pty` overrides this. Default false.
+    #[serde(default)]
+    pub memory_limit_restart_pty: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -114,6 +118,7 @@ impl GroupStore {
             actors: Vec::new(),
             automation: Map::new(),
             memory_limit_mb: 0,
+            memory_limit_restart_pty: false,
             extra: Map::new(),
         };
         let dir = self.group_dir(&group.group_id)?;

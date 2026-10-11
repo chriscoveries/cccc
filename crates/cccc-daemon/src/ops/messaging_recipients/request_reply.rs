@@ -77,6 +77,7 @@ mod tests {
             actors: vec![Actor::new("lead"), Actor::new("peer")],
             automation: Map::new(),
             memory_limit_mb: 0,
+            memory_limit_restart_pty: false,
             extra: Map::new(),
         }
     }
