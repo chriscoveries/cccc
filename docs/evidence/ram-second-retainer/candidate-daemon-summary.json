@@ -1,0 +1,32 @@
+{
+  "manifest": {
+    "binary": "/home/ghrunner/sol-b-ram-evidence/candidate-cccc",
+    "pid": 1258271,
+    "groups": [
+      "g_9b52376b78f1",
+      "g_5b6866119834",
+      "g_2e8d21794d1a",
+      "g_e880bfa3bc40",
+      "g_1b7b9deffa20",
+      "g_c9f1bc8ef249"
+    ],
+    "actors": 18,
+    "seconds": 120
+  },
+  "binary_sha256": "b01b47f40b040d614eaae290a188fc22cf313a3ccab43cd0d2649d6722b7bddf",
+  "peak_allocation_families_bytes": {
+    "output_deque_headers": 55296,
+    "output_payload_and_mode_probe": 5562944,
+    "terminal_mirror": 10094040,
+    "other": 591977
+  },
+  "peak_heap_exact_bytes": 16304257,
+  "final_sample": {
+    "seconds": "120",
+    "rss_kib": "71000",
+    "total_cursor": "5230605",
+    "ledger_bytes": "29900"
+  },
+  "total_profile_runtime_seconds": 124.67,
+  "peak_rss_heaptrack": "73.05M"
+}
