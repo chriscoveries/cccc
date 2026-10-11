@@ -363,7 +363,11 @@ fn read_source(path: &Path, group_id: &str) -> io::Result<Vec<Event>> {
     read_source_from(path, 0, group_id).map(|(events, _)| events)
 }
 
-fn read_source_from(path: &Path, offset: u64, group_id: &str) -> io::Result<(Vec<Event>, u64)> {
+pub(crate) fn read_source_from(
+    path: &Path,
+    offset: u64,
+    group_id: &str,
+) -> io::Result<(Vec<Event>, u64)> {
     if is_gzip(path) {
         return if offset == 0 {
             read_source(path, group_id)
@@ -446,7 +450,7 @@ fn decode_event_line(raw: &[u8], source: &Path, line_no: usize, _group_id: &str)
     }
 }
 
-fn ledger_group_id(path: &Path) -> String {
+pub(crate) fn ledger_group_id(path: &Path) -> String {
     path.parent()
         .and_then(Path::file_name)
         .and_then(|value| value.to_str())
@@ -462,7 +466,7 @@ fn is_ledger_segment(path: &Path) -> bool {
     name.ends_with(".jsonl") || name.ends_with(".jsonl.gz")
 }
 
-fn is_gzip(path: &Path) -> bool {
+pub(crate) fn is_gzip(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension == "gz")
 }
 
