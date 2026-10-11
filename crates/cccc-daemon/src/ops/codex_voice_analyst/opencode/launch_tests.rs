@@ -146,7 +146,7 @@ fn official_kilo_npm_cache_bypasses_the_resident_node_shim() {
     for executable in [shim, script] {
         let prepared = prepare(
             &[executable.to_string_lossy().into_owned()],
-            &BTreeMap::new(),
+            &BTreeMap::from([("CCCC_OPENCODE_HEADLESS".into(), "1".into())]),
             ActorRuntime::Kilo,
         )
         .expect("native npm cache");
@@ -167,10 +167,13 @@ fn kilo_npm_symlink_uses_the_package_cache_and_override() {
     std::os::unix::fs::symlink(&script, &link).expect("npm symlink");
     let override_path = temp.path().join("override-kilo");
     fs::write(&override_path, "override fixture").expect("override");
-    let environment = BTreeMap::from([(
-        "KILO_BIN_PATH".into(),
-        override_path.to_string_lossy().into_owned(),
-    )]);
+    let environment = BTreeMap::from([
+        ("CCCC_OPENCODE_HEADLESS".into(), "1".into()),
+        (
+            "KILO_BIN_PATH".into(),
+            override_path.to_string_lossy().into_owned(),
+        ),
+    ]);
     let prepared = prepare(
         &[link.to_string_lossy().into_owned()],
         &environment,
@@ -301,7 +304,10 @@ fn native_kilo_resources_preserve_a_nonempty_override() {
     std::fs::create_dir(&resources).expect("resources");
     std::fs::write(resources.join("tree-sitter.wasm"), "fixture").expect("wasm");
     let prefix = vec![root.path().join(".kilo").to_string_lossy().into_owned()];
-    let mut env = BTreeMap::from([("KILO_TREE_SITTER_WASM_DIR".into(), String::new())]);
+    let mut env = BTreeMap::from([
+        ("CCCC_OPENCODE_HEADLESS".into(), "1".into()),
+        ("KILO_TREE_SITTER_WASM_DIR".into(), String::new()),
+    ]);
     command::configure_native_resources(Path::new(&prefix[0]), &prefix, &mut env);
     assert_eq!(
         env["KILO_TREE_SITTER_WASM_DIR"],
@@ -327,10 +333,13 @@ fn native_kilo_binary_override_keeps_npm_tree_sitter_resources() {
     fs::write(resources.join("tree-sitter.wasm"), "fixture").expect("wasm");
     let external = root.path().join("custom-native-kilo");
     fs::write(&external, "fixture").expect("native binary");
-    let mut env = BTreeMap::from([(
-        "KILO_BIN_PATH".into(),
-        external.to_string_lossy().into_owned(),
-    )]);
+    let mut env = BTreeMap::from([
+        ("CCCC_OPENCODE_HEADLESS".into(), "1".into()),
+        (
+            "KILO_BIN_PATH".into(),
+            external.to_string_lossy().into_owned(),
+        ),
+    ]);
     let prepared = prepare(
         &[shim.to_string_lossy().into_owned()],
         &env,
@@ -343,4 +352,69 @@ fn native_kilo_binary_override_keeps_npm_tree_sitter_resources() {
         env["KILO_TREE_SITTER_WASM_DIR"],
         resources.to_string_lossy()
     );
+}
+
+#[test]
+fn flag_unset_keeps_official_kilo_npm_launch_bytes_with_a_native_cache() {
+    let temp = tempfile::tempdir().expect("npm install");
+    let (shim, script) = npm_install(temp.path(), false);
+    fs::write(
+        script.parent().expect("bin").join(".kilo"),
+        "native fixture",
+    )
+    .expect("native cache");
+    for flag in [None, Some("0")] {
+        let mut env = BTreeMap::new();
+        if let Some(flag) = flag {
+            env.insert("CCCC_OPENCODE_HEADLESS".into(), flag.into());
+        }
+        let prepared = prepare(
+            &[shim.to_string_lossy().into_owned()],
+            &env,
+            ActorRuntime::Kilo,
+        )
+        .expect("legacy npm entrypoint");
+        assert_eq!(
+            prepared.launch_prefix,
+            [
+                shim.parent()
+                    .expect("shim")
+                    .join("node.exe")
+                    .to_string_lossy(),
+                script.to_string_lossy(),
+            ]
+        );
+        let prepared = prepare(
+            &[script.to_string_lossy().into_owned()],
+            &env,
+            ActorRuntime::Kilo,
+        )
+        .expect("legacy script");
+        assert_eq!(prepared.launch_prefix, [script.to_string_lossy()]);
+        let cached = script.parent().expect("bin").join(".kilo");
+        assert_eq!(
+            prepare(
+                &[cached.to_string_lossy().into_owned()],
+                &env,
+                ActorRuntime::Kilo
+            )
+            .err()
+            .expect("legacy executable-name restriction")
+            .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let resources = script.parent().expect("bin").join("tree-sitter");
+        fs::create_dir_all(&resources).expect("resources");
+        fs::write(resources.join("tree-sitter.wasm"), "fixture").expect("wasm");
+        let original_env = env.clone();
+        command::configure_native_resources(
+            &script,
+            &[cached.to_string_lossy().into_owned()],
+            &mut env,
+        );
+        assert_eq!(
+            env, original_env,
+            "default resource environment must remain unchanged"
+        );
+    }
 }

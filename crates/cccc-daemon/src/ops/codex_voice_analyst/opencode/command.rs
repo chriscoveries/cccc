@@ -13,7 +13,11 @@ pub(super) fn launch_prefix(
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    if name == "kilo"
+    let headless = environment
+        .get("CCCC_OPENCODE_HEADLESS")
+        .is_some_and(|value| value == "1");
+    if headless
+        && name == "kilo"
         && let Some(script) = kilo_npm_entrypoint(executable)
     {
         let cached = script.parent().expect("entrypoint directory").join(".kilo");
@@ -33,7 +37,7 @@ pub(super) fn launch_prefix(
     }
     if filename.eq_ignore_ascii_case(name)
         || filename.eq_ignore_ascii_case(&format!("{name}.exe"))
-        || (name == "kilo" && filename == ".kilo")
+        || (headless && name == "kilo" && filename == ".kilo")
     {
         return Ok(vec![executable.to_string_lossy().into_owned()]);
     }
@@ -121,6 +125,12 @@ pub(super) fn configure_native_resources(
     launch_prefix: &[String],
     environment: &mut BTreeMap<String, String>,
 ) {
+    if environment
+        .get("CCCC_OPENCODE_HEADLESS")
+        .is_none_or(|value| value != "1")
+    {
+        return;
+    }
     if environment
         .get("KILO_TREE_SITTER_WASM_DIR")
         .is_some_and(|value| !value.is_empty())

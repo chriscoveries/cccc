@@ -136,3 +136,27 @@ async fn headless_receipt_capacity_queues_without_evicting_uncertain_admission()
     assert!(!temp.path().join("prompts.jsonl").exists());
     app.stop(app.generation()).await.expect("stop");
 }
+
+#[tokio::test]
+async fn flag_unset_legacy_turn_keeps_rejected_admission_fenced() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let app = AnalystSession::acp_for_headless_test(temp.path())
+        .await
+        .expect("ACP");
+    let error = app
+        .start_turn(app.generation(), "legacy", "RETRY")
+        .await
+        .expect_err("rejected before admission");
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert!(error.to_string().starts_with("ACP request failed: "));
+    assert_eq!(app.delivery_receipt_count().await, 1);
+    assert_eq!(
+        app.start_turn(app.generation(), "legacy", "RETRY")
+            .await
+            .expect_err("legacy no-replay fence")
+            .kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    assert!(!temp.path().join("prompts.jsonl").exists());
+    app.stop(app.generation()).await.expect("stop");
+}

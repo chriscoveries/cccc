@@ -3,8 +3,9 @@
 The largest removable baseline cost is the native attach TUI. An opt-in Actor
 environment setting, `CCCC_OPENCODE_HEADLESS=1`, delivers through ACP and starts
 the TUI only while terminal connections are open. Kilo's official npm launcher
-also retains about 50 MB of Node RSS per process; reusing its native cache removes
-that overhead from the server and any open viewer.
+also retains about 50 MB of Node RSS per process; this opt-in mode reuses its native
+cache to remove that overhead from the server and any open viewer. With the flag
+unset, the original npm launch and terminal-delivery paths remain in use.
 
 All measurements below use private claw processes and homes. No production
 deployment, install or daemon restart occurred on MACDAD or firestar. These are
@@ -15,7 +16,10 @@ Linux baseline measurements, not a long-term leak or macOS validation.
 - CCCC parent: `c36a4e4c`; branch: `sol-hi-b/kilo-memory`.
 - Pinned daemon/CLI binary SHA-256: parent
   `6c130d3cf0fadd5e681451878ded4be88f6efbcd352cf4a2ffcc7b32853832bf`;
-  final candidate `2fbd0247d257fc5f58368b9751a3d0c8bf8d7a771fc5021af9fc20be9893d4cf`.
+  candidate at `303726ab`
+  `2fbd0247d257fc5f58368b9751a3d0c8bf8d7a771fc5021af9fc20be9893d4cf`;
+  default-equivalence follow-up
+  `01ff63f8cdf9d3e1654ffb8749875cf1f3a409b0d42dc5a5f01b54f12008467b`.
 - Kilo CLI: 7.8.8, embedded Bun 1.4.2. OpenCode: 1.19.0, embedded Bun 1.3.14.
 - Native executable SHA-256: Kilo
   `d734bdfd765781457034fa0b8fd5bd28fa4d21472eab0ac030a1db7f571bfded`;
@@ -95,7 +99,7 @@ GC cost. OpenCode continued consuming about half a core during the last nine
 seconds of the 30-second settling window in both arms. Its lower CPU reading with
 `--smol` accompanies substantially higher RSS, so there is no basis for enabling
 that setting here. The high OpenCode post-turn CPU is a separate profiling lead;
-this experiment does not identify its cause.
+this experiment does not identify its cause. The separate P3 follow-up is card T502.
 
 ## Delivery and viewer contract
 
@@ -158,11 +162,13 @@ watchdog processes; it excludes the CCCC daemon itself.
 | Runtime / case | Startup (MB) | Viewer closed (MB) | Viewer open (MB) | Closed again (MB) |
 | --- | ---: | ---: | ---: | ---: |
 | Kilo parent, `daemon-kilo-baseline-rss` | 1,212.305 | — | TUI starts immediately | — |
-| Kilo final, `daemon-kilo-final` | 670.802 | 666.185 | 1,175.003 | 725.947 |
+| Kilo at `303726ab`, `daemon-kilo-final` | 670.802 | 666.185 | 1,175.003 | 725.947 |
+| Kilo follow-up, `daemon-kilo-default-fix` | 671.629 | 672.493 | 1,161.417 | 737.202 |
 | OpenCode parent, `daemon-opencode-baseline-rss` | 1,119.411 | — | TUI starts immediately | — |
-| OpenCode final, `daemon-opencode-final` | 525.054 | 606.990 | 1,009.287 | 641.622 |
+| OpenCode at `303726ab`, `daemon-opencode-final` | 525.054 | 606.990 | 1,009.287 | 641.622 |
+| OpenCode follow-up, `daemon-opencode-default-fix` | 618.288 | 677.790 | 1,016.185 | 708.608 |
 
-Kilo's matched final startup comparison saves 541.503 MB (44.67%) per lane.
+Kilo's matched `303726ab` startup comparison saves 541.503 MB (44.67%) per lane.
 Closing its last viewer frees the attach process and reduces lane RSS by 449.056 MB
 relative to the open measurement. The provider retains about 59.8 MB above its
 pre-viewer closed heap. Earlier candidates measured startup RSS of 638/687 MB and
@@ -173,11 +179,11 @@ The attach processes themselves measured 420.516 MB for Kilo and 304.894 MB
 for OpenCode in the final open windows. The larger whole-lane closing deltas also
 include provider heap movement; they should not be attributed entirely to the TUI.
 
-OpenCode's matched startup comparison saves 594.357 MB (53.10%) per lane. Its
+OpenCode's matched `303726ab` startup comparison saves 594.357 MB (53.10%) per lane. Its
 viewer close frees 367.665 MB relative to the open measurement; after reopening
 and closing, the server also retains additional heap. These are process-tree RSS
 observations, not a promise that every provider heap returns to its initial size.
-The final case names use the pinned final binary listed above; the earlier Kilo
+The `*-final` cases use the pinned `303726ab` binary listed above; the earlier Kilo
 candidates preceded the diagnostic-cap and resource-path hardening. The startup
 before/after savings combine headless delivery and native launch; do not add the
 individual Node savings to that combined total.
@@ -191,14 +197,43 @@ viewer refusal, four exactly-once accepted receipts, and the same-session restar
 the same extended checks on the pinned final binary. The final Kilo run passed
 them as well; each final run recorded four source IDs exactly once in order.
 
+## Default-path equivalence follow-up
+
+Seat review required flag-unset equivalence. Three regressions failed at
+`303726ab`: an installed native cache changed default Kilo argv; pre-admission
+rejection changed legacy Voice Analyst retry fencing; and closed terminal output
+errors were globally normalized. The follow-up gates native launch/resources,
+managed cancellation, and closed-socket normalization under the opt-in, and keeps
+legacy Voice Analyst rejection semantics. The default launcher test also checks
+flag `0`, executable-name restrictions, and an unchanged resource environment.
+The closed-socket regression exercises an actual terminal attachment, rather than
+only checking a helper's condition. The pre-existing detach fixture accepts EOF
+or the original closed-write error after it closes its own socket.
+
+The new binary repeated the complete native Kilo and OpenCode proofs successfully.
+Kilo startup was 671.629 MB, a 540.676 MB (44.60%) reduction against the parent;
+its viewer measured 424.010 MB, and closing the last viewer reduced lane RSS
+by 424.215 MB. OpenCode's
+startup RSS was 618.288 MB, a 501.123 MB (44.77%) reduction against the parent.
+The viewer itself measured 308.232 MB; closing its last connection reduced lane
+RSS by 307.577 MB. This repeat is higher than the original 525.054 MB startup
+result. Both measurements are retained rather than attributing ordinary provider
+heap variation to a default-path guard change.
+
 ## Validation
 
 Native launcher: two regressions fail on the exact parent when a selected native
 cache is available. Headless startup: the regression fails on the parent because
-it starts a TUI. The final source passed 594 daemon tests and 141 runtime tests, including the
-external native-override resource-path regression. Clippy passed for both crates
+it starts a TUI. The follow-up source passed 597 daemon tests and 141 runtime
+tests, including
+the three flag-unset regressions and external native-override resource-path
+regression. The three flag-unset regressions were red at `303726ab` and green
+with these fixes. After clippy's equivalent Boolean guard cleanup, all nine
+launcher tests and all three flag-unset tests passed again. Clippy passed for
+both crates
 with all targets/features and `-D warnings`; workspace formatting is clean. The
-final CLI build passed. Both real-daemon proofs passed on its pinned binary:
+final CLI build passed. Both real-daemon proofs passed on the original candidate
+and repeated on the pinned default-equivalence follow-up binary:
 ordered queued admission, durable receipts, working/idle detection, shared viewer
 last-close cleanup, same-session restart, native cancel, and passive refusal.
 

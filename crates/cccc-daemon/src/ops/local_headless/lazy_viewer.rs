@@ -19,7 +19,15 @@ pub(crate) struct ViewerLease {
     session: Weak<Session>,
 }
 
+pub(crate) fn active(group_id: &str, actor_id: &str) -> bool {
+    supervisor::lookup(&(group_id.to_owned(), actor_id.to_owned()))
+        .is_some_and(|item| item.lazy_viewer)
+}
+
 pub(crate) fn acquire(group_id: &str, actor_id: &str) -> io::Result<Option<ViewerLease>> {
+    if !active(group_id, actor_id) {
+        return Ok(None);
+    }
     let key = (group_id.to_owned(), actor_id.to_owned());
     let _guard = supervisor::StartGuard::acquire(&key)?;
     let Some(item) = supervisor::lookup(&key).filter(|item| item.lazy_viewer) else {

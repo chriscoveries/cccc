@@ -124,10 +124,11 @@ never automatically replayed; use the displayed source event ID to decide whethe
 to resend deliberately. Pending receipts are bounded by queueing and retired only
 after their accepted delivery record is durable.
 
-CCCC also reuses the official Kilo npm package's native `.kilo` cache when available,
-including an absolute `KILO_BIN_PATH` override, and preserves its tree-sitter resource
-path. An uncached installation retains the official npm launcher. OpenCode's current
-npm package already installs a native executable.
+In this opt-in mode, CCCC also reuses the official Kilo npm package's native `.kilo`
+cache when available, including an absolute `KILO_BIN_PATH` override, and preserves
+its tree-sitter resource path. With the flag unset or an uncached installation,
+CCCC retains the official npm launcher. OpenCode's current npm package already
+installs a native executable.
 
 Cline currently opens a fresh native terminal on each start. CCCC does not persist or reuse Cline's `--id` session identifier.
 
@@ -148,8 +149,9 @@ streaming updates to the same part. Ordinary answer text is preserved even
 when synthetic or containing the same words as a progress label.
 
 Windows npm installs (`npm install -g @kilocode/cli`, or a project-local install)
-expose `kilo.cmd`. CCCC uses the installed native cache for ACP and TUI when
-available; no manual `kilo.exe` path is needed. For an uncached package, it resolves
+expose `kilo.cmd`. With headless delivery enabled, CCCC uses the installed native
+cache for ACP and TUI when available; no manual `kilo.exe` path is needed. With
+the flag unset or an uncached package, it resolves
 the official entrypoint to Node plus the installed Kilo launcher. That fallback
 requires Node beside the npm shim or on the configured `PATH`.
 Windows CI separately exercises npm installation layouts, literal arguments and

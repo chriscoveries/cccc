@@ -176,7 +176,7 @@ impl AnalystSession {
             Ok(turn_id) => turn_id,
             Err(error)
                 if error.kind() == io::ErrorKind::WouldBlock
-                    || acp::prompt_was_rejected(&error) =>
+                    || (capacity.is_some() && acp::prompt_was_rejected(&error)) =>
             {
                 return Err(error);
             }
