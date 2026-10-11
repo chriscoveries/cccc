@@ -25,6 +25,7 @@ const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MIN_MANAGED_VERSION: (u64, u64, u64) = (1, 18, 14);
 
 pub(super) struct PreparedOpenCode {
+    executable: std::path::PathBuf,
     runtime: super::ActorRuntime,
     launch_prefix: Vec<String>,
     acp_arguments: Vec<String>,
@@ -62,6 +63,7 @@ pub(super) fn prepare(
     let launch_prefix = command::launch_prefix(&executable, name, environment)?;
     let parsed = command::parse_arguments(&configured[1..])?;
     Ok(PreparedOpenCode {
+        executable,
         runtime,
         launch_prefix,
         acp_arguments: parsed.acp_arguments,
@@ -108,6 +110,11 @@ pub(super) async fn launch(
         environment.insert(format!("{prefix}_SERVER_PASSWORD"), password.clone());
         if is_kilo {
             environment.insert("KILO_NO_DAEMON".into(), "1".into());
+            command::configure_native_resources(
+                &prepared.executable,
+                &prepared.launch_prefix,
+                &mut environment,
+            );
         }
         let mut acp_command = prepared.launch_prefix.clone();
         acp_command.push("acp".into());

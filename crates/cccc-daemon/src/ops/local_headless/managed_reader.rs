@@ -95,6 +95,8 @@ pub(crate) async fn verify_claude_reader_release(
         group_id: group.group_id.clone(),
         actor_id: "claude-reader".into(),
         managed: Arc::clone(&managed),
+        lazy_viewer: false,
+        viewer_clients: std::sync::atomic::AtomicUsize::new(0),
         has_terminal: AtomicBool::new(false),
         viewer: Mutex::new(None),
         status: Mutex::new(super::HeadlessStatus {

@@ -23,7 +23,11 @@ pub(super) fn write(_home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let data = string_arg(request, "data")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| OpError::new("invalid_args", "data is required"))?;
-    cccc_runtime::write(&group_id, &actor_id, data.as_bytes()).map_err(runtime_error)?;
+    if !super::super::local_headless::lazy_viewer::interrupt(&group_id, &actor_id, data.as_bytes())
+        .map_err(OpError::io)?
+    {
+        cccc_runtime::write(&group_id, &actor_id, data.as_bytes()).map_err(runtime_error)?;
+    }
     object(json!({"written": data.len()}))
 }
 

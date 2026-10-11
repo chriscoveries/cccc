@@ -172,6 +172,28 @@ fn process_managed_batch(
         finish_jobs(jobs);
         return true;
     }
+    if let Some(reason) = crate::ops::local_headless::lazy_viewer::unresolved_delivery(
+        &group.group_id,
+        &actor.id,
+        &events[0].id,
+    ) {
+        for job in jobs {
+            if let Err(error) = super::runtime_delivery::append_state(
+                home,
+                &group.group_id,
+                &actor.id,
+                &actor.created_at,
+                &job.event.id,
+                super::actor_delivery::delivery_transport(home, group, actor),
+                super::runtime_delivery::DeliveryOutcome::Ambiguous(&reason),
+            ) {
+                tracing::warn!(message = %error.message, "uncertain ACP admission awaits durable ledger record");
+                return false;
+            }
+            super::actor_delivery::release_in_flight(job);
+        }
+        return true;
+    }
     false
 }
 

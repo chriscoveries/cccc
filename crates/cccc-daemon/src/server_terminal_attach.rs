@@ -18,33 +18,52 @@ pub(crate) async fn handle<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut attachment = match tokio::task::spawn_blocking(move || prepare(&home, &request)).await?
-    {
-        Ok(attachment) => attachment,
-        Err(response) => {
-            write_response(stream.get_mut(), &response).await?;
-            return Ok(());
-        }
-    };
+    let (mut attachment, _viewer_lease) =
+        match tokio::task::spawn_blocking(move || prepare(&home, &request)).await? {
+            Ok(attachment) => attachment,
+            Err(response) => {
+                write_response(stream.get_mut(), &response).await?;
+                return Ok(());
+            }
+        };
     let response = attach_response(&attachment);
     write_response(stream.get_mut(), &response).await?;
 
     let input = attachment.input();
     let (read, write) = tokio::io::split(stream);
-    tokio::select! {
+    let result = tokio::select! {
         result = pump_output(write, &mut attachment) => result,
         result = pump_input(read, input, INPUT_WRITE_TIMEOUT) => result,
         changed = shutdown.changed() => {
             changed.ok();
             Ok(())
         }
+    };
+    match result {
+        Err(error)
+            if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                )
+            }) =>
+        {
+            Ok(())
+        }
+        other => other,
     }
 }
 
 fn prepare(
     home: &HomeLayout,
     request: &DaemonRequest,
-) -> Result<TerminalAttachment, DaemonResponse> {
+) -> Result<
+    (
+        TerminalAttachment,
+        Option<crate::ops::local_headless::lazy_viewer::ViewerLease>,
+    ),
+    DaemonResponse,
+> {
     let group_id = non_blank(request, "group_id")
         .ok_or_else(|| DaemonResponse::failure("missing_group_id", "missing group_id"))?;
     let actor_id = non_blank(request, "actor_id")
@@ -77,7 +96,9 @@ fn prepare(
     } else {
         TerminalAttachMode::Control
     };
-    if mode == TerminalAttachMode::Control {
+    let viewer_lease = crate::ops::local_headless::lazy_viewer::acquire(&group_id, &actor_id)
+        .map_err(|error| DaemonResponse::failure("runtime_error", error.to_string()))?;
+    if viewer_lease.is_none() && mode == TerminalAttachMode::Control {
         crate::ops::local_headless::ensure_viewer(&group_id, &actor_id)
             .map_err(|error| DaemonResponse::failure("runtime_error", error.to_string()))?;
     }
@@ -110,7 +131,9 @@ fn prepare(
         }
         (false, None) => cccc_runtime::attach(&group_id, &actor_id, mode, takeover, since),
     };
-    attached.map_err(runtime_error)
+    attached
+        .map(|attachment| (attachment, viewer_lease))
+        .map_err(runtime_error)
 }
 
 fn runtime_error(error: cccc_runtime::RuntimeError) -> DaemonResponse {
@@ -196,7 +219,24 @@ where
         // ownership also cancels the Linux PTY task. Do not replay partial input.
         tokio::time::timeout(
             write_timeout,
-            tokio::task::spawn_blocking(move || writer.write(&data)),
+            tokio::task::spawn_blocking(move || {
+                if data == b"\x03" {
+                    let mut handled = false;
+                    writer.with_writer(|| {
+                        handled = crate::ops::local_headless::lazy_viewer::interrupt(
+                            writer.group_id(),
+                            writer.actor_id(),
+                            &data,
+                        )
+                        .map_err(cccc_runtime::RuntimeError::Io)?;
+                        Ok(())
+                    })?;
+                    if handled {
+                        return Ok(true);
+                    }
+                }
+                writer.write(&data)
+            }),
         )
         .await
         .map_err(|_| anyhow!("terminal input stalled"))?

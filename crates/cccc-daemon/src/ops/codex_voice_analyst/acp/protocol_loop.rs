@@ -837,14 +837,20 @@ fn prompt_admission_error(error: io::Error) -> io::Error {
     ]
     .iter()
     .any(|marker| normalized.contains(marker));
-    io::Error::new(
-        if provider_busy {
-            io::ErrorKind::WouldBlock
-        } else {
-            error.kind()
-        },
-        message,
-    )
+    let rejected_request = message
+        .strip_prefix("ACP request failed: ")
+        .and_then(|reply| serde_json::from_str::<Value>(reply).ok())
+        .and_then(|reply| reply.get("code").and_then(Value::as_i64))
+        .is_some_and(|code| matches!(code, -32602..=-32600));
+    if provider_busy {
+        io::Error::new(io::ErrorKind::WouldBlock, message)
+    } else if rejected_request {
+        // Invalid request/method/params is an explicit protocol rejection.
+        // An internal/provider failure can follow execution: keep it uncertain.
+        io::Error::new(error.kind(), super::PromptRejected(message))
+    } else {
+        error
+    }
 }
 
 #[cfg(test)]
@@ -871,6 +877,14 @@ mod tests {
             r#"ACP request failed: {"code":-32603,"message":"provider failed"}"#,
         ));
         assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(!super::super::prompt_was_rejected(&error));
+        let rejected = prompt_admission_error(io::Error::other(
+            r#"ACP request failed: {"code":-32602,"message":"invalid params"}"#,
+        ));
+        assert!(super::super::prompt_was_rejected(&rejected));
+        assert!(!super::super::prompt_was_rejected(&io::Error::other(
+            "transport lost"
+        )));
     }
 
     #[test]

@@ -11,6 +11,8 @@ mod acp;
 mod claude;
 mod control;
 mod grok;
+#[cfg(all(test, unix))]
+mod headless_fixture;
 mod launch;
 mod launch_claude;
 mod launch_codex;

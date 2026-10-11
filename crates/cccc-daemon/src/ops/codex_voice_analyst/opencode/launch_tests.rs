@@ -137,6 +137,49 @@ fn direct_executables_are_unchanged_and_custom_wrappers_stay_unsupported() {
     }
 }
 
+#[test]
+fn official_kilo_npm_cache_bypasses_the_resident_node_shim() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (shim, script) = npm_install(temp.path(), false);
+    let cached = script.parent().expect("bin").join(".kilo");
+    fs::write(&cached, "native fixture").expect("native cache");
+    for executable in [shim, script] {
+        let prepared = prepare(
+            &[executable.to_string_lossy().into_owned()],
+            &BTreeMap::new(),
+            ActorRuntime::Kilo,
+        )
+        .expect("native npm cache");
+        assert_eq!(prepared.launch_prefix, [cached.to_string_lossy()]);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn kilo_npm_symlink_uses_the_package_cache_and_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (_, script) = npm_install(temp.path(), false);
+    let cached = script.parent().expect("bin").join(".kilo");
+    fs::write(&cached, "native fixture").expect("native cache");
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).expect("bin");
+    let link = bin.join("kilo");
+    std::os::unix::fs::symlink(&script, &link).expect("npm symlink");
+    let override_path = temp.path().join("override-kilo");
+    fs::write(&override_path, "override fixture").expect("override");
+    let environment = BTreeMap::from([(
+        "KILO_BIN_PATH".into(),
+        override_path.to_string_lossy().into_owned(),
+    )]);
+    let prepared = prepare(
+        &[link.to_string_lossy().into_owned()],
+        &environment,
+        ActorRuntime::Kilo,
+    )
+    .expect("override");
+    assert_eq!(prepared.launch_prefix, [override_path.to_string_lossy()]);
+}
+
 /// Exercise the actual Windows process and ConPTY paths, not only argv assembly.
 /// This npm-layout fixture needs Node but no Kilo download, credentials or model.
 #[cfg(windows)]
@@ -248,5 +291,56 @@ require('child_process').spawn(process.execPath, ['-e', worker, ...process.argv.
             "--session",
             "exact-session"
         ])
+    );
+}
+
+#[test]
+fn native_kilo_resources_preserve_a_nonempty_override() {
+    let root = tempfile::tempdir().expect("npm package");
+    let resources = root.path().join("tree-sitter");
+    std::fs::create_dir(&resources).expect("resources");
+    std::fs::write(resources.join("tree-sitter.wasm"), "fixture").expect("wasm");
+    let prefix = vec![root.path().join(".kilo").to_string_lossy().into_owned()];
+    let mut env = BTreeMap::from([("KILO_TREE_SITTER_WASM_DIR".into(), String::new())]);
+    command::configure_native_resources(Path::new(&prefix[0]), &prefix, &mut env);
+    assert_eq!(
+        env["KILO_TREE_SITTER_WASM_DIR"],
+        resources.to_string_lossy()
+    );
+    env.insert(
+        "KILO_TREE_SITTER_WASM_DIR".into(),
+        "chosen/resources".into(),
+    );
+    command::configure_native_resources(Path::new(&prefix[0]), &prefix, &mut env);
+    assert_eq!(env["KILO_TREE_SITTER_WASM_DIR"], "chosen/resources");
+}
+
+#[test]
+fn native_kilo_binary_override_keeps_npm_tree_sitter_resources() {
+    let root = tempfile::tempdir().expect("npm package");
+    let (shim, script) = npm_install(root.path(), false);
+    let resources = script
+        .parent()
+        .expect("script directory")
+        .join("tree-sitter");
+    fs::create_dir(&resources).expect("resources");
+    fs::write(resources.join("tree-sitter.wasm"), "fixture").expect("wasm");
+    let external = root.path().join("custom-native-kilo");
+    fs::write(&external, "fixture").expect("native binary");
+    let mut env = BTreeMap::from([(
+        "KILO_BIN_PATH".into(),
+        external.to_string_lossy().into_owned(),
+    )]);
+    let prepared = prepare(
+        &[shim.to_string_lossy().into_owned()],
+        &env,
+        ActorRuntime::Kilo,
+    )
+    .expect("native override");
+    assert_eq!(prepared.launch_prefix, [external.to_string_lossy()]);
+    command::configure_native_resources(&prepared.executable, &prepared.launch_prefix, &mut env);
+    assert_eq!(
+        env["KILO_TREE_SITTER_WASM_DIR"],
+        resources.to_string_lossy()
     );
 }
