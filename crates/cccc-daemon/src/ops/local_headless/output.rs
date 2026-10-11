@@ -195,8 +195,13 @@ fn complete_turn(session: &Session, message: &Value) {
     // failure out of band (ACP stopReason, a model API error surfaced as an
     // errored assistant message), and reporting "idle" for a rejected turn hid
     // a broken lane behind a healthy one. Classify before settling.
-    match settled.failure {
-        Some(reason) => {
+    //
+    // Cancellation is deliberately NOT a failure. It is usually an operator
+    // interrupt, a cccc cancel_turn, or the owner's Esc, and marking a
+    // deliberate stop as an error would train every reader to ignore the
+    // error state. It stays visible in history without claiming breakage.
+    match settled.outcome {
+        TurnSettle::Failed(reason) => {
             emit(
                 session,
                 "headless.turn.failed",
@@ -208,8 +213,27 @@ fn complete_turn(session: &Session, message: &Value) {
             );
             session.set_status_with_reason("error", None, Some(reason));
         }
-        None => session.set_status("idle", None),
+        TurnSettle::Cancelled => {
+            emit(
+                session,
+                "headless.turn.cancelled",
+                Map::from_iter([
+                    ("turn_id".into(), json!(turn_id)),
+                    ("status".into(), json!(settled.status)),
+                ]),
+            );
+            session.set_status("idle", None);
+        }
+        TurnSettle::Completed => session.set_status("idle", None),
     }
+}
+
+/// How a turn completion settles.
+#[derive(Debug)]
+enum TurnSettle {
+    Completed,
+    Cancelled,
+    Failed(String),
 }
 
 /// Decide how a turn completion settles. `None` means the completion names a
@@ -248,8 +272,8 @@ fn turn_outcome(message: &Value) -> TurnOutcome {
         .pointer("/params/turn/error")
         .filter(|error| !error.is_null())
         .map(error_text);
-    let failure = settle_failure(&status, error);
-    TurnOutcome { status, failure }
+    let outcome = settle_outcome(&status, error);
+    TurnOutcome { status, outcome }
 }
 
 fn error_text(error: &Value) -> String {
@@ -273,15 +297,20 @@ fn error_text(error: &Value) -> String {
 
 struct TurnOutcome {
     status: String,
-    /// The provider-reported cause when the turn did not succeed.
-    failure: Option<String>,
+    outcome: TurnSettle,
 }
 
-fn settle_failure(status: &str, error: Option<String>) -> Option<String> {
-    if status == "completed" {
-        return None;
+fn settle_outcome(status: &str, error: Option<String>) -> TurnSettle {
+    // A cancellation is a deliberate stop, not a fault. `acp/events.rs` and
+    // `claude/transcript.rs` both publish "cancelled" for an operator
+    // interrupt, so it must not read as an error.
+    if matches!(status, "cancelled" | "canceled" | "interrupted") {
+        return TurnSettle::Cancelled;
     }
-    Some(error.unwrap_or_else(|| match status {
+    if status == "completed" && error.is_none() {
+        return TurnSettle::Completed;
+    }
+    TurnSettle::Failed(error.unwrap_or_else(|| match status {
         "failed" => "provider reported the turn failed without a reason".to_owned(),
         other => format!("turn ended with status {other}"),
     }))
@@ -360,13 +389,18 @@ mod tests {
         );
     }
     /// Classify a completion the way `complete_turn` does, including the
-    /// turn-id guard. Returns (status, reason) on failure and None when the
-    /// turn settles successfully.
-    fn classify(active_turn_id: &str, message: Value) -> Option<(String, String)> {
+    /// turn-id guard. `None` means the turn was ignored; otherwise the settle
+    /// decision, with the reported status for context.
+    fn classify(active_turn_id: &str, message: Value) -> Option<(TurnSettle, String)> {
         let outcome = settle_decision(active_turn_id, &message)?;
-        outcome
-            .failure
-            .map(|reason| (outcome.status, reason))
+        Some((outcome.outcome, outcome.status))
+    }
+
+    fn failed_reason(settled: &(TurnSettle, String)) -> &str {
+        match &settled.0 {
+            TurnSettle::Failed(reason) => reason,
+            other => panic!("expected a failure, got {other:?}"),
+        }
     }
 
     // Claude publishes status+error via claude/transcript.rs settle_turn.
@@ -375,7 +409,6 @@ mod tests {
     const CLAUDE_FAILED: &str = r#"{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"failed","error":"ACP turn stopped: provider_error"}}}"#;
     const ACP_OPENCODE_FAILED: &str = r#"{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"failed","error":"ACP turn stopped: max_tokens"}}}"#;
     const CODEX_FAILED: &str = r#"{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"failed","error":{"message":"reasoning encrypted_content was not issued to this caller","code":"api_error"}}}}"#;
-    const KILO_CANCELLED: &str = r#"{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"cancelled","error":null}}}"#;
 
     #[test]
     fn a_failed_completion_is_reported_as_a_failure_with_its_reason() {
@@ -384,66 +417,97 @@ mod tests {
             ("opencode", ACP_OPENCODE_FAILED, "ACP turn stopped"),
             ("codex", CODEX_FAILED, "encrypted_content"),
         ] {
-            let (status, reason) =
-                classify("turn-1", json!(fixture_parse(fixture))).expect("failure");
-            assert_eq!(status, "failed", "{runtime}");
-            assert!(reason.contains(expected), "{runtime} reason was {reason:?}");
+            let settled = classify("turn-1", json!(fixture_parse(fixture))).expect("settled");
+            assert!(matches!(settled.0, TurnSettle::Failed(_)), "{runtime}");
+            assert!(
+                failed_reason(&settled).contains(expected),
+                "{runtime} reason was {:?}",
+                failed_reason(&settled)
+            );
         }
     }
 
+    /// A deliberate cancel is not a fault. It settles idle, never error, so the
+    /// error state keeps meaning "this lane is broken".
     #[test]
-    fn a_cancelled_completion_is_a_failure_and_not_a_success() {
-        let (status, reason) =
-            classify("turn-1", json!(fixture_parse(KILO_CANCELLED))).expect("failure");
-        assert_eq!(status, "cancelled");
-        assert_eq!(reason, "turn ended with status cancelled");
+    fn a_cancelled_completion_settles_idle_and_is_not_an_error() {
+        for status in ["cancelled", "canceled", "interrupted"] {
+            let fixture = json!({
+                "method": "turn/completed",
+                "params": {"turn": {"id": "turn-1", "status": status, "error": null}}
+            });
+            let settled = classify("turn-1", fixture).expect("settled");
+            assert!(
+                matches!(settled.0, TurnSettle::Cancelled),
+                "{status} must not settle as a failure, got {:?}",
+                settled.0
+            );
+        }
+        // A cancellation carrying an error text is still a cancellation.
+        let settled = classify(
+            "turn-1",
+            json!(fixture_parse(
+                r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"cancelled","error":"operator interrupt"}}}"#
+            )),
+        )
+        .expect("settled");
+        assert!(matches!(settled.0, TurnSettle::Cancelled));
     }
 
     #[test]
     fn a_successful_completion_settles_idle() {
-        assert!(
-            classify(
-                "turn-1",
-                json!(fixture_parse(
-                    r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed","error":null}}}"#
-                ))
-            )
-            .is_none()
-        );
-        // A provider that reports no status at all is not claiming failure.
-        assert!(
-            classify(
-                "turn-1",
-                json!(fixture_parse(r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}"#))
-            )
-            .is_none()
-        );
+        for fixture in [
+            r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed","error":null}}}"#,
+            // A provider that reports no status at all is not claiming failure.
+            r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}"#,
+        ] {
+            let settled = classify("turn-1", json!(fixture_parse(fixture))).expect("settled");
+            assert!(
+                matches!(settled.0, TurnSettle::Completed),
+                "expected completed, got {:?}",
+                settled.0
+            );
+        }
+    }
+
+    /// "completed" plus an error is a contradiction; trust the error rather
+    /// than reporting a turn that carried a failure as a success.
+    #[test]
+    fn a_completed_status_carrying_an_error_still_fails() {
+        let settled = classify(
+            "turn-1",
+            json!(fixture_parse(
+                r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed","error":"partial failure"}}}"#
+            )),
+        )
+        .expect("settled");
+        assert!(matches!(settled.0, TurnSettle::Failed(_)));
+        assert_eq!(failed_reason(&settled), "partial failure");
     }
 
     #[test]
     fn a_failed_turn_that_reports_no_reason_still_fails_loudly() {
-        let (_, reason) = classify(
+        let settled = classify(
             "turn-1",
             json!(fixture_parse(
                 r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"failed"}}}"#
             )),
         )
-        .expect("failure");
+        .expect("settled");
         assert_eq!(
-            reason,
+            failed_reason(&settled),
             "provider reported the turn failed without a reason"
         );
     }
 
     #[test]
     fn a_completion_for_another_turn_is_ignored_whatever_its_outcome() {
-        let failing = fixture_parse(
+        for fixture in [
             r#"{"method":"turn/completed","params":{"turn":{"id":"turn-other","status":"failed","error":"wrong turn"}}}"#,
-        );
-        let succeeding =
-            fixture_parse(r#"{"method":"turn/completed","params":{"turn":{"id":"turn-other","status":"completed"}}}"#);
-        for message in [failing, succeeding] {
-            assert!(classify("turn-main", json!(message)).is_none());
+            r#"{"method":"turn/completed","params":{"turn":{"id":"turn-other","status":"completed"}}}"#,
+            r#"{"method":"turn/completed","params":{"turn":{"id":"turn-other","status":"cancelled"}}}"#,
+        ] {
+            assert!(classify("turn-main", json!(fixture_parse(fixture))).is_none());
         }
     }
 
@@ -451,18 +515,17 @@ mod tests {
     /// successful completion settles it back to idle.
     #[test]
     fn a_successful_turn_after_a_failed_one_clears_the_error() {
+        let failed = classify("turn-1", json!(fixture_parse(CODEX_FAILED))).expect("settled");
+        assert!(matches!(failed.0, TurnSettle::Failed(_)));
+        let recovered = classify(
+            "turn-2",
+            json!(fixture_parse(
+                r#"{"method":"turn/completed","params":{"turn":{"id":"turn-2","status":"completed"}}}"#
+            )),
+        )
+        .expect("settled");
         assert!(
-            classify("turn-1", json!(fixture_parse(CODEX_FAILED)))
-                .is_some_and(|(_, reason)| reason.contains("encrypted_content"))
-        );
-        assert!(
-            classify(
-                "turn-2",
-                json!(fixture_parse(
-                    r#"{"method":"turn/completed","params":{"turn":{"id":"turn-2","status":"completed"}}}"#
-                ))
-            )
-            .is_none(),
+            matches!(recovered.0, TurnSettle::Completed),
             "the next successful turn must settle idle, clearing the stale reason"
         );
     }
