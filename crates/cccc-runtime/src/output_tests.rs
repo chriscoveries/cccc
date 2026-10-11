@@ -1,6 +1,48 @@
 use super::OutputBuffer;
 
 #[test]
+fn tiny_writes_keep_all_bytes_without_one_allocation_per_read() {
+    let mut output = OutputBuffer::with_capacity_at(128 * 1024, 40);
+    let mut expected = Vec::new();
+    for i in 0..200_000_u32 {
+        let byte = b'a' + (i % 26) as u8;
+        output.push(&[byte]);
+        expected.push(byte);
+    }
+    let retained = &expected[expected.len() - 128 * 1024..];
+    let page = output.page(None, retained.len());
+    assert_eq!(page.data.as_bytes(), retained);
+    assert_eq!(
+        page.start_cursor,
+        40 + (expected.len() - retained.len()) as u64
+    );
+    assert_eq!(page.end_cursor, 40 + expected.len() as u64);
+    let allocated = output.chunks.capacity() * std::mem::size_of::<Vec<u8>>()
+        + output.chunks.iter().map(Vec::capacity).sum::<usize>();
+    assert!(
+        allocated <= 140 * 1024,
+        "tiny writes retain {allocated} bytes for a 128KiB history"
+    );
+}
+
+#[test]
+fn oversized_write_keeps_only_a_bounded_allocation_for_the_tail() {
+    let mut output = OutputBuffer::with_capacity_at(1024, 42);
+    output.push(&vec![b'x'; 1024 * 1024]);
+    let allocated = output.chunks.capacity() * std::mem::size_of::<Vec<u8>>()
+        + output.chunks.iter().map(Vec::capacity).sum::<usize>()
+        + output.mode_probe.capacity();
+    assert!(
+        allocated <= 12 * 1024,
+        "an oversized write retains {allocated} allocated bytes"
+    );
+    let page = output.page(None, 1024);
+    assert_eq!(page.data, "x".repeat(1024));
+    assert_eq!(page.end_cursor, 42 + 1024 * 1024);
+    assert_eq!(page.start_cursor, page.end_cursor - 1024);
+}
+
+#[test]
 fn history_uses_absolute_cursors() {
     let mut output = OutputBuffer::default();
     output.push(b"hello");
