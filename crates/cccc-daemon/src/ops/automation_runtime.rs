@@ -134,16 +134,98 @@ fn tick_actor_memory(home: &HomeLayout, group_id: &str, cancelled: &AtomicBool) 
     }
 }
 
-/// Actors whose managed session is idle. Waiting Mail reaches them promptly;
-/// actors that are working, waiting on approval, or whose state is unknown (no
-/// managed session) keep the longer interruption-avoiding delay. Delivery
-/// rechecks this at admission, since the Actor may start work in between.
+/// How long a plain PTY lane's output must have been quiet, with no newer
+/// input, before Mail and card notices treat it as idle. Long enough that a
+/// TUI thinking silently between bursts is not interrupted.
+const PTY_NOTICE_QUIET: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Actors that are idle. Waiting Mail reaches them promptly and held cards
+/// remind them; actors that are working, waiting on approval, or whose state
+/// is unknown keep the longer interruption-avoiding delay. A managed session
+/// reports its own turn state; a plain PTY lane counts as idle once its
+/// output has been quiet for `PTY_NOTICE_QUIET` with no newer input. Managed
+/// delivery rechecks this at admission, since the Actor may start work in
+/// between.
 fn idle_actor_ids(group_id: &str, actor_ids: &HashSet<String>) -> HashSet<String> {
     actor_ids
         .iter()
-        .filter(|actor_id| super::local_headless::ready_for_mail_notice(group_id, actor_id))
+        .filter(|actor_id| {
+            let managed = super::local_headless::running(group_id, actor_id);
+            notice_idle(
+                managed,
+                managed && super::local_headless::ready_for_mail_notice(group_id, actor_id),
+                (!managed)
+                    .then(|| cccc_runtime::activity(group_id, actor_id).ok())
+                    .flatten()
+                    .as_ref(),
+            )
+        })
         .cloned()
         .collect()
+}
+
+/// Idle decision for one actor. A managed session decides alone, so its PTY
+/// tracker never overrides a live turn; a PTY lane needs a readable activity
+/// snapshot showing quiet output and no input newer than that output.
+///
+/// The quiet test duplicates `actor_memory::pty_quiet_for` (T474) on purpose:
+/// this branch must build without that module, which rides a different queue
+/// entry. When both land, delete this copy and call that one.
+fn notice_idle(
+    managed: bool,
+    managed_ready: bool,
+    pty: Option<&cccc_runtime::ActivitySnapshot>,
+) -> bool {
+    if managed {
+        return managed_ready;
+    }
+    pty.is_some_and(|snapshot| {
+        let quiet = PTY_NOTICE_QUIET;
+        let Some(output) = &snapshot.last_output else {
+            return false;
+        };
+        if output.age < quiet {
+            return false;
+        }
+        match &snapshot.last_input {
+            None => true,
+            Some(input) => input.age >= output.age,
+        }
+    })
+}
+
+/// Announce a Mail just written at once to its recipients that are idle, rather
+/// than on the next unread tick, up to a minute away. Recipients that work, or
+/// have no managed session, keep the tick's delays. Runs under the Group write
+/// permit of the send, which the tick also takes, so the two never both notify.
+pub fn notify_idle_mail_recipients(home: &HomeLayout, group: &GroupDoc, mail: &Event) {
+    notify_idle_mail_recipients_with(home, group, mail, |actor_id| {
+        super::local_headless::ready_for_mail_notice(&group.group_id, actor_id)
+    });
+}
+
+fn notify_idle_mail_recipients_with(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    mail: &Event,
+    idle: impl Fn(&str) -> bool,
+) {
+    let recipients = actors::visible(group)
+        .filter(|actor| {
+            actor.enabled && actor.id != mail.by && inbox::is_for_actor(group, mail, &actor.id)
+        })
+        .map(|actor| actor.id.clone())
+        .filter(|actor_id| idle(actor_id))
+        .collect::<HashSet<_>>();
+    if recipients.is_empty() {
+        return;
+    }
+    match cccc_core::automation::notify_idle_mail(home, &group.group_id, &recipients) {
+        Ok(result) => apply(home, result, &AtomicBool::new(false)),
+        Err(error) => {
+            tracing::warn!(%error, group_id = %group.group_id, "idle Mail notice failed");
+        }
+    }
 }
 
 fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
@@ -437,8 +519,56 @@ mod tests {
     }
 
     #[test]
-    fn actors_without_a_managed_session_are_never_treated_as_idle() {
-        // No session reports a finished turn, so Mail keeps the longer delay.
+    fn written_mail_is_announced_at_once_only_to_its_idle_recipients() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("Mail now", "").expect("group");
+        store
+            .mutate(&group.group_id, |group| {
+                group.state = cccc_contracts::GroupState::Active;
+                for id in ["lead", "peer", "busy", "bystander"] {
+                    actors::add(group, Actor::new(id))?;
+                }
+                Ok(())
+            })
+            .expect("group");
+        let group = store.load(&group.group_id).expect("group");
+        let ledger = store.ledger_path(&group.group_id).expect("ledger");
+        let mail = |to: serde_json::Value| {
+            let mut mail = Event::new("chat.message", &group.group_id);
+            mail.by = "lead".into();
+            mail.data = json!({"text":"review","to":to,"message_mode":"mail"})
+                .as_object()
+                .cloned()
+                .expect("mail");
+            cccc_core::ledger::append(&ledger, &mail).expect("Mail");
+            mail
+        };
+        // The bystander has its own fresh unread Mail, still inside its idle delay.
+        mail(json!(["bystander"]));
+        let written = mail(json!(["peer", "busy"]));
+
+        // Everyone but `busy` is idle, the sender included.
+        notify_idle_mail_recipients_with(&home, &group, &written, |actor_id| actor_id != "busy");
+
+        let notices = cccc_core::ledger::read_all(&ledger)
+            .expect("events")
+            .into_iter()
+            .filter(|event| event.kind == "system.notify" && event.data["kind"] == "mail_notice")
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].data["context"]["actor_id"], "peer");
+        assert_eq!(
+            notices[0].data["context"]["source_event_ids"],
+            json!([written.id])
+        );
+    }
+
+    #[test]
+    fn actors_without_any_readable_session_are_never_treated_as_idle() {
+        // No managed session reports a finished turn and no PTY tracker shows
+        // quiet output, so Mail keeps the longer delay.
         let actors = HashSet::from(["pty-peer".to_owned(), "stopped-peer".to_owned()]);
         assert!(idle_actor_ids("g_no_sessions", &actors).is_empty());
     }
@@ -538,5 +668,53 @@ mod tests {
                 Ok(())
             })
             .expect("automation rule");
+    }
+}
+
+
+#[cfg(test)]
+mod notice_idle_tests {
+    use super::notice_idle;
+    use cccc_runtime::{ActivityInstant, ActivitySnapshot};
+    use std::time::{Duration, SystemTime};
+
+    fn snapshot(out_age_secs: Option<u64>, in_age_secs: Option<u64>) -> ActivitySnapshot {
+        let instant = |age: u64| ActivityInstant {
+            at: SystemTime::now(),
+            age: Duration::from_secs(age),
+        };
+        ActivitySnapshot {
+            last_output: out_age_secs.map(instant),
+            last_input: in_age_secs.map(instant),
+            recent_output: Vec::new(),
+            output_bytes_since_input: 0,
+        }
+    }
+
+    #[test]
+    fn managed_session_decides_alone() {
+        let quiet = snapshot(Some(600), None);
+        assert!(notice_idle(true, true, None));
+        // A busy managed turn is never overridden by a quiet PTY tracker.
+        assert!(!notice_idle(true, false, Some(&quiet)));
+    }
+
+    #[test]
+    fn quiet_pty_lane_is_idle() {
+        assert!(notice_idle(false, false, Some(&snapshot(Some(121), None))));
+        // Input older than the last output was answered: still idle.
+        assert!(notice_idle(false, false, Some(&snapshot(Some(200), Some(400)))));
+    }
+
+    #[test]
+    fn recent_output_or_newer_input_is_not_idle() {
+        assert!(!notice_idle(false, false, Some(&snapshot(Some(30), None))));
+        // A delivery newer than the last output: the TUI has not answered yet.
+        assert!(!notice_idle(false, false, Some(&snapshot(Some(300), Some(10)))));
+    }
+
+    #[test]
+    fn unreadable_tracker_is_not_idle() {
+        assert!(!notice_idle(false, false, None));
     }
 }
