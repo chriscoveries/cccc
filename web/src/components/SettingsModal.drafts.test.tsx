@@ -52,6 +52,8 @@ const settings: GroupSettings = {
   terminal_transcript_visibility: "foreman",
   terminal_transcript_notify_tail: false,
   terminal_transcript_notify_lines: 20,
+  task_wake_on_idle: false,
+  task_wake_interval_seconds: 60,
 };
 
 describe("settings draft and save continuity", () => {
