@@ -31,6 +31,8 @@
   "sendInterruptLabel": "发送中断信号",
   "relaunch": "重启",
   "relaunchAgent": "重启智能体",
+  "resumeSession": "恢复会话…",
+  "resumeSessionPrompt": "已保存的 Claude 会话 ID（UUID）",
   "newSession": "新会话",
   "newSessionAgent": "启动新会话",
   "newSessionConfirm": "要为这个 actor 启动一个新的会话吗？",
