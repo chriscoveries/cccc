@@ -552,14 +552,9 @@ fn card_wake_is_off_unless_the_group_opts_in() {
 
     let eligible = HashSet::from(["peer".to_owned()]);
     let idle = HashSet::from(["peer".to_owned()]);
-    let result = automation::tick_group_with_idle_actors(
-        &home,
-        &group.group_id,
-        true,
-        &eligible,
-        &idle,
-    )
-    .expect("tick");
+    let result =
+        automation::tick_group_with_idle_actors(&home, &group.group_id, true, &eligible, &idle)
+            .expect("tick");
     assert!(
         !result
             .notifications
@@ -579,7 +574,9 @@ fn card_wake_skips_cards_that_are_not_the_actors_to_move() {
         .mutate(&group.group_id, |group| {
             group.state = GroupState::Active;
             actors::add(group, Actor::new("peer"))?;
-            group.extra.insert("delivery".into(), json!({"task_wake_on_idle":true}));
+            group
+                .extra
+                .insert("delivery".into(), json!({"task_wake_on_idle":true}));
             Ok(())
         })
         .expect("actor");
@@ -661,8 +658,9 @@ fn card_wake_waits_for_the_quiet_interval_before_reminding() {
 
     let eligible = HashSet::from(["peer".to_owned()]);
     let idle = HashSet::from(["peer".to_owned()]);
-    let result = automation::tick_group_with_idle_actors(&home, &group.group_id, true, &eligible, &idle)
-        .expect("tick");
+    let result =
+        automation::tick_group_with_idle_actors(&home, &group.group_id, true, &eligible, &idle)
+            .expect("tick");
     assert!(
         !result
             .notifications

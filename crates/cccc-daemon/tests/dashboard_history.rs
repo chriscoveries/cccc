@@ -285,29 +285,66 @@ fn dashboard_big_ledger_has_bounded_peak_rss() {
 #[test]
 fn review_status_first_reply_is_independent_of_requested_page_ids() {
     let temp = tempfile::tempdir().expect("valid status parity fixture");
-    let home = HomeLayout::from_path(temp.path().join("home")).expect("valid status parity fixture");
+    let home =
+        HomeLayout::from_path(temp.path().join("home")).expect("valid status parity fixture");
     home.initialize().expect("valid status parity fixture");
-    let created = call(&home, "group_create", json!({"title":"status dependency review"}));
-    let id = created["group"]["group_id"].as_str().expect("valid status parity fixture");
+    let created = call(
+        &home,
+        "group_create",
+        json!({"title":"status dependency review"}),
+    );
+    let id = created["group"]["group_id"]
+        .as_str()
+        .expect("valid status parity fixture");
     call(&home, "group_stop", json!({"group_id":id,"by":"user"}));
-    call(&home, "actor_add", json!({"group_id":id,"actor_id":"peer","by":"user"}));
-    let path = GroupStore::new(home.clone()).expect("valid status parity fixture").ledger_path(id).expect("valid status parity fixture");
+    call(
+        &home,
+        "actor_add",
+        json!({"group_id":id,"actor_id":"peer","by":"user"}),
+    );
+    let path = GroupStore::new(home.clone())
+        .expect("valid status parity fixture")
+        .ledger_path(id)
+        .expect("valid status parity fixture");
     let mut source = Event::new("chat.message", id);
     source.by = "user".into();
-    source.data = json!({"to":["peer"],"text":"request","message_mode":"request_reply"}).as_object().expect("valid status parity fixture").clone();
+    source.data = json!({"to":["peer"],"text":"request","message_mode":"request_reply"})
+        .as_object()
+        .expect("valid status parity fixture")
+        .clone();
     let mut reply = Event::new("chat.message", id);
     reply.by = "peer".into();
-    reply.data = json!({"reply_to":source.id,"to":["user"],"text":"first reply","message_mode":"send"}).as_object().expect("valid status parity fixture").clone();
+    reply.data =
+        json!({"reply_to":source.id,"to":["user"],"text":"first reply","message_mode":"send"})
+            .as_object()
+            .expect("valid status parity fixture")
+            .clone();
     let mut cancel = Event::new("chat.reply_request.cancelled", id);
-    cancel.data = json!({"source_event_id":source.id}).as_object().expect("valid status parity fixture").clone();
+    cancel.data = json!({"source_event_id":source.id})
+        .as_object()
+        .expect("valid status parity fixture")
+        .clone();
     for event in [&source, &reply, &cancel, &reply] {
         cccc_core::ledger::append(&path, event).expect("valid status parity fixture");
     }
-    let source_only = call(&home, "ledger_statuses", json!({"group_id":id,"event_ids":[source.id]}));
-    let both = call(&home, "ledger_statuses", json!({"group_id":id,"event_ids":[source.id,reply.id]}));
+    let source_only = call(
+        &home,
+        "ledger_statuses",
+        json!({"group_id":id,"event_ids":[source.id]}),
+    );
+    let both = call(
+        &home,
+        "ledger_statuses",
+        json!({"group_id":id,"event_ids":[source.id,reply.id]}),
+    );
     let source_status = &source_only["statuses"][&source.id];
     assert_eq!(source_status["obligation_status"]["peer"]["replied"], true);
-    assert_eq!(source_status["obligation_status"]["peer"]["cancelled"], false);
-    assert_eq!(source_status, &both["statuses"][&source.id],
-        "requesting another page record must not change which reply preceded cancellation");
+    assert_eq!(
+        source_status["obligation_status"]["peer"]["cancelled"],
+        false
+    );
+    assert_eq!(
+        source_status, &both["statuses"][&source.id],
+        "requesting another page record must not change which reply preceded cancellation"
+    );
 }

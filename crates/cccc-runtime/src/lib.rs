@@ -62,10 +62,10 @@ pub use manager::{
     submit, submit_interruptible, submit_sequence_interruptible, wait_for_input_ready, write,
 };
 pub use output::HistoryPage;
+pub use process_tree::leftover::{TaggedProcess, scan_tagged_processes, terminate_process};
 #[cfg(unix)]
 pub use process_tree::protect_owned_process_groups;
 pub use process_tree::{OwnedProcessTree, force_terminate_owned, owned_process_recovery_pending};
-pub use process_tree::leftover::{TaggedProcess, scan_tagged_processes, terminate_process};
 pub use session::{LaunchSpec, SessionStatus};
 pub use terminal_attach::{TerminalAttachMode, TerminalAttachment, TerminalInput, TerminalOutput};
 pub use terminal_initial_output::{TerminalInitialOutput, TerminalInitialOutputKind};

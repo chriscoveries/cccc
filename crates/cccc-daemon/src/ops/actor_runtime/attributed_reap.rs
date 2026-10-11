@@ -16,7 +16,7 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use nix::errno::Errno;
 #[cfg(target_os = "linux")]
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::{Signal, kill};
 #[cfg(target_os = "linux")]
 use nix::unistd::Pid;
 

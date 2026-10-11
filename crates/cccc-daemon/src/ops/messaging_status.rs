@@ -87,9 +87,7 @@ impl StatusSnapshot<'_> {
             sequence += 1;
             let source = event.data.get("source_event_id").and_then(Value::as_str);
             let reply = event.data.get("reply_to").and_then(Value::as_str);
-            if requested.contains(event.id.as_str())
-                || cursor_ids.contains(event.id.as_str())
-            {
+            if requested.contains(event.id.as_str()) || cursor_ids.contains(event.id.as_str()) {
                 retained.insert(format!("id:{}", event.id), (position, event.clone()));
             }
             // Page records and outcome dependencies have independent retention.
