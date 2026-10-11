@@ -1,6 +1,90 @@
 use super::OutputBuffer;
 
 #[test]
+fn tiny_writes_keep_all_bytes_without_one_allocation_per_read() {
+    let mut output = OutputBuffer::with_capacity_at(128 * 1024, 40);
+    let mut expected = Vec::new();
+    for i in 0..200_000_u32 {
+        let byte = b'a' + (i % 26) as u8;
+        output.push(&[byte]);
+        expected.push(byte);
+    }
+    let retained = &expected[expected.len() - 128 * 1024..];
+    let page = output.page(None, retained.len());
+    assert_eq!(page.data.as_bytes(), retained);
+    assert_eq!(
+        page.start_cursor,
+        40 + (expected.len() - retained.len()) as u64
+    );
+    assert_eq!(page.end_cursor, 40 + expected.len() as u64);
+    let allocated = output.chunks.capacity() * std::mem::size_of::<Vec<u8>>()
+        + output.chunks.iter().map(Vec::capacity).sum::<usize>();
+    assert!(
+        allocated <= 140 * 1024,
+        "tiny writes retain {allocated} bytes for a 128KiB history"
+    );
+}
+
+#[test]
+fn oversized_write_keeps_only_a_bounded_allocation_for_the_tail() {
+    let mut output = OutputBuffer::with_capacity_at(1024, 42);
+    output.push(&vec![b'x'; 1024 * 1024]);
+    let allocated = output.chunks.capacity() * std::mem::size_of::<Vec<u8>>()
+        + output.chunks.iter().map(Vec::capacity).sum::<usize>()
+        + output.mode_probe.capacity();
+    assert!(
+        allocated <= 12 * 1024,
+        "an oversized write retains {allocated} allocated bytes"
+    );
+    let page = output.page(None, 1024);
+    assert_eq!(page.data, "x".repeat(1024));
+    assert_eq!(page.end_cursor, 42 + 1024 * 1024);
+    assert_eq!(page.start_cursor, page.end_cursor - 1024);
+}
+
+#[test]
+fn block_boundaries_partial_eviction_and_trim_keep_exact_raw_cursors() {
+    let mut output = OutputBuffer::with_capacity_at(8193, 42);
+    let mut expected = Vec::new();
+    let mut end = 42_u64;
+    for length in [4095, 2, 4096, 1, 4095, 33, 8192, 16384, 7] {
+        let data: Vec<u8> = (0..length).map(|i| (i % 251) as u8).collect();
+        output.push(&data);
+        end += data.len() as u64;
+        expected.extend_from_slice(&data);
+        expected = expected[expected.len().saturating_sub(8193)..].to_vec();
+        let page = output.raw_retained_since(None);
+        assert_eq!(page.data, expected);
+        assert_eq!(page.end_cursor, end);
+        assert_eq!(page.start_cursor, end - expected.len() as u64);
+        let tail = output.raw_page_since(end - 5, 3);
+        assert_eq!(tail.data, expected[expected.len() - 5..expected.len() - 2]);
+    }
+    output.trim_to(4097);
+    expected = expected[expected.len() - 4097..].to_vec();
+    output.push(b"after trim");
+    expected.extend_from_slice(b"after trim");
+    assert_eq!(output.raw_retained_since(None).data, expected);
+    output.clear();
+    output.push(b"after clear");
+    let page = output.raw_retained_since(None);
+    assert_eq!(page.data, b"after clear");
+    assert_eq!(page.start_cursor, end + b"after trim".len() as u64);
+}
+
+#[test]
+fn mode_probe_observes_discarded_prefix_and_split_modes_in_large_writes() {
+    let mut output = OutputBuffer::with_capacity_at(16, 0);
+    let mut data = b"\x1b[?2004h".to_vec();
+    data.extend(std::iter::repeat_n(b'x', 16_384));
+    data.extend_from_slice(b"\x1b[?20");
+    output.push(&data);
+    assert!(output.bracketed_paste_enabled());
+    output.push(b"04l");
+    assert!(!output.bracketed_paste_enabled());
+}
+
+#[test]
 fn history_uses_absolute_cursors() {
     let mut output = OutputBuffer::default();
     output.push(b"hello");
