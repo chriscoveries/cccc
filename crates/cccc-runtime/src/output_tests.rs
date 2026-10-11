@@ -43,6 +43,48 @@ fn oversized_write_keeps_only_a_bounded_allocation_for_the_tail() {
 }
 
 #[test]
+fn block_boundaries_partial_eviction_and_trim_keep_exact_raw_cursors() {
+    let mut output = OutputBuffer::with_capacity_at(8193, 42);
+    let mut expected = Vec::new();
+    let mut end = 42_u64;
+    for length in [4095, 2, 4096, 1, 4095, 33, 8192, 16384, 7] {
+        let data: Vec<u8> = (0..length).map(|i| (i % 251) as u8).collect();
+        output.push(&data);
+        end += data.len() as u64;
+        expected.extend_from_slice(&data);
+        expected = expected[expected.len().saturating_sub(8193)..].to_vec();
+        let page = output.raw_retained_since(None);
+        assert_eq!(page.data, expected);
+        assert_eq!(page.end_cursor, end);
+        assert_eq!(page.start_cursor, end - expected.len() as u64);
+        let tail = output.raw_page_since(end - 5, 3);
+        assert_eq!(tail.data, expected[expected.len() - 5..expected.len() - 2]);
+    }
+    output.trim_to(4097);
+    expected = expected[expected.len() - 4097..].to_vec();
+    output.push(b"after trim");
+    expected.extend_from_slice(b"after trim");
+    assert_eq!(output.raw_retained_since(None).data, expected);
+    output.clear();
+    output.push(b"after clear");
+    let page = output.raw_retained_since(None);
+    assert_eq!(page.data, b"after clear");
+    assert_eq!(page.start_cursor, end + b"after trim".len() as u64);
+}
+
+#[test]
+fn mode_probe_observes_discarded_prefix_and_split_modes_in_large_writes() {
+    let mut output = OutputBuffer::with_capacity_at(16, 0);
+    let mut data = b"\x1b[?2004h".to_vec();
+    data.extend(std::iter::repeat_n(b'x', 16_384));
+    data.extend_from_slice(b"\x1b[?20");
+    output.push(&data);
+    assert!(output.bracketed_paste_enabled());
+    output.push(b"04l");
+    assert!(!output.bracketed_paste_enabled());
+}
+
+#[test]
 fn history_uses_absolute_cursors() {
     let mut output = OutputBuffer::default();
     output.push(b"hello");
