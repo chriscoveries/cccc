@@ -163,3 +163,105 @@ fn running_pty_actor_without_a_session_reports_unknown_with_null_idle() {
     assert!(state["idle_seconds"].is_null());
     assert!(state["effective_working_updated_at"].is_null());
 }
+
+#[test]
+fn pty_busy_fails_open_without_a_session() {
+    // No session, no output: first deliveries must still go out.
+    assert!(!super::working_state::pty_busy(
+        "g_no_such_group",
+        "no_such_actor"
+    ));
+}
+
+#[test]
+fn pty_busy_tracks_live_output() {
+    let group_id = format!("g_pty_busy_{}", uuid::Uuid::new_v4().simple());
+    struct Cleanup(String, String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = cccc_runtime::stop(&self.0, &self.1);
+        }
+    }
+    let cwd = tempfile::tempdir().expect("tempdir");
+    // A chatty session counts as busy while it emits.
+    cccc_runtime::start(cccc_runtime::LaunchSpec {
+        group_id: group_id.clone(),
+        actor_id: "chatty".into(),
+        runner: cccc_contracts::RunnerKind::Pty,
+        command: vec![
+            "sh".into(),
+            "-c".into(),
+            "while true; do echo BUSY_LINE; sleep 0.05; done".into(),
+        ],
+        cwd: cwd.path().to_owned(),
+        env: Default::default(),
+        cols: 80,
+        rows: 24,
+    })
+    .expect("chatty PTY session");
+    let _chatty = Cleanup(group_id.clone(), "chatty".into());
+    // Feed it once: only fed lanes ever hold, so startup prompts stay free.
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    assert!(
+        cccc_runtime::submit_sequence_interruptible(
+            &group_id,
+            "chatty",
+            b"FEED",
+            &[],
+            Duration::ZERO,
+            Duration::ZERO,
+            &cancelled,
+        )
+        .expect("feed chatty lane"),
+        "feed write must succeed"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    // Deliveries within the grace window go out unchanged; the hold only
+    // engages for spaced-out writes into ongoing output.
+    assert!(
+        !super::working_state::pty_busy(&group_id, "chatty"),
+        "grace window must not hold"
+    );
+    std::thread::sleep(super::working_state::HOLD_AFTER_FEED_GRACE + Duration::from_secs(1));
+    loop {
+        if super::working_state::pty_busy(&group_id, "chatty") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "emitting fed session must read busy past the grace"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // A silent session never does, even once fed.
+    cccc_runtime::start(cccc_runtime::LaunchSpec {
+        group_id: group_id.clone(),
+        actor_id: "quiet".into(),
+        runner: cccc_contracts::RunnerKind::Pty,
+        command: vec!["sleep".into(), "30".into()],
+        cwd: cwd.path().to_owned(),
+        env: Default::default(),
+        cols: 80,
+        rows: 24,
+    })
+    .expect("quiet PTY session");
+    let _quiet = Cleanup(group_id.clone(), "quiet".into());
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        cccc_runtime::submit_sequence_interruptible(
+            &group_id,
+            "quiet",
+            b"FEED",
+            &[],
+            Duration::ZERO,
+            Duration::ZERO,
+            &cancelled,
+        )
+        .expect("feed quiet lane"),
+        "feed write must succeed"
+    );
+    assert!(
+        !super::working_state::pty_busy(&group_id, "quiet"),
+        "silent fed session must not read busy"
+    );
+}

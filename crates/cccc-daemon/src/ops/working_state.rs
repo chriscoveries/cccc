@@ -10,6 +10,10 @@ pub(crate) const PTY_ACTIVE_WINDOW: Duration = Duration::from_secs(30);
 /// Output volume within the window that counts as substantive on its own.
 /// Override with `CCCC_PTY_ACTIVE_MIN_BYTES` (1..=1048576).
 pub(crate) const PTY_SUBSTANTIVE_OUTPUT_BYTES: u64 = 2048;
+/// Deliveries this soon after the previous completed one always go out, so
+/// startup bursts and rapid chat behave exactly as before the hold. Only a
+/// spaced-out write into ongoing output is held.
+pub(crate) const HOLD_AFTER_FEED_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PtyLivenessConfig {
@@ -100,6 +104,41 @@ pub(crate) fn pty_liveness(
                 .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
         ),
     }
+}
+
+/// Whether a plain PTY lane is actively emitting, having received a delivery
+/// a while ago. Delivery holds while this is true: bytes written into
+/// sustained output are dropped by the TUI or kill the running turn instead
+/// of queueing (hermes repro: accepted-in-1.5s mid-turn input interrupted the
+/// turn and never executed). Deliberately narrower than the display liveness:
+/// a short echo answering our own delivery does NOT hold, and deliveries
+/// within seconds of the previous one go out unchanged, so startup sequences
+/// and ordinary back-to-back messages behave exactly as before; only a
+/// spaced-out write into ongoing voluminous output holds. Lanes never fed
+/// yet, quiet lanes, and unknown lanes (no output yet) read idle; the submit
+/// path rechecks every attempt. `last_input` counts only completed
+/// deliveries and resets with the session, so a restarted lane starts unfed
+/// again. Residuals: rapid-fire writes into a streaming lane, and any write
+/// into a busy-but-silent lane, still read idle (output liveness cannot see
+/// silence; that needs managed turn awareness).
+pub(crate) fn pty_busy(group_id: &str, actor_id: &str) -> bool {
+    let activity = cccc_runtime::activity(group_id, actor_id).ok();
+    let Some(snapshot) = activity.as_ref() else {
+        return false;
+    };
+    let Some(last_input) = snapshot.last_input.as_ref() else {
+        return false;
+    };
+    // Grace for startup bursts and rapid chat: only spaced-out writes hold.
+    if last_input.age <= HOLD_AFTER_FEED_GRACE {
+        return false;
+    }
+    let config = PtyLivenessConfig::default();
+    let Some(last_output) = snapshot.last_output.as_ref() else {
+        return false;
+    };
+    last_output.age <= config.window
+        && snapshot.output_bytes_within(config.window) >= config.min_bytes
 }
 
 pub fn runtime_actor_fields(

@@ -24,7 +24,11 @@ type Key = (String, String);
 
 /// Deliver text to the Runtime's native terminal. A successful return means
 /// the payload and submit keys were written to that terminal; whether the
-/// Runtime steers the active turn or queues the input remains its own policy.
+/// Runtime steers the active turn or queues the input remains its own policy,
+/// so callers must not treat it as witnessed. Plain PTY lanes additionally
+/// hold while their own output shows a working turn: mid-turn bytes are
+/// dropped or kill the turn (never queued), and the worker requeues the batch
+/// for a later attempt instead.
 pub(super) fn submit_terminal_text(
     group_id: &str,
     actor: &Actor,
@@ -43,6 +47,11 @@ pub(super) fn submit_terminal_text(
             cancelled,
         )
         .unwrap_or(false)
+    {
+        return false;
+    }
+    if !super::local_headless::running(group_id, &actor.id)
+        && super::working_state::pty_busy(group_id, &actor.id)
     {
         return false;
     }
