@@ -1,0 +1,122 @@
+[
+  {
+    "csv": "baseline-soak-v3.csv",
+    "csv_sha256": "eb18557292eed8fa1255d87bebb59f3613b49f790582eb2e8386029fdaa63c47",
+    "metadata": {
+      "pid": "666193",
+      "duration": "7200",
+      "actors": "18",
+      "write_bytes": "2",
+      "interval_ms": "1",
+      "cols": "80",
+      "rows": "24"
+    },
+    "samples": 646,
+    "final_seconds": 7202,
+    "completed_requested_seconds": true,
+    "final_rss_kib": 822464,
+    "peak_sampled_rss_kib": 839668,
+    "last_900_seconds_samples": 84,
+    "last_900_seconds_rss_kib": {
+      "median": 833272.0,
+      "min": 781488,
+      "max": 839668
+    },
+    "final_total_cursor": 231878454,
+    "final_snapshot_bytes": 157572,
+    "archive_actors": 18,
+    "min_archive_payload_bytes": 10486003,
+    "max_archive_payload_bytes": 10549171,
+    "all_actors_passed_hot_cap": true,
+    "watch_last_900_process_seconds": {
+      "requested_start_seconds": 6300,
+      "requested_end_seconds": 7200,
+      "samples": 90,
+      "first_utc": "2026-10-11T03:28:00.227320+00:00",
+      "last_utc": "2026-10-11T03:42:50.819235+00:00",
+      "all_actors_alive": true,
+      "metrics": {
+        "rss_kib": {
+          "median": 833266.0,
+          "min": 781532,
+          "max": 839668
+        },
+        "swap_kib": {
+          "median": 472.0,
+          "min": 472,
+          "max": 28552
+        },
+        "rss_plus_swap_kib": {
+          "median": 835050.0,
+          "min": 810084,
+          "max": 840160
+        },
+        "mem_available_kib": {
+          "median": 8900140.0,
+          "min": 4733132,
+          "max": 12133784
+        }
+      }
+    }
+  },
+  {
+    "csv": "candidate-soak.csv",
+    "csv_sha256": "1c3c2b0a3c19bed25f4fa5124ecd829b0eb92d5fd0814e09b57ae70ece4fad83",
+    "metadata": {
+      "pid": "697225",
+      "duration": "7200",
+      "actors": "18",
+      "write_bytes": "2",
+      "interval_ms": "1",
+      "cols": "80",
+      "rows": "24"
+    },
+    "samples": 713,
+    "final_seconds": 7200,
+    "completed_requested_seconds": true,
+    "final_rss_kib": 48208,
+    "peak_sampled_rss_kib": 48248,
+    "last_900_seconds_samples": 90,
+    "last_900_seconds_rss_kib": {
+      "median": 48208.0,
+      "min": 48208,
+      "max": 48248
+    },
+    "final_total_cursor": 237470718,
+    "final_snapshot_bytes": 157572,
+    "archive_actors": 18,
+    "min_archive_payload_bytes": 10489264,
+    "max_archive_payload_bytes": 10549633,
+    "all_actors_passed_hot_cap": true,
+    "watch_last_900_process_seconds": {
+      "requested_start_seconds": 6300,
+      "requested_end_seconds": 7200,
+      "samples": 90,
+      "first_utc": "2026-10-11T03:38:00.632362+00:00",
+      "last_utc": "2026-10-11T03:52:51.110129+00:00",
+      "all_actors_alive": true,
+      "metrics": {
+        "rss_kib": {
+          "median": 48208.0,
+          "min": 48208,
+          "max": 48248
+        },
+        "swap_kib": {
+          "median": 472.0,
+          "min": 472,
+          "max": 472
+        },
+        "rss_plus_swap_kib": {
+          "median": 48680.0,
+          "min": 48680,
+          "max": 48720
+        },
+        "mem_available_kib": {
+          "median": 6421514.0,
+          "min": 4680388,
+          "max": 9136624
+        }
+      }
+    }
+  }
+]
