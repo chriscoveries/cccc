@@ -230,3 +230,25 @@ fn writer_takeover_and_disconnect_promotion_match_python_semantics() {
     drop(takeover);
     assert!(registry.is_writer(first.attachment_id).expect("promoted"));
 }
+
+#[test]
+fn provider_control_rechecks_writer_ownership_after_takeover() {
+    let history = SessionHistory::new(None).expect("history");
+    let registry = AttachmentRegistry::default();
+    let first = attachment(&history, &registry, TerminalAttachMode::Control, false);
+    let viewer = attachment(&history, &registry, TerminalAttachMode::Viewer, false);
+    let calls = std::cell::Cell::new(0);
+    let call = || {
+        calls.set(calls.get() + 1);
+        Ok(())
+    };
+    assert!(first.input().with_writer(call).expect("owner"));
+    assert!(!viewer.input().with_writer(call).expect("viewer"));
+    let replacement = attachment(&history, &registry, TerminalAttachMode::Control, true);
+    assert!(!first.input().with_writer(call).expect("superseded"));
+    assert!(replacement.input().with_writer(call).expect("replacement"));
+    assert_eq!(calls.get(), 2);
+    drop(replacement);
+    assert!(first.input().with_writer(call).expect("promoted"));
+    assert_eq!(calls.get(), 3);
+}

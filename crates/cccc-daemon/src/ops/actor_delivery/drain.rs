@@ -30,11 +30,18 @@ pub(crate) fn drain_group(home: &HomeLayout, group_id: &str) {
             &completion.transport,
             crate::ops::runtime_delivery::DeliveryOutcome::Accepted,
         ) {
-            Ok(_) => clear_in_flight(|item| {
-                item.0 == completion.group_id
-                    && item.1 == completion.actor_id
-                    && item.2 == completion.event_id
-            }),
+            Ok(_) => {
+                crate::ops::local_headless::lazy_viewer::delivery_accepted(
+                    &completion.group_id,
+                    &completion.actor_id,
+                    &completion.event_id,
+                );
+                clear_in_flight(|item| {
+                    item.0 == completion.group_id
+                        && item.1 == completion.actor_id
+                        && item.2 == completion.event_id
+                });
+            }
             Err(error) => {
                 tracing::warn!(
                     message = %error.message,

@@ -1,7 +1,19 @@
 use super::*;
 use cccc_contracts::ActorRuntime;
 use std::fs;
+
 use std::path::PathBuf;
+
+/// Canonical form of a path the launcher derives through `canonicalize`
+/// (native cache, tree-sitter resources): on Windows with a `\\?\` verbatim
+/// prefix, and anywhere with symlinks resolved (macOS /tmp). Expectations on
+/// those derived paths must canonicalize the same way; plain launch argv is
+/// never canonicalized and keeps verbatim expectations.
+fn canonical(path: &Path) -> String {
+    fs::canonicalize(path)
+        .map(|resolved| resolved.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+}
 
 fn npm_install(root: &Path, local: bool) -> (PathBuf, PathBuf) {
     let modules = root.join("node_modules");
@@ -137,6 +149,52 @@ fn direct_executables_are_unchanged_and_custom_wrappers_stay_unsupported() {
     }
 }
 
+#[test]
+fn official_kilo_npm_cache_bypasses_the_resident_node_shim() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (shim, script) = npm_install(temp.path(), false);
+    let cached = script.parent().expect("bin").join(".kilo");
+    fs::write(&cached, "native fixture").expect("native cache");
+    for executable in [shim, script] {
+        let prepared = prepare(
+            &[executable.to_string_lossy().into_owned()],
+            &BTreeMap::from([("CCCC_OPENCODE_HEADLESS".into(), "1".into())]),
+            ActorRuntime::Kilo,
+        )
+        .expect("native npm cache");
+        assert_eq!(prepared.launch_prefix, [canonical(&cached)]);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn kilo_npm_symlink_uses_the_package_cache_and_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (_, script) = npm_install(temp.path(), false);
+    let cached = script.parent().expect("bin").join(".kilo");
+    fs::write(&cached, "native fixture").expect("native cache");
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).expect("bin");
+    let link = bin.join("kilo");
+    std::os::unix::fs::symlink(&script, &link).expect("npm symlink");
+    let override_path = temp.path().join("override-kilo");
+    fs::write(&override_path, "override fixture").expect("override");
+    let environment = BTreeMap::from([
+        ("CCCC_OPENCODE_HEADLESS".into(), "1".into()),
+        (
+            "KILO_BIN_PATH".into(),
+            override_path.to_string_lossy().into_owned(),
+        ),
+    ]);
+    let prepared = prepare(
+        &[link.to_string_lossy().into_owned()],
+        &environment,
+        ActorRuntime::Kilo,
+    )
+    .expect("override");
+    assert_eq!(prepared.launch_prefix, [override_path.to_string_lossy()]);
+}
+
 /// Exercise the actual Windows process and ConPTY paths, not only argv assembly.
 /// This npm-layout fixture needs Node but no Kilo download, credentials or model.
 #[cfg(windows)]
@@ -249,4 +307,123 @@ require('child_process').spawn(process.execPath, ['-e', worker, ...process.argv.
             "exact-session"
         ])
     );
+}
+
+#[test]
+fn native_kilo_resources_preserve_a_nonempty_override() {
+    let root = tempfile::tempdir().expect("npm package");
+    let resources = root.path().join("tree-sitter");
+    std::fs::create_dir(&resources).expect("resources");
+    std::fs::write(resources.join("tree-sitter.wasm"), "fixture").expect("wasm");
+    let prefix = vec![root.path().join(".kilo").to_string_lossy().into_owned()];
+    let mut env = BTreeMap::from([
+        ("CCCC_OPENCODE_HEADLESS".into(), "1".into()),
+        ("KILO_TREE_SITTER_WASM_DIR".into(), String::new()),
+    ]);
+    command::configure_native_resources(Path::new(&prefix[0]), &prefix, &mut env);
+    assert_eq!(
+        env["KILO_TREE_SITTER_WASM_DIR"],
+        resources.to_string_lossy()
+    );
+    env.insert(
+        "KILO_TREE_SITTER_WASM_DIR".into(),
+        "chosen/resources".into(),
+    );
+    command::configure_native_resources(Path::new(&prefix[0]), &prefix, &mut env);
+    assert_eq!(env["KILO_TREE_SITTER_WASM_DIR"], "chosen/resources");
+}
+
+#[test]
+fn native_kilo_binary_override_keeps_npm_tree_sitter_resources() {
+    let root = tempfile::tempdir().expect("npm package");
+    let (shim, script) = npm_install(root.path(), false);
+    let resources = script
+        .parent()
+        .expect("script directory")
+        .join("tree-sitter");
+    fs::create_dir(&resources).expect("resources");
+    fs::write(resources.join("tree-sitter.wasm"), "fixture").expect("wasm");
+    let external = root.path().join("custom-native-kilo");
+    fs::write(&external, "fixture").expect("native binary");
+    let mut env = BTreeMap::from([
+        ("CCCC_OPENCODE_HEADLESS".into(), "1".into()),
+        (
+            "KILO_BIN_PATH".into(),
+            external.to_string_lossy().into_owned(),
+        ),
+    ]);
+    let prepared = prepare(
+        &[shim.to_string_lossy().into_owned()],
+        &env,
+        ActorRuntime::Kilo,
+    )
+    .expect("native override");
+    assert_eq!(prepared.launch_prefix, [external.to_string_lossy()]);
+    command::configure_native_resources(&prepared.executable, &prepared.launch_prefix, &mut env);
+    assert_eq!(env["KILO_TREE_SITTER_WASM_DIR"], canonical(&resources));
+}
+
+#[test]
+fn flag_unset_keeps_official_kilo_npm_launch_bytes_with_a_native_cache() {
+    let temp = tempfile::tempdir().expect("npm install");
+    let (shim, script) = npm_install(temp.path(), false);
+    fs::write(
+        script.parent().expect("bin").join(".kilo"),
+        "native fixture",
+    )
+    .expect("native cache");
+    for flag in [None, Some("0")] {
+        let mut env = BTreeMap::new();
+        if let Some(flag) = flag {
+            env.insert("CCCC_OPENCODE_HEADLESS".into(), flag.into());
+        }
+        let prepared = prepare(
+            &[shim.to_string_lossy().into_owned()],
+            &env,
+            ActorRuntime::Kilo,
+        )
+        .expect("legacy npm entrypoint");
+        assert_eq!(
+            prepared.launch_prefix,
+            [
+                shim.parent()
+                    .expect("shim")
+                    .join("node.exe")
+                    .to_string_lossy(),
+                script.to_string_lossy(),
+            ]
+        );
+        let prepared = prepare(
+            &[script.to_string_lossy().into_owned()],
+            &env,
+            ActorRuntime::Kilo,
+        )
+        .expect("legacy script");
+        assert_eq!(prepared.launch_prefix, [script.to_string_lossy()]);
+        let cached = script.parent().expect("bin").join(".kilo");
+        assert_eq!(
+            prepare(
+                &[cached.to_string_lossy().into_owned()],
+                &env,
+                ActorRuntime::Kilo
+            )
+            .err()
+            .expect("legacy executable-name restriction")
+            .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let resources = script.parent().expect("bin").join("tree-sitter");
+        fs::create_dir_all(&resources).expect("resources");
+        fs::write(resources.join("tree-sitter.wasm"), "fixture").expect("wasm");
+        let original_env = env.clone();
+        command::configure_native_resources(
+            &script,
+            &[cached.to_string_lossy().into_owned()],
+            &mut env,
+        );
+        assert_eq!(
+            env, original_env,
+            "default resource environment must remain unchanged"
+        );
+    }
 }

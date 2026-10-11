@@ -13,7 +13,31 @@ pub(super) fn launch_prefix(
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    if filename.eq_ignore_ascii_case(name) || filename.eq_ignore_ascii_case(&format!("{name}.exe"))
+    let headless = environment
+        .get("CCCC_OPENCODE_HEADLESS")
+        .is_some_and(|value| value == "1");
+    if headless
+        && name == "kilo"
+        && let Some(script) = kilo_npm_entrypoint(executable)
+    {
+        let cached = script.parent().expect("entrypoint directory").join(".kilo");
+        let native = environment
+            .get("KILO_BIN_PATH")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or(cached);
+        if native.is_absolute() && native.is_file() {
+            // npm's postinstall already selected the CPU/libc variant. Reuse
+            // its native cache instead of retaining a Node signal-forwarder
+            // for both the ACP server and every TUI attachment.
+            return Ok(vec![native.to_string_lossy().into_owned()]);
+        }
+        // Uncached older installs and relative overrides retain the official
+        // launcher's platform selection and cwd semantics.
+    }
+    if filename.eq_ignore_ascii_case(name)
+        || filename.eq_ignore_ascii_case(&format!("{name}.exe"))
+        || (headless && name == "kilo" && filename == ".kilo")
     {
         return Ok(vec![executable.to_string_lossy().into_owned()]);
     }
@@ -67,6 +91,70 @@ pub(super) fn launch_prefix(
             }
         ),
     ))
+}
+
+fn kilo_npm_entrypoint(executable: &Path) -> Option<std::path::PathBuf> {
+    let resolved = executable.canonicalize().ok()?;
+    let script = if resolved
+        .file_name()?
+        .to_str()?
+        .eq_ignore_ascii_case("kilo.cmd")
+    {
+        let bin = resolved.parent()?;
+        let modules = if bin.file_name().is_some_and(|name| name == ".bin") {
+            bin.parent()?.to_owned()
+        } else {
+            bin.join("node_modules")
+        };
+        modules.join("@kilocode/cli/bin/kilo")
+    } else {
+        resolved
+    };
+    let bin = script.parent()?;
+    let package = bin.parent()?;
+    (script.file_name()? == "kilo"
+        && bin.file_name()? == "bin"
+        && package.file_name()? == "cli"
+        && package.parent()?.file_name()? == "@kilocode"
+        && script.is_file())
+    .then_some(script)
+}
+
+pub(super) fn configure_native_resources(
+    executable: &Path,
+    launch_prefix: &[String],
+    environment: &mut BTreeMap<String, String>,
+) {
+    if environment
+        .get("CCCC_OPENCODE_HEADLESS")
+        .is_none_or(|value| value != "1")
+    {
+        return;
+    }
+    if environment
+        .get("KILO_TREE_SITTER_WASM_DIR")
+        .is_some_and(|value| !value.is_empty())
+    {
+        return;
+    }
+    let package_script = kilo_npm_entrypoint(executable);
+    // The official launcher finds resources beside its script even when
+    // KILO_BIN_PATH points outside the npm package.
+    let resource_entry = package_script.as_deref().or_else(|| {
+        launch_prefix
+            .first()
+            .filter(|_| launch_prefix.len() == 1)
+            .map(Path::new)
+    });
+    if let Some(bin) = resource_entry.and_then(Path::parent) {
+        let resources = bin.join("tree-sitter");
+        if resources.join("tree-sitter.wasm").is_file() {
+            environment.insert(
+                "KILO_TREE_SITTER_WASM_DIR".into(),
+                resources.to_string_lossy().into_owned(),
+            );
+        }
+    }
 }
 
 #[derive(Debug, Default)]

@@ -13,6 +13,9 @@ use tracing::Instrument;
 #[path = "control_fixture.rs"]
 mod control_fixture;
 #[cfg(all(test, unix))]
+#[path = "lazy_viewer_tests.rs"]
+mod lazy_viewer_tests;
+#[cfg(all(test, unix))]
 #[path = "shutdown_tests.rs"]
 mod shutdown_tests;
 #[cfg(all(test, unix))]
@@ -136,6 +139,8 @@ pub(super) fn attach_managed(
         group_id: group.group_id.clone(),
         actor_id: actor.id.clone(),
         managed: Arc::clone(&app),
+        lazy_viewer: super::lazy_viewer::enabled(actor),
+        viewer_clients: std::sync::atomic::AtomicUsize::new(0),
         has_terminal: AtomicBool::new(false),
         viewer: Mutex::new(Some(super::ViewerLaunch {
             command: app.actor_tui_command(),
@@ -156,38 +161,40 @@ pub(super) fn attach_managed(
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
     }
-    let history = match super::super::actor_runtime::terminal_history::config(
-        home,
-        &group.group_id,
-        &actor.id,
-    ) {
-        Ok(history) => history,
-        Err(error) => {
-            return Err(cleanup_failed_start(&item, error));
-        }
-    };
-    let terminal = match lifecycle_timing::run_sync("runtime.terminal_attach", || {
-        cccc_runtime::start_with_history(
-            cccc_runtime::LaunchSpec {
-                group_id: group.group_id.clone(),
-                actor_id: actor.id.clone(),
-                runner: RunnerKind::Pty,
-                command: app.actor_tui_command(),
-                cwd: cwd.clone(),
-                env: app.tui_environment(),
-                cols: 120,
-                rows: 40,
-            },
-            history,
-        )
-        .map_err(io::Error::other)
-    }) {
-        Ok(status) => status,
-        Err(error) => {
-            return Err(cleanup_failed_start(&item, error));
-        }
-    };
-    item.attach_terminal(terminal.pid);
+    if !item.lazy_viewer {
+        let history = match super::super::actor_runtime::terminal_history::config(
+            home,
+            &group.group_id,
+            &actor.id,
+        ) {
+            Ok(history) => history,
+            Err(error) => {
+                return Err(cleanup_failed_start(&item, error));
+            }
+        };
+        let terminal = match lifecycle_timing::run_sync("runtime.terminal_attach", || {
+            cccc_runtime::start_with_history(
+                cccc_runtime::LaunchSpec {
+                    group_id: group.group_id.clone(),
+                    actor_id: actor.id.clone(),
+                    runner: RunnerKind::Pty,
+                    command: app.actor_tui_command(),
+                    cwd: cwd.clone(),
+                    env: app.tui_environment(),
+                    cols: 120,
+                    rows: 40,
+                },
+                history,
+            )
+            .map_err(io::Error::other)
+        }) {
+            Ok(status) => status,
+            Err(error) => {
+                return Err(cleanup_failed_start(&item, error));
+            }
+        };
+        item.attach_terminal(terminal.pid);
+    }
     if let Err(error) = sessions()
         .write()
         .map_err(|_| poisoned())
@@ -259,6 +266,7 @@ pub fn ensure_viewer(group_id: &str, actor_id: &str) -> io::Result<()> {
     let _start = StartGuard::acquire(&key)?;
     if let Some(item) = lookup(&key)
         && item.running()
+        && !item.lazy_viewer
     {
         item.reattach_viewer()?;
     }
@@ -412,6 +420,9 @@ pub fn submit_batch(
     ) else {
         return false;
     };
+    if item.lazy_viewer {
+        return super::lazy_viewer::submit(&item, source_events, &delivery, cancelled);
+    }
     if let Err(error) = item.reattach_viewer() {
         tracing::warn!(
             %error,
@@ -467,7 +478,7 @@ fn render_turn(event: &Event) -> Option<(String, String)> {
     })
 }
 
-fn lookup(key: &Key) -> Option<Arc<Session>> {
+pub(super) fn lookup(key: &Key) -> Option<Arc<Session>> {
     sessions().read().ok()?.get(key).cloned()
 }
 

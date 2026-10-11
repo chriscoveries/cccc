@@ -18,33 +18,54 @@ pub(crate) async fn handle<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut attachment = match tokio::task::spawn_blocking(move || prepare(&home, &request)).await?
-    {
-        Ok(attachment) => attachment,
-        Err(response) => {
-            write_response(stream.get_mut(), &response).await?;
-            return Ok(());
-        }
-    };
+    let (mut attachment, _viewer_lease) =
+        match tokio::task::spawn_blocking(move || prepare(&home, &request)).await? {
+            Ok(attachment) => attachment,
+            Err(response) => {
+                write_response(stream.get_mut(), &response).await?;
+                return Ok(());
+            }
+        };
+    let lazy_viewer = _viewer_lease.is_some();
     let response = attach_response(&attachment);
     write_response(stream.get_mut(), &response).await?;
 
     let input = attachment.input();
     let (read, write) = tokio::io::split(stream);
-    tokio::select! {
+    let result = tokio::select! {
         result = pump_output(write, &mut attachment) => result,
         result = pump_input(read, input, INPUT_WRITE_TIMEOUT) => result,
         changed = shutdown.changed() => {
             changed.ok();
             Ok(())
         }
+    };
+    match result {
+        Err(error)
+            if lazy_viewer
+                && error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                    )
+                }) =>
+        {
+            Ok(())
+        }
+        other => other,
     }
 }
 
 fn prepare(
     home: &HomeLayout,
     request: &DaemonRequest,
-) -> Result<TerminalAttachment, DaemonResponse> {
+) -> Result<
+    (
+        TerminalAttachment,
+        Option<crate::ops::local_headless::lazy_viewer::ViewerLease>,
+    ),
+    DaemonResponse,
+> {
     let group_id = non_blank(request, "group_id")
         .ok_or_else(|| DaemonResponse::failure("missing_group_id", "missing group_id"))?;
     let actor_id = non_blank(request, "actor_id")
@@ -77,7 +98,9 @@ fn prepare(
     } else {
         TerminalAttachMode::Control
     };
-    if mode == TerminalAttachMode::Control {
+    let viewer_lease = crate::ops::local_headless::lazy_viewer::acquire(&group_id, &actor_id)
+        .map_err(|error| DaemonResponse::failure("runtime_error", error.to_string()))?;
+    if viewer_lease.is_none() && mode == TerminalAttachMode::Control {
         crate::ops::local_headless::ensure_viewer(&group_id, &actor_id)
             .map_err(|error| DaemonResponse::failure("runtime_error", error.to_string()))?;
     }
@@ -110,7 +133,9 @@ fn prepare(
         }
         (false, None) => cccc_runtime::attach(&group_id, &actor_id, mode, takeover, since),
     };
-    attached.map_err(runtime_error)
+    attached
+        .map(|attachment| (attachment, viewer_lease))
+        .map_err(runtime_error)
 }
 
 fn runtime_error(error: cccc_runtime::RuntimeError) -> DaemonResponse {
@@ -196,7 +221,29 @@ where
         // ownership also cancels the Linux PTY task. Do not replay partial input.
         tokio::time::timeout(
             write_timeout,
-            tokio::task::spawn_blocking(move || writer.write(&data)),
+            tokio::task::spawn_blocking(move || {
+                if data == b"\x03"
+                    && crate::ops::local_headless::lazy_viewer::active(
+                        writer.group_id(),
+                        writer.actor_id(),
+                    )
+                {
+                    let mut handled = false;
+                    writer.with_writer(|| {
+                        handled = crate::ops::local_headless::lazy_viewer::interrupt(
+                            writer.group_id(),
+                            writer.actor_id(),
+                            &data,
+                        )
+                        .map_err(cccc_runtime::RuntimeError::Io)?;
+                        Ok(())
+                    })?;
+                    if handled {
+                        return Ok(true);
+                    }
+                }
+                writer.write(&data)
+            }),
         )
         .await
         .map_err(|_| anyhow!("terminal input stalled"))?
@@ -282,5 +329,109 @@ mod tests {
                 .to_string(),
             "terminal input stalled"
         );
+    }
+    struct ClosedOutputAfterHeader {
+        header_written: bool,
+    }
+
+    impl AsyncRead for ClosedOutputAfterHeader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for ClosedOutputAfterHeader {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let stream = self.get_mut();
+            if stream.header_written {
+                std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "fixture closed terminal",
+                )))
+            } else {
+                stream.header_written = true;
+                std::task::Poll::Ready(Ok(bytes.len()))
+            }
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn flag_unset_preserves_closed_terminal_output_error() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("default terminal", "").expect("group");
+        let mut actor = cccc_contracts::Actor::new("peer");
+        actor.runtime = cccc_contracts::ActorRuntime::Custom;
+        group.actors.push(actor);
+        store.save(&group).expect("actor");
+        cccc_runtime::start(cccc_runtime::LaunchSpec {
+            group_id: group.group_id.clone(),
+            actor_id: "peer".into(),
+            runner: RunnerKind::Pty,
+            command: vec![
+                "sh".into(),
+                "-c".into(),
+                "while true; do printf DEFAULT_BYTES; sleep .01; done".into(),
+            ],
+            cwd: temp.path().into(),
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        })
+        .expect("terminal");
+        let (_shutdown, receiver) = tokio::sync::watch::channel(false);
+        let request = DaemonRequest {
+            v: 1,
+            op: "term_attach".into(),
+            args: json!({"group_id":group.group_id,"actor_id":"peer","mode":"viewer"})
+                .as_object()
+                .expect("args")
+                .clone(),
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle(
+                BufReader::new(ClosedOutputAfterHeader {
+                    header_written: false,
+                }),
+                home,
+                request,
+                receiver,
+            ),
+        )
+        .await;
+        cccc_runtime::stop(&group.group_id, "peer").expect("cleanup");
+        let error = result
+            .expect("bounded attachment")
+            .expect_err("default closed-stream error");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .expect("I/O error")
+                .kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(error.to_string(), "fixture closed terminal");
     }
 }

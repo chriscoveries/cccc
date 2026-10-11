@@ -2,6 +2,7 @@ mod events;
 mod events_migration;
 #[cfg(test)]
 mod events_migration_tests;
+pub(crate) mod lazy_viewer;
 mod managed_reader;
 mod output;
 mod provider_cli;
@@ -67,6 +68,8 @@ struct Session {
     group_id: String,
     actor_id: String,
     managed: std::sync::Arc<super::codex_voice_analyst::AnalystSession>,
+    lazy_viewer: bool,
+    viewer_clients: std::sync::atomic::AtomicUsize,
     has_terminal: AtomicBool,
     viewer: Mutex<Option<ViewerLaunch>>,
     status: Mutex<HeadlessStatus>,

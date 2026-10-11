@@ -381,3 +381,37 @@ impl Drop for AcpClient {
 fn closed_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "managed ACP session is closed")
 }
+
+// Only a provider RPC error received before admission is safe to retry.
+// Transport errors and lost replies retain the unresolved outcome fence.
+#[derive(Debug)]
+struct PromptRejected(String);
+impl std::fmt::Display for PromptRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+impl std::error::Error for PromptRejected {}
+pub(super) fn prompt_was_rejected(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<PromptRejected>())
+}
+
+/// A busyness report that arrived as the reply to an already-sent prompt.
+/// The provider may have executed before complaining, so headless delivery
+/// must fence it instead of queueing a retry. Legacy voice turns keep the
+/// historical WouldBlock retry (see `start_turn_with_limit`).
+#[derive(Debug)]
+struct PromptBusy(String);
+impl std::fmt::Display for PromptBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+impl std::error::Error for PromptBusy {}
+pub(super) fn prompt_is_busy(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<PromptBusy>())
+}

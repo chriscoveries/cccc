@@ -53,6 +53,67 @@ impl AnalystSession {
         delegation_id: &str,
         text: &str,
     ) -> io::Result<TurnReceipt> {
+        self.start_turn_with_limit(expected_generation, delegation_id, text, None)
+            .await
+    }
+
+    pub(crate) async fn start_delivery(
+        &self,
+        delegation_id: &str,
+        text: &str,
+    ) -> io::Result<TurnReceipt> {
+        // Ack failures retain receipts, never an unbounded chat history. Do not
+        // evict an uncertain admission: backpressure until durable acks retire it.
+        self.start_turn_with_limit(&self.generation, delegation_id, text, Some(256))
+            .await
+    }
+
+    pub(crate) fn delivery_error_message(error: &io::Error) -> String {
+        let mut message = error.to_string();
+        if message.len() > 4096 {
+            let mut end = 4096;
+            while !message.is_char_boundary(end) {
+                end -= 1;
+            }
+            message.truncate(end);
+            message.push_str("...");
+        }
+        message
+    }
+
+    pub(crate) fn delivery_retryable(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::WouldBlock || acp::prompt_was_rejected(error)
+    }
+
+    pub(crate) async fn unresolved_delivery(&self, delegation_id: &str) -> Option<String> {
+        match self.delegations.lock().await.get(delegation_id) {
+            Some(DelegationState::Unresolved(reason)) => Some(reason.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) async fn forget_delivery(&self, delegation_id: &str) {
+        let mut delegations = self.delegations.lock().await;
+        if matches!(
+            delegations.get(delegation_id),
+            Some(DelegationState::Started(_))
+        ) {
+            delegations.remove(delegation_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn delivery_receipt_count(&self) -> usize {
+        self.delegations.lock().await.len()
+    }
+
+    async fn start_turn_with_limit(
+        &self,
+        expected_generation: &str,
+        delegation_id: &str,
+        text: &str,
+        capacity: Option<usize>,
+    ) -> io::Result<TurnReceipt> {
         self.require_generation(expected_generation)?;
         let delegation_id = required_value(delegation_id, "delegation_id")?;
         let text = required_value(text, "text")?;
@@ -67,6 +128,12 @@ impl AnalystSession {
                     ),
                 )),
             };
+        }
+        if capacity.is_some_and(|limit| delegations.len() >= limit) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "pending ACP delivery receipts are full",
+            ));
         }
         let turn_result = match &self.protocol {
             ManagedProtocol::Codex(protocol) => protocol
@@ -107,12 +174,25 @@ impl AnalystSession {
         };
         let turn_id = match turn_result {
             Ok(turn_id) => turn_id,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            // Client-side WouldBlock (active turn, full receipt queue) never
+            // sent anything: safe to requeue on every path. A busyness report
+            // that arrived as the reply to a sent prompt may follow execution,
+            // so headless delivery fences it instead of retrying; legacy
+            // voice turns keep the historical retry.
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    && !(capacity.is_some() && acp::prompt_is_busy(&error))
+                    || (capacity.is_some() && acp::prompt_was_rejected(&error)) =>
+            {
                 return Err(error);
             }
             Err(error) => {
                 let kind = error.kind();
-                let message = error.to_string();
+                let message = if capacity.is_some() {
+                    Self::delivery_error_message(&error)
+                } else {
+                    error.to_string()
+                };
                 delegations.insert(
                     delegation_id.to_owned(),
                     DelegationState::Unresolved(message.clone()),

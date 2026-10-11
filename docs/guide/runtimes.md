@@ -105,7 +105,30 @@ cccc actor add worker --runtime custom --command "my-agent --with-flags"
 
 Users choose a Runtime, not a runner mode. CLI runtimes expose their native terminal so the user can inspect and operate the Actor. Codex, Claude Code, Grok Build, OpenCode, and Kilo additionally run a structured background protocol against the same provider session; CCCC uses that protocol for identity, lifecycle, progress, completion, and cancellation.
 
-Actor messages still enter those managed Runtimes through their native terminal. CCCC does not decide whether a message steers an active turn or waits behind it; the receiving Runtime applies its own configuration. DeepSeek Harness has only a structured ACP surface, while ChatGPT Web Model uses browser delivery plus a remote MCP connector. These are Runtime capabilities, not user-selectable modes.
+By default, Actor messages enter those managed Runtimes through their native terminal. CCCC does not decide whether a message steers an active turn or waits behind it; the receiving Runtime applies its own configuration. DeepSeek Harness has only a structured ACP surface, while ChatGPT Web Model uses browser delivery plus a remote MCP connector. These are Runtime capabilities, not user-selectable modes.
+
+### Optional Kilo/OpenCode headless delivery
+
+Set `CCCC_OPENCODE_HEADLESS=1` in a Kilo or OpenCode Actor's environment (or its
+Runtime Profile) before starting it. CCCC sends messages through its existing ACP
+session and queues them until the active turn ends. Opening the native terminal
+starts a viewer for that same session; closing the last terminal connection frees
+the viewer runtime. Agent View, idle detection, delivery receipts and session resume
+continue to use the managed session. The current terminal writer's Ctrl-C cancels
+through ACP; passive viewers cannot cancel. Failed delivery shows the source event
+ID and never silently starts a TUI to type the message.
+
+Exactly-once on clean paths; at-most-once plus a visible error on ambiguous admission or crash.
+An explicit rejection before admission is retryable. An uncertain admission is
+never automatically replayed; use the displayed source event ID to decide whether
+to resend deliberately. Pending receipts are bounded by queueing and retired only
+after their accepted delivery record is durable.
+
+In this opt-in mode, CCCC also reuses the official Kilo npm package's native `.kilo`
+cache when available, including an absolute `KILO_BIN_PATH` override, and preserves
+its tree-sitter resource path. With the flag unset or an uncached installation,
+CCCC retains the official npm launcher. OpenCode's current npm package already
+installs a native executable.
 
 Cline currently opens a fresh native terminal on each start. CCCC does not persist or reuse Cline's `--id` session identifier.
 
@@ -126,9 +149,11 @@ streaming updates to the same part. Ordinary answer text is preserved even
 when synthetic or containing the same words as a progress label.
 
 Windows npm installs (`npm install -g @kilocode/cli`, or a project-local install)
-expose `kilo.cmd`. CCCC resolves that official entrypoint to Node plus the
-installed Kilo launcher for both ACP and TUI; no manual `kilo.exe` path is needed.
-Node must be available beside the npm shim or on the configured `PATH`.
+expose `kilo.cmd`. With headless delivery enabled, CCCC uses the installed native
+cache for ACP and TUI when available; no manual `kilo.exe` path is needed. With
+the flag unset or an uncached package, it resolves
+the official entrypoint to Node plus the installed Kilo launcher. That fallback
+requires Node beside the npm shim or on the configured `PATH`.
 Windows CI separately exercises npm installation layouts, literal arguments and
 environment, owned stdio launch, and native terminal launch with an offline fixture.
 That fixture does not substitute for full real-Kilo platform validation.

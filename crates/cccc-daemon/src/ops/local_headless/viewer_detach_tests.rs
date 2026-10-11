@@ -96,6 +96,8 @@ async fn a_reaped_viewer_detaches_without_stopping_the_provider_job() {
             Vec::new(),
             true,
         )),
+        lazy_viewer: false,
+        viewer_clients: std::sync::atomic::AtomicUsize::new(0),
         has_terminal: AtomicBool::new(true),
         viewer: Mutex::new(Some(viewer.clone())),
         status: Mutex::new(HeadlessStatus {
@@ -282,6 +284,18 @@ async fn attach_request(
     .expect("response");
     let response = serde_json::from_str(&line).expect("attachment response");
     drop(client);
-    server.await.expect("server task").expect("server stream");
+    // The peer has closed its socket. Depending on which stream pump wins,
+    // the unchanged default transport reports EOF or its closed-write error.
+    if let Err(error) = server.await.expect("server task") {
+        assert!(
+            error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                )
+            }),
+            "unexpected attachment error: {error}"
+        );
+    }
     response
 }

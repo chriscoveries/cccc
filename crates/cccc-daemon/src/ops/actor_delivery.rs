@@ -181,7 +181,14 @@ pub(super) fn complete_job(job: &DeliveryJob) {
         transport,
         crate::ops::runtime_delivery::DeliveryOutcome::Accepted,
     ) {
-        Ok(_) => release_in_flight(job),
+        Ok(_) => {
+            crate::ops::local_headless::lazy_viewer::delivery_accepted(
+                &job.group.group_id,
+                &job.actor.id,
+                &job.event.id,
+            );
+            release_in_flight(job);
+        }
         Err(error) => {
             tracing::warn!(
                 message = %error.message,
@@ -595,7 +602,11 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                     break;
                 };
                 vec![job]
-            } else if deferred.len() >= BATCH_CAPACITY {
+            } else if deferred.len() >= BATCH_CAPACITY
+                || deferred.first().is_some_and(|job: &DeliveryJob| {
+                    crate::ops::local_headless::lazy_viewer::enabled(&job.actor)
+                })
+            {
                 // Failed startup or paused delivery must not grow this batch
                 // beyond its limit by draining the bounded channel on retries.
                 if !actor_delivery_worker::interruptible_sleep(

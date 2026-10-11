@@ -64,6 +64,15 @@ impl TerminalInput {
             data,
         )
     }
+
+    /// Execute a provider control operation only while this connection owns
+    /// the terminal writer. Passive clients and superseded writers are refused.
+    pub fn with_writer(
+        &self,
+        operation: impl FnOnce() -> Result<(), RuntimeError>,
+    ) -> Result<bool, RuntimeError> {
+        self.registry.run_if_writer(self.attachment_id, operation)
+    }
 }
 
 pub struct TerminalAttachment {
