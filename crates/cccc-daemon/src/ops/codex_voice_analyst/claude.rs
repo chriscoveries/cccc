@@ -1253,7 +1253,10 @@ impl TranscriptFollower {
         // until the first prompt. Validate an already-published path now, but
         // let poll() discover a fresh transcript after control admission.
         if !self.skip_existing {
-            return self.discover_path().await;
+            // Publication can precede file creation. Use the same bounded grace
+            // as an active transcript move, without admitting a different identity.
+            let result = self.discover_path().await;
+            return self.continuity.settle(result);
         }
         let deadline = tokio::time::Instant::now() + TRANSCRIPT_READY_TIMEOUT;
         loop {
@@ -1275,13 +1278,8 @@ impl TranscriptFollower {
     }
 
     async fn poll(&mut self) -> io::Result<Vec<Value>> {
-        let active = self.path.is_some();
         let result = self.poll_inner().await;
-        if active {
-            self.continuity.settle(result)
-        } else {
-            result
-        }
+        self.continuity.settle(result)
     }
 
     async fn poll_inner(&mut self) -> io::Result<Vec<Value>> {
@@ -1383,7 +1381,17 @@ impl TranscriptFollower {
         if filename != format!("{}.jsonl", self.session_id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Claude Agent View state referenced a different transcript identity",
+                format!(
+                    "Claude Agent View state referenced a different transcript identity: \
+                     expected session {:?}, observed transcript {:?}, job {:?}",
+                    self.session_id,
+                    filename,
+                    self.state_path
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("unknown"),
+                ),
             ));
         }
         let path = transcript_path::recover_missing(
