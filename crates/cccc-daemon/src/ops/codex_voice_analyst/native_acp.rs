@@ -6,6 +6,11 @@ use std::{io, path::Path, time::Duration};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(40);
 
+/// Marks a failed `session/load` so the launch wrapper passes that
+/// diagnosis through instead of relabelling it an initialization failure.
+/// It names the failure, never a recovery command.
+pub(super) const RESUME_RECOVERY_HINT: &str = "could not resume ACP session";
+
 pub(super) struct Options {
     pub command: Vec<String>,
     pub model: Option<String>,
@@ -311,7 +316,26 @@ pub(super) async fn initialize(
     } else {
         "session/new"
     };
-    let result = protocol.request(method, params, HANDSHAKE_TIMEOUT).await?;
+    let result = match protocol.request(method, params, HANDSHAKE_TIMEOUT).await {
+        Ok(result) => result,
+        Err(error) if resume.is_some() => {
+            // A failed session/load is not an initialization or login failure.
+            // Naming it as one sends the operator to re-authenticate a CLI that
+            // is working fine, while the actual recovery -- starting a fresh
+            // session -- is never tried, because attempted sessions are never
+            // replaced automatically. The provider diagnostic is bounded before
+            // the recovery wrapper is added, so the whole message stays bounded.
+            let diagnostic: String = error.to_string().chars().take(1400).collect();
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{RESUME_RECOVERY_HINT} {} ({diagnostic}). This is not a login or launch failure. If the session data is gone, recover by starting a new session: `cccc actor new-session <actor>`, which discards the saved session",
+                    resume.unwrap_or_default()
+                ),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     if !result.is_object() {
         return Err(io::Error::other(
             "Official ACP server returned an invalid session response",
