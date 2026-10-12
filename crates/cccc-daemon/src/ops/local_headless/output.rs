@@ -339,10 +339,7 @@ pub(super) fn emit(session: &Session, kind: &str, data: Map<String, Value>) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::HeadlessStatus;
     use super::*;
-    use crate::ops::codex_voice_analyst::AnalystSession;
-    use cccc_core::HomeLayout;
 
     #[test]
     fn an_untracked_codex_turn_is_adopted_until_its_completion() {
@@ -391,12 +388,16 @@ mod tests {
             StartedTurnDisposition::Conflict
         );
     }
-    /// Exercise the real settle path against a live `Session`, not just the
-    /// classifier. A failed completion must leave status error with the
-    /// provider's reason, and the next successful turn must clear both status
-    /// and reason back to idle — the recovery the fix exists to make possible.
+    /// Exercise the status/reason round trip on a live `Session`, not just the
+    /// classifier. A failed turn must leave status error with the provider's
+    /// reason, and the next successful turn must clear both status and reason
+    /// back to idle. The fake control socket is Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_failed_turn_clears_on_the_next_success_through_a_real_session() {
+        use super::super::HeadlessStatus;
+        use crate::ops::codex_voice_analyst::AnalystSession;
+        use cccc_core::HomeLayout;
         use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
         let temp = tempfile::tempdir().expect("tempdir");
