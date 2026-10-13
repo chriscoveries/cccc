@@ -44,29 +44,41 @@ fn write_doc(path: &Path, title: &str, count: u32) {
 /// atomic writers only.
 #[cfg(unix)]
 #[test]
-fn same_length_in_place_edit_within_one_mtime_tick_is_the_documented_gap() {
+fn same_length_in_place_edit_with_preserved_timestamp_is_the_documented_gap() {
     let (_serial, temp) = temp();
     let path = temp.path().join("d.yaml");
     write_doc(&path, "a", 1);
     let first = read_yaml_atomic_cached::<Doc>(&path).expect("first");
+    // Other GroupStore tests share this cache. Keep this tiny fixture newer
+    // than their entries until the next read, so eviction cannot turn the
+    // intended identity-hit assertion into an unrelated cache miss.
+    cache()
+        .lock()
+        .expect("cache")
+        .get_mut(&path)
+        .expect("entry")
+        .last_used = Instant::now() + Duration::from_secs(60);
 
-    // An external tool rewrites in place, same length, immediately.
-    let before = FileIdentity::of(&std::fs::metadata(&path).expect("meta"));
+    // Force an identity collision instead of hoping both writes land in the
+    // filesystem's same mtime tick. This writer deliberately violates the
+    // atomic-write contract; the unchanged identity can reuse the old parse.
+    let metadata = std::fs::metadata(&path).expect("meta");
+    let before = FileIdentity::of(&metadata);
     std::fs::write(&path, "title: b\ncount: 2\n").expect("in-place edit");
+    std::fs::File::open(&path)
+        .expect("file")
+        .set_times(std::fs::FileTimes::new().set_modified(metadata.modified().expect("mtime")))
+        .expect("preserve mtime");
     let after = FileIdentity::of(&std::fs::metadata(&path).expect("meta"));
-
+    assert_eq!(
+        before, after,
+        "the fixture must preserve every identity field"
+    );
     let second = read_yaml_atomic_cached::<Doc>(&path).expect("second");
-    if before == after && second == first {
-        // Identity did not change at all, so the cached parse is reused. This
-        // is the documented gap; observing it here is the point.
-        assert_eq!(second.title, first.title);
-        assert_eq!(second.count, first.count);
-    } else {
-        // Identity changed or the entry was evicted while other GroupStore
-        // tests ran; either permits a fresh parse of the changed document.
-        assert_eq!(second.title, "b");
-        assert_eq!(second.count, 2);
-    }
+    assert_eq!(
+        second, first,
+        "an unchanged identity reuses the retained parse"
+    );
 }
 
 /// The guarantee that does hold: any rename-based write is always seen, even
