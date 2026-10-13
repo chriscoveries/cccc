@@ -17,6 +17,7 @@ pub(crate) struct SourceRevision {
     pub(crate) path: PathBuf,
     pub(crate) len: u64,
     pub(crate) modified: Option<SystemTime>,
+    pub(crate) identity: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Default)]
@@ -343,10 +344,18 @@ pub(crate) fn revisions(path: &Path) -> io::Result<Vec<SourceRevision>> {
         .into_iter()
         .map(|source| {
             let metadata = source.metadata()?;
+            #[cfg(unix)]
+            let identity = {
+                use std::os::unix::fs::MetadataExt;
+                Some((metadata.dev(), metadata.ino()))
+            };
+            #[cfg(not(unix))]
+            let identity = None;
             Ok(SourceRevision {
                 path: source,
                 len: metadata.len(),
                 modified: metadata.modified().ok(),
+                identity,
             })
         })
         .collect()

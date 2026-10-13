@@ -111,50 +111,38 @@ impl LedgerIndex {
 }
 
 /// The events a stale index can adopt by reading only appended bytes: every
-/// previously indexed source is still present and line-aligned, so the tail
-/// after the old length extends the history the index already holds. Anything
-/// else (a removed, truncated, rewritten, or gzip-grown source, or a torn old
-/// tail line) is unreadable as an incremental delta and the caller falls back
-/// to a full rebuild.
+/// source still identifies the same file, unchanged archives precede the same
+/// active file, and only the line-aligned active tail has grown. Rotation,
+/// replacement, truncation and same-size rewrites require a full rebuild.
+/// Platforms without file identity also use the full rebuild path.
 fn read_appended_tail(
     path: &Path,
     old: &[SourceRevision],
     next: &[SourceRevision],
 ) -> io::Result<Option<Vec<Event>>> {
-    if old.is_empty() {
-        // A stale-marked or cold index holds no committed prefix to extend.
+    if old.is_empty() || old.len() != next.len() {
         return Ok(None);
     }
     let group_id = ledger_group_id(path);
-    let mut remaining = old
-        .iter()
-        .map(|revision| (revision.path.clone(), revision.len))
-        .collect::<HashMap<_, _>>();
     let mut events = Vec::new();
-    for revision in next {
-        match remaining.remove(&revision.path) {
-            Some(previous_len) if previous_len > revision.len => return Ok(None),
-            Some(previous_len) if is_gzip(&revision.path) && previous_len != revision.len => {
-                // Gzip sources cannot be resumed mid-stream.
-                return Ok(None);
-            }
-            Some(previous_len) => {
-                if previous_len > 0 && !old_tail_is_line_aligned(&revision.path, previous_len)? {
-                    return Ok(None);
-                }
-                if revision.len > previous_len {
-                    let (mut read, _) = read_source_from(&revision.path, previous_len, &group_id)?;
-                    events.append(&mut read);
-                }
-            }
-            None => {
-                let (mut read, _) = read_source_from(&revision.path, 0, &group_id)?;
-                events.append(&mut read);
-            }
+    for (previous, revision) in old.iter().zip(next) {
+        if previous == revision {
+            // In particular, do not test a gzip archive's compressed trailer
+            // for a newline: unchanged archives need no reads at all.
+            continue;
         }
-    }
-    if !remaining.is_empty() {
-        return Ok(None);
+        if revision.path != path
+            || previous.path != revision.path
+            || previous.identity.is_none()
+            || previous.identity != revision.identity
+            || previous.len >= revision.len
+            || is_gzip(&revision.path)
+            || (previous.len > 0 && !old_tail_is_line_aligned(&revision.path, previous.len)?)
+        {
+            return Ok(None);
+        }
+        let (mut read, _) = read_source_from(&revision.path, previous.len, &group_id)?;
+        events.append(&mut read);
     }
     Ok(Some(events))
 }
@@ -296,15 +284,11 @@ pub(crate) fn note_append(path: &Path, event: &Event, encoded_len: usize) {
         // A rebuild already included this committed append.
         return;
     }
-    let previous_len = index
+    let previous_source = index
         .revisions
         .iter()
-        .find(|revision| revision.path == path)
-        .map(|revision| revision.len);
-    let next_len = next_revisions
-        .iter()
-        .find(|revision| revision.path == path)
-        .map(|revision| revision.len);
+        .find(|revision| revision.path == path);
+    let next_source = next_revisions.iter().find(|revision| revision.path == path);
     let other_sources_unchanged = index
         .revisions
         .iter()
@@ -312,9 +296,13 @@ pub(crate) fn note_append(path: &Path, event: &Event, encoded_len: usize) {
         .eq(next_revisions
             .iter()
             .filter(|revision| revision.path != path));
-    let exact_append = previous_len
-        .zip(next_len)
-        .is_some_and(|(before, after)| after == before.saturating_add(encoded_len as u64));
+    let exact_append = previous_source
+        .zip(next_source)
+        .is_some_and(|(before, after)| {
+            before.identity.is_some()
+                && before.identity == after.identity
+                && after.len == before.len.saturating_add(encoded_len as u64)
+        });
     // A delayed callback may describe an event already loaded by a rebuild,
     // while the file has grown by a different event of the same encoded size.
     if exact_append && other_sources_unchanged && !index.positions.contains_key(&event.id) {
@@ -322,9 +310,10 @@ pub(crate) fn note_append(path: &Path, event: &Event, encoded_len: usize) {
         let weight = source_bytes.max(index.estimated_bytes);
         drop(index);
         cache::update_weight(path, weight, &cached);
-    } else {
-        index.revisions.clear();
     }
+    // A missed or out-of-order callback leaves the committed prefix intact.
+    // current() validates the sources and catches up from those offsets. An
+    // actual rotation/replacement still fails validation and rebuilds.
 }
 
 pub(crate) fn invalidate_path(path: &Path) {
@@ -347,6 +336,148 @@ mod tests {
     use std::thread;
     #[cfg(unix)]
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn delayed_callbacks_keep_the_indexed_prefix_for_tail_catch_up() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let first = Event::new("chat.message", "g_fixture");
+        crate::ledger::append(&path, &first).expect("first");
+        let entry = current(&path).expect("warm");
+        let first_allocation = entry.read().expect("index").events[0].id.as_ptr();
+        let second = Event::new("chat.message", "g_fixture");
+        let third = Event::new("chat.message", "g_fixture");
+        let writer = crate::ledger::acquire_writer_lock(&path).expect("writer");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("source");
+        let mut last_len = 0;
+        for event in [&second, &third] {
+            let mut encoded = serde_json::to_vec(event).expect("encode");
+            encoded.push(b'\n');
+            last_len = encoded.len();
+            file.write_all(&encoded).expect("commit");
+        }
+        file.sync_data().expect("sync");
+        drop(writer);
+        note_append(&path, &third, last_len);
+
+        let updated = current(&path).expect("catch up");
+        let index = updated.read().expect("index");
+        assert_eq!(index.events, [first, second, third]);
+        assert_eq!(
+            index.events[0].id.as_ptr(),
+            first_allocation,
+            "a delayed callback must not force a full parse of retained events"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unchanged_gzip_archive_does_not_force_tail_rebuilds() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let segments = temp.path().join("state/ledger/segments");
+        std::fs::create_dir_all(&segments).expect("segments");
+        let first = Event::new("chat.message", "g_fixture");
+        let mut archive = GzEncoder::new(
+            File::create(segments.join("0001.jsonl.gz")).expect("archive"),
+            Compression::default(),
+        );
+        serde_json::to_writer(&mut archive, &first).expect("encode");
+        archive.write_all(b"\n").expect("newline");
+        archive.finish().expect("gzip");
+        let second = Event::new("chat.message", "g_fixture");
+        crate::ledger::append(&path, &second).expect("active");
+        let entry = current(&path).expect("warm");
+        let first_allocation = entry.read().expect("index").events[0].id.as_ptr();
+
+        let third = Event::new("chat.message", "g_fixture");
+        let writer = crate::ledger::acquire_writer_lock(&path).expect("writer");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("source");
+        serde_json::to_writer(&mut file, &third).expect("encode");
+        file.write_all(b"\n").expect("newline");
+        file.sync_data().expect("commit");
+        drop(writer);
+
+        let updated = current(&path).expect("catch up");
+        let index = updated.read().expect("index");
+        assert_eq!(index.events, [first, second, third]);
+        assert_eq!(
+            index.events[0].id.as_ptr(),
+            first_allocation,
+            "a gzip trailer is not the active ledger's line boundary"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_equal_metadata_atomic_replacement_rebuilds_the_index() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let first = Event::new("chat.message", "g_fixture");
+        crate::ledger::append(&path, &first).expect("first");
+        current(&path).expect("warm");
+        // Keeping the original file open prevents its inode being reused.
+        let original = File::open(&path).expect("original");
+        let metadata = original.metadata().expect("metadata");
+        let mut replacement = first.clone();
+        replacement.id = "z".repeat(first.id.len());
+        let mut file = tempfile::NamedTempFile::new_in(temp.path()).expect("replacement");
+        serde_json::to_writer(&mut file, &replacement).expect("encode");
+        file.write_all(b"\n").expect("newline");
+        file.as_file()
+            .set_times(std::fs::FileTimes::new().set_modified(metadata.modified().expect("mtime")))
+            .expect("equal mtime");
+        file.persist(&path).expect("replace");
+        assert_eq!(
+            std::fs::metadata(&path).expect("metadata").len(),
+            metadata.len()
+        );
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("replacement history"),
+            [replacement]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_equal_length_in_place_rewrite_rebuilds_the_index() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let first = Event::new("chat.message", "g_fixture");
+        crate::ledger::append(&path, &first).expect("first");
+        current(&path).expect("warm");
+        let old_mtime = std::fs::metadata(&path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime");
+        let mut replacement = first.clone();
+        replacement.id = "z".repeat(first.id.len());
+        let mut file = File::create(&path).expect("rewrite");
+        serde_json::to_writer(&mut file, &replacement).expect("encode");
+        file.write_all(b"\n").expect("newline");
+        file.set_times(std::fs::FileTimes::new().set_modified(old_mtime + Duration::from_secs(1)))
+            .expect("changed mtime");
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("rewritten history"),
+            [replacement]
+        );
+    }
 
     #[test]
     fn delayed_notification_cannot_apply_an_already_indexed_event_for_a_new_append() {
@@ -413,6 +544,7 @@ mod tests {
         assert_eq!(reader.join().expect("reader").expect("read"), vec![first]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_stale_warm_index_catches_up_from_the_appended_tail_only() {
         use std::io::Write;
