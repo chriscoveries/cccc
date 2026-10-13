@@ -82,7 +82,7 @@ pub fn apply(
 fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<(), OpError> {
     let mut actor = environment::resolve_launch_actor(home, group, actor)?;
     let cwd = working_directory(group, &actor)?;
-    let mut env = environment::launch_env(home, group, &actor);
+    let mut env = environment::launch_env(home, group, &actor)?;
     if super::local_headless::uses_managed_provider_cli(&actor) {
         super::runtime_mcp::prepare(home, actor.runtime, &actor.command, &cwd, &mut env)?;
     }
@@ -119,7 +119,7 @@ fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionSt
         actor.command.clone()
     };
     let cwd = working_directory(group, &actor)?;
-    let mut env = environment::launch_env(home, group, &actor);
+    let mut env = environment::launch_env(home, group, &actor)?;
     super::runtime_mcp::prepare(home, actor.runtime, &command, &cwd, &mut env)?;
     let _start_permit = crate::runtime_start_gate::permit(home)
         .map_err(|message| OpError::new("runtime_shutting_down", message))?;
