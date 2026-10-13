@@ -492,7 +492,7 @@ fn nonmatching_text_with_pending_controlled_fails_closed() {
     state
         .ingest(
             &assistant(json!([{"type":"text","text":"spontaneous"}])),
-            None
+            None,
         )
         .expect("orphan adopted");
     assert_eq!(state.active_turn_id(), Some("claude-untracked-1"));
