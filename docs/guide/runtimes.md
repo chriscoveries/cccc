@@ -356,7 +356,8 @@ per-turn repository snapshots on large workspaces. CCCC merges this launch
 default into `OPENCODE_CONFIG_CONTENT` for OpenCode or `KILO_CONFIG_CONTENT` for
 Kilo. Other inline configuration is preserved. An explicit `snapshot` in the
 Actor's or linked Runtime Profile's environment takes precedence. The inline
-value must be a JSON object; invalid values fail startup without replacing the
+value must be a JSON or JSONC object; comments and trailing commas are accepted.
+Invalid values fail startup without replacing the
 configuration or including its contents in the error. Existing sessions receive
 the default on their next start or restart.
 
