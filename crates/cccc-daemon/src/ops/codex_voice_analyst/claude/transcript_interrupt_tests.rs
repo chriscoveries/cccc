@@ -72,21 +72,29 @@ fn interruption_of_an_admitted_followup_cancels_the_same_turn() {
         state
             .ingest(&user("followup", INTERRUPTION_MARKER), None)
             .expect("ingest transcript record");
-        events.try_recv().expect("receive queued event");
-        let ended = events.try_recv().expect("receive queued event");
-        assert_eq!(ended.message["params"]["turn"]["id"], "claude-initial");
+        // The interruption cancels the running turn, and the absorbed
+        // followup text opens the next turn instead of leaving later output
+        // orphaned (queued-interrupt fix: never strand a dequeued prompt).
+        let completed = events.try_recv().expect("completed message");
+        assert_eq!(completed.message["method"], "item/completed");
+        let ended = events.try_recv().expect("completed turn");
         assert_eq!(ended.message["params"]["turn"]["status"], "cancelled");
-        assert!(state.active_turn_id().is_none());
+        assert_eq!(ended.message["params"]["turn"]["id"], "claude-initial");
+        let started = events.try_recv().expect("next turn started");
+        assert_eq!(started.message["method"], "turn/started");
+        assert_eq!(started.message["params"]["turn"]["id"], "claude-followup");
+        assert_eq!(state.active_turn_id(), Some("claude-followup"));
 
-        // Old or unadmitted prompt ids cannot cancel a subsequent turn.
+        // A marker for a prompt id owned by no live turn still cannot
+        // cancel anything: "initial" died with the first turn.
         state
             .ingest(&user("next", "next request"), None)
             .expect("ingest transcript record");
         assert!(
             state
-                .ingest(&user("followup", TOOL_INTERRUPTION_MARKER), None)
+                .ingest(&user("initial", TOOL_INTERRUPTION_MARKER), None)
                 .is_err()
         );
-        assert_eq!(state.active_turn_id(), Some("claude-next"));
+        assert_eq!(state.active_turn_id(), Some("claude-followup"));
     }
 }

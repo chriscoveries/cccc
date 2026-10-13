@@ -149,15 +149,20 @@ fn hidden_input_during_a_turn_joins_it() {
 }
 
 #[test]
-fn output_without_a_turn_or_hidden_input_still_fails_closed() {
-    let (mut state, _) = harness();
-    let error = state
+fn output_without_a_turn_or_hidden_input_is_adopted_not_disconnected() {
+    let (mut state, mut events) = harness();
+    // Formerly failed closed ("without an active transcript turn") and killed
+    // the session. Now the output is adopted as a self-started turn with a
+    // diagnostic, and the session survives (WICK claude 08:46Z).
+    state
         .ingest(&assistant(json!([{"type":"text","text":"orphan"}])), None)
-        .expect_err("orphan output");
-    assert!(
-        error
-            .to_string()
-            .contains("without an active transcript turn")
+        .expect("orphan output is adopted");
+    assert_eq!(state.active_turn_id(), Some("claude-untracked-1"));
+    let started = events.try_recv().expect("turn started");
+    assert_eq!(started.message["method"], "turn/started");
+    assert_eq!(
+        started.message["params"]["turn"]["id"],
+        "claude-untracked-1"
     );
 }
 
@@ -195,11 +200,12 @@ fn settled_hidden_input_does_not_excuse_later_orphan_output() {
         .ingest(&cross_session_message("stale"), None)
         .expect("hidden input");
     state.ingest(&turn_duration(), None).expect("settle");
-    assert!(
-        state
-            .ingest(&assistant(json!([{"type":"text","text":"orphan"}])), None)
-            .is_err()
-    );
+    // The stale hidden prompt was cleared by the settle, so the orphan is
+    // adopted unattributed — but still adopted, never a disconnect.
+    state
+        .ingest(&assistant(json!([{"type":"text","text":"orphan"}])), None)
+        .expect("orphan output is adopted");
+    assert_eq!(state.active_turn_id(), Some("claude-untracked-1"));
 }
 
 /// A scheduled (cron/loop) prompt fires while idle: hidden input, then Claude's own turn.
@@ -258,11 +264,12 @@ fn resume_acknowledgement_consumes_the_hidden_resume_prompt() {
             None,
         )
         .expect("resume acknowledgement");
-    assert!(
-        state
-            .ingest(&assistant(json!([{"type":"text","text":"orphan"}])), None)
-            .is_err()
-    );
+    // The acknowledgement consumed the hidden prompt; a later orphan is
+    // still adopted as a self-started turn, never a disconnect.
+    state
+        .ingest(&assistant(json!([{"type":"text","text":"orphan"}])), None)
+        .expect("orphan output is adopted");
+    assert_eq!(state.active_turn_id(), Some("claude-untracked-1"));
 }
 
 #[test]
@@ -271,11 +278,12 @@ fn hidden_input_from_another_session_is_not_remembered() {
     let mut foreign = cross_session_message("foreign");
     foreign["sessionId"] = json!("another-session");
     state.ingest(&foreign, None).expect("foreign hidden input");
-    assert!(
-        state
-            .ingest(&assistant(json!([{"type":"text","text":"orphan"}])), None)
-            .is_err()
-    );
+    // The foreign prompt is not remembered, so the orphan is adopted
+    // unattributed — but still adopted, never a disconnect.
+    state
+        .ingest(&assistant(json!([{"type":"text","text":"orphan"}])), None)
+        .expect("orphan output is adopted");
+    assert_eq!(state.active_turn_id(), Some("claude-untracked-1"));
 }
 
 /// Two hidden inputs can land before Claude answers (e.g. a held then denied delivery notice).
@@ -303,4 +311,68 @@ fn every_pending_hidden_input_belongs_to_the_turn_it_starts() {
         .expect("interruption carrying the earlier hidden prompt id");
     let ended = drain(&mut events).pop().expect("completed turn");
     assert_eq!(ended["params"]["turn"]["status"], "cancelled");
+}
+
+/// The exact WICK 08:46:37 record sequence (cwf#116 comment 6120984998): a
+/// queued message interrupts a running tool. Before the fix, the dequeued
+/// prompt was absorbed into the dying turn, the interrupt cancelled it, and
+/// the answering assistant output had no turn, so the tracker disconnected
+/// and the lane died. Now the dequeued prompt opens its own turn at the
+/// interrupt and the answer lands in it: no disconnect, no lost lane.
+#[test]
+fn queued_prompt_interrupting_a_tool_opens_its_turn() {
+    let (mut state, mut events) = harness();
+    // The long Bash tool turn is running.
+    state
+        .ingest(&user("prompt-long", "run a long command"), None)
+        .expect("user");
+    assert_eq!(state.active_turn_id(), Some("claude-prompt-long"));
+    state
+        .ingest(
+            &assistant(json!([{"type":"tool_use","id":"tool-9","name":"Bash","input":{"command":"sleep 200"}}])),
+            None,
+        )
+        .expect("tool call");
+    // The queued message arrives mid-turn and is absorbed as a correction.
+    state
+        .ingest(&user("prompt-queued", "please also summarize"), None)
+        .expect("dequeued prompt absorbed");
+    assert_eq!(state.active_turn_id(), Some("claude-prompt-long"));
+    // The running tool reports, then the queued prompt interrupts it.
+    state
+        .ingest(
+            &json!({
+                "type":"user","sessionId":"session-1","promptId":"prompt-long",
+                "message":{"content":[{"type":"tool_result","tool_use_id":"tool-9","content":"done"}]}
+            }),
+            None,
+        )
+        .expect("tool result");
+    state
+        .ingest(&user("prompt-queued", TOOL_INTERRUPTION_MARKER), None)
+        .expect("interrupt");
+    // The interrupt cancelled the tool turn AND opened the dequeued prompt's
+    // own turn instead of leaving the next output orphaned.
+    assert_eq!(state.active_turn_id(), Some("claude-prompt-queued"));
+    let started = drain(&mut events)
+        .into_iter()
+        .find(|message| {
+            message["method"] == "turn/started"
+                && message["params"]["turn"]["id"] == "claude-prompt-queued"
+        })
+        .expect("new turn started for the dequeued prompt");
+    assert_eq!(started["params"]["turn"]["id"], "claude-prompt-queued");
+    // The answer to the queued prompt lands in its turn: session survives.
+    state
+        .ingest(
+            &assistant(json!([
+                {"type":"text","text":"summary"},
+                {"type":"tool_use","id":"tool-10","name":"Bash","input":{}}
+            ])),
+            None,
+        )
+        .expect("answer to the queued prompt");
+    assert_eq!(state.active_turn_id(), Some("claude-prompt-queued"));
+    state.ingest(&turn_duration(), None).expect("settle");
+    assert!(state.active_turn_id().is_none());
 }

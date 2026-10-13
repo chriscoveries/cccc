@@ -115,9 +115,25 @@ fn resume_ack_exception_preserves_session_and_orphan_output_guards() {
             "foreign_session" => record["sessionId"] = json!("another-session"),
             _ => unreachable!(),
         }
+        if field == "foreign_session" {
+            // A record from another session is still a hard identity mismatch.
+            assert!(
+                state.ingest(&record, None).is_err(),
+                "{field} must still fail closed"
+            );
+            continue;
+        }
+        // Malformed acks are not resume acknowledgements, so the handshake
+        // stays open — but the output is adopted as a self-started turn
+        // instead of killing the session (queued-interrupt fix).
+        state
+            .ingest(&record, None)
+            .unwrap_or_else(|_| panic!("{field} must be adopted, not disconnect"));
         assert!(
-            state.ingest(&record, None).is_err(),
-            "{field} must still fail closed"
+            state
+                .active_turn_id()
+                .is_some_and(|id| id.starts_with("claude-untracked-")),
+            "{field} opens an adopted turn"
         );
     }
 }

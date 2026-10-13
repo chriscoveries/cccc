@@ -50,6 +50,15 @@ pub(super) struct TranscriptState {
     /// turns from such inputs (scheduled prompts, cross-session messages); the turn they start
     /// is attributed to these prompts.
     meta_prompt_ids: Vec<String>,
+    /// promptId of the latest user text absorbed into a running turn as an
+    /// unregistered correction. When that turn is then cancelled by an
+    /// interrupt marker, the correction was a dequeued prompt (or equivalent
+    /// mid-turn input) that deserves its own turn: it opens one instead of
+    /// leaving the next assistant output orphaned. Cleared on every turn
+    /// boundary; a stale id never opens anything.
+    interrupted_prompt: Option<String>,
+    /// Counter for adopted self-started turns (untracked assistant output).
+    untracked_turns: u64,
 }
 
 impl TranscriptState {
@@ -65,6 +74,8 @@ impl TranscriptState {
             events,
             active: None,
             meta_prompt_ids: Vec::new(),
+            interrupted_prompt: None,
+            untracked_turns: 0,
         }
     }
 
@@ -175,7 +186,19 @@ impl TranscriptState {
                             })
                         })
             }) {
+                let pending = self.interrupted_prompt.take();
                 self.settle("cancelled", None);
+                // The text that interrupted the turn was a dequeued prompt (or
+                // equivalent mid-turn input): it opens the next turn instead of
+                // leaving the following assistant output orphaned. A bare
+                // interrupt with nothing absorbed opens nothing.
+                if let Some(prompt_id) = pending {
+                    self.open_turn(
+                        format!("claude-{prompt_id}"),
+                        HashSet::from([prompt_id]),
+                        None,
+                    );
+                }
                 return Ok(IngestOutcome::None);
             }
             return invalid("Claude interruption marker did not match the active turn");
@@ -195,6 +218,10 @@ impl TranscriptState {
                     .expect("active turn")
                     .prompt_ids
                     .insert(prompt_id.to_owned());
+                // Remember it as a possible interrupter: if this turn is
+                // cancelled by an interrupt marker next, this prompt opens
+                // the following turn (see above).
+                self.interrupted_prompt = Some(prompt_id.to_owned());
             }
             if let Some(native) = native.filter(|native| native.text == text) {
                 self.publish(
@@ -241,15 +268,29 @@ impl TranscriptState {
         if self.active.is_none() {
             // Claude Code answers some hidden inputs (scheduled prompts, messages from other
             // Claude sessions, delivery notices) in a turn of its own. Output that follows such an
-            // input belongs to that turn; any other output without a turn is still a desync and
-            // fails closed.
-            let Some(first) = self.meta_prompt_ids.first().cloned() else {
-                return invalid(
-                    "Claude emitted assistant output without an active transcript turn",
+            // input belongs to that turn.
+            if let Some(first) = self.meta_prompt_ids.first().cloned() {
+                let prompt_ids = self.meta_prompt_ids.drain(..).collect();
+                self.open_turn(format!("claude-{first}"), prompt_ids, None);
+            } else {
+                // Otherwise adopt it as a self-started turn and log a diagnostic
+                // instead of disconnecting: a turn cancelled by an interrupt, a
+                // dequeued prompt the tracker never saw open, or provider-side
+                // output all land here, and killing the session loses the lane
+                // (WICK claude 08:46Z). The pending dequeued prompt, if any,
+                // attributes the turn; open_turn clears it.
+                let pending = self.interrupted_prompt.clone();
+                self.untracked_turns += 1;
+                let turn_id = format!("claude-untracked-{}", self.untracked_turns);
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    turn_id = %turn_id,
+                    pending_prompt_id = ?pending,
+                    "adopting untracked assistant output as a self-started turn instead of disconnecting",
                 );
-            };
-            let prompt_ids = self.meta_prompt_ids.drain(..).collect();
-            self.open_turn(format!("claude-{first}"), prompt_ids, None);
+                let prompt_ids = pending.into_iter().collect();
+                self.open_turn(turn_id, prompt_ids, None);
+            }
         }
         let active = self.active.as_mut().expect("active turn");
         let content = record.pointer("/message/content").unwrap_or(&Value::Null);
@@ -356,6 +397,7 @@ impl TranscriptState {
         requested_delegation_id: Option<String>,
     ) {
         self.meta_prompt_ids.clear();
+        self.interrupted_prompt = None;
         self.active = Some(ActiveTurn {
             turn_id: turn_id.clone(),
             prompt_ids,
@@ -430,6 +472,7 @@ impl TranscriptState {
 
     fn settle(&mut self, requested_status: &str, requested_error: Option<&str>) {
         self.meta_prompt_ids.clear();
+        self.interrupted_prompt = None;
         let Some(active) = self.active.take() else {
             return;
         };
