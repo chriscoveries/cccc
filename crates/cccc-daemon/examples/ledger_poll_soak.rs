@@ -161,7 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .write(true)
                     .open(store.state_dir(&group.group_id)?.join("ledger/ledger.lock"))?;
                 lock.lock_exclusive()?;
-                let mut file = OpenOptions::new().append(true).open(&path)?;
+                let mut file = OpenOptions::new().append(true).open(path)?;
                 // Two externally committed receipts model missed/out-of-order
                 // notifications. No in-process append hook updates the index.
                 for offset in 0..2 {
