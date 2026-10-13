@@ -79,3 +79,34 @@ fn invalid_inline_config_is_not_replaced_or_exposed_in_errors() {
         assert!(!error.message.contains(content));
     }
 }
+
+#[test]
+fn group_snapshot_policy_reaches_both_runtime_launch_environments() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+    let mut group = store.create("snapshot launch", "").expect("group");
+    for runtime in [ActorRuntime::Opencode, ActorRuntime::Kilo] {
+        let key = snapshot_config_key(runtime).expect("runtime key");
+        let mut actor = Actor::new("snapshot-peer");
+        actor.runtime = runtime;
+        // Explicit empty actor config keeps the test independent of daemon env.
+        actor.env.insert(key.into(), "{}".into());
+        for enabled in [false, true] {
+            group
+                .extra
+                .insert("settings".into(), json!({"opencode_snapshot":enabled}));
+            let env = launch_env(&home, &group, &actor).expect("launch env");
+            let config: Value = serde_json::from_str(&env[key]).expect("config");
+            assert_eq!(config["snapshot"], enabled);
+            assert_eq!(env["CCCC_GROUP_ID"], group.group_id);
+            assert_eq!(env["CCCC_ACTOR_ID"], actor.id);
+        }
+        actor.env.insert(key.into(), r#"{"snapshot":false}"#.into());
+        let env = launch_env(&home, &group, &actor).expect("actor override");
+        assert_eq!(
+            serde_json::from_str::<Value>(&env[key]).expect("config")["snapshot"],
+            false
+        );
+    }
+}

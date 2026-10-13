@@ -26,7 +26,19 @@ pub(super) fn launch_env(
     let mut env = actor.env.clone();
     if let Some(key) = snapshot_config_key(actor.runtime) {
         let inherited = std::env::var(key).ok();
-        merge_snapshot_config(&mut env, key, inherited.as_deref(), false)?;
+        let snapshot = group
+            .extra
+            .get("settings")
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("opencode_snapshot"))
+            .map(|value| {
+                value.as_bool().ok_or_else(|| {
+                    OpError::new("invalid_args", "opencode_snapshot must be a boolean")
+                })
+            })
+            .transpose()?
+            .unwrap_or(false);
+        merge_snapshot_config(&mut env, key, inherited.as_deref(), snapshot)?;
     }
     // Packaged/test installations need the same CLI as their owning daemon,
     // even when that executable is not installed on the user's shell PATH.

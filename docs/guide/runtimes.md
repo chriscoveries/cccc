@@ -360,6 +360,13 @@ value must be a JSON object; invalid values fail startup without replacing the
 configuration or including its contents in the error. Existing sessions receive
 the default on their next start or restart.
 
+The Group setting `opencode_snapshot` controls the default for both Runtimes.
+It defaults to `false`; set `settings.opencode_snapshot: true` in `group.yaml`,
+or update the Group settings API with `{"opencode_snapshot": true}` to enable
+snapshots. Sending `null` through the API removes the override. This setting
+applies to Actors on their next start; an Actor's explicit inline `snapshot`
+continues to take precedence over the Group setting.
+
 Codex, Claude, Grok, OpenCode, and Kilo always pair their native terminal with the
 managed background session described above. DeepSeek uses ACP NDJSON through
 CCCC's fixed composition and has no terminal surface. Provider health determines
