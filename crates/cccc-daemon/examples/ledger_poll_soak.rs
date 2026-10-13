@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .cloned()
             .ok_or("request object")?,
     };
-    println!("phase,pid,elapsed_ms,cpu_ticks,rss_kib,swap_kib,ledger_bytes");
+    println!("phase,pid,elapsed_ms,cpu_ticks,rss_kib,hwm_kib,swap_kib,threads,ledger_bytes");
     let started = Instant::now();
     sample("cold", started, &path)?;
     // The roster contains only one unbound Web Model actor. It is structured
@@ -219,11 +219,13 @@ fn sample(phase: &str, started: Instant, path: &Path) -> io::Result<()> {
             .unwrap_or_default()
     };
     println!(
-        "{phase},{},{},{cpu},{},{},{}",
+        "{phase},{},{},{cpu},{},{},{},{},{}",
         std::process::id(),
         started.elapsed().as_millis(),
         field("VmRSS:"),
+        field("VmHWM:"),
         field("VmSwap:"),
+        field("Threads:"),
         std::fs::metadata(path)?.len()
     );
     io::stdout().flush()
