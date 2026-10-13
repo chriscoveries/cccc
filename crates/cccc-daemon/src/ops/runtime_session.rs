@@ -9,6 +9,7 @@ mod claude;
 mod grok;
 #[cfg(test)]
 mod grok_tests;
+mod muse;
 pub(crate) mod native_acp;
 mod opencode;
 pub(crate) mod pi;
@@ -22,6 +23,9 @@ pub use claude::{
 };
 pub use grok::{
     prepare_managed as prepare_grok_managed_session, record_managed as record_grok_managed_session,
+};
+pub use muse::{
+    capture_after_launch as capture_muse_session_after_launch, prepare as prepare_muse_session,
 };
 pub use opencode::{
     prepare_managed as prepare_opencode_managed_session,

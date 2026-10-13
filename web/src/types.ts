@@ -1584,6 +1584,7 @@ export const SUPPORTED_RUNTIMES = [
   "grok",
   "hermes",
   "kimi",
+  "muse",
   "opencode",
   "pi",
   "web_model",
@@ -1628,6 +1629,10 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   grok: { label: "Grok Build", desc: "Managed delivery in the same native Grok TUI" },
   hermes: { label: "Hermes Agent", desc: "Uses your Hermes profile with CCCC MCP" },
   kimi: { label: "Kimi Code", desc: "" },
+  muse: {
+    label: "Muse Code",
+    desc: "Uses Muse's native terminal with CCCC MCP; restarts resume the same session",
+  },
   opencode: { label: "OpenCode", desc: "Managed delivery in the same native OpenCode TUI" },
   pi: { label: "Pi", desc: "" },
   web_model: {
@@ -1822,6 +1827,16 @@ export const RUNTIME_COLORS: Record<
     textLight: "text-lime-700",
     borderLight: "border-lime-300",
     dotLight: "bg-lime-500",
+  },
+  muse: {
+    bg: "bg-violet-900/30",
+    text: "text-violet-300",
+    border: "border-violet-600/50",
+    dot: "bg-violet-400",
+    bgLight: "bg-violet-50",
+    textLight: "text-violet-700",
+    borderLight: "border-violet-300",
+    dotLight: "bg-violet-500",
   },
   opencode: {
     bg: "bg-stone-900/40",

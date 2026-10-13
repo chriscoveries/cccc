@@ -32,11 +32,14 @@ pub(super) fn prepare(
     }
     // These adapters own MCP setup later in the launch pipeline. Grok shares
     // its native registry with the TUI; the others inject a session entry.
+    // Muse is a PTY lane whose MCP entry is injected per launch via
+    // `-c mcpServers.cccc=...` when its command is assembled.
     if matches!(
         runtime,
         ActorRuntime::Claude
             | ActorRuntime::Codex
             | ActorRuntime::Grok
+            | ActorRuntime::Muse
             | ActorRuntime::Opencode
             | ActorRuntime::Kilo
             | ActorRuntime::Pi
@@ -62,6 +65,7 @@ pub(super) fn prepare(
         ActorRuntime::Claude
         | ActorRuntime::Codex
         | ActorRuntime::Grok
+        | ActorRuntime::Muse
         | ActorRuntime::Kilo
         | ActorRuntime::Pi
         | ActorRuntime::Opencode => {

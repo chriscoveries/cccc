@@ -22,6 +22,7 @@ const SUPPORTED: &[&str] = &[
     "grok",
     "hermes",
     "kimi",
+    "muse",
     "opencode",
     "pi",
     "deepseek",
@@ -235,6 +236,17 @@ fn setup_one(
             "status":"ready",
             "managed":true,
             "mcp":"injected_per_session"
+        }));
+    }
+    if runtime == "muse" {
+        // PTY lane: the daemon injects `-c mcpServers.cccc=...` at launch
+        // and resumes the recorded session; there is no persistent setup.
+        return Ok(json!({
+            "runtime":runtime,
+            "mode":"pty",
+            "status":"ready",
+            "managed":true,
+            "mcp":"injected_per_launch"
         }));
     }
     if runtime == "kimi" {

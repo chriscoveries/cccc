@@ -81,6 +81,7 @@ pub enum ActorRuntime {
     Grok,
     Hermes,
     Kimi,
+    Muse,
     Opencode,
     Pi,
     WebModel,
@@ -322,6 +323,21 @@ mod tests {
             serde_json::to_string(&runtime).expect("serialize"),
             r#""cline""#
         );
+    }
+
+    #[test]
+    fn muse_runtime_is_a_pty_terminal_lane() {
+        let runtime: ActorRuntime = serde_json::from_str(r#""muse""#).expect("deserialize");
+        assert_eq!(runtime, ActorRuntime::Muse);
+        assert_eq!(
+            serde_json::to_string(&runtime).expect("serialize"),
+            r#""muse""#
+        );
+        assert_eq!(runtime.runner(), RunnerKind::Pty);
+        assert_eq!(runtime.state_source(), RuntimeStateSource::Terminal);
+        assert!(!runtime.supports_acp_mode());
+        assert!(RuntimeMode::Acp.validate(runtime).is_err());
+        assert!(!runtime.is_web_model());
     }
 
     #[test]
