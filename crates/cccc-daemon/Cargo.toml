@@ -19,6 +19,7 @@ cccc-runtime = { package = "cccc-pair-runtime", version = "=0.4.42", path = "../
 chrono.workspace = true
 fs2.workspace = true
 futures-util.workspace = true
+jsonc-parser.workspace = true
 mime_guess.workspace = true
 nix = { workspace = true, features = ["hostname"] }
 percent-encoding.workspace = true

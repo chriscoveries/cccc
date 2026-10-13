@@ -69,8 +69,30 @@ fn inherited_config_is_preserved_but_its_snapshot_does_not_override_launch_polic
 }
 
 #[test]
+fn jsonc_comments_and_trailing_commas_preserve_provider_strings_and_actor_override() {
+    let content = r#"{ // runtime-supported inline config
+        "provider": {"example": {"options": {"baseURL": "https://example.test/v1"}}},
+        /* keep the actor's choice */ "snapshot": true,
+    }"#;
+    let config = merged(Some(content), None, false);
+    assert_eq!(config["snapshot"], true);
+    assert_eq!(
+        config["provider"]["example"]["options"]["baseURL"],
+        "https://example.test/v1"
+    );
+    assert_eq!(merged(None, Some(content), false)["snapshot"], false);
+}
+
+#[test]
 fn invalid_inline_config_is_not_replaced_or_exposed_in_errors() {
-    for content in ["{private-credential", "[]", "null", "false"] {
+    for content in [
+        "{private-credential",
+        "[]",
+        "null",
+        "false",
+        "{snapshot:true}",
+        r#"{"model":"a" "snapshot":false}"#,
+    ] {
         let mut env = BTreeMap::from([(KEY.into(), content.into())]);
         let original = env.clone();
         let error = merge_snapshot_config(&mut env, KEY, None, false).expect_err("invalid config");

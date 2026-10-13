@@ -69,8 +69,20 @@ fn merge_snapshot_config(
     let actor_override = env.contains_key(key);
     let content = env.get(key).map(String::as_str).or(inherited);
     let mut config = match content.filter(|content| !content.trim().is_empty()) {
-        Some(content) => serde_json::from_str::<Value>(content)
+        Some(content) => jsonc_parser::parse_to_serde_value(
+            content,
+            &jsonc_parser::ParseOptions {
+                allow_comments: true,
+                allow_trailing_commas: true,
+                allow_loose_object_property_names: false,
+                allow_missing_commas: false,
+                allow_single_quoted_strings: false,
+                allow_hexadecimal_numbers: false,
+                allow_unary_plus_numbers: false,
+            },
+        )
             .ok()
+            .flatten()
             .and_then(|value| value.as_object().cloned())
             .ok_or_else(|| {
                 // Inline configuration may contain credentials. Do not include
@@ -78,7 +90,7 @@ fn merge_snapshot_config(
                 OpError::new(
                     "invalid_runtime_config",
                     format!(
-                        "{key} must contain a JSON object; existing configuration was not replaced"
+                        "{key} must contain a JSON/JSONC object; existing configuration was not replaced"
                     ),
                 )
             })?,
