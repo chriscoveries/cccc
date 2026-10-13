@@ -490,15 +490,15 @@ fn nonmatching_text_with_pending_controlled_fails_closed() {
     };
     // An adopted turn holds the tracker (orphan adopted first).
     state
-        .ingest(&assistant(json!([{"type":"text","text":"spontaneous"}])), None)
+        .ingest(
+            &assistant(json!([{"type":"text","text":"spontaneous"}])),
+            None
+        )
         .expect("orphan adopted");
     assert_eq!(state.active_turn_id(), Some("claude-untracked-1"));
     // Different text with the delivery pending: ambiguous, fail closed.
     let error = state
-        .ingest(
-            &user("prompt-other", "something else"),
-            Some(pending()),
-        )
+        .ingest(&user("prompt-other", "something else"), Some(pending()))
         .expect_err("nonmatching text must not absorb a pending delivery");
     assert!(error.to_string().contains("turn ownership is ambiguous"));
     assert_eq!(state.active_turn_id(), Some("claude-untracked-1"));
