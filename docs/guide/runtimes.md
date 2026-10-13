@@ -351,6 +351,15 @@ submit one message after changing the native TUI model, or set
 `--model provider/model` in the launch command. Existing terminal-only receipts
 are not adopted; subsequent managed stop/start preserves the new session.
 
+OpenCode and Kilo Actors started by CCCC default to `snapshot: false`, avoiding
+per-turn repository snapshots on large workspaces. CCCC merges this launch
+default into `OPENCODE_CONFIG_CONTENT` for OpenCode or `KILO_CONFIG_CONTENT` for
+Kilo. Other inline configuration is preserved. An explicit `snapshot` in the
+Actor's or linked Runtime Profile's environment takes precedence. The inline
+value must be a JSON object; invalid values fail startup without replacing the
+configuration or including its contents in the error. Existing sessions receive
+the default on their next start or restart.
+
 Codex, Claude, Grok, OpenCode, and Kilo always pair their native terminal with the
 managed background session described above. DeepSeek uses ACP NDJSON through
 CCCC's fixed composition and has no terminal surface. Provider health determines
