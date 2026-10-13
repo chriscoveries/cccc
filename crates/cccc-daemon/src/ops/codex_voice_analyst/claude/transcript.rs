@@ -186,18 +186,16 @@ impl TranscriptState {
                             })
                         })
             }) {
+                // Consume the stash only if this marker owns it: the
+                // interrupting prompt must be the stashed one. A marker for
+                // another prompt cancels the turn without reopening stale
+                // (or foreign) text as a phantom successor.
                 let pending = self.interrupted_prompt.take();
                 self.settle("cancelled", None);
-                // The text that interrupted the turn was a dequeued prompt (or
-                // equivalent mid-turn input): it opens the next turn instead of
-                // leaving the following assistant output orphaned. A bare
-                // interrupt with nothing absorbed opens nothing.
-                if let Some(prompt_id) = pending {
-                    self.open_turn(
-                        format!("claude-{prompt_id}"),
-                        HashSet::from([prompt_id]),
-                        None,
-                    );
+                if let Some(id) = pending {
+                    if id == prompt_id {
+                        self.open_turn(format!("claude-{id}"), HashSet::from([id]), None);
+                    }
                 }
                 return Ok(IngestOutcome::None);
             }
@@ -207,6 +205,39 @@ impl TranscriptState {
             return Ok(IngestOutcome::None);
         }
         if let Some(active_turn_id) = self.active_turn_id().map(str::to_owned) {
+            // A controlled delivery's echo arriving while an adopted
+            // self-started turn holds the tracker supersedes it: the adopted
+            // turn was a placeholder for unattributable output, and the echo
+            // is the delivery the worker is waiting on. Settle and open so
+            // the receipt completes exactly instead of hanging to timeout.
+            // Real (non-adopted) turns are never touched here. Any OTHER
+            // text while a controlled delivery is pending is the same
+            // ambiguity as the terminal race below: fail closed so stray
+            // input cannot silently absorb (or strand) the delivery.
+            if let Some(c) = controlled.as_ref() {
+                if c.text == text {
+                    if active_turn_id.starts_with("claude-untracked-") {
+                        // Same input-authority validation as ordinary
+                        // controlled input: refuse a malformed echo BEFORE
+                        // settling the orphan, so a bad record cannot strand
+                        // retained text in a dead turn.
+                        let prompt_id = required_prompt_id(record)?.to_owned();
+                        self.settle("cancelled", None);
+                        let turn_id = c.turn_id.to_owned();
+                        let delegation_id = c.delegation_id.to_owned();
+                        self.open_turn(
+                            turn_id.clone(),
+                            HashSet::from([prompt_id]),
+                            Some(delegation_id),
+                        );
+                        return Ok(IngestOutcome::Controlled(turn_id));
+                    }
+                } else {
+                    return invalid(
+                        "terminal input raced a pending CCCC Claude prompt; turn ownership is ambiguous",
+                    );
+                }
+            }
             if let Some(prompt_id) = record
                 .get("promptId")
                 .and_then(Value::as_str)
@@ -278,7 +309,11 @@ impl TranscriptState {
                 // dequeued prompt the tracker never saw open, or provider-side
                 // output all land here, and killing the session loses the lane
                 // (WICK claude 08:46Z). The pending dequeued prompt, if any,
-                // attributes the turn; open_turn clears it.
+                // attributes the turn; open_turn clears it. This runs even
+                // with a controlled delivery pending: if its echo then
+                // matches while this adopted turn is still active, the echo
+                // settles it and opens the controlled turn, so the receipt
+                // completes instead of hanging to timeout.
                 let pending = self.interrupted_prompt.clone();
                 self.untracked_turns += 1;
                 let turn_id = format!("claude-untracked-{}", self.untracked_turns);
@@ -293,6 +328,11 @@ impl TranscriptState {
             }
         }
         let active = self.active.as_mut().expect("active turn");
+        // The turn answered: any absorbed correction is no longer a pending
+        // interrupter. Only a cancel with no intervening output may reopen
+        // the stashed prompt; otherwise a later ordinary cancel would revive
+        // stale text as a phantom turn.
+        self.interrupted_prompt = None;
         let content = record.pointer("/message/content").unwrap_or(&Value::Null);
         for block in content.as_array().into_iter().flatten() {
             match block.get("type").and_then(Value::as_str) {

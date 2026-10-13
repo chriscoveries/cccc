@@ -376,3 +376,130 @@ fn queued_prompt_interrupting_a_tool_opens_its_turn() {
     state.ingest(&turn_duration(), None).expect("settle");
     assert!(state.active_turn_id().is_none());
 }
+
+/// REDO finding 1: a stashed correction answered by later output must not
+/// reopen as a phantom turn on an ordinary cancel.
+#[test]
+fn answered_correction_is_not_reopened_by_a_later_cancel() {
+    let (mut state, mut events) = harness();
+    state
+        .ingest(&user("prompt-long", "run a long command"), None)
+        .expect("user");
+    assert_eq!(state.active_turn_id(), Some("claude-prompt-long"));
+    // A mid-turn correction is absorbed (stashed).
+    state
+        .ingest(&user("prompt-note", "also note this"), None)
+        .expect("correction absorbed");
+    // The turn answers: the correction is consumed, stash cleared.
+    state
+        .ingest(&assistant(json!([{"type":"text","text":"noted"}])), None)
+        .expect("assistant");
+    assert_eq!(state.active_turn_id(), Some("claude-prompt-long"));
+    // An ordinary cancel now ends the turn WITHOUT opening a phantom turn
+    // for the long-answered correction.
+    state
+        .ingest(&user("prompt-note", TOOL_INTERRUPTION_MARKER), None)
+        .expect("cancel");
+    assert!(state.active_turn_id().is_none());
+    let ended = drain(&mut events)
+        .into_iter()
+        .find(|message| message["method"] == "turn/completed")
+        .expect("cancelled turn");
+    assert_eq!(ended["params"]["turn"]["status"], "cancelled");
+}
+
+/// REDO finding 2: orphan output with a pending controlled delivery is
+/// adopted (text preserved, never dropped); the delivery's echo then settles
+/// the adopted turn and opens the controlled one, so the receipt completes
+/// instead of hanging to timeout.
+#[test]
+fn orphan_adopted_then_controlled_echo_settles_and_opens() {
+    let (mut state, mut events) = harness();
+    let pending = || PendingPrompt {
+        delegation_id: "controlled-delivery",
+        text: "inspect this",
+        turn_id: "controlled-turn",
+    };
+    // Spontaneous output arrives before the delivery's echo: adopted, since
+    // dropping it would be silent loss.
+    assert_eq!(
+        state
+            .ingest(
+                &assistant(json!([{"type":"text","text":"spontaneous"}])),
+                Some(pending())
+            )
+            .expect("orphan adopted"),
+        None
+    );
+    assert_eq!(state.active_turn_id(), Some("claude-untracked-1"));
+    // The exact echo settles the adopted turn and opens the controlled one:
+    // text preserved in history, receipt completes exactly.
+    assert_eq!(
+        state
+            .ingest(&user("prompt-1", "inspect this"), Some(pending()),)
+            .expect("echo")
+            .as_deref(),
+        Some("controlled-turn")
+    );
+    assert_eq!(state.active_turn_id(), Some("controlled-turn"));
+    let settled = drain(&mut events)
+        .into_iter()
+        .find(|message| {
+            message["method"] == "turn/completed"
+                && message["params"]["turn"]["id"] == "claude-untracked-1"
+        })
+        .expect("adopted turn settled");
+    assert_eq!(settled["params"]["turn"]["status"], "cancelled");
+}
+
+/// REDO ownership: a cancel marker for another prompt must not reopen a
+/// fresh absorbed correction as a phantom successor.
+#[test]
+fn cancel_for_another_prompt_does_not_reopen_a_fresh_correction() {
+    let (mut state, mut events) = harness();
+    state
+        .ingest(&user("prompt-orig", "original work"), None)
+        .expect("user");
+    assert_eq!(state.active_turn_id(), Some("claude-prompt-orig"));
+    // A fresh correction is absorbed (stashed) with no output after it.
+    state
+        .ingest(&user("prompt-extra", "extra note"), None)
+        .expect("correction absorbed");
+    // The cancel marker owns the ORIGINAL prompt, not the stashed one.
+    state
+        .ingest(&user("prompt-orig", TOOL_INTERRUPTION_MARKER), None)
+        .expect("cancel");
+    assert!(state.active_turn_id().is_none());
+    let ended = drain(&mut events)
+        .into_iter()
+        .find(|message| message["method"] == "turn/completed")
+        .expect("cancelled turn");
+    assert_eq!(ended["params"]["turn"]["status"], "cancelled");
+}
+
+/// REDO delivery accounting: nonmatching text while a controlled delivery
+/// is pending fails closed (like the terminal race), so it cannot silently
+/// absorb or strand the delivery.
+#[test]
+fn nonmatching_text_with_pending_controlled_fails_closed() {
+    let (mut state, _) = harness();
+    let pending = || PendingPrompt {
+        delegation_id: "controlled-delivery",
+        text: "inspect this",
+        turn_id: "controlled-turn",
+    };
+    // An adopted turn holds the tracker (orphan adopted first).
+    state
+        .ingest(&assistant(json!([{"type":"text","text":"spontaneous"}])), None)
+        .expect("orphan adopted");
+    assert_eq!(state.active_turn_id(), Some("claude-untracked-1"));
+    // Different text with the delivery pending: ambiguous, fail closed.
+    let error = state
+        .ingest(
+            &user("prompt-other", "something else"),
+            Some(pending()),
+        )
+        .expect_err("nonmatching text must not absorb a pending delivery");
+    assert!(error.to_string().contains("turn ownership is ambiguous"));
+    assert_eq!(state.active_turn_id(), Some("claude-untracked-1"));
+}
