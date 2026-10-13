@@ -331,3 +331,7 @@ pub(crate) fn cursor_preserving_text(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[path = "output_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "review_probe.rs"]
+mod review_probe;
