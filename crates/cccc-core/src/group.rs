@@ -173,9 +173,8 @@ impl GroupStore {
         stored.updated_at = utc_now();
         let path = self.group_dir(&stored.group_id)?.join("group.yaml");
         write_yaml_committed(&path, &stored)?;
-        // Seed the parse cache with exactly what was committed, so the very
-        // next `load` returns this document without a round trip. The identity
-        // is read back from the file that `write_yaml_committed` replaced.
+        // Invalidate after commit; a delayed hook must not associate this
+        // value with an external writer's later atomic replacement.
         crate::parse_cache::store_serialized(&path, &stored);
         Ok(stored)
     }

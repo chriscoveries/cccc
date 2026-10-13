@@ -28,10 +28,6 @@ pub mod deepseek_restart_gate;
 pub mod direct;
 pub mod fs;
 pub mod group;
-pub mod parse_cache;
-#[cfg(test)]
-#[path = "bench_parsecache.rs"]
-mod bench_parsecache;
 pub mod group_bridge_retirement;
 pub mod group_copy;
 mod group_delete;
@@ -52,6 +48,7 @@ pub mod mail_pending;
 pub mod membership;
 pub mod memory;
 pub mod nomcp;
+pub mod parse_cache;
 pub mod path_input;
 pub mod peer_insight;
 pub mod permissions;

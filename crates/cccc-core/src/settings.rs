@@ -58,8 +58,7 @@ pub fn update<T>(
         let result = change(&mut settings)?;
         let path = home.root().join("settings.yaml");
         write_yaml(&path, &settings)?;
-        // Reopen the parse cache with what was just committed, so this
-        // process's next read cannot observe its own write as stale.
+        // Invalidate after commit so a racing external writer remains visible.
         crate::parse_cache::store_serialized(&path, &settings);
         Ok(result)
     })
