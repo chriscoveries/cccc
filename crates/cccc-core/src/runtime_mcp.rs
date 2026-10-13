@@ -26,6 +26,7 @@ pub const fn is_auto_managed(runtime: ActorRuntime) -> bool {
             | ActorRuntime::Grok
             | ActorRuntime::Hermes
             | ActorRuntime::Kimi
+            | ActorRuntime::Muse
             | ActorRuntime::Kilo
             | ActorRuntime::Opencode
             | ActorRuntime::Pi
@@ -51,6 +52,7 @@ pub const fn name(runtime: ActorRuntime) -> &'static str {
         ActorRuntime::Grok => "grok",
         ActorRuntime::Hermes => "hermes",
         ActorRuntime::Kimi => "kimi",
+        ActorRuntime::Muse => "muse",
         ActorRuntime::Opencode => "opencode",
         ActorRuntime::Pi => "pi",
         ActorRuntime::WebModel => "web_model",
@@ -211,6 +213,7 @@ mod tests {
             ActorRuntime::Grok,
             ActorRuntime::Hermes,
             ActorRuntime::Kimi,
+            ActorRuntime::Muse,
             ActorRuntime::Kilo,
             ActorRuntime::Opencode,
             ActorRuntime::Pi,

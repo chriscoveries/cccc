@@ -106,6 +106,29 @@ fn assert_managed_setup(runtime: &str, actor_runtime: ActorRuntime) {
 }
 
 #[test]
+fn muse_setup_reports_launch_owned_mcp_without_global_config_mutation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let args = SetupArgs {
+        runtime: Some("muse".into()),
+        path: ".".into(),
+        runtime_mode: "default".into(),
+        login: false,
+    };
+    let value =
+        setup_one(&home, &args, "muse", Path::new("/opt/cccc"), &json!({})).expect("muse setup");
+    assert_eq!(value["status"], "ready");
+    assert_eq!(value["managed"], true);
+    assert_eq!(value["mode"], "pty");
+    assert_eq!(value["mcp"], "injected_per_launch");
+    assert!(SUPPORTED.contains(&"muse"));
+    assert!(
+        cccc_core::runtime_mcp::add_command(ActorRuntime::Muse, Path::new("/opt/cccc")).is_none()
+    );
+    assert!(cccc_core::runtime_mcp::remove_command(ActorRuntime::Muse).is_none());
+}
+
+#[test]
 fn claude_setup_reports_session_owned_mcp_without_global_config_mutation() {
     assert_managed_setup("claude", ActorRuntime::Claude);
 }
