@@ -84,22 +84,10 @@ fn apply_with_policy(
     if !matches!(kind, "actor.restart" | "actor.new_session")
         && actor_is_running(group, stored_actor)
     {
-        // A registered trust owner retains its pending decision until that
-        // owner retires, including when next-launch settings name another runtime.
-        if !super::local_headless::waiting_for_workspace_trust(&group.group_id, actor_id)
-            .map_err(OpError::io)?
-        {
-            super::runtime_session::recovery_decision(
-                home,
-                &group.group_id,
-                actor_id,
-                "skip",
-                "already_running",
-            )
-            .map_err(OpError::io)?;
-        }
         // Saving config does not restart an existing session. Explicit restart
         // applies it; start remains idempotent across backend changes too.
+        // Preserve the existing owner's receipt: next-launch settings may name
+        // another provider, and a trust owner may still hold a pending decision.
         super::local_headless::ensure_viewer(&group.group_id, actor_id).map_err(OpError::io)?;
         super::capabilities::apply_actor_startup_baseline(home, group, &actor);
         return Ok(
