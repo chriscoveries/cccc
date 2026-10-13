@@ -1,8 +1,10 @@
 //! Isolated T539 measurement through the real daemon's IPC polling handler.
 //! Creates a new home, starts no actor processes, and writes only its copy.
 //! Usage: ledger_poll_soak NEW_CASE LEDGER_COPY_OR_DASH ROUNDS [ACTOR_ID]
-//!                        [START_PAUSE_MS] [POLL_PAUSE_MS] [GROUPS]
+//!                        [START_PAUSE_MS] [POLL_PAUSE_MS] [GROUPS] [DELIVER_SOURCE_ID]
 //! A dash generates approximately 91 MiB of accepted delivery history.
+//! DELIVER_SOURCE_ID probes an already accepted message instead of waiting;
+//! `auto` selects the first message when generating synthetic history.
 
 use cccc_client::DaemonClient;
 use cccc_contracts::{Actor, ActorRuntime, DaemonRequest, Event, GroupState};
@@ -19,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.len() < 3 {
         return Err(
-            "usage: ledger_poll_soak NEW_CASE LEDGER_COPY_OR_DASH ROUNDS [ACTOR_ID] [START_PAUSE_MS] [POLL_PAUSE_MS] [GROUPS]".into(),
+            "usage: ledger_poll_soak NEW_CASE LEDGER_COPY_OR_DASH ROUNDS [ACTOR_ID] [START_PAUSE_MS] [POLL_PAUSE_MS] [GROUPS] [DELIVER_SOURCE_ID]".into(),
         );
     }
     let case = Path::new(&args[0]);
@@ -37,13 +39,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     group.state = GroupState::Active;
     store.save(&group)?;
     let path = store.ledger_path(&group.group_id)?;
-    if args[1] == "-" {
-        generate(&path, &group.group_id, actor_id)?;
+    let generated_source = if args[1] == "-" {
+        Some(generate(&path, &group.group_id, actor_id)?)
     } else {
         // Read the supplied copy; never modify it or copy its runnable group
         // configuration, account state, connections, or automation rules.
         std::fs::copy(&args[1], &path)?;
-    }
+        None
+    };
     let rounds: usize = args[2].parse()?;
     let start_pause = args
         .get(4)
@@ -63,13 +66,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !(1..=4).contains(&group_count) {
         return Err("GROUPS must be between 1 and 4".into());
     }
+    let delivery_source = args
+        .get(7)
+        .map(|source| {
+            if source == "auto" {
+                generated_source
+                    .clone()
+                    .ok_or("auto delivery source requires a generated fixture")
+            } else {
+                Ok(source.clone())
+            }
+        })
+        .transpose()?;
+    let (op, request_args) = if let Some(source) = &delivery_source {
+        (
+            "message_deliver",
+            json!({"group_id":group.group_id,"source_event_id":source,"actor_ids":[actor_id],"by":"user"}),
+        )
+    } else {
+        (
+            "runtime_wait_next_turn",
+            json!({"group_id":group.group_id,"actor_id":actor_id,"by":actor_id,"limit":1}),
+        )
+    };
     let request = DaemonRequest {
         v: 1,
-        op: "runtime_wait_next_turn".into(),
-        args: json!({"group_id":group.group_id,"actor_id":actor_id,"by":actor_id,"limit":1})
-            .as_object()
-            .cloned()
-            .ok_or("request object")?,
+        op: op.into(),
+        args: request_args.as_object().cloned().ok_or("request object")?,
     };
     let mut cases = vec![(group, path.clone(), request)];
     for index in 1..group_count {
@@ -122,9 +145,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     sample("ready", started, &path)?;
     eprintln!(
-        "ready pid={} home={} actor={actor_id} groups={group_count}",
+        "ready pid={} home={} actor={actor_id} groups={group_count} op={op} build={}",
         std::process::id(),
-        home.root().display()
+        home.root().display(),
+        cccc_core::build_info::current()
     );
     tokio::time::sleep(Duration::from_millis(start_pause)).await;
     for round in 0..=rounds {
@@ -153,7 +177,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 drop(lock);
             }
             let response = client.call(request).await?;
-            if !response.ok {
+            if delivery_source.is_some() {
+                // This exercises the real source/generation validation scan
+                // without handing any message to an actor or claiming work.
+                if response.ok
+                    || response.error.as_ref().map(|error| error.code.as_str())
+                        != Some("already_delivered")
+                {
+                    return Err(format!(
+                        "delivery fixture is not already accepted: {:?}",
+                        response.error
+                    )
+                    .into());
+                }
+            } else if !response.ok {
                 return Err(format!("runtime polling failed: {:?}", response.error).into());
             }
             // On a copied ledger an actual pending turn can be claimed. That is
@@ -205,14 +242,16 @@ fn receipt(group: &str, actor: &str, source: &str) -> Event {
     event
 }
 
-fn generate(path: &Path, group: &str, actor: &str) -> io::Result<()> {
+fn generate(path: &Path, group: &str, actor: &str) -> io::Result<String> {
     let mut file = BufWriter::new(File::create(path)?);
     let body = "x".repeat(2048);
     let mut written = 0;
     let mut index = 0;
+    let mut first_source = None;
     while written < 91 * 1024 * 1024 {
         let mut source = Event::new("chat.message", group);
         source.by = "user".into();
+        first_source.get_or_insert_with(|| source.id.clone());
         source.data = json!({"to":[actor],"message_mode":"send","text":body})
             .as_object()
             .cloned()
@@ -229,7 +268,7 @@ fn generate(path: &Path, group: &str, actor: &str) -> io::Result<()> {
     file.flush()?;
     file.get_ref().sync_data()?;
     eprintln!("synthetic fixture: {written} bytes, {index} settled messages");
-    Ok(())
+    first_source.ok_or_else(|| io::Error::other("generated fixture has no messages"))
 }
 
 fn sample(phase: &str, started: Instant, path: &Path) -> io::Result<()> {
