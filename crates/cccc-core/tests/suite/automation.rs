@@ -457,15 +457,6 @@ fn mail_written_to_an_idle_actor_is_announced_at_once() {
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
     let store = GroupStore::new(home.clone()).expect("store");
     let group = store.create("idle Mail now", "").expect("group");
-
-/// A managed session that reports idle, holds active cards, and has been
-/// quiet for the interval, is reminded about them once per interval.
-#[test]
-fn card_wake_reminds_an_idle_actor_about_its_active_cards_once_per_interval() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
-    let store = GroupStore::new(home.clone()).expect("store");
-    let group = store.create("card wake", "").expect("group");
     let configure = |delivery: serde_json::Value| {
         store
             .mutate(&group.group_id, |group| {
@@ -622,7 +613,28 @@ fn disabled_idle_mail_notice_does_not_announce_overdue_mail_on_write() {
             .expect("events")
             .iter()
             .all(|event| event.kind != "mail.read")
+    );
+}
 
+/// A managed session that reports idle, holds active cards, and has been
+/// quiet for the interval, is reminded about them once per interval.
+#[test]
+fn card_wake_reminds_an_idle_actor_about_its_active_cards_once_per_interval() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("card wake", "").expect("group");
+    let configure = |delivery: serde_json::Value| {
+        store
+            .mutate(&group.group_id, |group| {
+                group.extra.insert("delivery".into(), delivery.clone());
+                Ok(())
+            })
+            .expect("delivery settings");
+    };
+    store
+        .mutate(&group.group_id, |group| {
+            group.state = GroupState::Active;
             actors::add(group, Actor::new("peer"))?;
             Ok(())
         })
@@ -705,14 +717,9 @@ fn card_wake_is_off_unless_the_group_opts_in() {
 
     let eligible = HashSet::from(["peer".to_owned()]);
     let idle = HashSet::from(["peer".to_owned()]);
-    let result = automation::tick_group_with_idle_actors(
-        &home,
-        &group.group_id,
-        true,
-        &eligible,
-        &idle,
-    )
-    .expect("tick");
+    let result =
+        automation::tick_group_with_idle_actors(&home, &group.group_id, true, &eligible, &idle)
+            .expect("tick");
     assert!(
         !result
             .notifications
@@ -732,7 +739,9 @@ fn card_wake_skips_cards_that_are_not_the_actors_to_move() {
         .mutate(&group.group_id, |group| {
             group.state = GroupState::Active;
             actors::add(group, Actor::new("peer"))?;
-            group.extra.insert("delivery".into(), json!({"task_wake_on_idle":true}));
+            group
+                .extra
+                .insert("delivery".into(), json!({"task_wake_on_idle":true}));
             Ok(())
         })
         .expect("actor");
@@ -814,8 +823,9 @@ fn card_wake_waits_for_the_quiet_interval_before_reminding() {
 
     let eligible = HashSet::from(["peer".to_owned()]);
     let idle = HashSet::from(["peer".to_owned()]);
-    let result = automation::tick_group_with_idle_actors(&home, &group.group_id, true, &eligible, &idle)
-        .expect("tick");
+    let result =
+        automation::tick_group_with_idle_actors(&home, &group.group_id, true, &eligible, &idle)
+            .expect("tick");
     assert!(
         !result
             .notifications
