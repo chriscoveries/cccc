@@ -112,6 +112,8 @@ describe("settings draft and save continuity", () => {
       mail_notice_after_seconds: 300,
       mail_notice_idle_after_seconds: 45,
       reply_notice_after_seconds: 900,
+      task_wake_on_idle: false,
+      task_wake_interval_seconds: 60,
     });
     await act(async () =>
       useModalStore.getState().openSettingsTarget({ scope: "group", tab: "messaging" }),
