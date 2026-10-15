@@ -353,6 +353,33 @@ pub(super) async fn run(
                     let _ = response.send(());
                 }
                 Some(AcpCommand::ExternalDisconnected { reason }) => break reason,
+                Some(AcpCommand::CloseIfIdle { response }) => {
+                    // A timed-out/cancelled maintenance caller no longer owns
+                    // this request. Do not retire its session later.
+                    if response.is_closed() {
+                        continue;
+                    }
+                    let idle = !session_id.is_empty()
+                        && active.is_none()
+                        && pending.is_empty()
+                        && loading_request_id.is_none()
+                        && cancelling_turn_id.is_none()
+                        && cancelled_pending_input.is_none()
+                        && deferred_settlement.is_none()
+                        && native_inputs.is_empty()
+                        && tool_calls.is_empty()
+                        && frames.is_empty()
+                        && permissions.lock().is_ok_and(|items| items.is_empty());
+                    if !idle {
+                        let _ = response.send(Ok(false));
+                        continue;
+                    }
+                    // Revoke admission before acknowledging success. Commands
+                    // queued after this fence cannot write another prompt.
+                    commands.close();
+                    let _ = response.send(Ok(true));
+                    break "managed ACP client closed".to_owned();
+                }
                 Some(AcpCommand::Close) | None => break "managed ACP client closed".to_owned(),
             },
             frame = frames.recv() => {
