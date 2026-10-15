@@ -77,7 +77,11 @@ export function DeliveryTab(props: DeliveryTabProps) {
           </SettingsRow>
         ))}
 
-        <SettingsRow label={t("delivery.taskWakeOnIdle")} help={t("delivery.taskWakeOnIdleHelp")}>
+        <SettingsRow
+          label={t("delivery.taskWakeOnIdle")}
+          help={t("delivery.taskWakeOnIdleHelp")}
+          htmlFor="delivery-task-wake-on-idle"
+        >
           <input
             id="delivery-task-wake-on-idle"
             type="checkbox"
