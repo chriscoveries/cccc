@@ -76,7 +76,8 @@ for line in sys.stdin:
             result = {"sessions": [{"sessionId": key, "cwd": str(root / "wrong") if (root / "v3_list_wrong_cwd").exists() else cwd}
                                    for key, cwd in sessions.items()]}
     elif method == "session/new":
-        sid = "v3-" + str(uuid.uuid4())
+        session_id_file = root / "v3_new_session_id"
+        sid = session_id_file.read_text(encoding="utf-8") if session_id_file.exists() else "v3-" + str(uuid.uuid4())
         result = session_result(new=True)
         with (root / "v3_bindings.jsonl").open("a") as log:
             log.write(json.dumps({"vendor": vendor, "cwd": params["cwd"], "mcp": params["mcpServers"],
