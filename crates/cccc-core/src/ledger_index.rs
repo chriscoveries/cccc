@@ -110,51 +110,55 @@ impl LedgerIndex {
     }
 }
 
-/// The events a stale index can adopt by reading only appended bytes: every
-/// previously indexed source is still present and line-aligned, so the tail
-/// after the old length extends the history the index already holds. Anything
-/// else (a removed, truncated, rewritten, or gzip-grown source, or a torn old
-/// tail line) is unreadable as an incremental delta and the caller falls back
-/// to a full rebuild.
+/// Extend a retained prefix only across ordinary appends to the active file.
+/// Rotation can reuse that pathname at an equal or greater length, so every
+/// ordered source path and every sealed revision must remain unchanged.
 fn read_appended_tail(
     path: &Path,
     old: &[SourceRevision],
     next: &[SourceRevision],
 ) -> io::Result<Option<Vec<Event>>> {
-    if old.is_empty() {
-        // A stale-marked or cold index holds no committed prefix to extend.
+    if old.is_empty()
+        || old.len() != next.len()
+        || old
+            .iter()
+            .zip(next)
+            .any(|(old, next)| old.path != next.path)
+    {
         return Ok(None);
     }
     let group_id = ledger_group_id(path);
-    let mut remaining = old
-        .iter()
-        .map(|revision| (revision.path.clone(), revision.len))
-        .collect::<HashMap<_, _>>();
     let mut events = Vec::new();
-    for revision in next {
-        match remaining.remove(&revision.path) {
-            Some(previous_len) if previous_len > revision.len => return Ok(None),
-            Some(previous_len) if is_gzip(&revision.path) && previous_len != revision.len => {
-                // Gzip sources cannot be resumed mid-stream.
+    for (previous, revision) in old.iter().zip(next) {
+        if revision.path != path {
+            // Historical sources are sealed. Appending their new bytes after
+            // the retained active events would also reorder canonical history.
+            if previous != revision {
                 return Ok(None);
             }
-            Some(previous_len) => {
-                if previous_len > 0 && !old_tail_is_line_aligned(&revision.path, previous_len)? {
-                    return Ok(None);
-                }
-                if revision.len > previous_len {
-                    let (mut read, _) = read_source_from(&revision.path, previous_len, &group_id)?;
-                    events.append(&mut read);
-                }
-            }
-            None => {
-                let (mut read, _) = read_source_from(&revision.path, 0, &group_id)?;
-                events.append(&mut read);
-            }
+            continue;
         }
-    }
-    if !remaining.is_empty() {
-        return Ok(None);
+        if previous.len > revision.len {
+            return Ok(None);
+        }
+        if previous.len == revision.len {
+            // Same-size changed metadata cannot certify an appended tail.
+            if previous != revision {
+                return Ok(None);
+            }
+            continue;
+        }
+        if is_gzip(&revision.path)
+            || (previous.len > 0 && !old_tail_is_line_aligned(&revision.path, previous.len)?)
+        {
+            return Ok(None);
+        }
+        let (mut read, consumed_end) = read_source_from(&revision.path, previous.len, &group_id)?;
+        if consumed_end != revision.len {
+            // Never certify bytes that were not consumed as the indexed tail.
+            return Ok(None);
+        }
+        events.append(&mut read);
     }
     Ok(Some(events))
 }
