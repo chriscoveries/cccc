@@ -668,6 +668,9 @@ fn card_wake_reminds_an_idle_actor_about_its_active_cards_once_per_interval() {
             .collect()
     }
 
+    // A busy pass before the first reminder must neither notify nor consume
+    // the interval: the following idle pass must still emit its first notice.
+    assert!(card_notices(&tick(&HashSet::new())).is_empty());
     let due = tick(&idle);
     let notices = card_notices(&due);
     assert_eq!(notices.len(), 1, "{:?}", due.notifications);
