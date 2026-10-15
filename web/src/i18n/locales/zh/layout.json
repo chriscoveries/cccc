@@ -254,5 +254,8 @@
   "realtimeSocketUnreachable": "实时连接不可达",
   "realtimeSubscriptionClosed": "订阅被服务端关闭",
   "retryingIn": "{{seconds}} 秒后重试",
-  "retryingNow": "正在重试"
+  "retryingNow": "正在重试",
+  "diskSpaceWarning": "CCCC 存储空间不足：可用 {{available}} GiB（已使用 {{percent}}%）。",
+  "diskSpaceCritical": "CCCC 存储空间严重不足：可用 {{available}} GiB（已使用 {{percent}}%）。",
+  "diskSpaceUnknown": "无法获取 CCCC 的存储容量。"
 }
