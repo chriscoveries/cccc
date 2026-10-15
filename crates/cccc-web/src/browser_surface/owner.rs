@@ -129,8 +129,10 @@ impl BrowserOwner {
                 if message.is_err() {
                     break;
                 }
-                handler_activity
-                    .store(activity_base.elapsed().as_millis() as u64, Ordering::Relaxed);
+                handler_activity.store(
+                    activity_base.elapsed().as_millis() as u64,
+                    Ordering::Relaxed,
+                );
             }
         });
 
