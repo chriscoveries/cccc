@@ -328,12 +328,29 @@
     "failedSlashVisibility": "スラッシュコマンドの表示状態を更新できませんでした。",
     "sectionNavigation": "Capability セクション",
     "sections": {
-      "library": { "label": "ライブラリ", "hint": "すべての capability" },
-      "skill": { "label": "Skills", "hint": "手順型 capability" },
-      "mcp": { "label": "MCP", "hint": "Tool servers" },
-      "sources": { "label": "Sources", "hint": "フィードと出所" }
+      "library": {
+        "label": "ライブラリ",
+        "hint": "すべての capability"
+      },
+      "skill": {
+        "label": "Skills",
+        "hint": "手順型 capability"
+      },
+      "mcp": {
+        "label": "MCP",
+        "hint": "Tool servers"
+      },
+      "sources": {
+        "label": "Sources",
+        "hint": "フィードと出所"
+      }
     },
-    "typeOptions": { "all": "すべて", "skill": "Skills", "mcp": "MCP", "pack": "Packs" },
+    "typeOptions": {
+      "all": "すべて",
+      "skill": "Skills",
+      "mcp": "MCP",
+      "pack": "Packs"
+    },
     "stateOptions": {
       "all": "すべての状態",
       "enabled": "有効",
@@ -342,7 +359,12 @@
       "blocked": "ブロック",
       "needs_setup": "設定が必要"
     },
-    "stats": { "skills": "Skills", "mcp": "MCP", "packs": "Packs", "enabled": "有効" },
+    "stats": {
+      "skills": "Skills",
+      "mcp": "MCP",
+      "packs": "Packs",
+      "enabled": "有効"
+    },
     "sidebarSummary": "{{capabilities}} 件の capability · {{sources}} 件の source",
     "loading": "読み込み中...",
     "emptyDash": "-",
@@ -475,7 +497,10 @@
       "confirmDisableTitle": "このグループで {{name}} を無効化しますか？",
       "confirmDisableDescription": "{{id}} を現在のグループでのみ無効化します。あとで再び有効化できます。"
     },
-    "confirm": { "cancel": "キャンセル", "confirm": "確認" },
+    "confirm": {
+      "cancel": "キャンセル",
+      "confirm": "確認"
+    },
     "showSystem": "システム"
   },
   "assistants": {
@@ -681,6 +706,8 @@
     "notebookSectionLockedConnecting": "現在の Google サインインが完了すると、ここに作業 / メモリノートブックの表示・バインド・管理が現れます。"
   },
   "automation": {
+    "foremanSweep": "担当管理者による毎時のカード確認",
+    "foremanSweepHelp": "@foreman にカードの確認を通知します。既存のカスタムスケジュールとメッセージは保持されます。",
     "title": "自動化",
     "description": "組み込み自動化とスケジュール済みルールを構成します。設定は次の場所に保存されます",
     "configPathFallback": "CCCC_HOME/.../group.yaml",
@@ -1244,7 +1271,10 @@
       "protected": "ログイン有効",
       "protectedHint": "リモートログイン用のアクセストークンを {{count}} 個設定済みです。localhost への直接アクセスは引き続きログイン不要です。"
     },
-    "cards": { "reachability": "到達性", "accessControl": "Web ログイン" },
+    "cards": {
+      "reachability": "到達性",
+      "accessControl": "Web ログイン"
+    },
     "accessControlTitle": "アクセストークン",
     "accessControlDescription": "Web サインイン用の管理者資格情報とグループ限定資格情報を管理します。",
     "userIdLabel": "ユーザーラベル",
@@ -1343,7 +1373,11 @@
     "presetLanTitle": "プライベートネットワーク",
     "presetLanHint": "0.0.0.0 にバインドし、再起動後は localhost とプライベートネットワーク上の他端末から到達できるようにします。",
     "providerLabel": "リモート接続方式",
-    "providers": { "off": "オフ", "manual": "直接バインド / プロキシ", "tailscale": "Tailscale" },
+    "providers": {
+      "off": "オフ",
+      "manual": "直接バインド / プロキシ",
+      "tailscale": "Tailscale"
+    },
     "remoteMethodLanHint": "このプライベート経路で Web に届く方法を選びます。直接バインドか Tailscale を使えます。",
     "privateMethodTailscaleTitle": "Tailscale を使用します",
     "privateMethodTailscaleHint": "このプライベート経路は、通常の LAN 直通ではなく tailnet 経由で Web に届きます。詳細設定には Tailscale の開始 / 停止操作と生のバインド診断が残っています。",
@@ -1707,7 +1741,11 @@
       "cancelled": "キャンセル済み",
       "unconfirmed": "結果未確認"
     },
-    "kinds": { "document": "文書", "ask": "Ask", "prompt": "推敲" },
+    "kinds": {
+      "document": "文書",
+      "ask": "Ask",
+      "prompt": "推敲"
+    },
     "handoffProposal": "{{target}} への送信案",
     "confirmHandoff": "このグループの {{target}} に送信しますか？\n\n{{text}}",
     "forwarded": "送信済み",
