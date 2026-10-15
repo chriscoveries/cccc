@@ -249,6 +249,45 @@ fn memory_restart_loads_the_same_session_and_fences_old_generation() {
 }
 
 #[test]
+fn closed_runtime_start_gate_preserves_the_live_session() {
+    let f = Fixture::new(false);
+    f.materialize();
+    let before = f.candidate();
+    let requests = f.requests().len();
+    let admitted = std::cell::Cell::new(false);
+    crate::runtime_start_gate::prevent(&f.home).expect("close runtime start gate");
+    let result = f.restart(&before, |_, _, _| {
+        admitted.set(true);
+        Ok(true)
+    });
+    let after = memory_candidate(&f.group.group_id, "worker");
+    crate::runtime_start_gate::allow(&f.home).expect("restore fixture start gate");
+    assert_eq!(
+        result.expect("closed gate skips"),
+        MemoryRestartOutcome::Skipped
+    );
+    assert!(
+        !admitted.get(),
+        "shutdown must precede final admission or cooldown writes"
+    );
+    assert_eq!(
+        after.as_ref(),
+        Some(&before),
+        "live provider must remain untouched"
+    );
+    assert_eq!(
+        f.requests().len(),
+        requests,
+        "no new native launch or close"
+    );
+    assert!(
+        actor_memory::required_resume(&f.home, &f.group.group_id, "worker")
+            .expect("requirement")
+            .is_none()
+    );
+}
+
+#[test]
 fn missing_unattempted_or_changed_identity_never_stops_the_provider() {
     let f = Fixture::new(false);
     let before = f.candidate();

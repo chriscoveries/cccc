@@ -43,6 +43,12 @@ pub(crate) fn restart_for_memory(
     expected: &MemoryCandidate,
     admit: impl FnOnce(&GroupDoc, &Actor, &MemoryCandidate) -> io::Result<bool>,
 ) -> io::Result<MemoryRestartOutcome> {
+    // This binding must precede both gates: joining a cancelled worker can
+    // require those gates, so every return releases them before joining it.
+    let _delivery_shutdown: super::super::actor_delivery::DeferredWorkerShutdown;
+    let Ok(_permit) = crate::runtime_start_gate::permit(home) else {
+        return Ok(MemoryRestartOutcome::Skipped);
+    };
     let key = (group_id.to_owned(), actor_id.to_owned());
     let _start = supervisor::StartGuard::acquire(&key)?;
     let Some(item) = supervisor::lookup(&key) else {
@@ -76,7 +82,7 @@ pub(crate) fn restart_for_memory(
     }
     let cwd = super::super::actor_runtime::working_directory(&group, &actor)
         .map_err(|error| io::Error::other(error.message))?;
-    let config = supervisor::managed_launch_config(home, &group, &actor, &cwd);
+    let config = launch_config(home, &group, &actor, &cwd);
     let required_id = item.managed.thread_id().to_owned();
     if !AnalystSession::native_acp_resume_id(home, &config)
         .is_ok_and(|resume| resume.as_deref() == Some(required_id.as_str()))
@@ -110,17 +116,41 @@ pub(crate) fn restart_for_memory(
         }
         return Ok(MemoryRestartOutcome::Skipped);
     }
-    // New controlled submissions now defer on StartGuard, so joining delivery
-    // cannot deadlock on an admission waiting for this maintenance operation.
-    super::super::actor_delivery::shutdown_actor(group_id, actor_id);
+    // A worker may already be waiting in actor.start before its controlled
+    // submission. Cancel now, but join only after both admission gates drop.
+    _delivery_shutdown = super::super::actor_delivery::cancel_actor(group_id, actor_id);
     supervisor::stop_locked(&key)?;
     let launch_home = home.clone();
     let app = run_managed_launch(async move {
         AnalystSession::launch_actor_resume_only(&launch_home, config, required_id).await
     })?;
-    supervisor::attach_managed(home, &group, &actor, key.clone(), cwd, app)?;
-    supervisor::clear_attached_requirement(home, &group, &actor, &key, &required)?;
+    supervisor::attach_managed(home, &group, &actor, key, cwd, app)?;
     Ok(MemoryRestartOutcome::Restarted)
+}
+
+fn launch_config(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    cwd: &std::path::Path,
+) -> super::super::codex_voice_analyst::ActorLaunchConfig {
+    let mut env = actor.env.clone();
+    env.insert(
+        "CCCC_HOME".into(),
+        home.root().to_string_lossy().into_owned(),
+    );
+    env.insert("CCCC_GROUP_ID".into(), group.group_id.clone());
+    env.insert("CCCC_ACTOR_ID".into(), actor.id.clone());
+    super::super::codex_mcp::configure_actor_cli(&mut env);
+    super::super::codex_voice_analyst::ActorLaunchConfig {
+        workdir: cwd.to_path_buf(),
+        group_id: group.group_id.clone(),
+        actor_id: actor.id.clone(),
+        runtime: actor.runtime,
+        runtime_mode: actor.runtime_mode,
+        command: super::provider_cli::base_command(actor),
+        environment: env,
+    }
 }
 
 #[cfg(all(test, unix))]

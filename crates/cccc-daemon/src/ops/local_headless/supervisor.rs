@@ -98,20 +98,8 @@ fn start_managed_agent(
     key: Key,
 ) -> io::Result<()> {
     let cwd = working_directory(group, actor)?;
-    let required = super::super::actor_memory::required_resume(home, &group.group_id, &actor.id)
-        .map_err(|_| {
-            super::super::actor_memory::blocked_resume(
-                "Could not verify the memory-maintenance resume requirement before startup",
-            )
-        })?;
     match launch_managed(home, group, actor, &cwd) {
-        Ok(app) => {
-            attach_managed(home, group, actor, key.clone(), cwd, app)?;
-            if let Some(required) = &required {
-                clear_attached_requirement(home, group, actor, &key, required)?;
-            }
-            Ok(())
-        }
+        Ok(app) => attach_managed(home, group, actor, key, cwd, app),
         Err(refusal) if super::workspace_trust::refused(actor, &refusal) => {
             super::workspace_trust::prompt(home, group, actor, key, cwd, refusal)
         }
@@ -125,23 +113,6 @@ pub(super) fn launch_managed(
     actor: &Actor,
     cwd: &std::path::Path,
 ) -> io::Result<AnalystSession> {
-    let config = managed_launch_config(home, group, actor, cwd);
-    let launch_home = home.clone();
-    run_managed_launch(
-        async move { AnalystSession::launch_actor(&launch_home, config).await }.instrument(
-            tracing::info_span!(
-                "actor_runtime_start", group_id = %group.group_id, actor_id = %actor.id
-            ),
-        ),
-    )
-}
-
-pub(super) fn managed_launch_config(
-    home: &HomeLayout,
-    group: &GroupDoc,
-    actor: &Actor,
-    cwd: &std::path::Path,
-) -> super::super::codex_voice_analyst::ActorLaunchConfig {
     let mut env = actor.env.clone();
     env.insert(
         "CCCC_HOME".into(),
@@ -150,7 +121,7 @@ pub(super) fn managed_launch_config(
     env.insert("CCCC_GROUP_ID".into(), group.group_id.clone());
     env.insert("CCCC_ACTOR_ID".into(), actor.id.clone());
     super::super::codex_mcp::configure_actor_cli(&mut env);
-    super::super::codex_voice_analyst::ActorLaunchConfig {
+    let config = super::super::codex_voice_analyst::ActorLaunchConfig {
         workdir: cwd.to_path_buf(),
         group_id: group.group_id.clone(),
         actor_id: actor.id.clone(),
@@ -158,7 +129,15 @@ pub(super) fn managed_launch_config(
         runtime_mode: actor.runtime_mode,
         command: provider_cli::base_command(actor),
         environment: env,
-    }
+    };
+    let launch_home = home.clone();
+    run_managed_launch(
+        async move { AnalystSession::launch_actor(&launch_home, config).await }.instrument(
+            tracing::info_span!(
+                "actor_runtime_start", group_id = %group.group_id, actor_id = %actor.id
+            ),
+        ),
+    )
 }
 
 pub(super) fn attach_managed(
@@ -260,11 +239,14 @@ pub(super) fn attach_managed(
     {
         return Err(cleanup_failed_start(&item, error));
     }
+    if let Some(required) = &required {
+        clear_attached_requirement(home, group, actor, &key, required)?;
+    }
     super::output::emit(&item, "headless.session.started", Map::new());
     Ok(())
 }
 
-pub(super) fn clear_attached_requirement(
+fn clear_attached_requirement(
     home: &HomeLayout,
     group: &GroupDoc,
     actor: &Actor,

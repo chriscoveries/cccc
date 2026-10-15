@@ -5,7 +5,7 @@ mod events_migration;
 #[cfg(test)]
 mod events_migration_tests;
 mod managed_reader;
-mod memory;
+pub(crate) mod memory;
 mod notice_gate;
 mod output;
 mod provider_cli;
@@ -22,9 +22,6 @@ pub(crate) use managed_reader::verify_claude_reader_release;
 pub(crate) use events::{
     append as append_event, append_with_dedupe as append_event_with_dedupe,
     contains_dedupe as contains_event_dedupe,
-};
-pub(crate) use memory::{
-    MemoryCandidate, MemoryRestartOutcome, memory_candidate, restart_for_memory,
 };
 pub(crate) use supervisor::registered_running;
 pub(crate) use supervisor::{
@@ -117,6 +114,14 @@ struct Session {
 
 fn poisoned() -> std::io::Error {
     std::io::Error::other("headless supervisor lock poisoned")
+}
+
+#[cfg(test)]
+pub(crate) fn hold_start_guard_for_test(
+    group_id: &str,
+    actor_id: &str,
+) -> std::io::Result<impl Send> {
+    supervisor::StartGuard::acquire(&(group_id.to_owned(), actor_id.to_owned()))
 }
 
 fn managed_runtime() -> &'static tokio::runtime::Runtime {
