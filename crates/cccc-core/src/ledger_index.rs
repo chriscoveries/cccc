@@ -388,6 +388,73 @@ mod tests {
         );
     }
 
+    fn assert_rotation_refill_before_notification(refill_count: usize) {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().expect("isolated rotation fixture");
+        let home = crate::HomeLayout::from_path(temp.path()).expect("home");
+        let store = crate::GroupStore::new(home.clone()).expect("store");
+        let group = store.create("rotation refill", "").expect("group");
+        let path = store.ledger_path(&group.group_id).expect("ledger");
+        // Any creation records remain canonical but do not change the exact
+        // active-file byte boundary used by this regression.
+        crate::ledger_archive::compact(&home, &group.group_id, "seed boundary")
+            .expect("initial boundary");
+        let mut first = Event::new("chat.message", &group.group_id);
+        first.id = "a".repeat(32);
+        crate::ledger::append(&path, &first).expect("first append");
+        let mut expected = crate::ledger::read_all(&path).expect("warm index");
+        let first_len = std::fs::metadata(&path).expect("active source").len();
+        crate::ledger_archive::compact(&home, &group.group_id, "rotate warm active")
+            .expect("rotate")
+            .expect("segment");
+
+        let mut pending_notifications = Vec::new();
+        for ordinal in 0..refill_count {
+            let mut event = first.clone();
+            event.id = char::from(b'b' + ordinal as u8).to_string().repeat(32);
+            let mut encoded = serde_json::to_vec(&event).expect("encode");
+            encoded.push(b'\n');
+            assert_eq!(encoded.len() as u64, first_len, "equal-size native records");
+            let writer = crate::ledger::acquire_writer_lock(&path).expect("writer lock");
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("active source");
+            file.write_all(&encoded).expect("refill commit");
+            file.sync_data().expect("durable refill");
+            drop(file);
+            drop(writer);
+            // This is the production interval after append releases its writer
+            // lock and before note_append acquires the index lock.
+            expected.push(event.clone());
+            pending_notifications.push((event, encoded.len()));
+        }
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("query before notifications"),
+            expected,
+            "rotation plus refill must preserve the exact canonical sequence",
+        );
+        for (event, encoded_len) in pending_notifications {
+            note_append(&path, &event, encoded_len);
+        }
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("query after notifications"),
+            expected,
+            "delayed notifications must neither duplicate nor skip committed IDs",
+        );
+    }
+
+    #[test]
+    fn rotation_refilled_to_equal_length_before_notification_keeps_the_exact_sequence() {
+        assert_rotation_refill_before_notification(1);
+    }
+
+    #[test]
+    fn rotation_refilled_past_old_length_before_notifications_keeps_the_exact_sequence() {
+        assert_rotation_refill_before_notification(2);
+    }
+
     #[test]
     fn a_warm_query_waits_for_a_rotation_in_progress() {
         let temp = tempfile::tempdir().expect("tempdir");
