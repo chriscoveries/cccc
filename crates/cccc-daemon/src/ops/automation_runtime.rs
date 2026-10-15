@@ -718,7 +718,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod notice_idle_tests {
     use super::notice_idle;
@@ -750,14 +749,22 @@ mod notice_idle_tests {
     fn quiet_pty_lane_is_idle() {
         assert!(notice_idle(false, false, Some(&snapshot(Some(121), None))));
         // Input older than the last output was answered: still idle.
-        assert!(notice_idle(false, false, Some(&snapshot(Some(200), Some(400)))));
+        assert!(notice_idle(
+            false,
+            false,
+            Some(&snapshot(Some(200), Some(400)))
+        ));
     }
 
     #[test]
     fn recent_output_or_newer_input_is_not_idle() {
         assert!(!notice_idle(false, false, Some(&snapshot(Some(30), None))));
         // A delivery newer than the last output: the TUI has not answered yet.
-        assert!(!notice_idle(false, false, Some(&snapshot(Some(300), Some(10)))));
+        assert!(!notice_idle(
+            false,
+            false,
+            Some(&snapshot(Some(300), Some(10)))
+        ));
     }
 
     #[test]
