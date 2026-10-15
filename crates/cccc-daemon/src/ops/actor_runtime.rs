@@ -7,13 +7,18 @@ use crate::dispatch::OpError;
 use crate::ops::actor_profile_runtime;
 
 mod attributed_reap;
+mod delivery;
 mod environment;
+#[cfg(all(test, unix))]
+#[path = "actor_runtime_memory_delivery_tests.rs"]
+mod memory_delivery_tests;
 mod persistence;
 mod reconcile;
 pub(crate) mod terminal_history;
 #[cfg(test)]
 mod untrusted_workspace_tests;
 pub(crate) use attributed_reap::reap_group;
+pub(crate) use delivery::start_for_delivery;
 pub use persistence::persist_lifecycle;
 pub(crate) use reconcile::record_process_exit;
 pub use reconcile::{reap_exited, reconcile_exited};
