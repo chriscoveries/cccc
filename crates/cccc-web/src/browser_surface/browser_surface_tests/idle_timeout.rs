@@ -63,7 +63,13 @@ async fn idle_sweep_leaves_non_web_model_surfaces_alone() {
     let actor_key = "web-model::g_idle::reader";
     let presentation_key = "g_idle::presentation";
     let opened_actor = manager
-        .open(actor_key, &temp.path().join("actor-profile"), &url, 800, 600)
+        .open(
+            actor_key,
+            &temp.path().join("actor-profile"),
+            &url,
+            800,
+            600,
+        )
         .await
         .expect("open actor browser");
     let actor_pid = opened_actor["metadata"]["pid"]
@@ -183,7 +189,7 @@ async fn wait_for_process_exit(pid: u64) {
 #[test]
 fn browser_idle_timeout_clamps_the_environment_value() {
     use crate::browser_surface::{
-        clamp_browser_idle_timeout, DEFAULT_BROWSER_IDLE_TIMEOUT, MIN_BROWSER_IDLE_TIMEOUT,
+        DEFAULT_BROWSER_IDLE_TIMEOUT, MIN_BROWSER_IDLE_TIMEOUT, clamp_browser_idle_timeout,
     };
     let default = DEFAULT_BROWSER_IDLE_TIMEOUT;
     let floor = MIN_BROWSER_IDLE_TIMEOUT;
