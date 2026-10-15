@@ -71,6 +71,8 @@ describe("settings pages on the kit", () => {
       const [mail, setMail] = useState(1800);
       const [idle, setIdle] = useState(60);
       const [reply, setReply] = useState(900);
+      const [taskWake, setTaskWake] = useState(false);
+      const [taskWakeInterval, setTaskWakeInterval] = useState(1200);
       return (
         <DeliveryTab
           isDark={false}
@@ -81,6 +83,10 @@ describe("settings pages on the kit", () => {
           setMailNoticeIdleAfterSeconds={setIdle}
           replyNoticeAfterSeconds={reply}
           setReplyNoticeAfterSeconds={setReply}
+          taskWakeOnIdle={taskWake}
+          setTaskWakeOnIdle={setTaskWake}
+          taskWakeIntervalSeconds={taskWakeInterval}
+          setTaskWakeIntervalSeconds={setTaskWakeInterval}
           onSave={onSave}
         />
       );
@@ -91,6 +97,8 @@ describe("settings pages on the kit", () => {
       "delivery.mailNotice",
       "delivery.mailIdleNotice",
       "delivery.replyNotice",
+      "delivery.taskWakeInterval",
+      "delivery.taskWakeOnIdle",
     ]);
     const idleInput = host.querySelector<HTMLInputElement>(`#${CSS.escape(labels[1].htmlFor)}`)!;
     expect(idleInput.value).toBe("60");
@@ -100,6 +108,18 @@ describe("settings pages on the kit", () => {
       idleInput.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(idleInput.value).toBe("45");
+    const taskWakeToggle = host.querySelector<HTMLInputElement>("#delivery-task-wake-on-idle")!;
+    expect(taskWakeToggle.checked).toBe(false);
+    await click(taskWakeToggle);
+    expect(taskWakeToggle.checked).toBe(true);
+    const intervalInput = host.querySelector<HTMLInputElement>("#delivery-task-wake-interval")!;
+    expect(intervalInput.value).toBe("1200");
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(intervalInput, "1800");
+      intervalInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(intervalInput.value).toBe("1800");
     await click(host.querySelector("[data-settings-save-bar] button")!);
     expect(onSave).toHaveBeenCalledOnce();
   });
