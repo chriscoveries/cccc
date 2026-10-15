@@ -777,8 +777,24 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         // Join pending launch/trust cleanup before replacing its receipt. No
         // foreign job is touched: preflight has already rejected live targets.
         actor_runtime::apply(home, &group, &actor_id, "actor.stop")?;
-        write_retarget_receipt(home, &group_id, &actor_id, &retarget.target)
-            .map_err(OpError::io)?;
+        if let Err(error) = write_retarget_receipt(home, &group_id, &actor_id, &retarget.target) {
+            // An atomic replace can report an error after the new receipt was
+            // installed. Restore the snapshot before returning either failure.
+            let effect = lifecycle_effect(
+                kind,
+                runtime_was_running,
+                actor_process_running(&group, &original_actor),
+            );
+            return Err(rollback_actor_lifecycle(
+                home,
+                &group,
+                &original_actor,
+                runtime_session_snapshot.as_ref(),
+                kind,
+                effect,
+                OpError::io(error),
+            ));
+        }
     }
     // An old trust terminal is not a resumed managed session. An explicit retry
     // must retire that attachment before retrying the same durable conversation.
