@@ -94,6 +94,14 @@ fn failed_resume_preserves_identity_and_pauses_automatic_launch_without_new_sess
         assert!(is_resume_blocked(&error));
     }
     let mut after = f.receipt();
+    let timestamp = after["updated_at"].as_str().expect("diagnostic timestamp");
+    chrono::DateTime::parse_from_rfc3339(timestamp).expect("valid diagnostic timestamp");
+    assert_eq!(
+        after["last_recovery_decision"],
+        json!({"action":"block", "reason":"previous_resume_failure",
+            "session_id":SESSION, "at":timestamp}),
+        "blocked polling must describe the retained conversation without another attempt"
+    );
     let mut before = failed.clone();
     for document in [&mut after, &mut before] {
         document.remove("updated_at");
@@ -161,7 +169,7 @@ fn changing_launch_identity_does_not_reuse_a_blocked_conversation() {
     let attempt = f.prepare().expect("prepare").expect("session");
     f.failure(&attempt, true);
     f.command.extend(["--model".into(), "sonnet".into()]);
-    assert!(f.prepare().is_err());
+    assert!(f.prepare().expect("new configured identity").is_none());
     assert_eq!(
         f.receipt()["provider_session_id"],
         SESSION,

@@ -505,7 +505,8 @@ mod tests {
                 &command,
                 &changed,
             )
-            .is_err()
+            .expect("changed identity")
+            .is_none()
         );
 
         let mut changed_secret = BTreeMap::from([(
@@ -522,7 +523,8 @@ mod tests {
                 &command,
                 &changed_secret,
             )
-            .is_err()
+            .expect("changed provider configuration")
+            .is_none()
         );
     }
 
@@ -580,7 +582,8 @@ mod tests {
                 &command,
                 &BTreeMap::new(),
             )
-            .is_err()
+            .expect("changed input")
+            .is_none()
         );
     }
 }

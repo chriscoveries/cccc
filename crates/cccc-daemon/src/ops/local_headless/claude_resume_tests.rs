@@ -314,6 +314,19 @@ fn copied_claude_resume_stops_auto_wake_and_explicit_retry_delivers_the_original
     }
     assert_eq!(f.launches(), 1, "no repeated provider launch");
     let mut after = f.receipt();
+    let timestamp = after["updated_at"].as_str().expect("diagnostic timestamp");
+    chrono::DateTime::parse_from_rfc3339(timestamp).expect("valid diagnostic timestamp");
+    let decision = &after["last_recovery_decision"];
+    assert_eq!(decision["at"], timestamp);
+    assert_eq!(decision["action"], "block");
+    assert_eq!(decision["session_id"], SAVED);
+    assert!(
+        !decision["reason"]
+            .as_str()
+            .expect("safe recovery reason")
+            .is_empty(),
+        "the terminal startup decision must explain why the original message is held"
+    );
     let mut before = failed.clone();
     for document in [&mut after, &mut before] {
         document
@@ -1094,4 +1107,82 @@ fn resume_session_native_worktree_can_match_original_cwd() {
     f.wrong_receipt();
     let response = f.resume_session(SAVED);
     assert!(response.ok, "{:?}", response.error);
+}
+
+#[test]
+fn ordinary_lifecycle_uses_current_workspace_instead_of_saved_receipt() {
+    if isolated("ordinary_lifecycle_uses_current_workspace_instead_of_saved_receipt") {
+        return;
+    }
+    for op in ["actor_start", "actor_restart", "group_start"] {
+        let f = Fixture::new("healthy");
+        let store = GroupStore::new(f.home.clone()).expect("store");
+        let requested = f._temp.path().join("requested-workspace");
+        std::fs::create_dir(&requested).expect("requested workspace");
+        let scope = cccc_core::scope::detect(&requested).expect("new scope");
+        let scope_key = scope.scope_key.clone();
+        cccc_core::group_scope::attach(&store, &f.group.group_id, scope)
+            .expect("attach new workspace");
+        store
+            .mutate(&f.group.group_id, |group| {
+                group.active_scope_key = scope_key.clone();
+                group.actors[0].default_scope_key = scope_key.clone();
+                Ok(())
+            })
+            .expect("configure current workspace");
+
+        let response = f.lifecycle(op);
+        if !response.ok {
+            let error = response.error.expect("loud workspace refusal");
+            assert!(
+                error.message.to_ascii_lowercase().contains("workspace"),
+                "{op} refused for an unrelated reason: {}",
+                error.message
+            );
+            assert_eq!(
+                f.launches(),
+                0,
+                "a refused {op} must not launch in the old cwd"
+            );
+            continue;
+        }
+        let state_path = f.config.join("jobs/abcdef12/state.json");
+        f.wait(|| state_path.is_file());
+        let state: Value = cccc_core::fs::read_json(&state_path).expect("actual provider job");
+        let actual = PathBuf::from(state["cwd"].as_str().expect("actual provider cwd"));
+        assert_eq!(
+            actual.canonicalize().expect("actual cwd"),
+            requested.canonicalize().expect("requested cwd"),
+            "{op} must launch in the currently configured workspace"
+        );
+        assert_eq!(
+            f.launches(),
+            1,
+            "{op} must not attempt the old cwd then fall back"
+        );
+    }
+}
+
+#[test]
+fn resume_disabled_starts_fresh_even_when_a_saved_receipt_exists() {
+    if isolated("resume_disabled_starts_fresh_even_when_a_saved_receipt_exists") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    // This exact test runs in its own child process; no parallel tests share this env.
+    unsafe { std::env::set_var("CCCC_RUNTIME_RESUME", "off") };
+    let response = f.lifecycle("actor_start");
+    assert!(
+        response.ok,
+        "resume-off must start fresh: {:?}",
+        response.error
+    );
+    assert_eq!(f.launches(), 1);
+    assert_eq!(
+        std::fs::read_to_string(f.config.join("launches")).expect("launch audit"),
+        "fresh\n"
+    );
+    let state: Value = cccc_core::fs::read_json(&f.config.join("jobs/abcdef12/state.json"))
+        .expect("actual fresh job");
+    assert_ne!(state["sessionId"], SAVED);
 }
