@@ -219,7 +219,9 @@ fn notice(
 /// caller to dispatch. Pure observation when nothing qualifies: no writes,
 /// no signals.
 pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
-    use super::local_headless::memory::{MemoryRestartOutcome, memory_candidate, restart_for_memory};
+    use super::local_headless::memory::{
+        MemoryRestartOutcome, memory_candidate, restart_for_memory,
+    };
     let mut out = Vec::new();
     let now = now_secs();
     let marks = read_cooldowns(home, &group.group_id)?;
