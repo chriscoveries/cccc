@@ -254,5 +254,8 @@
   "realtimeSocketUnreachable": "リアルタイム接続に到達できません",
   "realtimeSubscriptionClosed": "サーバーが購読を閉じました",
   "retryingIn": "{{seconds}}秒後に再試行",
-  "retryingNow": "再試行中"
+  "retryingNow": "再試行中",
+  "diskSpaceWarning": "CCCC の空き容量が少なくなっています：残り {{available}} GiB（{{percent}}% 使用中）。",
+  "diskSpaceCritical": "CCCC の空き容量が不足しています：残り {{available}} GiB（{{percent}}% 使用中）。",
+  "diskSpaceUnknown": "CCCC のストレージ容量を取得できません。"
 }
