@@ -831,6 +831,85 @@ fn resume_session_launch_failure_rolls_back_and_keeps_both_records() {
     assert!(!f.config.join("active").exists());
 }
 
+fn assert_retarget_receipt_write_failure_rolls_back(
+    failure: super::super::actors::RetargetWriteFailure,
+) {
+    let f = Fixture::new("healthy");
+    let cwd = super::super::actor_runtime::working_directory(&f.group, &f.actor).expect("cwd");
+    f.retarget_history(cwd.to_str().expect("cwd string"));
+    let started = f.lifecycle("actor_new_session");
+    assert!(started.ok, "{:?}", started.error);
+    let mut before = f.receipt();
+    assert_eq!(before["provider_session_id"], WRONG);
+    assert!(super::running(&f.group.group_id, &f.actor.id));
+    let launches = f.launches();
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    let group_before = store.load(&f.group.group_id).expect("group before");
+
+    super::super::actors::fail_next_retarget_write(&f.home, failure);
+    let response = f.resume_session(SAVED);
+    assert!(!response.ok, "receipt write failure must fail retargeting");
+    let error = response.error.expect("retarget error");
+    assert_eq!(error.code, "claude_resume_session_failed");
+    assert!(
+        error
+            .message
+            .contains("injected retarget receipt write failure")
+    );
+
+    let mut after = f.receipt();
+    let archive = after
+        .as_object_mut()
+        .expect("receipt object")
+        .remove("previous_sessions")
+        .expect("retained targets");
+    before
+        .as_object_mut()
+        .expect("old receipt object")
+        .remove("previous_sessions");
+    assert_eq!(after, before, "restore every original receipt field");
+    for session_id in [SAVED, WRONG] {
+        assert!(
+            archive
+                .as_array()
+                .expect("archive")
+                .iter()
+                .any(|entry| entry["session_id"] == session_id),
+            "both selected targets must remain archived"
+        );
+    }
+    assert_eq!(f.launches(), launches, "no replacement or rollback restart");
+    assert!(!super::running(&f.group.group_id, &f.actor.id));
+    assert!(!f.config.join("active").exists());
+    let group_after = store.load(&f.group.group_id).expect("group after");
+    assert_eq!(
+        serde_json::to_value(group_after.actors).expect("actors after"),
+        serde_json::to_value(group_before.actors).expect("actors before")
+    );
+    assert_eq!(group_after.running, group_before.running);
+    assert_eq!(group_after.state, group_before.state);
+}
+
+#[test]
+fn resume_session_receipt_write_failure_before_replace_restores_original_target() {
+    if isolated("resume_session_receipt_write_failure_before_replace_restores_original_target") {
+        return;
+    }
+    assert_retarget_receipt_write_failure_rolls_back(
+        super::super::actors::RetargetWriteFailure::BeforeReplace,
+    );
+}
+
+#[test]
+fn resume_session_receipt_write_failure_after_replace_restores_original_target() {
+    if isolated("resume_session_receipt_write_failure_after_replace_restores_original_target") {
+        return;
+    }
+    assert_retarget_receipt_write_failure_rolls_back(
+        super::super::actors::RetargetWriteFailure::AfterReplace,
+    );
+}
+
 #[test]
 fn resume_session_identity_mismatch_is_untouched() {
     if isolated("resume_session_identity_mismatch_is_untouched") {

@@ -777,7 +777,7 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         // Join pending launch/trust cleanup before replacing its receipt. No
         // foreign job is touched: preflight has already rejected live targets.
         actor_runtime::apply(home, &group, &actor_id, "actor.stop")?;
-        runtime_session::write_claude_retarget(home, &group_id, &actor_id, &retarget.target)
+        write_retarget_receipt(home, &group_id, &actor_id, &retarget.target)
             .map_err(OpError::io)?;
     }
     // An old trust terminal is not a resumed managed session. An explicit retry
@@ -889,6 +889,66 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
     object(
         json!({"actor": actor, "event": event, "runtime": status, "model_application": model_application}),
     )
+}
+
+fn write_retarget_receipt(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    document: &serde_json::Map<String, Value>,
+) -> std::io::Result<()> {
+    #[cfg(test)]
+    let failure = RETARGET_WRITE_FAILURE.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        if pending
+            .as_ref()
+            .is_some_and(|(root, _)| root == home.root())
+        {
+            pending.take().map(|(_, failure)| failure)
+        } else {
+            None
+        }
+    });
+    #[cfg(test)]
+    if failure == Some(RetargetWriteFailure::BeforeReplace) {
+        return Err(std::io::Error::other(
+            "injected retarget receipt write failure before replacement",
+        ));
+    }
+    runtime_session::write_claude_retarget(home, group_id, actor_id, document)?;
+    #[cfg(test)]
+    if failure == Some(RetargetWriteFailure::AfterReplace) {
+        return Err(std::io::Error::other(
+            "injected retarget receipt write failure after replacement",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetargetWriteFailure {
+    BeforeReplace,
+    AfterReplace,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    // One-shot and Home-bound so unrelated fixtures cannot consume the failure.
+    static RETARGET_WRITE_FAILURE: std::cell::RefCell<Option<(std::path::PathBuf, RetargetWriteFailure)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_retarget_write(home: &HomeLayout, failure: RetargetWriteFailure) {
+    RETARGET_WRITE_FAILURE.with(|pending| {
+        assert!(
+            pending
+                .replace(Some((home.root().to_path_buf(), failure)))
+                .is_none(),
+            "retarget write failure is already armed on this test thread"
+        );
+    });
 }
 
 #[derive(Clone, Copy)]
