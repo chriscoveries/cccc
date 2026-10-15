@@ -235,7 +235,8 @@ pub fn started_secs_of(_pid: i32) -> Option<u64> {
 
 /// Sum resident KiB over `root` plus currently-visible descendants. Pids that
 /// vanish mid-scan contribute nothing. Returns `(total_kib, counted)`.
-pub fn tree_rss_kib(root: i32) -> (u64, usize) {    let mut total = 0u64;
+pub fn tree_rss_kib(root: i32) -> (u64, usize) {
+    let mut total = 0u64;
     let mut counted = 0usize;
     for pid in tree_pids(root) {
         if let Some(kb) = rss_kb_of(pid) {
@@ -269,8 +270,9 @@ mod tests {
 
     #[test]
     fn bfs_tree_covers_descendants_and_survives_cycles() {
-        let children: HashMap<i32, Vec<i32>> =
-            [(1, vec![2, 3]), (2, vec![4]), (4, vec![2])].into_iter().collect();
+        let children: HashMap<i32, Vec<i32>> = [(1, vec![2, 3]), (2, vec![4]), (4, vec![2])]
+            .into_iter()
+            .collect();
         let members = bfs_tree(1, &children);
         assert_eq!(members[0], 1);
         let mut rest = members[1..].to_vec();

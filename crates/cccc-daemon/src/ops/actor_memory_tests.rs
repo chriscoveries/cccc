@@ -17,7 +17,12 @@ fn actor_memory_limit_round_trips_and_defaults_off() {
 
 #[test]
 fn actor_memory_limit_rejects_negative_fractional_and_overflow_values() {
-    for invalid in [json!(-1), json!(1.5), json!("256"), json!(18446744073709551615_u64)] {
+    for invalid in [
+        json!(-1),
+        json!(1.5),
+        json!("256"),
+        json!(18446744073709551615_u64),
+    ] {
         let mut configured =
             serde_json::to_value(Actor::new("memory-worker")).expect("serialize default actor");
         configured["memory_limit_mb"] = invalid;

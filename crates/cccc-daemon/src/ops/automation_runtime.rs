@@ -87,30 +87,6 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
     }
 }
 
-/// One memory-ceiling pass for a group: sample capped actors, restart what is
-/// over limit while idle (at most one restart per actor per 30 minutes).
-/// Returned restart/failure notices are dispatched like any other tick
-/// notification.
-fn tick_actor_memory(home: &HomeLayout, group_id: &str, cancelled: &AtomicBool) {
-    let Ok(store) = GroupStore::new(home.clone()) else {
-        return;
-    };
-    let Ok(group) = store.load(group_id) else {
-        return;
-    };
-    match super::actor_memory::tick(home, &group) {
-        Ok(events) => {
-            for event in events {
-                if cancelled.load(Ordering::Acquire) {
-                    return;
-                }
-                super::actor_delivery::dispatch(home, &group, &event);
-            }
-        }
-        Err(error) => tracing::warn!(%error, %group_id, "actor memory tick failed"),
-    }
-}
-
 /// Actors whose managed session is idle. Waiting Mail reaches them promptly;
 /// actors that are working, waiting on approval, or whose state is unknown (no
 /// managed session) keep the longer interruption-avoiding delay. Delivery
@@ -355,6 +331,30 @@ fn call(home: &HomeLayout, op: &str, value: serde_json::Value) -> bool {
         tracing::warn!(%op, "scheduled automation action failed");
     }
     response.ok
+}
+
+/// One memory-ceiling pass for a group: sample capped actors, restart what is
+/// over limit while idle (at most one restart per actor per 30 minutes).
+/// Returned restart/failure notices are dispatched like any other tick
+/// notification.
+fn tick_actor_memory(home: &HomeLayout, group_id: &str, cancelled: &AtomicBool) {
+    let Ok(store) = GroupStore::new(home.clone()) else {
+        return;
+    };
+    let Ok(group) = store.load(group_id) else {
+        return;
+    };
+    match super::actor_memory::tick(home, &group) {
+        Ok(events) => {
+            for event in events {
+                if cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                super::actor_delivery::dispatch(home, &group, &event);
+            }
+        }
+        Err(error) => tracing::warn!(%error, %group_id, "actor memory tick failed"),
+    }
 }
 
 #[cfg(test)]

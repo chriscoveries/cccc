@@ -23,8 +23,8 @@ use cccc_contracts::Event;
 use cccc_core::{GroupDoc, HomeLayout};
 use serde_json::{Value, json};
 
-use super::actor_runtime_status;
 use super::actor_memory_sampling as sampling;
+use super::actor_runtime_status;
 
 /// Minimum seconds between restarts of one actor, even across daemon
 /// restarts. The marker is written *before* the restart is attempted, so a
@@ -72,8 +72,8 @@ fn write_cooldown(home: &HomeLayout, group_id: &str, actor_id: &str, at: u64) ->
     }
     let mut marks = read_cooldowns(home, group_id);
     marks.insert(actor_id.to_owned(), at);
-    let body = serde_json::to_string_pretty(&json!({"restarts": marks}))
-        .map_err(io::Error::other)?;
+    let body =
+        serde_json::to_string_pretty(&json!({"restarts": marks})).map_err(io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, &path)?;
@@ -145,7 +145,10 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
         if limit_mb == 0 {
             continue;
         }
-        if marks.get(&actor.id).is_some_and(|at| now < at.saturating_add(RESTART_COOLDOWN_SECS)) {
+        if marks
+            .get(&actor.id)
+            .is_some_and(|at| now < at.saturating_add(RESTART_COOLDOWN_SECS))
+        {
             continue;
         }
         // Idle first (cheap snapshot); sampling only happens for idle lanes.
@@ -204,7 +207,10 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
                 limit_mb as u64,
                 rss_mb,
                 "restart_failed",
-                &format!("actor.restart refused ({}): {}. Cooldown holds; will not retry hot.", error.code, error.message),
+                &format!(
+                    "actor.restart refused ({}): {}. Cooldown holds; will not retry hot.",
+                    error.code, error.message
+                ),
             )?),
         }
     }
