@@ -300,4 +300,76 @@ mod tests {
         assert_eq!(event.data["context"]["outcome"], "restarted");
         assert_eq!(event.data["context"]["rss_mb"], 1024);
     }
+
+    #[test]
+    fn memory_restart_targets_only_the_foreman_in_dispatch_and_recovery() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("initialize");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("memory routing", "").expect("group");
+        group.state = cccc_contracts::GroupState::Stopped;
+        group.actors = vec![
+            cccc_contracts::Actor::new("lead"),
+            cccc_contracts::Actor::new("peer"),
+        ];
+        store.save(&group).expect("save actors");
+        let event = emit(
+            &home,
+            &group.group_id,
+            "worker",
+            500,
+            800,
+            "restarted",
+            "same session",
+        )
+        .expect("emit notice");
+        assert_eq!(event.data["target_actor_id"], "lead");
+        // The stopped group selects routing without starting any test actor.
+        let report = super::super::actor_delivery::dispatch(&home, &group, &event);
+        assert_eq!(report.targeted, 1);
+        assert_eq!(report.queued, 0);
+        for (actor, expected) in [(&group.actors[0], true), (&group.actors[1], false)] {
+            let pending = super::super::runtime_delivery::pending_sources(&home, &group, actor, 10)
+                .expect("pending notifications");
+            assert_eq!(pending.iter().any(|item| item.id == event.id), expected);
+            assert!(
+                !cccc_core::inbox::is_for_actor(&group, &event, &actor.id),
+                "maintenance notices never become inbox messages"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_restart_without_an_available_foreman_stays_ledger_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("initialize");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+        let mut group = store
+            .create("memory routing no foreman", "")
+            .expect("group");
+        group.state = cccc_contracts::GroupState::Stopped;
+        let mut lead = cccc_contracts::Actor::new("lead");
+        lead.enabled = false;
+        group.actors = vec![lead, cccc_contracts::Actor::new("peer")];
+        store.save(&group).expect("save actors");
+        let event = emit(
+            &home,
+            &group.group_id,
+            "worker",
+            500,
+            800,
+            "restart_failed",
+            "receipt missing",
+        )
+        .expect("emit outcome");
+        assert!(event.data.get("target_actor_id").is_none());
+        let report = super::super::actor_delivery::dispatch(&home, &group, &event);
+        assert_eq!(report.targeted, 0, "never fall back to broadcasting");
+        let ledger =
+            cccc_core::ledger::read_all(&store.ledger_path(&group.group_id).expect("path"))
+                .expect("ledger");
+        assert_eq!(ledger.iter().filter(|item| item.kind == "system.notify" && item.data["kind"] == "memory_restart").count(), 1);
+    }
 }
