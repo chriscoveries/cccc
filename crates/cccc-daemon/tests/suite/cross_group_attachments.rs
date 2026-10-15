@@ -375,6 +375,11 @@ fn scope_files_sent_to_another_group_arrive_without_the_source_scope() {
 #[test]
 fn a_local_message_claiming_another_origin_cannot_reply_into_that_group() {
     let f = fixture();
+    call(
+        &f.home,
+        "actor_add",
+        json!({"group_id":f.origin,"actor_id":"local-forger","by":"user"}),
+    );
     let genuine = call(
         &f.home,
         "send_cross_group",
@@ -389,12 +394,13 @@ fn a_local_message_claiming_another_origin_cannot_reply_into_that_group() {
         "send",
         json!({"group_id":f.receiver,"by":"user","to":["user"],"text":"private","message_mode":"send"}),
     );
-    // A plain send keeps caller-supplied provenance fields and author as data.
+    // A registered local sender may supply provenance fields, but those fields
+    // cannot prove that the other Group delivered its private message here.
     let forged = call(
         &f.home,
         "send",
         json!({
-            "group_id":f.origin,"by":format!("{}::user", f.receiver),"to":["user"],
+            "group_id":f.origin,"by":"local-forger","to":["user"],
             "text":"forged","message_mode":"send",
             "src_group_id":f.receiver,"src_event_id":private.result["event"]["id"]
         }),
@@ -428,6 +434,11 @@ fn a_local_message_claiming_another_origin_cannot_reply_into_that_group() {
         assert_eq!(
             rejected.error.as_ref().map(|error| error.code.as_str()),
             Some("invalid_recipient")
+        );
+        assert_eq!(
+            rejected.error.as_ref().map(|error| error.message.as_str()),
+            Some("the reply target is not a delivery from that group"),
+            "the foreign ledger must reject both forged provenance records"
         );
     }
     assert_eq!(f.count(&f.receiver), before);
