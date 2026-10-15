@@ -2181,6 +2181,7 @@ fn antigravity_recovers_failed_startup_with_bounded_automatic_delivery() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     let temp = tempfile::tempdir().expect("tempdir");
@@ -2226,6 +2227,7 @@ while True:
         "command":[script,temp.path()],"env":{"HOME":provider_home,"USERPROFILE":provider_home},"by":"user"}),
     );
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let queued_at = std::time::Instant::now();
         let sources = (0..70)
             .map(|index| {
                 call(
@@ -2250,7 +2252,12 @@ while True:
             .expect("startup fixture")
             .ledger_path(gid)
             .expect("startup fixture");
-        let deadline = std::time::Instant::now() + Duration::from_secs(12);
+        // A failed automatic launch retains the crash-loop guard: the next
+        // launch waits 10 s. A singleton initial batch then needs startup
+        // settling and three paced submissions for all 70 messages. The old
+        // 4 s + 12 s budget expired just before the final batch was accepted.
+        // Keep production pacing and allow scheduling slack around that work.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             let events = ledger::read_all(&ledger_path).expect("startup fixture");
             if ids.iter().all(|id| {
@@ -2268,6 +2275,10 @@ while True:
             );
             std::thread::sleep(Duration::from_millis(30));
         }
+        eprintln!(
+            "startup recovery: all 70 deliveries accepted after {:.2}s from queueing",
+            queued_at.elapsed().as_secs_f64()
+        );
         let input = std::fs::read_to_string(&received).expect("startup fixture");
         assert!(!input.contains("MCP setup request"));
         assert_eq!(input.matches("[CCCC] You are agy").count(), 1);
