@@ -2210,7 +2210,10 @@ mod tests {
             TranscriptFollower::new(state_path.clone(), config_dir, session_id.into(), false);
         follower.poll().await.expect("first poll discovers");
         let parses_after_discovery = follower.state_parses;
-        assert!(parses_after_discovery >= 1, "the first poll must parse state");
+        assert!(
+            parses_after_discovery >= 1,
+            "the first poll must parse state"
+        );
         assert!(follower.path.is_some(), "the first poll must attach");
 
         // 40 further ticks at the 50 ms cadence, with state.json untouched.
