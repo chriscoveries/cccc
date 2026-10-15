@@ -84,7 +84,7 @@ pub fn process_batch(
     if crate::ops::local_headless::uses_managed_delivery(&current_group.group_id, &current_actor) {
         return process_managed_batch(jobs, &job.home, &current_group, &current_actor, cancelled);
     }
-    let status = match ensure_running(&job.home, &current_group, &current_actor) {
+    let status = match ensure_running(&job.home, &current_group, &current_actor, cancelled) {
         Ok(Some(status)) => status,
         Ok(None) => return BatchOutcome::Retry,
         Err(reason) => return BatchOutcome::Terminal(reason),
@@ -162,8 +162,8 @@ fn process_deepseek_batch(
         if crate::ops::deepseek_runtime::manual_restart_required(home, group, actor) {
             return BatchOutcome::Retry;
         }
-        match actor_runtime::apply(home, group, &actor.id, "actor.start") {
-            Ok(_) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
+        match actor_runtime::start_for_delivery(home, group, &actor.id, cancelled) {
+            Ok(true) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
             Ok(_) => return BatchOutcome::Retry,
             Err(error) => {
                 return match terminal_reason(&error) {
@@ -192,8 +192,8 @@ fn process_managed_batch(
     cancelled: &AtomicBool,
 ) -> BatchOutcome {
     if !crate::ops::local_headless::running(&group.group_id, &actor.id) {
-        match actor_runtime::apply(home, group, &actor.id, "actor.start") {
-            Ok(None) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {}
+        match actor_runtime::start_for_delivery(home, group, &actor.id, cancelled) {
+            Ok(true) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {}
             Ok(_) => return BatchOutcome::Retry,
             Err(error) => {
                 if let Some(reason) = terminal_reason(&error) {
@@ -296,14 +296,18 @@ fn ensure_running(
     home: &cccc_core::HomeLayout,
     group: &cccc_core::GroupDoc,
     actor: &Actor,
+    cancelled: &AtomicBool,
 ) -> Result<Option<cccc_runtime::SessionStatus>, String> {
     if let Ok(status) = cccc_runtime::status(&group.group_id, &actor.id)
         && status.running
     {
         return Ok(Some(status));
     }
-    let status = match actor_runtime::apply(home, group, &actor.id, "actor.start") {
-        Ok(Some(status)) if status.running => status,
+    let status = match actor_runtime::start_for_delivery(home, group, &actor.id, cancelled) {
+        Ok(true) => match actor_runtime::status(&group.group_id, &actor.id) {
+            Some(status) if status.running => status,
+            _ => return Ok(None),
+        },
         Ok(_) => return Ok(None),
         Err(error) => {
             if let Ok(status) = cccc_runtime::status(&group.group_id, &actor.id)

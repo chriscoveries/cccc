@@ -7,13 +7,18 @@ use crate::dispatch::OpError;
 use crate::ops::actor_profile_runtime;
 
 mod attributed_reap;
+mod delivery;
 mod environment;
+#[cfg(all(test, unix))]
+#[path = "actor_runtime_memory_delivery_tests.rs"]
+mod memory_delivery_tests;
 mod persistence;
 mod reconcile;
 pub(crate) mod terminal_history;
 #[cfg(test)]
 mod untrusted_workspace_tests;
 pub(crate) use attributed_reap::reap_group;
+pub(crate) use delivery::start_for_delivery;
 pub use persistence::persist_lifecycle;
 pub(crate) use reconcile::record_process_exit;
 pub use reconcile::{reap_exited, reconcile_exited};
@@ -94,6 +99,10 @@ pub(super) fn apply_resolved(
         // receipt, so a late old launch cannot undo the explicit reset.
         super::runtime_session::remove(home, &group.group_id, actor_id).map_err(OpError::io)?;
     }
+    if kind == "actor.new_session" {
+        super::actor_memory::clear_required_resume(home, &group.group_id, actor_id, None)
+            .map_err(OpError::io)?;
+    }
     super::capabilities::apply_actor_startup_baseline(home, group, actor);
     if actor.runtime == ActorRuntime::Deepseek {
         super::deepseek_runtime::apply(home, group, actor, "actor.start")?;
@@ -123,6 +132,9 @@ fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> R
 }
 
 fn launch_error(error: std::io::Error) -> OpError {
+    if super::actor_memory::is_resume_blocked(&error) {
+        return OpError::new(RUNTIME_RESUME_FAILED, error.to_string());
+    }
     if super::runtime_session::resume_failure::is_blocked(&error) {
         return OpError::new(RUNTIME_RESUME_FAILED, error.to_string());
     }
