@@ -4,7 +4,9 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use crate::ledger::{SourceRevision, read_all_uncached, revisions};
+use crate::ledger::{
+    SourceRevision, is_gzip, ledger_group_id, read_all_uncached, read_source_from, revisions,
+};
 
 mod cache;
 mod queries;
@@ -66,6 +68,11 @@ impl LedgerIndex {
     }
 
     fn push(&mut self, event: Event, next_revisions: Vec<SourceRevision>) {
+        self.push_indexed(event);
+        self.revisions = next_revisions;
+    }
+
+    fn push_indexed(&mut self, event: Event) {
         let position = self.events.len();
         self.positions.insert(event.id.clone(), position);
         if let Some(client_id) = event
@@ -91,8 +98,81 @@ impl LedgerIndex {
             .estimated_bytes
             .saturating_add(estimate_event_bytes(&event));
         self.events.push(event);
+    }
+
+    /// Apply the events committed since the indexed revisions without
+    /// re-reading the sources that produced the retained events.
+    fn catch_up(&mut self, events: Vec<Event>, next_revisions: Vec<SourceRevision>) {
+        for event in events {
+            self.push_indexed(event);
+        }
         self.revisions = next_revisions;
     }
+}
+
+/// Extend a retained prefix only across ordinary appends to the active file.
+/// Rotation can reuse that pathname at an equal or greater length, so every
+/// ordered source path and every sealed revision must remain unchanged.
+fn read_appended_tail(
+    path: &Path,
+    old: &[SourceRevision],
+    next: &[SourceRevision],
+) -> io::Result<Option<Vec<Event>>> {
+    if old.is_empty()
+        || old.len() != next.len()
+        || old
+            .iter()
+            .zip(next)
+            .any(|(old, next)| old.path != next.path)
+    {
+        return Ok(None);
+    }
+    let group_id = ledger_group_id(path);
+    let mut events = Vec::new();
+    for (previous, revision) in old.iter().zip(next) {
+        if revision.path != path {
+            // Historical sources are sealed. Appending their new bytes after
+            // the retained active events would also reorder canonical history.
+            if previous != revision {
+                return Ok(None);
+            }
+            continue;
+        }
+        if previous.len > revision.len {
+            return Ok(None);
+        }
+        if previous.len == revision.len {
+            // Same-size changed metadata cannot certify an appended tail.
+            if previous != revision {
+                return Ok(None);
+            }
+            continue;
+        }
+        if is_gzip(&revision.path)
+            || (previous.len > 0 && !old_tail_is_line_aligned(&revision.path, previous.len)?)
+        {
+            return Ok(None);
+        }
+        let (mut read, consumed_end) = read_source_from(&revision.path, previous.len, &group_id)?;
+        if consumed_end != revision.len {
+            // Never certify bytes that were not consumed as the indexed tail.
+            return Ok(None);
+        }
+        events.append(&mut read);
+    }
+    Ok(Some(events))
+}
+
+/// The retained events end on a line boundary only when the byte before the
+/// old length is a newline; a torn old tail means the first bytes after it
+/// continue a line the index never parsed.
+fn old_tail_is_line_aligned(path: &Path, previous_len: u64) -> io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::Start(previous_len - 1))?;
+    let mut last = [0_u8; 1];
+    file.read_exact(&mut last)?;
+    Ok(last[0] == b'\n')
 }
 
 fn index_reply(event: &Event, replied_by: &mut HashMap<String, BTreeSet<String>>) {
@@ -189,7 +269,10 @@ fn current(path: &Path) -> io::Result<Arc<RwLock<LedgerIndex>>> {
     let source_lock = crate::ledger::acquire_reader_lock(path)?;
     let next_revisions = revisions(path)?;
     if index.revisions != next_revisions {
-        *index = LedgerIndex::rebuild(path, next_revisions)?;
+        match read_appended_tail(path, &index.revisions, &next_revisions) {
+            Ok(Some(tail_events)) => index.catch_up(tail_events, next_revisions),
+            _ => *index = LedgerIndex::rebuild(path, next_revisions)?,
+        }
     }
     let weight = index
         .revisions
@@ -309,6 +392,73 @@ mod tests {
         );
     }
 
+    fn assert_rotation_refill_before_notification(refill_count: usize) {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().expect("isolated rotation fixture");
+        let home = crate::HomeLayout::from_path(temp.path()).expect("home");
+        let store = crate::GroupStore::new(home.clone()).expect("store");
+        let group = store.create("rotation refill", "").expect("group");
+        let path = store.ledger_path(&group.group_id).expect("ledger");
+        // Any creation records remain canonical but do not change the exact
+        // active-file byte boundary used by this regression.
+        crate::ledger_archive::compact(&home, &group.group_id, "seed boundary")
+            .expect("initial boundary");
+        let mut first = Event::new("chat.message", &group.group_id);
+        first.id = "a".repeat(32);
+        crate::ledger::append(&path, &first).expect("first append");
+        let mut expected = crate::ledger::read_all(&path).expect("warm index");
+        let first_len = std::fs::metadata(&path).expect("active source").len();
+        crate::ledger_archive::compact(&home, &group.group_id, "rotate warm active")
+            .expect("rotate")
+            .expect("segment");
+
+        let mut pending_notifications = Vec::new();
+        for ordinal in 0..refill_count {
+            let mut event = first.clone();
+            event.id = char::from(b'b' + ordinal as u8).to_string().repeat(32);
+            let mut encoded = serde_json::to_vec(&event).expect("encode");
+            encoded.push(b'\n');
+            assert_eq!(encoded.len() as u64, first_len, "equal-size native records");
+            let writer = crate::ledger::acquire_writer_lock(&path).expect("writer lock");
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("active source");
+            file.write_all(&encoded).expect("refill commit");
+            file.sync_data().expect("durable refill");
+            drop(file);
+            drop(writer);
+            // This is the production interval after append releases its writer
+            // lock and before note_append acquires the index lock.
+            expected.push(event.clone());
+            pending_notifications.push((event, encoded.len()));
+        }
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("query before notifications"),
+            expected,
+            "rotation plus refill must preserve the exact canonical sequence",
+        );
+        for (event, encoded_len) in pending_notifications {
+            note_append(&path, &event, encoded_len);
+        }
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("query after notifications"),
+            expected,
+            "delayed notifications must neither duplicate nor skip committed IDs",
+        );
+    }
+
+    #[test]
+    fn rotation_refilled_to_equal_length_before_notification_keeps_the_exact_sequence() {
+        assert_rotation_refill_before_notification(1);
+    }
+
+    #[test]
+    fn rotation_refilled_past_old_length_before_notifications_keeps_the_exact_sequence() {
+        assert_rotation_refill_before_notification(2);
+    }
+
     #[test]
     fn a_warm_query_waits_for_a_rotation_in_progress() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -332,6 +482,47 @@ mod tests {
         );
         drop(rotation);
         assert_eq!(reader.join().expect("reader").expect("read"), vec![first]);
+    }
+
+    #[test]
+    fn a_stale_warm_index_catches_up_from_the_appended_tail_only() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let first = Event::new("chat.message", "g_fixture");
+        crate::ledger::append(&path, &first).expect("first event");
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("warm index"),
+            vec![first.clone()]
+        );
+
+        // Rewrite the committed prefix in place, then append a second event.
+        // A full rebuild would fail on the corrupted first line; the tail
+        // catch-up keeps the already-indexed prefix and reads only the tail.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("rewrite");
+        file.write_all(b"x").expect("corrupt first byte");
+        file.sync_data().expect("commit corruption");
+        drop(file);
+        let second = Event::new("chat.message", "g_fixture");
+        let mut encoded = serde_json::to_vec(&second).expect("encode");
+        encoded.push(b'\n');
+        let writer = crate::ledger::acquire_writer_lock(&path).expect("writer lock");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        file.write_all(&encoded).expect("second event");
+        file.sync_data().expect("commit");
+        drop(writer);
+
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("caught up"),
+            vec![first, second]
+        );
     }
 
     #[test]
