@@ -5,6 +5,7 @@ mod events_migration;
 #[cfg(test)]
 mod events_migration_tests;
 mod managed_reader;
+mod memory;
 mod notice_gate;
 mod output;
 mod provider_cli;
@@ -21,6 +22,9 @@ pub(crate) use managed_reader::verify_claude_reader_release;
 pub(crate) use events::{
     append as append_event, append_with_dedupe as append_event_with_dedupe,
     contains_dedupe as contains_event_dedupe,
+};
+pub(crate) use memory::{
+    MemoryCandidate, MemoryRestartOutcome, memory_candidate, restart_for_memory,
 };
 pub(crate) use supervisor::registered_running;
 pub(crate) use supervisor::{

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 /// Parse `VmRSS: <kb> kB` out of a Linux `/proc/<pid>/status` body.
 /// Returns resident KiB. Anything unparseable (exited, kernel thread) is
 /// `None` — skipped, never counted as zero.
+#[cfg(any(test, target_os = "linux"))]
 pub fn parse_vmrss_kb(status: &str) -> Option<u64> {
     for line in status.lines() {
         let Some(rest) = line.strip_prefix("VmRSS:") else {
@@ -74,30 +75,6 @@ fn ppid_of(candidate: i32) -> Option<i32> {
     let mut fields = after.split_whitespace();
     fields.next()?; // state
     fields.next()?.parse::<i32>().ok() // ppid
-}
-
-/// Parentage table pid -> ppid from one `ps` pass.
-#[cfg(target_os = "macos")]
-fn ppid_table() -> HashMap<i32, i32> {
-    let mut table = HashMap::new();
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid="])
-        .env("LC_ALL", "C")
-        .output()
-    else {
-        return table;
-    };
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut tokens = line.split_whitespace();
-        if let (Some(candidate), Some(ppid)) = (tokens.next(), tokens.next())
-            && let (Ok(candidate), Ok(ppid)) = (candidate.parse::<i32>(), ppid.parse::<i32>())
-            && candidate > 0
-            && ppid >= 0
-        {
-            table.insert(candidate, ppid);
-        }
-    }
-    table
 }
 
 /// Breadth-first tree from `root` over a parentage table. Root first; the
@@ -174,63 +151,6 @@ fn ppid_table_inverted() -> HashMap<i32, Vec<i32>> {
         }
     }
     children
-}
-
-/// Start time of one pid in unix seconds, same source the scan uses.
-/// `None` when gone or unreadable — callers treat that as "do not act".
-#[cfg(target_os = "linux")]
-pub fn started_secs_of(pid: i32) -> Option<u64> {
-    std::fs::metadata(format!("/proc/{pid}"))
-        .and_then(|meta| meta.modified())
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .ok()
-        .filter(|secs| *secs > 0)
-}
-
-/// Same contract via a single-pid `ps` etime lookup.
-#[cfg(target_os = "macos")]
-pub fn started_secs_of(pid: i32) -> Option<u64> {
-    let output = std::process::Command::new("ps")
-        .args(["-o", "etime=", "-p", &pid.to_string()])
-        .env("LC_ALL", "C")
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Reuse the scan's shape: [[dd-]hh:]mm:ss. Duplicated in three lines
-    // rather than shared so this file stays dependency-free.
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let (days, clock) = match text.split_once('-') {
-        Some((d, c)) => (d.parse::<u64>().ok()?, c),
-        None => (0, text),
-    };
-    let mut fields = clock.split(':');
-    let mut parts = Vec::new();
-    for part in fields.by_ref() {
-        parts.push(part.parse::<u64>().ok()?);
-    }
-    if parts.len() < 2 || parts.len() > 3 {
-        return None;
-    }
-    let elapsed = if parts.len() == 3 {
-        parts[0] * 3600 + parts[1] * 60 + parts[2]
-    } else {
-        parts[0] * 60 + parts[1]
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0);
-    now.checked_sub(elapsed).filter(|started| *started > 0)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn started_secs_of(_pid: i32) -> Option<u64> {
-    None
 }
 
 /// Sum resident KiB over `root` plus currently-visible descendants. Pids that

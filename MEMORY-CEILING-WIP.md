@@ -1,16 +1,15 @@
-# Memory ceiling handover
+# Native ACP memory ceiling — T620 correction
 
-Stopped per owner order. No production implementation exists.
+The earlier handover in this file is superseded by the implementation and regressions in this branch. Validation remains pending; no runtime PASS is claimed here.
 
-Branch: wip/actor-memory-ceiling-sol. Base: local lab 0990769cb29b7f19e097cec94542abc3b25f8a2e (origin/lab fetched d067059f is older).
-Worktree: /home/agent/work/sol-actor-memory-ceiling.
+`Actor.memory_limit_mb` defaults to zero. A configured ceiling currently enforces only directly owned, single-child native ACP sessions: Copilot, Devin, Cursor, Kimi, Auggie, Kiro, Hermes and Droid in ACP mode. PTY/viewer and multi-root runtimes are skipped. A configured limit is not a promise of enforcement for an unsupported topology.
 
-Two new daemon tests exercise default-off serialization, configured round-trip, and rejection of negative/fractional/string/overflow limits. They should fail on this base, which has no Actor.memory_limit_mb. The claw run was cancelled before any verified result; /tmp/sol-memory-settings-red.log is incomplete, not evidence.
+The first idle/RSS observations are filters. Final admission reloads the current Profile/private environment, verifies a materialized receipt for the live conversation, and compares a new owned-tree RSS sample with the current nonzero limit. Controlled delivery uses the same nonblocking start guard as maintenance. The serialized ACP command loop refuses maintenance while work, RPCs, approvals or native input remain pending, and closes further admission before acknowledging an idle retirement.
 
-Actor is defined in crates/cccc-contracts/src/actor.rs:170. Core actors::update serializes the Actor, merges patch, then deserializes; daemon actor_from_args supports actor object and flat args. A serde-default u32 with skip-zero retains default-off serialization and rejects the tested invalid values. No field added yet.
+A durable exact-resume sidecar is written before stopping. Missing or changed receipts cannot fall back to session/new, including ordinary automatic recovery after a failed maintenance attempt or daemon restart. Only verified matching resume and attachment, or an explicit New Session, clears the requirement. The existing owned ChildOwner/OwnedProcessTree controls shutdown; numeric RSS sampling PIDs are never used as independent process authority.
 
-Existing scheduler runs each group under group_write in server_automation.rs. automation_runtime::tick_group is the periodic hook. local_headless::ready_for_mail_notice checks running, active_turn absent and status idle; it is a snapshot, not a restart fence. HeadlessStatus.pid can represent the viewer, so do not assume it identifies the provider tree. Need ownership-verified provider roots and PID birth identity, with idle/ownership rechecked at restart admission. PTY heuristic idle cannot prove never-mid-turn.
+Cooldown reservations use atomic durable writes and survive failure/restart. Corrupt cooldown history suppresses enforcement. One outcome event per attempted restart remains in the ledger; the available concrete foreman is targeted through normal durable non-chat delivery. No available foreman means ledger-only evidence, never broadcast.
 
-actor_runtime::apply(home,group,actor_id,"actor.restart") stops registered ownership and starts using runtime_session receipt. Require verified resumability before stopping; do not silently fresh-start if receipt absent or incompatible. Keep cooldown across daemon restarts, reserve before attempting restart, and preserve failure outcomes. One ledger event plus targeted foreman notice; no new polling loop required. Linux/macOS process-tree sampling and cooldown/idle tests remain unwritten.
+Regressions cover authoritative idle-close, busy/pending refusal, owned root versus viewer projection, stale generations, Profile drift, fresh limits, receipt removal/replacement races, ordinary recovery gating, matching resume, durable requirements, cooldown corruption and concrete notice routing. They must execute through the required fork CI before semantic PASS. Staging proof, fresh RSS comparison and production acceptance remain separate gates.
 
-No live changes, push upstream, install or successful test claim.
+No firestar or MACDAD cap, install or restart is authorized by this branch.

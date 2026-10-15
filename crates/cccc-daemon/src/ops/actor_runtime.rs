@@ -94,6 +94,10 @@ pub(super) fn apply_resolved(
         // receipt, so a late old launch cannot undo the explicit reset.
         super::runtime_session::remove(home, &group.group_id, actor_id).map_err(OpError::io)?;
     }
+    if kind == "actor.new_session" {
+        super::actor_memory::clear_required_resume(home, &group.group_id, actor_id, None)
+            .map_err(OpError::io)?;
+    }
     super::capabilities::apply_actor_startup_baseline(home, group, actor);
     if actor.runtime == ActorRuntime::Deepseek {
         super::deepseek_runtime::apply(home, group, actor, "actor.start")?;
@@ -123,6 +127,9 @@ fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> R
 }
 
 fn launch_error(error: std::io::Error) -> OpError {
+    if super::actor_memory::is_resume_blocked(&error) {
+        return OpError::new(RUNTIME_RESUME_FAILED, error.to_string());
+    }
     if super::runtime_session::resume_failure::is_blocked(&error) {
         return OpError::new(RUNTIME_RESUME_FAILED, error.to_string());
     }

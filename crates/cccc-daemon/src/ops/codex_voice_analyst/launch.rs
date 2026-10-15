@@ -163,6 +163,23 @@ impl AnalystSession {
             .runtime_mode
             .validate(config.runtime)
             .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+        let required =
+            super::super::actor_memory::required_resume(home, &config.group_id, &config.actor_id)
+                .map_err(|_| {
+                super::super::actor_memory::blocked_resume(
+                    "Could not verify the memory-maintenance resume requirement",
+                )
+            })?;
+        if let Some(required) = required {
+            if config.runtime != required.runtime
+                || !Self::supports_memory_restart(config.runtime, config.runtime_mode)
+            {
+                return Err(super::super::actor_memory::blocked_resume(
+                    "Actor settings no longer match the required native ACP session",
+                ));
+            }
+            return Self::launch_actor_resume_only(home, config, required.session_id).await;
+        }
         if config.runtime == ActorRuntime::Antigravity && config.runtime_mode == RuntimeMode::Acp {
             return Self::launch_antigravity(
                 home,
@@ -316,6 +333,75 @@ impl AnalystSession {
             );
         }
         Ok(session)
+    }
+
+    /// Memory maintenance may only load the exact materialized native ACP session.
+    pub(crate) async fn launch_actor_resume_only(
+        home: &HomeLayout,
+        config: ActorLaunchConfig,
+        required_id: String,
+    ) -> io::Result<Self> {
+        if !Self::supports_memory_restart(config.runtime, config.runtime_mode) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Memory restart requires a native ACP Actor",
+            ));
+        }
+        let binding = bind_workspace(&config.workdir)?;
+        Self::launch_native_acp_resume_only(
+            home,
+            binding,
+            config.runtime,
+            config.command,
+            config.environment,
+            (&config.group_id, &config.actor_id),
+            required_id,
+        )
+        .await
+    }
+
+    pub(crate) fn supports_memory_restart(runtime: ActorRuntime, mode: RuntimeMode) -> bool {
+        mode == RuntimeMode::Acp
+            && matches!(
+                runtime,
+                ActorRuntime::Copilot
+                    | ActorRuntime::Devin
+                    | ActorRuntime::Cursor
+                    | ActorRuntime::Kimi
+                    | ActorRuntime::Auggie
+                    | ActorRuntime::Kiro
+                    | ActorRuntime::Hermes
+                    | ActorRuntime::Droid
+            )
+    }
+
+    /// The primary owned provider is the only process root eligible for maintenance.
+    pub(crate) fn memory_provider_pid(&self) -> Option<u32> {
+        if !Self::supports_memory_restart(self.runtime, self.runtime_mode())
+            || !matches!(&self.protocol, ManagedProtocol::Acp(_))
+            || !self.auxiliary_processes.is_empty()
+        {
+            return None;
+        }
+        let process = self.process.as_ref()?;
+        process.running().then(|| process.id()).flatten()
+    }
+
+    pub(crate) fn resumed_native_session_is(&self, runtime: ActorRuntime, id: &str) -> bool {
+        self.runtime == runtime
+            && self.thread_id == id
+            && self.thread_resumed
+            && self.memory_provider_pid().is_some()
+    }
+
+    pub(crate) async fn close_native_acp_if_idle(&self) -> io::Result<bool> {
+        if self.memory_provider_pid().is_none() {
+            return Ok(false);
+        }
+        match &self.protocol {
+            ManagedProtocol::Acp(protocol) => protocol.close_if_idle().await,
+            _ => Ok(false),
+        }
     }
 
     pub(crate) fn generation(&self) -> &str {

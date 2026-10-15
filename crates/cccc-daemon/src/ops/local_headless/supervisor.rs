@@ -44,6 +44,15 @@ pub(super) struct StartGuard {
 }
 
 impl StartGuard {
+    pub(super) fn try_acquire(key: &Key) -> io::Result<Option<Self>> {
+        let mut active = starts().0.lock().map_err(|_| poisoned())?;
+        if active.contains(key) {
+            return Ok(None);
+        }
+        active.insert(key.clone());
+        Ok(Some(Self { key: key.clone() }))
+    }
+
     pub(super) fn acquire(key: &Key) -> io::Result<Self> {
         let (active, changed) = starts();
         let mut active = active.lock().map_err(|_| poisoned())?;
@@ -89,8 +98,20 @@ fn start_managed_agent(
     key: Key,
 ) -> io::Result<()> {
     let cwd = working_directory(group, actor)?;
+    let required = super::super::actor_memory::required_resume(home, &group.group_id, &actor.id)
+        .map_err(|_| {
+            super::super::actor_memory::blocked_resume(
+                "Could not verify the memory-maintenance resume requirement before startup",
+            )
+        })?;
     match launch_managed(home, group, actor, &cwd) {
-        Ok(app) => attach_managed(home, group, actor, key, cwd, app),
+        Ok(app) => {
+            attach_managed(home, group, actor, key.clone(), cwd, app)?;
+            if let Some(required) = &required {
+                clear_attached_requirement(home, group, actor, &key, required)?;
+            }
+            Ok(())
+        }
         Err(refusal) if super::workspace_trust::refused(actor, &refusal) => {
             super::workspace_trust::prompt(home, group, actor, key, cwd, refusal)
         }
@@ -104,23 +125,7 @@ pub(super) fn launch_managed(
     actor: &Actor,
     cwd: &std::path::Path,
 ) -> io::Result<AnalystSession> {
-    let mut env = actor.env.clone();
-    env.insert(
-        "CCCC_HOME".into(),
-        home.root().to_string_lossy().into_owned(),
-    );
-    env.insert("CCCC_GROUP_ID".into(), group.group_id.clone());
-    env.insert("CCCC_ACTOR_ID".into(), actor.id.clone());
-    super::super::codex_mcp::configure_actor_cli(&mut env);
-    let config = super::super::codex_voice_analyst::ActorLaunchConfig {
-        workdir: cwd.to_path_buf(),
-        group_id: group.group_id.clone(),
-        actor_id: actor.id.clone(),
-        runtime: actor.runtime,
-        runtime_mode: actor.runtime_mode,
-        command: provider_cli::base_command(actor),
-        environment: env,
-    };
+    let config = managed_launch_config(home, group, actor, cwd);
     let launch_home = home.clone();
     run_managed_launch(
         async move { AnalystSession::launch_actor(&launch_home, config).await }.instrument(
@@ -129,6 +134,31 @@ pub(super) fn launch_managed(
             ),
         ),
     )
+}
+
+pub(super) fn managed_launch_config(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    cwd: &std::path::Path,
+) -> super::super::codex_voice_analyst::ActorLaunchConfig {
+    let mut env = actor.env.clone();
+    env.insert(
+        "CCCC_HOME".into(),
+        home.root().to_string_lossy().into_owned(),
+    );
+    env.insert("CCCC_GROUP_ID".into(), group.group_id.clone());
+    env.insert("CCCC_ACTOR_ID".into(), actor.id.clone());
+    super::super::codex_mcp::configure_actor_cli(&mut env);
+    super::super::codex_voice_analyst::ActorLaunchConfig {
+        workdir: cwd.to_path_buf(),
+        group_id: group.group_id.clone(),
+        actor_id: actor.id.clone(),
+        runtime: actor.runtime,
+        runtime_mode: actor.runtime_mode,
+        command: provider_cli::base_command(actor),
+        environment: env,
+    }
 }
 
 pub(super) fn attach_managed(
@@ -164,6 +194,28 @@ pub(super) fn attach_managed(
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
     });
+    let required =
+        match super::super::actor_memory::required_resume(home, &group.group_id, &actor.id) {
+            Ok(required) => required,
+            Err(_) => {
+                return Err(cleanup_failed_start(
+                    &item,
+                    super::super::actor_memory::blocked_resume(
+                        "Could not verify the memory-maintenance resume requirement at attachment",
+                    ),
+                ));
+            }
+        };
+    if let Some(required) = &required
+        && !app.resumed_native_session_is(required.runtime, &required.session_id)
+    {
+        return Err(cleanup_failed_start(
+            &item,
+            super::super::actor_memory::blocked_resume(
+                "Managed attachment did not load the required native ACP session",
+            ),
+        ));
+    }
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
     }
@@ -209,6 +261,34 @@ pub(super) fn attach_managed(
         return Err(cleanup_failed_start(&item, error));
     }
     super::output::emit(&item, "headless.session.started", Map::new());
+    Ok(())
+}
+
+pub(super) fn clear_attached_requirement(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    key: &Key,
+    required: &super::super::actor_memory::RequiredResume,
+) -> io::Result<()> {
+    if super::super::actor_memory::clear_required_resume(
+        home,
+        &group.group_id,
+        &actor.id,
+        Some(required),
+    )
+    .is_err()
+    {
+        let primary = super::super::actor_memory::blocked_resume(
+            "Could not retire the memory-maintenance resume requirement after attachment",
+        );
+        return Err(match stop_locked(key) {
+            Ok(()) => primary,
+            Err(cleanup) => {
+                io::Error::other(format!("{primary}; attachment cleanup failed: {cleanup}"))
+            }
+        });
+    }
     Ok(())
 }
 
@@ -278,7 +358,7 @@ pub fn ensure_viewer(group_id: &str, actor_id: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn stop_locked(key: &Key) -> io::Result<()> {
+pub(super) fn stop_locked(key: &Key) -> io::Result<()> {
     // A prompt may have been registered while stop was waiting for its start.
     super::workspace_trust_recovery::cancel(key)?;
     let Some(item) = lookup(key) else {
@@ -411,7 +491,11 @@ pub fn submit_batch(
     source_events: &[Event],
     cancelled: &AtomicBool,
 ) -> BatchSubmission {
-    let Some(item) = lookup(&(group.group_id.clone(), actor.id.clone())) else {
+    let key = (group.group_id.clone(), actor.id.clone());
+    let Ok(Some(_start)) = StartGuard::try_acquire(&key) else {
+        return BatchSubmission::Deferred;
+    };
+    let Some(item) = lookup(&key) else {
         return BatchSubmission::Deferred;
     };
     if !item.running() {
@@ -581,7 +665,7 @@ fn render_turn(event: &Event) -> Option<(String, String)> {
     })
 }
 
-fn lookup(key: &Key) -> Option<Arc<Session>> {
+pub(super) fn lookup(key: &Key) -> Option<Arc<Session>> {
     sessions().read().ok()?.get(key).cloned()
 }
 
@@ -631,7 +715,7 @@ pub(crate) fn cancel_turn(group: &str, actor: &str, generation: &str) -> io::Res
     Ok(true)
 }
 
-fn working_directory(group: &GroupDoc, actor: &Actor) -> io::Result<std::path::PathBuf> {
+pub(super) fn working_directory(group: &GroupDoc, actor: &Actor) -> io::Result<std::path::PathBuf> {
     let wanted = if actor.default_scope_key.is_empty() {
         &group.active_scope_key
     } else {
