@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::{io, path::Path, time::Duration};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(40);
+const RESUME_DIAGNOSTIC_LIMIT: usize = 1800;
 
 /// Marks a failed `session/load` so the launch wrapper passes that
 /// diagnosis through instead of relabelling it an initialization failure.
@@ -332,20 +333,25 @@ pub(super) async fn initialize(
             // session -- is never tried, because attempted sessions are never
             // replaced automatically.
             //
-            // T631 envelope: v0.4.43 bounds every RPC diagnostic to 1600 chars
-            // (acp/diagnostic.rs LIMIT) and its start-up bound test allows 1800
-            // for the fixed wrapper text around one. The upstream relabel was
-            // written against a tree without that bound; at its original length
-            // it pushed the final operator message past 1800 and broke
-            // hermes_rpc_startup_diagnostics_keep_method_and_safe_details. The
-            // diagnosis, the session name and the recovery all stay; the
-            // reassurance clause is what pays for the envelope.
+            // The RPC reason is already sanitized and bounded to 1600
+            // characters. Reserve space for the full accepted session ID
+            // (up to 512 bytes) and recovery before fitting that reason into
+            // the complete 1800-character startup diagnostic envelope.
+            let prefix = format!("{RESUME_RECOVERY_HINT} {} (", resume.unwrap_or_default());
+            let suffix =
+                "). Not an initialization failure. Recover with `cccc actor new-session <actor>`";
+            let reason_limit = RESUME_DIAGNOSTIC_LIMIT
+                .saturating_sub(prefix.chars().count() + suffix.chars().count());
+            let reason = error.to_string();
+            let mut characters = reason.chars();
+            let mut reason: String = characters.by_ref().take(reason_limit).collect();
+            if characters.next().is_some() && !reason.is_empty() {
+                reason.pop();
+                reason.push('…');
+            }
             return Err(io::Error::new(
                 error.kind(),
-                format!(
-                    "could not resume ACP session {} ({error}). Not a login or launch failure; the CLI is running. Recover with `cccc actor new-session <actor>`",
-                    resume.unwrap_or_default()
-                ),
+                format!("{prefix}{reason}{suffix}"),
             ));
         }
         Err(error) => return Err(error),
