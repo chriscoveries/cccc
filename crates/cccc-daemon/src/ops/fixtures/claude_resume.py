@@ -75,7 +75,15 @@ else:
         path = root / "projects" / "workspace" / f"{session}.jsonl"
         if mode != "missing_history" and not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"type": "user", "sessionId": session, "message": {"content": "fixture history"}}) + "\n")
+            # Fresh launches follow this transcript from offset zero. A user record
+            # requires promptId, and the completed fixture turn must settle.
+            records = [
+                {"type": "user", "sessionId": session, "cwd": os.getcwd(),
+                 "promptId": f"fixture-{session}", "message": {"content": "fixture history"}},
+                {"type": "system", "sessionId": session, "cwd": os.getcwd(),
+                 "subtype": "turn_duration"},
+            ]
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
         write_json(root / "jobs" / SHORT / "state.json", {
             "sessionId": session, "daemonShort": SHORT, "cwd": os.getcwd(),
             "tempo": "idle", "inFlight": {"tasks": 0, "queued": 0},

@@ -144,7 +144,12 @@ fn launch_managed_with_policy(
     run_managed_launch(
         async move {
             if explicit {
-                AnalystSession::launch_actor_with_policy(&launch_home, config, true).await
+                Box::pin(AnalystSession::launch_actor_with_policy(
+                    &launch_home,
+                    config,
+                    true,
+                ))
+                .await
             } else {
                 AnalystSession::launch_actor(&launch_home, config).await
             }

@@ -12,6 +12,37 @@ use std::{
 
 const SAVED: &str = "52b41c61-e23c-4b7c-8b60-809c347451b5";
 
+// A successful idempotent Start records an observation; every conversation and
+// recovery-gate field must otherwise remain unchanged.
+fn assert_start_preserved_receipt(receipt: &std::path::Path, retained: &[u8]) {
+    let mut before: serde_json::Value = serde_json::from_slice(retained).expect("old receipt JSON");
+    let mut after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(receipt).expect("retained receipt"))
+            .expect("new receipt JSON");
+    let timestamp = after["updated_at"].as_str().expect("diagnostic timestamp");
+    assert!(
+        !timestamp.is_empty(),
+        "diagnostic timestamp must be present"
+    );
+    assert_eq!(
+        after["last_recovery_decision"],
+        serde_json::json!({
+            "action": "skip", "reason": "already_running", "at": timestamp,
+            "session_id": before["provider_session_id"].as_str().unwrap_or("")
+        }),
+        "Start must report that the existing owner was retained"
+    );
+    for document in [&mut before, &mut after] {
+        let object = document.as_object_mut().expect("receipt object");
+        object.remove("updated_at");
+        object.remove("last_recovery_decision");
+    }
+    assert_eq!(
+        after, before,
+        "Start must preserve all non-diagnostic receipt fields"
+    );
+}
+
 fn isolated(test: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     const CHILD: &str = "CCCC_TEST_CLAUDE_RESUME";
@@ -488,10 +519,7 @@ fn explicit_start_retries_only_the_registered_claude_trust_owner() {
         trust_pid,
         "Start with saved ACP settings must not replace the pending trust owner"
     );
-    assert_eq!(
-        std::fs::read(&receipt).expect("old receipt retained"),
-        retained
-    );
+    assert_start_preserved_receipt(&receipt, &retained);
     assert_eq!(f.launches(), 1);
     assert!(!f.config.join("received").exists());
 
