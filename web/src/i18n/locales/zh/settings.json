@@ -1,8 +1,5 @@
 {
-  "saveFeedback": {
-    "saved": "设置已保存。",
-    "failed": "未能保存设置。你的修改仍然保留，请重试。"
-  },
+  "saveFeedback": { "saved": "设置已保存。", "failed": "未能保存设置。你的修改仍然保留，请重试。" },
   "title": "设置",
   "closeAriaLabel": "关闭设置",
   "tabs": {
@@ -328,29 +325,12 @@
     "failedSlashVisibility": "更新 / 命令显示状态失败。",
     "sectionNavigation": "能力分区",
     "sections": {
-      "library": {
-        "label": "能力库",
-        "hint": "全部能力"
-      },
-      "skill": {
-        "label": "Skills",
-        "hint": "流程型能力"
-      },
-      "mcp": {
-        "label": "MCP",
-        "hint": "工具服务"
-      },
-      "sources": {
-        "label": "来源",
-        "hint": "同步与出处"
-      }
+      "library": { "label": "能力库", "hint": "全部能力" },
+      "skill": { "label": "Skills", "hint": "流程型能力" },
+      "mcp": { "label": "MCP", "hint": "工具服务" },
+      "sources": { "label": "来源", "hint": "同步与出处" }
     },
-    "typeOptions": {
-      "all": "全部",
-      "skill": "Skills",
-      "mcp": "MCP",
-      "pack": "Packs"
-    },
+    "typeOptions": { "all": "全部", "skill": "Skills", "mcp": "MCP", "pack": "Packs" },
     "stateOptions": {
       "all": "全部状态",
       "enabled": "已启用",
@@ -359,12 +339,7 @@
       "blocked": "已阻止",
       "needs_setup": "需配置"
     },
-    "stats": {
-      "skills": "Skills",
-      "mcp": "MCP",
-      "packs": "Packs",
-      "enabled": "已启用"
-    },
+    "stats": { "skills": "Skills", "mcp": "MCP", "packs": "Packs", "enabled": "已启用" },
     "sidebarSummary": "{{capabilities}} 个能力 · {{sources}} 个来源",
     "loading": "加载中...",
     "emptyDash": "-",
@@ -444,12 +419,7 @@
     "remove": {
       "busy": "处理中",
       "failed": "移除能力失败。",
-      "label": {
-        "delete": "删除",
-        "remove": "移除",
-        "uninstall": "卸载",
-        "disable": "停用"
-      },
+      "label": { "delete": "删除", "remove": "移除", "uninstall": "卸载", "disable": "停用" },
       "title": {
         "delete": "删除这个 Skill",
         "remove": "移除这个 Skill 的当前组引用",
@@ -497,10 +467,7 @@
       "confirmDisableTitle": "为当前工作组停用 {{name}}？",
       "confirmDisableDescription": "这只会在当前工作组关闭 {{id}}，不会阻止之后再次启用。"
     },
-    "confirm": {
-      "cancel": "取消",
-      "confirm": "确认"
-    },
+    "confirm": { "cancel": "取消", "confirm": "确认" },
     "showSystem": "系统项"
   },
   "assistants": {
@@ -1271,10 +1238,7 @@
       "protected": "登录已生效",
       "protectedHint": "已配置 {{count}} 个远程登录访问令牌；通过本机地址直接访问仍免登录。"
     },
-    "cards": {
-      "reachability": "可达性",
-      "accessControl": "Web 登录"
-    },
+    "cards": { "reachability": "可达性", "accessControl": "Web 登录" },
     "accessControlTitle": "访问令牌",
     "accessControlDescription": "管理 Web 登录使用的管理员或工作组受限凭据。",
     "userIdLabel": "用户标识",
@@ -1373,11 +1337,7 @@
     "presetLanTitle": "私有网络",
     "presetLanHint": "绑定到 0.0.0.0，重启后 localhost 和私有网络里的其它设备都能访问。",
     "providerLabel": "远程接入方式",
-    "providers": {
-      "off": "关闭",
-      "manual": "直接绑定 / 代理",
-      "tailscale": "Tailscale"
-    },
+    "providers": { "off": "关闭", "manual": "直接绑定 / 代理", "tailscale": "Tailscale" },
     "remoteMethodLanHint": "为这条私有网络访问路径选择接入方式，可以用直接绑定，也可以用 Tailscale。",
     "privateMethodTailscaleTitle": "当前使用 Tailscale",
     "privateMethodTailscaleHint": "这条私有访问路径会通过 tailnet 到达 Web，而不是依赖普通局域网直连。高级设置里仍然保留 Tailscale 的启动/停止控制和原始绑定诊断。",
@@ -1741,11 +1701,7 @@
       "cancelled": "已取消",
       "unconfirmed": "结果未确认"
     },
-    "kinds": {
-      "document": "文档",
-      "ask": "Ask",
-      "prompt": "润色"
-    },
+    "kinds": { "document": "文档", "ask": "Ask", "prompt": "润色" },
     "handoffProposal": "拟转交给 {{target}} 的消息",
     "confirmHandoff": "将此消息转交给本组的 {{target}}？\n\n{{text}}",
     "forwarded": "已转交",
@@ -1785,16 +1741,8 @@
     "taskId": "任务 ID",
     "workspaceId": "工作区 ID",
     "requestId": "请求 ID",
-    "destination": {
-      "prompt": "目标：输入框",
-      "ask": "目标：提问记录",
-      "document": "目标：文档"
-    },
-    "openTarget": {
-      "prompt": "返回输入框",
-      "ask": "查看提问",
-      "document": "打开文档"
-    },
+    "destination": { "prompt": "目标：输入框", "ask": "目标：提问记录", "document": "目标：文档" },
+    "openTarget": { "prompt": "返回输入框", "ask": "查看提问", "document": "打开文档" },
     "outcome": {
       "syncFailed": "结果同步失败。",
       "noChange": "无需修改。",
