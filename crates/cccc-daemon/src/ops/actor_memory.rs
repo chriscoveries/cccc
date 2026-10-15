@@ -439,10 +439,11 @@ mod tests {
         )
         .expect("emit notice");
         assert_eq!(event.data["target_actor_id"], "lead");
-        // The stopped group selects routing without starting any test actor.
-        let report = super::super::actor_delivery::dispatch(&home, &group, &event);
-        assert_eq!(report.targeted, 1);
-        assert_eq!(report.queued, 0);
+        // Stopped groups deliberately return before recipient selection.
+        let stopped = super::super::actor_delivery::dispatch(&home, &group, &event);
+        assert_eq!(stopped.targeted, 0);
+        assert_eq!(stopped.queued, 0);
+        // A notice persisted before dispatch is recoverable only by its target.
         for (actor, expected) in [(&group.actors[0], true), (&group.actors[1], false)] {
             let pending = super::super::runtime_delivery::pending_sources(&home, &group, actor, 10)
                 .expect("pending notifications");
@@ -452,6 +453,42 @@ mod tests {
                 "maintenance notices never become inbox messages"
             );
         }
+
+        group.state = cccc_contracts::GroupState::Active;
+        store.save(&group).expect("activate routing fixture");
+        // Model an existing delivery claim so real dispatch selects recipients
+        // without starting a provider or creating a duplicate delivery worker.
+        assert_eq!(
+            super::super::runtime_delivery::claim(
+                &home,
+                &group,
+                &group.actors[0],
+                &event.id,
+                "managed_session",
+                false,
+            )
+            .expect("claim foreman notice"),
+            super::super::runtime_delivery::ClaimResult::Claimed
+        );
+        let report = super::super::actor_delivery::dispatch(&home, &group, &event);
+        // Clean up before assertions even if a routing regression queues a peer.
+        super::super::actor_delivery::shutdown_group(&group.group_id);
+        assert_eq!(report.targeted, 1);
+        assert_eq!(
+            report.queued, 0,
+            "the existing foreman claim is not duplicated"
+        );
+        assert!(
+            super::super::runtime_delivery::latest_state(
+                &home,
+                &group.group_id,
+                "peer",
+                &event.id,
+            )
+            .expect("peer delivery state")
+            .is_none(),
+            "dispatch must never claim the peer's copy"
+        );
     }
 
     #[test]
@@ -463,7 +500,8 @@ mod tests {
         let mut group = store
             .create("memory routing no foreman", "")
             .expect("group");
-        group.state = cccc_contracts::GroupState::Stopped;
+        // Exercise recipient selection instead of the stopped-group early exit.
+        group.state = cccc_contracts::GroupState::Active;
         let mut lead = cccc_contracts::Actor::new("lead");
         lead.enabled = false;
         group.actors = vec![lead, cccc_contracts::Actor::new("peer")];
@@ -480,7 +518,17 @@ mod tests {
         .expect("emit outcome");
         assert!(event.data.get("target_actor_id").is_none());
         let report = super::super::actor_delivery::dispatch(&home, &group, &event);
+        super::super::actor_delivery::shutdown_group(&group.group_id);
         assert_eq!(report.targeted, 0, "never fall back to broadcasting");
+        assert_eq!(report.queued, 0);
+        for actor in &group.actors {
+            assert!(
+                super::super::runtime_delivery::pending_sources(&home, &group, actor, 10)
+                    .expect("ledger-only notice recovery")
+                    .is_empty(),
+                "no foreman means no runtime recipient"
+            );
+        }
         let ledger =
             cccc_core::ledger::read_all(&store.ledger_path(&group.group_id).expect("path"))
                 .expect("ledger");
