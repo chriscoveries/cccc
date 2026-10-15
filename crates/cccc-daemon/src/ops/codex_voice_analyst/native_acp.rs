@@ -331,10 +331,19 @@ pub(super) async fn initialize(
             // is working fine, while the actual recovery -- starting a fresh
             // session -- is never tried, because attempted sessions are never
             // replaced automatically.
+            //
+            // T631 envelope: v0.4.43 bounds every RPC diagnostic to 1600 chars
+            // (acp/diagnostic.rs LIMIT) and its start-up bound test allows 1800
+            // for the fixed wrapper text around one. The upstream relabel was
+            // written against a tree without that bound; at its original length
+            // it pushed the final operator message past 1800 and broke
+            // hermes_rpc_startup_diagnostics_keep_method_and_safe_details. The
+            // diagnosis, the session name and the recovery all stay; the
+            // reassurance clause is what pays for the envelope.
             return Err(io::Error::new(
                 error.kind(),
                 format!(
-                    "{RESUME_RECOVERY_HINT} {} ({error}). This is not a login or launch failure. If the session data is gone, recover by starting a new session: `cccc actor new-session <actor>`, which discards the saved session",
+                    "could not resume ACP session {} ({error}). Not a login or launch failure; the CLI is running. Recover with `cccc actor new-session <actor>`",
                     resume.unwrap_or_default()
                 ),
             ));
