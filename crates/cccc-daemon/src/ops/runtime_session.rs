@@ -335,15 +335,16 @@ fn with_receipt_path_lock<T>(
     receipt: &Path,
     operation: impl FnOnce() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
+    // Injected admission failures carry the same tag as real lock failures;
+    // errors returned after operation admission remain unwrapped.
+    #[cfg(test)]
+    receipt_lock_tests::before_lock(receipt)
+        .map_err(|error| std::io::Error::new(error.kind(), ReceiptLockUnavailable(error)))?;
     let mut admitted = false;
-    let result = (|| {
-        #[cfg(test)]
-        receipt_lock_tests::before_lock(receipt)?;
-        cccc_core::fs::with_exclusive_lock(&receipt.with_extension("lock"), || {
-            admitted = true;
-            operation()
-        })
-    })();
+    let result = cccc_core::fs::with_exclusive_lock(&receipt.with_extension("lock"), || {
+        admitted = true;
+        operation()
+    });
     if admitted {
         result
     } else {
