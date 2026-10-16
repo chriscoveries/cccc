@@ -281,4 +281,139 @@ mod tests {
             assert_eq!(parse_vmrss_kb(status), None, "unreadable sample: {status}");
         }
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn known_unreadable_zombie_member_cannot_be_hidden_by_a_readable_owned_parent() {
+        use std::path::PathBuf;
+        use std::process::{Child, Command, ExitStatus, Stdio};
+        use std::time::{Duration, Instant};
+
+        struct OwnedFixture {
+            child: Child,
+            release: PathBuf,
+        }
+        impl OwnedFixture {
+            fn finish(&mut self) -> std::io::Result<ExitStatus> {
+                std::fs::write(&self.release, b"release")?;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if let Some(status) = self.child.try_wait()? {
+                        return Ok(status);
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "owned zombie fixture did not reap and exit",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        impl Drop for OwnedFixture {
+            fn drop(&mut self) {
+                if self.finish().is_err() && self.child.kill().is_ok() {
+                    // Wait only after successful termination of our exact Child.
+                    let _ = self.child.wait();
+                }
+            }
+        }
+
+        let private = tempfile::tempdir().expect("private fixture directory");
+        let ready = private.path().join("ready");
+        let release = private.path().join("release");
+        let reaped = private.path().join("reaped");
+        let program = r#"
+import os, pathlib, sys, time
+ready, release, reaped = map(pathlib.Path, sys.argv[1:])
+keep = bytearray(8 * 1024 * 1024)
+for offset in range(0, len(keep), 4096):
+    keep[offset] = 1
+kid = os.fork()
+if kid == 0:
+    os._exit(0)
+try:
+    deadline = time.monotonic() + 5
+    while True:
+        stat = pathlib.Path('/proc', str(kid), 'stat').read_text()
+        if stat.rsplit(')', 1)[1].split()[0] == 'Z':
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError('owned child did not become a retained zombie')
+        time.sleep(0.01)
+    ready.write_text(str(kid))
+    deadline = time.monotonic() + 20
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+finally:
+    waited, _ = os.waitpid(kid, 0)
+    reaped.write_text(str(waited))
+"#;
+        let child = Command::new("python3")
+            .args(["-u", "-c", program])
+            .arg(&ready)
+            .arg(&release)
+            .arg(&reaped)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn bounded owned process tree");
+        let root = child.id();
+        let mut fixture = OwnedFixture { child, release };
+        let observations = (|| -> std::io::Result<_> {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let zombie = loop {
+                if let Ok(text) = std::fs::read_to_string(&ready)
+                    && let Ok(pid) = text.parse::<u32>()
+                {
+                    break pid;
+                }
+                if fixture.child.try_wait()?.is_some() || Instant::now() >= deadline {
+                    return Err(std::io::Error::other("owned fixture did not become ready"));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let root = i32::try_from(root).map_err(std::io::Error::other)?;
+            let zombie_root = i32::try_from(zombie).map_err(std::io::Error::other)?;
+            let parent_kib = rss_kb_of(root);
+            let zombie_kib = rss_kb_of(zombie_root);
+            let members = tree_pids(root);
+            let single = tree_rss_kib(root);
+            let union =
+                roots_rss_kib(&[u32::try_from(root).map_err(std::io::Error::other)?, zombie]);
+            Ok((
+                zombie,
+                parent_kib,
+                zombie_kib,
+                members.contains(&zombie_root),
+                single,
+                union,
+            ))
+        })();
+        // Reap the retained child and our owned root before any evidence assertion,
+        // including readiness/sample failures. Drop also retries bounded cleanup.
+        let stopped = fixture.finish();
+        let reaped_pid = std::fs::read_to_string(&reaped);
+        drop(fixture);
+        assert!(stopped.expect("owned root cleanup").success());
+        let (zombie, parent_kib, zombie_kib, included, single, union) =
+            observations.expect("observe actual retained zombie tree");
+        assert_eq!(reaped_pid.expect("child was reaped"), zombie.to_string());
+        assert!(
+            parent_kib.is_some_and(|kib| kib > 0),
+            "owned parent is readable"
+        );
+        assert_eq!(zombie_kib, None, "known child lacks RSS+swap counters");
+        assert!(
+            included,
+            "the unreadable child was in the observed parent tree"
+        );
+        assert_eq!(
+            (single, union),
+            ((0, 0), (0, 0)),
+            "neither single-root nor union sampling may advertise a partial total"
+        );
+    }
 }
