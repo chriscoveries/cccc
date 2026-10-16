@@ -665,3 +665,77 @@ fn first_observation_is_not_skipped_with_resume_disabled() {
     );
     assert_durable_w_and_s(&f.receipt());
 }
+
+#[test]
+fn identity_receipt_ordinary_legacy_metadata_does_not_mint_adoption_conflict() {
+    // Retained native worktree metadata need not have the current live-job
+    // schema. With no different conversation claim, ordinary receipt and
+    // explicit-retarget/launch guards remain responsible for resume authority.
+    for resume in [None, Some(WORKER_W)] {
+        let f = Fixture::new();
+        f.record_worker();
+        let mut state = json!({
+            "sessionId": WORKER_W,
+            "cwd": "/original/workspace",
+            "worktreePath": f.cwd,
+        });
+        if let Some(session) = resume {
+            state["resumeSessionId"] = json!(session);
+        }
+        cccc_core::fs::write_json(&f.state_path(), &state).expect("legacy same-worker metadata");
+        let attempt = f
+            .prepare()
+            .expect("no foreign identity was observed")
+            .expect("ordinary configured receipt still resumes");
+        assert_eq!(attempt.session_id, WORKER_W);
+        let stored = f.receipt();
+        assert_eq!(stored["provider_session_id"], WORKER_W);
+        assert_eq!(stored["status"], "usable");
+        assert!(!stored.contains_key("claude_identity_conflict"));
+    }
+}
+
+#[test]
+fn identity_receipt_positive_adoption_with_invalid_binding_still_blocks() {
+    // Narrowing the observer to divergent records must never make malformed
+    // W-to-S evidence a reason to select fresh or resume W.
+    for bad in ["missing_short", "wrong_short", "missing_cwd", "wrong_cwd"] {
+        let f = Fixture::new();
+        f.record_worker();
+        f.write_adopting_observation();
+        let mut state: Value = cccc_core::fs::read_json(&f.state_path()).expect("adopting state");
+        match bad {
+            "missing_short" => {
+                state
+                    .as_object_mut()
+                    .expect("state object")
+                    .remove("daemonShort");
+            }
+            "wrong_short" => {
+                state["daemonShort"] = json!("deadbeef");
+            }
+            "missing_cwd" => {
+                state.as_object_mut().expect("state object").remove("cwd");
+            }
+            "wrong_cwd" => {
+                state["cwd"] = json!(f._temp.path());
+            }
+            _ => unreachable!(),
+        }
+        cccc_core::fs::write_json(&f.state_path(), &state).expect("invalid adoption binding");
+        let before = f.receipt();
+        let error = f
+            .prepare()
+            .err()
+            .expect("unverified foreign evidence blocks");
+        assert!(is_resume_blocked(&error), "{bad}: {error}");
+        let stored = f.receipt();
+        assert_eq!(stored["provider_session_id"], WORKER_W);
+        assert_eq!(stored["failure_count"], before["failure_count"]);
+        assert_eq!(
+            stored["last_resume_attempt_id"],
+            before["last_resume_attempt_id"]
+        );
+        assert!(f.transcript_path().exists(), "foreign history retained");
+    }
+}
