@@ -4,6 +4,41 @@ use serde_json::Value;
 use std::{io, path::Path, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// A compatibility decision made before native model input, not a failed
+/// provider resume. Only the direct type permits the caller's fresh fallback;
+/// a cleanup failure wrapping it must never permit another launch.
+#[derive(Debug)]
+struct RequiresFresh(&'static str);
+impl std::fmt::Display for RequiresFresh {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Claude model configuration requires a fresh session: {}",
+            self.0
+        )
+    }
+}
+impl std::error::Error for RequiresFresh {}
+
+pub(super) fn requires_fresh(reason: &'static str) -> io::Error {
+    io::Error::other(RequiresFresh(reason))
+}
+pub(super) fn is_requires_fresh(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<RequiresFresh>())
+}
+pub(super) fn require_adapter(model: &str, version: super::command::Version) -> io::Result<()> {
+    let model = if model.is_empty() { "default" } else { model };
+    control::validate_model(model)?;
+    if super::cache_confirmation::label(model, version).is_none() {
+        return Err(requires_fresh(
+            "native model dialog compatibility is unknown",
+        ));
+    }
+    Ok(())
+}
+
 fn confirmed(state: &Value, job: &Job, model: &str) -> io::Result<bool> {
     if state.get("resumeSessionId").and_then(Value::as_str) != Some(job.session_id.as_str()) {
         return Err(io::Error::new(
@@ -51,11 +86,11 @@ pub(super) async fn apply(
         return Ok(());
     }
     if !owned_launch {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Claude model switch could not be confirmed: resumed UI is not exclusively owned",
+        return Err(requires_fresh(
+            "surviving model drift has no exclusive UI owner",
         ));
     }
+    require_adapter(model, job.cli_version)?;
     let target_label = super::cache_confirmation::label(model, job.cli_version);
     let mut screen = super::cache_confirmation::Screen::default();
     let mut confirmed_dialog = false;
@@ -103,6 +138,33 @@ pub(super) async fn apply(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unknown_adapter_is_a_pre_input_fresh_decision() {
+        for (model, version) in [
+            ("opus", (2, 1, 259)),
+            ("opus", (2, 1, 261)),
+            ("opus", (2, 1, 294)),
+            ("haiku", (2, 1, 293)),
+            ("default", (2, 1, 293)),
+        ] {
+            let error = require_adapter(model, version).expect_err("unproven adapter");
+            assert!(is_requires_fresh(&error));
+        }
+        assert!(require_adapter("opus", (2, 1, 293)).is_ok());
+        assert!(!is_requires_fresh(
+            &require_adapter("opus\r/resume", (2, 1, 293))
+                .expect_err("invalid model input remains a real error")
+        ));
+    }
+    #[test]
+    fn cleanup_failure_never_allows_a_fresh_fallback() {
+        let error = super::super::with_optional_cleanup_error(
+            requires_fresh("fixture unsupported adapter"),
+            Some(io::Error::other("fixture cleanup could not confirm stop")),
+        );
+        assert!(!is_requires_fresh(&error));
+    }
 
     #[test]
     fn model_input_cannot_inject_terminal_commands() {
@@ -266,7 +328,15 @@ mod wiring_tests {
         });
         let result = apply(&config, &endpoint, &job, "opus", true).await;
         if change_identity {
-            assert!(result.is_err());
+            let error = result.expect_err("changed resume identity must fail");
+            assert!(
+                !is_requires_fresh(&error),
+                "actual attempt failure cannot start fresh"
+            );
+            assert!(
+                super::super::resume_failure::diagnostic(&error)
+                    .is_some_and(|(_, blocked)| blocked)
+            );
         } else {
             result.expect("persisted requested model");
         }

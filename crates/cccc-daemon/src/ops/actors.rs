@@ -735,11 +735,12 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         None
     };
     let runtime_was_running = actor_process_running(&group, &original_actor);
-    let retry_runtime = if matches!(kind, "actor.start" | "actor.restart") {
-        Some(actor_profile_runtime::resolve(home, &original_actor)?.runtime)
+    let retry_actor = if matches!(kind, "actor.start" | "actor.restart") {
+        Some(actor_profile_runtime::resolve(home, &original_actor)?)
     } else {
         None
     };
+    let retry_runtime = retry_actor.as_ref().map(|actor| actor.runtime);
     let retry_claude_trust = retry_runtime == Some(cccc_contracts::ActorRuntime::Claude)
         && !super::local_headless::running(&group_id, &actor_id)
         && super::local_headless::waiting_for_workspace_trust(&group_id, &actor_id)
@@ -758,12 +759,19 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         })
         .map_err(OpError::io)?;
     }
-    let retried_claude_resume = if let Some(runtime) = retry_runtime
+    let retried_claude_resume = if let Some(retry_actor) = retry_actor
+        .as_ref()
         .filter(|_| kind == "actor.restart" || !runtime_was_running || retry_claude_trust)
     {
+        let runtime = retry_actor.runtime;
         if runtime == cccc_contracts::ActorRuntime::Claude {
-            runtime_session::retry_failed_claude_resume(home, &group_id, &actor_id)
-                .map_err(OpError::io)?
+            runtime_session::retry_failed_claude_resume(
+                home,
+                &group_id,
+                &actor_id,
+                &retry_actor.command,
+            )
+            .map_err(OpError::io)?
         } else {
             runtime_session::resume_failure::retry(home, &group_id, &actor_id, runtime)
                 .map_err(OpError::io)?;

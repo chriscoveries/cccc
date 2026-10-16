@@ -79,17 +79,37 @@ impl AnalystSession {
             "env":mcp_environment,
         });
         let session_command = command.clone();
-        let explicit_session = if let Some((group_id, actor_id)) = actor {
-            super::super::runtime_session::snapshot(home, group_id, actor_id)?.and_then(|receipt| {
-                receipt
-                    .get("explicit_resume_session_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-        } else {
-            None
-        };
-        let resume_attempt = if let Some((group_id, actor_id)) = actor {
+        let (mut explicit_session, explicit_resume_pending) =
+            if let Some((group_id, actor_id)) = actor {
+                super::super::runtime_session::snapshot(home, group_id, actor_id)?
+                    .map(|receipt| {
+                        (
+                            receipt
+                                .get("explicit_resume_session_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            receipt
+                                .get("explicit_resume_pending")
+                                .and_then(Value::as_bool)
+                                == Some(true),
+                        )
+                    })
+                    .unwrap_or((None, false))
+            } else {
+                (None, false)
+            };
+        // The ordinary resume-off setting retains upstream fresh-start
+        // behavior even after a durable prior selection. A pending explicit
+        // retarget transaction remains strict; its validation rejects off.
+        if !explicit_resume_pending && !super::super::runtime_session::resume_enabled() {
+            explicit_session = None;
+        }
+        if explicit_resume_pending && explicit_session.is_none() {
+            return Err(io::Error::other(
+                "Pending explicit Claude resume has no selected target; no fresh session was started",
+            ));
+        }
+        let mut resume_attempt = if let Some((group_id, actor_id)) = actor {
             if explicit {
                 super::super::runtime_session::prepare_claude_managed_with_policy(
                     home,
@@ -138,7 +158,7 @@ impl AnalystSession {
             &binding.root,
             &settings_key,
             purpose,
-            mcp_server,
+            mcp_server.clone(),
         ) {
             Ok(prepared) => {
                 // Transcript validation holds a large future. Keep it off the
@@ -150,11 +170,51 @@ impl AnalystSession {
                     purpose,
                     resume_session_id,
                     resume_model,
-                    explicit_session.is_some(),
+                    explicit_resume_pending,
                 ))
                 .await
             }
             Err(error) => Err(error),
+        };
+        let result = match result {
+            Err(error)
+                if explicit_session.is_none() && claude::model_change_requires_fresh(&error) =>
+            {
+                // This outcome is produced only before /model input and after
+                // any newly owned resume job was confirmed stopped. Never turn
+                // an actual failed attempt, cleanup failure or explicit target
+                // into a fresh conversation.
+                if let Some((group_id, actor_id)) = actor
+                    && let Some(attempt) = resume_attempt.as_ref()
+                {
+                    super::super::runtime_session::abandon_claude_resume_attempt(
+                        home, group_id, actor_id, attempt,
+                    )?;
+                }
+                resume_attempt = None;
+                match claude::prepare(
+                    home,
+                    &command,
+                    &environment,
+                    &binding.root,
+                    &settings_key,
+                    purpose,
+                    mcp_server,
+                ) {
+                    Ok(prepared) => {
+                        Box::pin(claude::launch(
+                            prepared,
+                            &binding.root,
+                            &generation,
+                            purpose,
+                            None,
+                        ))
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            result => result,
         };
         let mut launched = match result {
             Ok(launched) => launched,

@@ -78,118 +78,141 @@ pub fn prepare_managed_with_policy(
     cwd: &Path,
     base_command: &[String],
     environment: &BTreeMap<String, String>,
-    explicit: bool,
+    _explicit: bool,
 ) -> io::Result<Option<ResumeAttempt>> {
-    let mut document = match read(home, group_id, actor_id) {
-        Ok(document) => document,
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::InvalidData
-            ) =>
-        {
-            Map::new()
-        }
-        Err(error) => return Err(error),
-    };
-    let valid = document.get("v").and_then(Value::as_u64) == Some(MANAGED_RECORD_VERSION)
-        && string(&document, "kind") == "runtime_session"
-        && string(&document, "transport") == MANAGED_TRANSPORT
-        && string(&document, "runtime") == "claude"
-        && string(&document, "provider_thread_id").is_empty()
-        && valid_session_id(&string(&document, "provider_session_id"));
-    if !valid {
-        continuity::decision(
-            home,
-            group_id,
-            actor_id,
-            &mut document,
-            "skip",
-            "no_valid_receipt",
-        )?;
+    // An ordinary launch with resume disabled is a fresh launch, including
+    // when an older saved receipt exists. Do not rewrite it as a failure.
+    if !resume_enabled() {
         return Ok(None);
     }
-    if !resume_enabled() {
-        return continuity::blocked(home, group_id, actor_id, &mut document, "resume_disabled");
-    }
-    if string(&document, "status") == "resume_failed" {
-        let reason = string(&document, "last_resume_error");
-        continuity::decision(
-            home,
-            group_id,
-            actor_id,
-            &mut document,
-            "block",
-            "previous_resume_failure",
-        )?;
-        return Err(io::Error::other(ResumeBlocked(reason)));
-    }
-    if string(&document, "status") != "usable"
-        || document.get("resume_eligible").and_then(Value::as_bool) != Some(true)
-    {
-        return continuity::blocked(
-            home,
-            group_id,
-            actor_id,
-            &mut document,
-            "resume_eligibility",
-        );
-    }
-    let saved_cwd = std::path::PathBuf::from(string(&document, "workspace_path"));
-    if !explicit && workspace_path(cwd) != workspace_path(&saved_cwd) {
-        return continuity::blocked(home, group_id, actor_id, &mut document, "workspace_path");
-    }
-    let stripped = continuity::without_model(base_command);
-    let legacy = continuity::prior_command(base_command, &string(&document, "model"));
-    let exact_command =
-        string(&document, "command_fingerprint") == command_fingerprint(base_command);
-    let normalized_command =
-        string(&document, "command_without_model_fingerprint") == command_fingerprint(&stripped);
-    let legacy_command = string(&document, "command_fingerprint") == command_fingerprint(&legacy);
-    if !(exact_command || normalized_command || legacy_command) {
-        return continuity::blocked(
-            home,
-            group_id,
-            actor_id,
-            &mut document,
-            "command_fingerprint",
-        );
-    }
-    let identity = identity_fingerprint(&stripped, environment, &saved_cwd)?;
-    let exact_identity = string(&document, "identity_fingerprint")
-        == identity_fingerprint(base_command, environment, &saved_cwd)?;
-    let normalized_identity = string(&document, "identity_without_model_fingerprint") == identity;
-    let legacy_identity = legacy_command
-        && string(&document, "identity_fingerprint")
-            == identity_fingerprint(&legacy, environment, &saved_cwd)?;
-    if !(exact_identity || normalized_identity || legacy_identity) {
-        return continuity::blocked(
-            home,
-            group_id,
-            actor_id,
-            &mut document,
-            "identity_fingerprint",
-        );
-    }
-    let model = model_from_command(base_command);
-    let model_change = (model != string(&document, "model")).then_some(model);
-    let session_id = string(&document, "provider_session_id");
-    let attempt_id = uuid::Uuid::new_v4().simple().to_string();
-    document.insert("last_resume_attempt_at".into(), json!(utc_now()));
-    document.insert("last_resume_attempt_id".into(), json!(attempt_id));
-    let reason = if string(&document, "explicit_resume_session_id") == session_id {
-        "explicit_retarget"
-    } else if model_change.is_some() {
-        "model_only_drift"
-    } else {
-        "saved_session"
-    };
-    continuity::decision(home, group_id, actor_id, &mut document, "attempt", reason)?;
-    Ok(Some(ResumeAttempt {
-        session_id,
-        attempt_id,
-        model_change,
-    }))
+    super::with_receipt_lock(home, group_id, actor_id, || {
+        let mut document = match read(home, group_id, actor_id) {
+            Ok(document) => document,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let valid = document.get("v").and_then(Value::as_u64) == Some(MANAGED_RECORD_VERSION)
+            && string(&document, "kind") == "runtime_session"
+            && string(&document, "transport") == MANAGED_TRANSPORT
+            && string(&document, "runtime") == "claude"
+            && string(&document, "provider_thread_id").is_empty()
+            && valid_session_id(&string(&document, "provider_session_id"));
+        if !valid {
+            return Ok(None);
+        }
+        let selected = string(&document, "explicit_resume_session_id")
+            == string(&document, "provider_session_id");
+        let saved_cwd = std::path::PathBuf::from(string(&document, "workspace_path"));
+        if workspace_path(cwd) != workspace_path(&saved_cwd) {
+            return incompatible_receipt(
+                home,
+                group_id,
+                actor_id,
+                &mut document,
+                selected,
+                "workspace_path",
+            );
+        }
+        let stripped = continuity::without_model(base_command);
+        let legacy = continuity::prior_command(base_command, &string(&document, "model"));
+        let exact_command =
+            string(&document, "command_fingerprint") == command_fingerprint(base_command);
+        let normalized_command = string(&document, "command_without_model_fingerprint")
+            == command_fingerprint(&stripped);
+        let legacy_command =
+            string(&document, "command_fingerprint") == command_fingerprint(&legacy);
+        if !(exact_command || normalized_command || legacy_command) {
+            return incompatible_receipt(
+                home,
+                group_id,
+                actor_id,
+                &mut document,
+                selected,
+                "command_fingerprint",
+            );
+        }
+        let identity = identity_fingerprint(&stripped, environment, cwd)?;
+        let exact_identity = string(&document, "identity_fingerprint")
+            == identity_fingerprint(base_command, environment, cwd)?;
+        let normalized_identity =
+            string(&document, "identity_without_model_fingerprint") == identity;
+        let legacy_identity = legacy_command
+            && string(&document, "identity_fingerprint")
+                == identity_fingerprint(&legacy, environment, cwd)?;
+        if !(exact_identity || normalized_identity || legacy_identity) {
+            return incompatible_receipt(
+                home,
+                group_id,
+                actor_id,
+                &mut document,
+                selected,
+                "identity_fingerprint",
+            );
+        }
+        let model = model_from_command(base_command);
+        let model_change = (model != string(&document, "model")).then_some(model.clone());
+        if string(&document, "status") == "resume_failed" {
+            // A new ordinary configured identity retains upstream fresh-start
+            // behavior. An unchanged failed attempt remains blocked.
+            let failed_model = document
+                .get("last_failed_resume_model")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| document.get("model").and_then(Value::as_str).unwrap_or(""));
+            if model != failed_model && !selected {
+                return Ok(None);
+            }
+            let reason = string(&document, "last_resume_error");
+            if let Err(error) = recovery_decision(
+                home,
+                group_id,
+                actor_id,
+                &mut document,
+                "block",
+                "previous_resume_failure",
+            ) {
+                tracing::warn!(%error, group_id = %group_id, actor_id = %actor_id,
+                    "optional runtime recovery diagnostic was not persisted");
+            }
+            return Err(io::Error::other(ResumeBlocked(reason)));
+        }
+        if string(&document, "status") != "usable"
+            || document.get("resume_eligible").and_then(Value::as_bool) != Some(true)
+        {
+            return incompatible_receipt(
+                home,
+                group_id,
+                actor_id,
+                &mut document,
+                selected,
+                "resume_eligibility",
+            );
+        }
+        let session_id = string(&document, "provider_session_id");
+        let attempt_id = uuid::Uuid::new_v4().simple().to_string();
+        document.insert("last_resume_attempt_at".into(), json!(utc_now()));
+        document.insert("last_resume_attempt_id".into(), json!(attempt_id));
+        document.insert("last_resume_attempt_model".into(), json!(model));
+        let reason = if string(&document, "explicit_resume_session_id") == session_id {
+            "explicit_retarget"
+        } else if model_change.is_some() {
+            "model_only_drift"
+        } else {
+            "saved_session"
+        };
+        continuity::decision(home, group_id, actor_id, &mut document, "attempt", reason)?;
+        Ok(Some(ResumeAttempt {
+            session_id,
+            attempt_id,
+            model_change,
+        }))
+    })
 }
 
 pub(super) fn recovery_decision(
@@ -203,74 +226,78 @@ pub(super) fn recovery_decision(
     continuity::decision(home, group, actor, document, action, reason)
 }
 
-/// Select the saved cwd only for explicit lifecycle recovery; account guards still apply.
-pub fn explicit_workspace(
+fn incompatible_receipt(
     home: &HomeLayout,
     group: &str,
     actor: &str,
-) -> io::Result<Option<std::path::PathBuf>> {
-    let mut document = match read(home, group, actor) {
-        Ok(document) => document,
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::InvalidData
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-    if document.get("v").and_then(Value::as_u64) != Some(MANAGED_RECORD_VERSION)
-        || string(&document, "runtime") != "claude"
-        || string(&document, "kind") != "runtime_session"
-        || string(&document, "transport") != MANAGED_TRANSPORT
-        || !valid_session_id(&string(&document, "provider_session_id"))
-    {
-        return Ok(None);
+    document: &mut Map<String, Value>,
+    selected: bool,
+    field: &str,
+) -> io::Result<Option<ResumeAttempt>> {
+    if selected {
+        continuity::blocked(home, group, actor, document, field)
+    } else {
+        // Configuration drift before an implicit attempt chooses a fresh
+        // session; retain the old binding until that launch succeeds.
+        Ok(None)
     }
-    let path = std::path::PathBuf::from(string(&document, "workspace_path"));
-    if !path.is_dir() {
-        return match continuity::blocked(
+}
+
+/// Retire only the exact attempt which could not begin a model transition.
+/// This remains an authoritative fence write, unlike recovery observations.
+pub fn abandon_resume_attempt(
+    home: &HomeLayout,
+    group: &str,
+    actor: &str,
+    attempt: &ResumeAttempt,
+) -> io::Result<()> {
+    super::with_receipt_lock(home, group, actor, || {
+        let mut document = read(home, group, actor)?;
+        if string(&document, "provider_session_id") == attempt.session_id
+            && string(&document, "last_resume_attempt_id") == attempt.attempt_id
+        {
+            document.insert("last_resume_attempt_id".into(), json!(""));
+            document.insert("updated_at".into(), json!(utc_now()));
+            write(home, group, actor, &document)?;
+        } else {
+            return Err(io::Error::other(
+                "Claude resume binding changed before the fresh fallback; launch was refused",
+            ));
+        }
+        Ok(())
+    })
+}
+
+pub fn archive_new_session(home: &HomeLayout, group: &str, actor: &str) -> io::Result<()> {
+    super::with_receipt_lock(home, group, actor, || {
+        let mut document = match read(home, group, actor) {
+            Ok(document) => document,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let history = continuity::archive(&document, "new_session");
+        document.insert("previous_sessions".into(), json!(history));
+        document.insert("provider_session_id".into(), json!(""));
+        document.remove("explicit_resume_session_id");
+        document.remove("explicit_resume_pending");
+        document.insert("status".into(), json!("new_session"));
+        document.insert("resume_eligible".into(), json!(false));
+        continuity::decision(
             home,
             group,
             actor,
             &mut document,
-            "workspace_path_unavailable",
-        ) {
-            Err(error) => Err(error),
-            Ok(_) => unreachable!("blocked always returns an error"),
-        };
-    }
-    Ok(Some(path))
-}
-
-pub fn archive_new_session(home: &HomeLayout, group: &str, actor: &str) -> io::Result<()> {
-    let mut document = match read(home, group, actor) {
-        Ok(document) => document,
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::InvalidData
-            ) =>
-        {
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-    let history = continuity::archive(&document, "new_session");
-    document.insert("previous_sessions".into(), json!(history));
-    document.insert("provider_session_id".into(), json!(""));
-    document.insert("status".into(), json!("new_session"));
-    document.insert("resume_eligible".into(), json!(false));
-    continuity::decision(
-        home,
-        group,
-        actor,
-        &mut document,
-        "skip",
-        "explicit_new_session",
-    )
+            "skip",
+            "explicit_new_session",
+        )
+    })
 }
 
 /// Preserve the original conversation and fence late failures from newer attempts/successes.
@@ -282,46 +309,89 @@ pub fn record_resume_failure(
     diagnostic: &str,
     blocked: bool,
 ) -> io::Result<()> {
-    let mut document = read(home, group_id, actor_id)?;
-    if string(&document, "provider_session_id") != attempt.session_id
-        || string(&document, "last_resume_attempt_id") != attempt.attempt_id
-    {
-        return Ok(());
-    }
-    document.insert("last_resume_error".into(), json!(diagnostic));
-    let failures = document
-        .get("failure_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    document.insert("failure_count".into(), json!(failures.saturating_add(1)));
-    if blocked {
-        document.insert("status".into(), json!("resume_failed"));
-        document.insert("resume_eligible".into(), json!(false));
-    }
-    // A terminal attempt must not record the same failure twice.
-    document.insert("last_resume_attempt_id".into(), json!(""));
-    document.insert("updated_at".into(), json!(utc_now()));
-    write(home, group_id, actor_id, &document)
+    super::with_receipt_lock(home, group_id, actor_id, || {
+        let mut document = read(home, group_id, actor_id)?;
+        if string(&document, "provider_session_id") != attempt.session_id
+            || string(&document, "last_resume_attempt_id") != attempt.attempt_id
+        {
+            return Ok(());
+        }
+        document.insert("last_resume_error".into(), json!(diagnostic));
+        let attempted_model = document
+            .get("last_resume_attempt_model")
+            .cloned()
+            .unwrap_or_else(|| json!(string(&document, "model")));
+        document.insert("last_failed_resume_model".into(), attempted_model);
+        let failures = document
+            .get("failure_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        document.insert("failure_count".into(), json!(failures.saturating_add(1)));
+        if blocked {
+            document.insert("status".into(), json!("resume_failed"));
+            document.insert("resume_eligible".into(), json!(false));
+        }
+        // A terminal attempt must not record the same failure twice.
+        document.insert("last_resume_attempt_id".into(), json!(""));
+        document.insert("updated_at".into(), json!(utc_now()));
+        write(home, group_id, actor_id, &document)
+    })
 }
 
 /// Called only by an authorized explicit Actor lifecycle action, never auto-wake or polling.
+#[cfg(test)]
 pub fn retry_failed_resume(home: &HomeLayout, group_id: &str, actor_id: &str) -> io::Result<bool> {
-    let mut document = match read(home, group_id, actor_id) {
-        Ok(document) => document,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    if string(&document, "transport") != MANAGED_TRANSPORT
-        || string(&document, "runtime") != "claude"
-        || string(&document, "status") != "resume_failed"
-    {
+    retry_failed_resume_matching(home, group_id, actor_id, None)
+}
+
+pub fn retry_failed_resume_for_command(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    command: &[String],
+) -> io::Result<bool> {
+    let model = model_from_command(command);
+    retry_failed_resume_matching(home, group_id, actor_id, Some(&model))
+}
+
+fn retry_failed_resume_matching(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    model: Option<&str>,
+) -> io::Result<bool> {
+    if !resume_enabled() {
         return Ok(false);
     }
-    document.insert("status".into(), json!("usable"));
-    document.insert("resume_eligible".into(), json!(true));
-    document.insert("updated_at".into(), json!(utc_now()));
-    write(home, group_id, actor_id, &document)?;
-    Ok(true)
+    super::with_receipt_lock(home, group_id, actor_id, || {
+        let mut document = match read(home, group_id, actor_id) {
+            Ok(document) => document,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if string(&document, "transport") != MANAGED_TRANSPORT
+            || string(&document, "runtime") != "claude"
+            || string(&document, "status") != "resume_failed"
+        {
+            return Ok(false);
+        }
+        let selected = string(&document, "explicit_resume_session_id")
+            == string(&document, "provider_session_id");
+        let failed_model = document
+            .get("last_failed_resume_model")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| document.get("model").and_then(Value::as_str).unwrap_or(""));
+        if !selected && model.is_some_and(|model| model != failed_model) {
+            // Preserve failed-attempt evidence until prepare can select the
+            // upstream fresh path for genuinely changed ordinary settings.
+            return Ok(false);
+        }
+        document.insert("status".into(), json!("usable"));
+        document.insert("resume_eligible".into(), json!(true));
+        document.insert("updated_at".into(), json!(utc_now()));
+        write(home, group_id, actor_id, &document)?;
+        Ok(true)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -344,86 +414,93 @@ pub fn record_managed(
             "invalid Claude Agent View session id",
         ));
     }
-    let now = utc_now();
-    let old = match read(home, group_id, actor_id) {
-        Ok(document) => document,
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::InvalidData
-            ) =>
+    super::with_receipt_lock(home, group_id, actor_id, || {
+        let now = utc_now();
+        let old = match read(home, group_id, actor_id) {
+            Ok(document) => document,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+                ) =>
+            {
+                Map::new()
+            }
+            Err(error) => return Err(error),
+        };
+        let history = if valid_session_id(&string(&old, "provider_session_id"))
+            && string(&old, "provider_session_id") != session_id
         {
-            Map::new()
-        }
-        Err(error) => return Err(error),
-    };
-    let history = if valid_session_id(&string(&old, "provider_session_id"))
-        && string(&old, "provider_session_id") != session_id
-    {
-        continuity::archive(&old, "provider_session_replaced")
-    } else {
-        continuity::previous_sessions(&old)
-    };
-    let mut document = Map::from_iter([
-        ("v".into(), json!(MANAGED_RECORD_VERSION)),
-        ("kind".into(), json!("runtime_session")),
-        ("transport".into(), json!(MANAGED_TRANSPORT)),
-        ("group_id".into(), json!(group_id)),
-        ("actor_id".into(), json!(actor_id)),
-        ("runtime".into(), json!("claude")),
-        ("workspace_path".into(), json!(workspace_path(cwd))),
-        (
-            "command_fingerprint".into(),
-            json!(command_fingerprint(base_command)),
-        ),
-        ("model".into(), json!(model_from_command(base_command))),
-        (
-            "identity_fingerprint".into(),
-            json!(identity_fingerprint(base_command, environment, cwd)?),
-        ),
-        ("provider_session_id".into(), json!(session_id)),
-        ("provider_thread_id".into(), json!("")),
-        ("resume_command_hint".into(), json!("")),
-        (
-            "captured_from".into(),
-            json!(if resumed {
-                "claude_agent_view_resume"
-            } else {
-                "claude_agent_view_start"
-            }),
-        ),
-        ("status".into(), json!("usable")),
-        ("resume_eligible".into(), json!(true)),
-        ("last_seen_at".into(), json!(now)),
-        ("last_resume_attempt_at".into(), json!("")),
-        ("last_resume_attempt_id".into(), json!("")),
-        ("last_resume_error".into(), json!("")),
-        ("failure_count".into(), json!(0)),
-        ("updated_at".into(), json!(utc_now())),
-    ]);
-    let stripped = continuity::without_model(base_command);
-    document.insert(
-        "command_without_model_fingerprint".into(),
-        json!(command_fingerprint(&stripped)),
-    );
-    document.insert(
-        "identity_without_model_fingerprint".into(),
-        json!(identity_fingerprint(&stripped, environment, cwd)?),
-    );
-    document.insert("previous_sessions".into(), json!(history));
-    retarget::retain_model(&old, &mut document, session_id);
-    continuity::decision(
-        home,
-        group_id,
-        actor_id,
-        &mut document,
-        "provider_ready",
-        if resumed {
-            "saved_session"
+            continuity::archive(&old, "provider_session_replaced")
         } else {
-            "fresh_session"
-        },
-    )
+            continuity::previous_sessions(&old)
+        };
+        let mut document = Map::from_iter([
+            ("v".into(), json!(MANAGED_RECORD_VERSION)),
+            ("kind".into(), json!("runtime_session")),
+            ("transport".into(), json!(MANAGED_TRANSPORT)),
+            ("group_id".into(), json!(group_id)),
+            ("actor_id".into(), json!(actor_id)),
+            ("runtime".into(), json!("claude")),
+            ("workspace_path".into(), json!(workspace_path(cwd))),
+            (
+                "command_fingerprint".into(),
+                json!(command_fingerprint(base_command)),
+            ),
+            ("model".into(), json!(model_from_command(base_command))),
+            (
+                "identity_fingerprint".into(),
+                json!(identity_fingerprint(base_command, environment, cwd)?),
+            ),
+            ("provider_session_id".into(), json!(session_id)),
+            ("provider_thread_id".into(), json!("")),
+            ("resume_command_hint".into(), json!("")),
+            (
+                "captured_from".into(),
+                json!(if resumed {
+                    "claude_agent_view_resume"
+                } else {
+                    "claude_agent_view_start"
+                }),
+            ),
+            ("status".into(), json!("usable")),
+            ("resume_eligible".into(), json!(true)),
+            ("last_seen_at".into(), json!(now)),
+            ("last_resume_attempt_at".into(), json!("")),
+            ("last_resume_attempt_id".into(), json!("")),
+            ("last_resume_error".into(), json!("")),
+            ("failure_count".into(), json!(0)),
+            ("updated_at".into(), json!(utc_now())),
+        ]);
+        let stripped = continuity::without_model(base_command);
+        document.insert(
+            "command_without_model_fingerprint".into(),
+            json!(command_fingerprint(&stripped)),
+        );
+        document.insert(
+            "identity_without_model_fingerprint".into(),
+            json!(identity_fingerprint(&stripped, environment, cwd)?),
+        );
+        document.insert("previous_sessions".into(), json!(history));
+        if resumed && string(&old, "provider_session_id") == session_id {
+            retarget::retain_model(&old, &mut document, session_id);
+            if string(&old, "explicit_resume_session_id") == session_id {
+                document.insert("explicit_resume_session_id".into(), json!(session_id));
+            }
+        }
+        continuity::decision(
+            home,
+            group_id,
+            actor_id,
+            &mut document,
+            "provider_ready",
+            if resumed {
+                "saved_session"
+            } else {
+                "fresh_session"
+            },
+        )
+    })
 }
 
 fn identity_fingerprint(

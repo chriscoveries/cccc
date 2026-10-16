@@ -323,3 +323,102 @@ fn repeated_recovery_observation_emits_only_one_state_change() {
         1
     );
 }
+
+#[test]
+fn failed_model_attempt_blocks_the_same_configuration_and_allows_a_new_model_edit() {
+    let (_temp, home, group, cwd, mut command, env) = fixture();
+    record_managed(&home, &group, "actor", &cwd, &command, &env, SAVED, false)
+        .expect("saved Sonnet conversation");
+    command[2] = "opus".into();
+    let attempt = prepare_managed(&home, &group, "actor", &cwd, &command, &env)
+        .expect("prepare model change")
+        .expect("resume attempt");
+    record_resume_failure(
+        &home,
+        &group,
+        "actor",
+        &attempt,
+        "model confirmation failed",
+        true,
+    )
+    .expect("fenced failure");
+    let blocked = prepare_managed(&home, &group, "actor", &cwd, &command, &env)
+        .err()
+        .expect("the same failed configuration must not silently start fresh");
+    assert!(is_resume_blocked(&blocked));
+    let retained = read(&home, &group, "actor").expect("failed receipt");
+    assert_eq!(retained["provider_session_id"], SAVED);
+    assert_eq!(retained["model"], "sonnet");
+    assert_eq!(retained["last_failed_resume_model"], "opus");
+    assert_eq!(retained["failure_count"], 1);
+    command[2] = "haiku".into();
+    assert!(
+        prepare_managed(&home, &group, "actor", &cwd, &command, &env)
+            .expect("a genuinely changed configuration retains upstream fresh behavior")
+            .is_none()
+    );
+    assert_eq!(
+        read(&home, &group, "actor").expect("retained evidence"),
+        retained
+    );
+}
+
+#[test]
+fn stale_fresh_fallback_cannot_retire_a_newer_resume_attempt_or_session() {
+    let (_temp, home, group, cwd, command, env) = fixture();
+    record_managed(&home, &group, "actor", &cwd, &command, &env, SAVED, false)
+        .expect("saved conversation");
+    let old = prepare_managed(&home, &group, "actor", &cwd, &command, &env)
+        .expect("old prepare")
+        .expect("old attempt");
+    let current = prepare_managed(&home, &group, "actor", &cwd, &command, &env)
+        .expect("new prepare")
+        .expect("current attempt");
+    let retained = read(&home, &group, "actor").expect("current receipt");
+    assert!(abandon_resume_attempt(&home, &group, "actor", &old).is_err());
+    assert_eq!(
+        read(&home, &group, "actor").expect("current attempt retained"),
+        retained
+    );
+    abandon_resume_attempt(&home, &group, "actor", &current).expect("matching pre-input fallback");
+    assert_eq!(
+        read(&home, &group, "actor").expect("retired attempt")["last_resume_attempt_id"],
+        ""
+    );
+    let replacement = "52b41c61-e23c-4b7c-8b60-809c347451b6";
+    record_managed(
+        &home,
+        &group,
+        "actor",
+        &cwd,
+        &command,
+        &env,
+        replacement,
+        false,
+    )
+    .expect("new selected provider");
+    let retained = read(&home, &group, "actor").expect("new session receipt");
+    assert!(abandon_resume_attempt(&home, &group, "actor", &current).is_err());
+    assert_eq!(
+        read(&home, &group, "actor").expect("new session retained"),
+        retained
+    );
+}
+
+#[test]
+fn new_session_clears_both_a_retained_selection_and_an_interrupted_retarget_guard() {
+    let (_temp, home, group, cwd, command, env) = fixture();
+    record_managed(&home, &group, "actor", &cwd, &command, &env, SAVED, false)
+        .expect("saved conversation");
+    let mut selected = read(&home, &group, "actor").expect("receipt");
+    selected.insert("explicit_resume_session_id".into(), json!(SAVED));
+    selected.insert("explicit_resume_pending".into(), json!(true));
+    super::super::restore_snapshot(&home, &group, "actor", Some(&selected))
+        .expect("interrupted retarget state");
+    archive_new_session(&home, &group, "actor").expect("explicitly retire that choice");
+    let retired = read(&home, &group, "actor").expect("archived receipt");
+    assert!(retired.get("explicit_resume_session_id").is_none());
+    assert!(retired.get("explicit_resume_pending").is_none());
+    assert_eq!(retired["provider_session_id"], "");
+    assert_eq!(retired["previous_sessions"][0]["session_id"], SAVED);
+}

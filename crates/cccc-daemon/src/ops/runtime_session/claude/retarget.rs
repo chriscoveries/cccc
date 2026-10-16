@@ -102,6 +102,10 @@ pub(crate) fn validate_retarget(
     target.insert("model_application".into(), json!({"action":"retained","retained_model":retained_model,"configured_model":model_from_command(command),"configured_model_applied":false}));
     target.insert("provider_session_id".into(), json!(session_id));
     target.insert("explicit_resume_session_id".into(), json!(session_id));
+    // The foreign-live-job exclusion belongs to this retarget transaction.
+    // Successful record_managed consumes it; the retained model preference
+    // above survives later Stop/Start and daemon-owned-job reattachment.
+    target.insert("explicit_resume_pending".into(), json!(true));
     target.insert("provider_thread_id".into(), json!(""));
     target.insert("status".into(), json!("usable"));
     target.insert("resume_eligible".into(), json!(true));
@@ -124,7 +128,9 @@ pub(crate) fn write_retarget(
     actor_id: &str,
     document: &Map<String, Value>,
 ) -> io::Result<()> {
-    write(home, group_id, actor_id, document)
+    super::super::with_receipt_lock(home, group_id, actor_id, || {
+        write(home, group_id, actor_id, document)
+    })
 }
 
 /// Recording an explicit selection must describe the retained model, not actor settings.

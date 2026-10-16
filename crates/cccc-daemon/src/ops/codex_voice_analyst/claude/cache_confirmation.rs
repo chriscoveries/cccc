@@ -3,29 +3,61 @@ use crate::ops::terminal_text;
 use std::io;
 
 const MAX_OUTPUT: usize = 128 * 1024;
-#[derive(Default)]
 pub(super) struct Screen {
-    output: Vec<u8>,
+    output: std::collections::VecDeque<u8>,
+    received: u64,
+    anchor: Option<u64>,
+    scanner: PaintScanner,
+}
+impl Default for Screen {
+    fn default() -> Self {
+        Self {
+            output: std::collections::VecDeque::new(),
+            received: 0,
+            // Before any bytes are evicted, preserve the complete attachment
+            // replay as before. After eviction, require a full recovery paint.
+            anchor: Some(0),
+            scanner: PaintScanner::default(),
+        }
+    }
 }
 impl Screen {
     pub(super) fn feed(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if self.output.len().saturating_add(bytes.len()) > MAX_OUTPUT {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Claude model switch could not be confirmed: native screen exceeded limit",
-            ));
+        for &byte in bytes {
+            // After 2^64 received bytes, lose authorization rather than
+            // letting stream positions wrap into an older retained frame.
+            if self.received == u64::MAX {
+                self.output.clear();
+                self.anchor = None;
+                return Ok(());
+            }
+            let offset = self.received;
+            self.received += 1;
+            if self.output.len() == MAX_OUTPUT {
+                self.output.pop_front();
+            }
+            self.output.push_back(byte);
+            if let Some(anchor) = self.scanner.feed(byte, offset) {
+                self.anchor = Some(anchor);
+            }
+            let retained_from = self.received - self.output.len() as u64;
+            if self.anchor.is_some_and(|anchor| anchor < retained_from) {
+                self.anchor = None;
+            }
         }
-        self.output.extend_from_slice(bytes);
         Ok(())
     }
     fn current(&self) -> Option<String> {
-        // Native synchronized repaint completion is required. A partial new
-        // repaint must not authorize input against the previous screen.
-        if !self.output.ends_with(b"\x1b[?2026l") {
+        // Require the latest top-level synchronized repaint to be complete.
+        // A partial next paint or bytes following it cannot reuse old consent.
+        if self.scanner.completed_at != Some(self.received) {
             return None;
         }
+        let retained_from = self.received - self.output.len() as u64;
+        let start = usize::try_from(self.anchor?.checked_sub(retained_from)?).ok()?;
+        let frame: Vec<_> = self.output.iter().skip(start).copied().collect();
         Some(terminal_text::render(
-            &String::from_utf8_lossy(&self.output),
+            &String::from_utf8_lossy(&frame),
             false,
         ))
     }
@@ -71,6 +103,109 @@ impl Screen {
             == format!(
                 "This conversation is cached for the current model. Switching to {label} means the full history gets re-read on your next message."
             )
+    }
+}
+
+// This scanner does not interpret the screen. It establishes a bounded raw
+// reconstruction point without treating escape bytes in a control string as
+// terminal commands. Rendering still uses the existing terminal renderer.
+#[derive(Default)]
+struct PaintScanner {
+    state: ScanState,
+    synchronized: bool,
+    clear_at: Option<u64>,
+    completed_at: Option<u64>,
+}
+#[derive(Default)]
+enum ScanState {
+    #[default]
+    Ground,
+    Escape {
+        at: u64,
+    },
+    Csi {
+        at: u64,
+        bytes: Vec<u8>,
+    },
+    String {
+        osc: bool,
+        escaped: bool,
+    },
+}
+impl PaintScanner {
+    fn feed(&mut self, byte: u8, offset: u64) -> Option<u64> {
+        match std::mem::take(&mut self.state) {
+            ScanState::Ground => {
+                if byte == 0x1b {
+                    self.state = ScanState::Escape { at: offset };
+                } else {
+                    self.clear_at = None;
+                }
+            }
+            ScanState::Escape { at } => match byte {
+                b'[' => {
+                    self.state = ScanState::Csi {
+                        at,
+                        bytes: Vec::new(),
+                    }
+                }
+                b']' | b'P' | b'X' | b'^' | b'_' => {
+                    self.clear_at = None;
+                    self.state = ScanState::String {
+                        osc: byte == b']',
+                        escaped: false,
+                    };
+                }
+                0x1b => {
+                    self.clear_at = None;
+                    self.state = ScanState::Escape { at: offset };
+                }
+                _ => self.clear_at = None,
+            },
+            ScanState::Csi { at, mut bytes } => {
+                if byte == 0x1b {
+                    self.clear_at = None;
+                    self.state = ScanState::Escape { at: offset };
+                } else if (0x40..=0x7e).contains(&byte) {
+                    bytes.push(byte);
+                    return self.sequence(&bytes, at, offset + 1);
+                } else if (0x20..=0x3f).contains(&byte) && bytes.len() < 32 {
+                    bytes.push(byte);
+                    self.state = ScanState::Csi { at, bytes };
+                } else {
+                    self.clear_at = None;
+                }
+            }
+            ScanState::String { osc, escaped } => {
+                if !(escaped && byte == b'\\' || osc && byte == 0x07) {
+                    self.state = ScanState::String {
+                        osc,
+                        escaped: byte == 0x1b,
+                    };
+                }
+            }
+        }
+        None
+    }
+    fn sequence(&mut self, bytes: &[u8], at: u64, end: u64) -> Option<u64> {
+        match bytes {
+            b"?2026h" => {
+                self.synchronized = true;
+                self.clear_at = None;
+                self.completed_at = None;
+            }
+            b"?2026l" => {
+                self.completed_at = self.synchronized.then_some(end);
+                self.synchronized = false;
+                self.clear_at = None;
+            }
+            b"2J" if self.synchronized => self.clear_at = Some(at),
+            b"H" | b"1H" | b"1;1H" | b"f" | b"1f" | b"1;1f" if self.synchronized => {
+                return self.clear_at.take();
+            }
+            _ => self.clear_at = None,
+        }
+        None
     }
 }
 
@@ -243,5 +378,17 @@ mod tests {
                 .expect("real complete recovery paint");
             assert!(screen.cache_cost("Opus 5.5"));
         }
+    }
+    #[test]
+    fn a_complete_initial_incremental_paint_keeps_existing_behavior() {
+        let mut screen = Screen::default();
+        screen
+            .feed(b"\x1b[?2026h")
+            .expect("start synchronized paint");
+        screen
+            .feed("❯\r\n⏵⏵ bypass permissions on".as_bytes())
+            .expect("initial paint");
+        screen.feed(b"\x1b[?2026l").expect("complete paint");
+        assert!(screen.empty_prompt());
     }
 }

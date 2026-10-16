@@ -108,6 +108,13 @@ pub(super) fn decision(
     action: &str,
     reason: &str,
 ) -> io::Result<()> {
+    let prior = document.get("last_recovery_decision");
+    let changed = prior.and_then(|v| v.get("action")).and_then(Value::as_str) != Some(action)
+        || prior.and_then(|v| v.get("reason")).and_then(Value::as_str) != Some(reason)
+        || prior
+            .and_then(|v| v.get("session_id"))
+            .and_then(Value::as_str)
+            != Some(string(document, "provider_session_id").as_str());
     let timestamp = utc_now();
     document.insert(
         "last_recovery_decision".into(),
@@ -116,6 +123,9 @@ pub(super) fn decision(
     );
     document.insert("updated_at".into(), json!(timestamp));
     write(home, group, actor, document)?;
+    if !changed {
+        return Ok(());
+    }
     let mut event = cccc_contracts::Event::new("runtime.session.recovery", group);
     event.by = "system".into();
     event.data = Map::from_iter([
@@ -127,10 +137,18 @@ pub(super) fn decision(
             json!(string(document, "provider_session_id")),
         ),
     ]);
-    cccc_core::ledger::append(
-        &cccc_core::GroupStore::new(home.clone())?.ledger_path(group)?,
-        &event,
-    )?;
+    // A mandatory receipt write above must succeed. Its optional observation
+    // must never turn a committed provider/attempt binding into a launch failure.
+    let emitted = (|| -> io::Result<()> {
+        cccc_core::ledger::append(
+            &cccc_core::GroupStore::new(home.clone())?.ledger_path(group)?,
+            &event,
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = emitted {
+        tracing::warn!(%error, group_id = %group, actor_id = %actor, "optional runtime recovery event was not appended");
+    }
     Ok(())
 }
 
