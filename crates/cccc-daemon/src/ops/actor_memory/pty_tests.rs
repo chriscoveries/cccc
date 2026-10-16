@@ -486,18 +486,32 @@ fn real_submit_in_the_final_quiet_to_stop_gap_keeps_the_owned_actor_and_spends_n
     let sample = super::super::observation::observe(&f.home, &f.group, &f.group.actors[1])
         .expect("actual observation")
         .expect("owned root");
-    crate::ops::actor_memory::must3_gap_tests::arm(
+    let _arm = crate::ops::actor_memory::must3_gap_tests::arm(
         f.home.root().to_path_buf(),
         f.group.group_id.clone(),
         "worker".into(),
     );
+    // Two DISTINCT oracles, per MUST3 review: (a) the commit-call counter
+    // proves the attempt boundary was never reached at all; (b) if commit
+    // WERE invoked, it performs the REAL cooldown write (same owner/actor and
+    // now-secs semantics the coordinator uses), so cooldown-file absence can
+    // never be vacuous.
+    let commit_calls = std::sync::atomic::AtomicUsize::new(0);
     let outcome = super::super::super::actor_runtime::restart_for_memory_pty(
         &f.home,
         &f.group.group_id,
         "worker",
         &sample,
         |_, _| Ok(true),
-        || Ok(()),
+        || {
+            commit_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            super::super::write_cooldown(
+                &f.home,
+                &f.group.group_id,
+                "worker",
+                super::super::now_secs(),
+            )
+        },
     )
     .expect("maintenance returns");
     assert_eq!(
@@ -512,10 +526,17 @@ fn real_submit_in_the_final_quiet_to_stop_gap_keeps_the_owned_actor_and_spends_n
         "the actor must be the same owned process, not a replacement"
     );
     assert!(
+        commit_calls.load(std::sync::atomic::Ordering::SeqCst) == 0,
+        "the attempt boundary must never be reached when the stop is vetoed \
+         (this counter is the commit-reached oracle, distinct from the \
+         persisted-cooldown oracle below)"
+    );
+    assert!(
         !super::super::cooldown_path(&f.home, &f.group.group_id)
             .expect("attempt path")
             .exists(),
-        "no attempt may be committed when the stop is vetoed"
+        "no attempt may be persisted when the stop is vetoed - and if commit \
+         had run, it wrote the REAL cooldown, so this file's absence is proof"
     );
 }
 
