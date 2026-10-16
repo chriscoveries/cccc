@@ -53,6 +53,19 @@ pub(crate) fn inspect_receipt_identity(
         if state["sessionId"].as_str() != Some(worker) {
             continue;
         }
+        let transcript = state["resumeSessionId"]
+            .as_str()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .unwrap_or(worker);
+        // Historical same-session metadata is not a foreign-conversation
+        // observation. In particular, native worktree records can predate
+        // daemonShort or retain the original cwd. Existing retarget and launch
+        // guards still verify the selected session; only a different identity
+        // enters the adoption binding checks below.
+        if transcript == worker {
+            continue;
+        }
         // A missing old workspace is relevant only when this is our saved
         // worker. Unrelated jobs must not prevent ordinary drift selecting fresh.
         let workspace = cwd.canonicalize()?;
@@ -69,11 +82,6 @@ pub(crate) fn inspect_receipt_identity(
                 "Saved Claude worker belongs to a different workspace",
             ));
         }
-        let transcript = state["resumeSessionId"]
-            .as_str()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .unwrap_or(worker);
         if uuid::Uuid::parse_str(transcript).is_err() {
             return Err(invalid(
                 "Saved Claude worker has an invalid transcript identity",
