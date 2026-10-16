@@ -387,3 +387,139 @@ fn delivery_start_uses_current_profile_and_preserves_native_to_pty_transition() 
         "current Profile does not restart stale ACP settings"
     );
 }
+
+// Append to actor_runtime_memory_delivery_tests.rs at 9210; reuse real Fixture.
+
+fn required_resume_for_fixture(f: &Fixture) -> crate::ops::actor_memory::RequiredResume {
+    f.materialize();
+    let candidate = f.candidate();
+    let required = crate::ops::actor_memory::RequiredResume {
+        generation: candidate.generation,
+        runtime: ActorRuntime::Kimi,
+        session_id: f.session_id(),
+    };
+    crate::ops::actor_memory::require_resume(&f.home, &f.group.group_id, "worker", &required)
+        .expect("durable exact-resume obligation");
+    required
+}
+
+fn fixture_changed_to_custom(f: &Fixture) -> GroupDoc {
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    store.mutate(&f.group.group_id, |group| {
+        let actor = &mut group.actors[0];
+        actor.runtime = ActorRuntime::Custom;
+        actor.runtime_mode = RuntimeMode::Default;
+        actor.command = vec!["python3".into(), "-u".into(), "-c".into(),
+            "import sys; from pathlib import Path; Path('custom-launched').write_text('started'); print('offline custom ready', flush=True); [None for line in sys.stdin]".into()];
+        actor.normalize_runtime_constraints();
+        Ok(())
+    }).expect("changed next-launch settings");
+    store
+        .load(&f.group.group_id)
+        .expect("changed actor snapshot")
+}
+
+#[test]
+fn required_resume_blocks_raw_custom_manual_and_delivery_start_until_explicit_new_session() {
+    let f = Fixture::new(false);
+    let required = required_resume_for_fixture(&f);
+    let before = f.candidate();
+    let changed = fixture_changed_to_custom(&f);
+    let receipt = std::fs::read(f.receipt()).expect("original native receipt");
+    // A healthy current owner remains idempotent despite next-launch drift.
+    apply(&f.home, &changed, "worker", "actor.start").expect("idempotent current owner");
+    assert!(
+        start_for_delivery(&f.home, &changed, "worker", &AtomicBool::new(false))
+            .expect("idempotent delivery owner")
+    );
+    assert_eq!(f.candidate(), before);
+    assert_eq!(
+        std::fs::read(f.receipt()).expect("preserved receipt"),
+        receipt
+    );
+    let restart = apply(&f.home, &changed, "worker", "actor.restart")
+        .expect_err("runtime drift must fail before retiring the healthy provider");
+    assert_eq!(restart.code, RUNTIME_RESUME_FAILED);
+    assert_eq!(
+        f.candidate(),
+        before,
+        "rejected restart must not stop the old owner"
+    );
+    local_headless::stop(&changed.group_id, "worker").expect("stop current owner");
+    let start = apply(&f.home, &changed, "worker", "actor.start")
+        .expect_err("raw start must not bypass the saved native session");
+    assert_eq!(start.code, RUNTIME_RESUME_FAILED);
+    let delivery = start_for_delivery(&f.home, &changed, "worker", &AtomicBool::new(false))
+        .expect_err("automatic raw start must honor the same obligation");
+    assert_eq!(delivery.code, RUNTIME_RESUME_FAILED);
+    assert!(
+        !f.workspace.join("custom-launched").exists(),
+        "neither path may execute the Custom program"
+    );
+    assert!(cccc_runtime::status(&changed.group_id, "worker").is_err());
+    assert_eq!(
+        crate::ops::actor_memory::required_resume(&f.home, &changed.group_id, "worker")
+            .expect("retained obligation"),
+        Some(required)
+    );
+    assert_eq!(
+        std::fs::read(f.receipt()).expect("retained native receipt"),
+        receipt
+    );
+    apply(&f.home, &changed, "worker", "actor.new_session")
+        .expect("explicit new session authorizes a fresh Custom launch");
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while !f.workspace.join("custom-launched").exists() {
+        assert!(
+            std::time::Instant::now() < until,
+            "explicit fresh Custom process must run"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        crate::ops::actor_memory::required_resume(&f.home, &changed.group_id, "worker")
+            .expect("explicitly retired obligation")
+            .is_none()
+    );
+    assert!(
+        cccc_runtime::status(&changed.group_id, "worker")
+            .expect("new terminal")
+            .running
+    );
+    assert_eq!(
+        f.requests("session/new"),
+        1,
+        "Custom reset must not create another native conversation"
+    );
+}
+
+#[test]
+fn corrupt_memory_requirement_blocks_every_new_raw_start_without_becoming_a_fresh_fallback() {
+    let f = Fixture::new(false);
+    let _required = required_resume_for_fixture(&f);
+    let changed = fixture_changed_to_custom(&f);
+    local_headless::stop(&changed.group_id, "worker").expect("stop owner");
+    let path = GroupStore::new(f.home.clone())
+        .expect("store")
+        .state_dir(&changed.group_id)
+        .expect("state")
+        .join("actor_memory_required/worker.json");
+    std::fs::write(&path, b"{ invalid").expect("corrupt obligation");
+    for delivery in [false, true] {
+        let error = if delivery {
+            start_for_delivery(&f.home, &changed, "worker", &AtomicBool::new(false))
+                .map(|_| ())
+                .expect_err("corrupt automatic start")
+        } else {
+            apply(&f.home, &changed, "worker", "actor.start")
+                .map(|_| ())
+                .expect_err("corrupt manual start")
+        };
+        assert_eq!(error.code, RUNTIME_RESUME_FAILED);
+        assert!(!f.workspace.join("custom-launched").exists());
+        assert_eq!(
+            std::fs::read(&path).expect("unchanged corrupt obligation"),
+            b"{ invalid".to_vec()
+        );
+    }
+}
