@@ -727,6 +727,8 @@ async fn await_settled(config_dir: &Path, job: &Job, expected_cwd: &Path) -> io:
         if classify_quiescence(&state) == Quiescence::Settled {
             return Ok(state);
         }
+        #[cfg(all(test, unix))]
+        tests::observe_fresh_settle_busy(config_dir, &job.short).await;
         if tokio::time::Instant::now() >= deadline {
             return Err(unsettled_error(&job.short, &state));
         }
