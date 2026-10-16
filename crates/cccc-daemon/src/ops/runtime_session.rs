@@ -14,11 +14,18 @@ mod opencode;
 pub(crate) mod pi;
 pub(crate) mod resume_failure;
 pub use claude::{
-    ResumeBlocked as ClaudeResumeBlocked, is_resume_blocked as is_claude_resume_blocked,
+    ResumeBlocked as ClaudeResumeBlocked, abandon_resume_attempt as abandon_claude_resume_attempt,
+    archive_new_session as archive_claude_new_session,
+    is_resume_blocked as is_claude_resume_blocked,
     prepare_managed as prepare_claude_managed_session,
+    prepare_managed_with_policy as prepare_claude_managed_with_policy,
     record_managed as record_claude_managed_session,
     record_resume_failure as record_claude_resume_failure,
-    retry_failed_resume as retry_failed_claude_resume,
+    retry_failed_resume_for_command as retry_failed_claude_resume,
+};
+pub(crate) use claude::{
+    Retarget as ClaudeRetarget, validate_retarget as validate_claude_retarget,
+    write_retarget as write_claude_retarget,
 };
 pub use grok::{
     prepare_managed as prepare_grok_managed_session, record_managed as record_grok_managed_session,
@@ -27,6 +34,56 @@ pub use opencode::{
     prepare_managed as prepare_opencode_managed_session,
     record_managed as record_opencode_managed_session,
 };
+
+/// Record the recovery outcome for all managed providers without persisting provider stderr.
+pub fn recovery_decision(
+    home: &HomeLayout,
+    group: &str,
+    actor: &str,
+    action: &str,
+    reason: &str,
+) -> std::io::Result<()> {
+    if let Err(error) = try_recovery_decision(home, group, actor, action, reason) {
+        tracing::warn!(%error, group_id = %group, actor_id = %actor, "optional runtime recovery diagnostic was not persisted");
+    }
+    Ok(())
+}
+
+fn try_recovery_decision(
+    home: &HomeLayout,
+    group: &str,
+    actor: &str,
+    action: &str,
+    reason: &str,
+) -> std::io::Result<()> {
+    with_receipt_lock(home, group, actor, || {
+        let mut document = match read(home, group, actor) {
+            Ok(document) => document,
+            // Diagnostics never manufacture a provider receipt or replace corrupt evidence.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if string(&document, "kind") != "runtime_session" {
+            return Ok(());
+        }
+        if action == "failure" && string(&document, "last_resume_error").is_empty() {
+            document.insert("last_resume_error".into(), json!(reason));
+            let failures = document
+                .get("failure_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            document.insert("failure_count".into(), json!(failures.saturating_add(1)));
+        }
+        claude::recovery_decision(home, group, actor, &mut document, action, reason)
+    })
+}
 
 const NO_RESUME_VALUES: [&str; 4] = ["0", "false", "no", "off"];
 const MANAGED_RECORD_VERSION: u64 = 2;
@@ -44,29 +101,31 @@ pub fn prepare_codex_app_thread(
     if !resume_enabled() {
         return Ok(None);
     }
-    let Ok(mut document) = read(home, group_id, actor_id) else {
-        return Ok(None);
-    };
-    if document.get("v").and_then(Value::as_u64) != Some(MANAGED_RECORD_VERSION)
-        || string(&document, "kind") != "runtime_session"
-        || string(&document, "transport") != CODEX_MANAGED_TRANSPORT
-        || string(&document, "runtime") != "codex"
-        || string(&document, "workspace_path") != workspace_path(cwd)
-        || string(&document, "command_fingerprint") != app_thread_command_fingerprint(command)
-        || string(&document, "model") != model.trim()
-        || string(&document, "identity_fingerprint")
-            != codex_identity_fingerprint(command, environment)
-        || !string(&document, "provider_session_id").is_empty()
-    {
-        return Ok(None);
-    }
-    let thread_id = string(&document, "provider_thread_id");
-    if thread_id.is_empty() {
-        return Ok(None);
-    }
-    let attempt = resume_failure::begin(&mut document, thread_id)?;
-    write(home, group_id, actor_id, &document)?;
-    Ok(attempt)
+    with_receipt_lock(home, group_id, actor_id, || {
+        let Ok(mut document) = read(home, group_id, actor_id) else {
+            return Ok(None);
+        };
+        if document.get("v").and_then(Value::as_u64) != Some(MANAGED_RECORD_VERSION)
+            || string(&document, "kind") != "runtime_session"
+            || string(&document, "transport") != CODEX_MANAGED_TRANSPORT
+            || string(&document, "runtime") != "codex"
+            || string(&document, "workspace_path") != workspace_path(cwd)
+            || string(&document, "command_fingerprint") != app_thread_command_fingerprint(command)
+            || string(&document, "model") != model.trim()
+            || string(&document, "identity_fingerprint")
+                != codex_identity_fingerprint(command, environment)
+            || !string(&document, "provider_session_id").is_empty()
+        {
+            return Ok(None);
+        }
+        let thread_id = string(&document, "provider_thread_id");
+        if thread_id.is_empty() {
+            return Ok(None);
+        }
+        let attempt = resume_failure::begin(&mut document, thread_id)?;
+        write(home, group_id, actor_id, &document)?;
+        Ok(attempt)
+    })
 }
 
 pub struct CodexAppThread<'a> {
@@ -93,49 +152,55 @@ pub fn record_codex_app_thread(
             "empty Codex app-server thread id",
         ));
     }
-    let now = utc_now();
-    let document = Map::from_iter([
-        ("v".into(), json!(MANAGED_RECORD_VERSION)),
-        ("kind".into(), json!("runtime_session")),
-        ("transport".into(), json!(CODEX_MANAGED_TRANSPORT)),
-        ("group_id".into(), json!(group_id)),
-        ("actor_id".into(), json!(actor_id)),
-        ("runtime".into(), json!("codex")),
-        ("workspace_path".into(), json!(workspace_path(cwd))),
-        (
-            "command_fingerprint".into(),
-            json!(app_thread_command_fingerprint(command)),
-        ),
-        ("model".into(), json!(model_from_command(command))),
-        (
-            "identity_fingerprint".into(),
-            json!(codex_identity_fingerprint(command, environment)),
-        ),
-        ("provider_session_id".into(), json!("")),
-        ("provider_thread_id".into(), json!(thread_id.trim())),
-        ("resume_command_hint".into(), json!("")),
-        (
-            "captured_from".into(),
-            json!(if thread.resumed {
-                "app_server_thread_resume"
-            } else {
-                "app_server_thread_start"
-            }),
-        ),
-        ("status".into(), json!("usable")),
-        ("resume_eligible".into(), json!(true)),
-        ("last_seen_at".into(), json!(now)),
-        ("last_resume_attempt_at".into(), json!("")),
-        ("last_resume_error".into(), json!("")),
-        ("failure_count".into(), json!(0)),
-        ("updated_at".into(), json!(utc_now())),
-    ]);
-    write(home, group_id, actor_id, &document)
+    with_receipt_lock(home, group_id, actor_id, || {
+        let now = utc_now();
+        let document = Map::from_iter([
+            ("v".into(), json!(MANAGED_RECORD_VERSION)),
+            ("kind".into(), json!("runtime_session")),
+            ("transport".into(), json!(CODEX_MANAGED_TRANSPORT)),
+            ("group_id".into(), json!(group_id)),
+            ("actor_id".into(), json!(actor_id)),
+            ("runtime".into(), json!("codex")),
+            ("workspace_path".into(), json!(workspace_path(cwd))),
+            (
+                "command_fingerprint".into(),
+                json!(app_thread_command_fingerprint(command)),
+            ),
+            ("model".into(), json!(model_from_command(command))),
+            (
+                "identity_fingerprint".into(),
+                json!(codex_identity_fingerprint(command, environment)),
+            ),
+            ("provider_session_id".into(), json!("")),
+            ("provider_thread_id".into(), json!(thread_id.trim())),
+            ("resume_command_hint".into(), json!("")),
+            (
+                "captured_from".into(),
+                json!(if thread.resumed {
+                    "app_server_thread_resume"
+                } else {
+                    "app_server_thread_start"
+                }),
+            ),
+            ("status".into(), json!("usable")),
+            ("resume_eligible".into(), json!(true)),
+            ("last_seen_at".into(), json!(now)),
+            ("last_resume_attempt_at".into(), json!("")),
+            ("last_resume_error".into(), json!("")),
+            ("failure_count".into(), json!(0)),
+            ("updated_at".into(), json!(utc_now())),
+        ]);
+        write(home, group_id, actor_id, &document)
+    })
 }
 
 pub fn remove(home: &HomeLayout, group_id: &str, actor_id: &str) -> std::io::Result<()> {
-    let path = selected_path(home, group_id, actor_id)?;
-    match std::fs::remove_file(path) {
+    let receipt = selected_path(home, group_id, actor_id)?;
+    with_receipt_path_lock(&receipt, || remove_unlocked(&receipt))
+}
+
+fn remove_unlocked(receipt: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(receipt) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
@@ -165,11 +230,14 @@ pub fn restore_snapshot(
     actor_id: &str,
     snapshot: Option<&Map<String, Value>>,
 ) -> std::io::Result<()> {
-    if let Some(document) = snapshot {
-        cccc_core::fs::write_json(&selected_path(home, group_id, actor_id)?, document)
-    } else {
-        remove(home, group_id, actor_id)
-    }
+    let receipt = selected_path(home, group_id, actor_id)?;
+    with_receipt_path_lock(&receipt, || {
+        if let Some(document) = snapshot {
+            cccc_core::fs::write_json(&receipt, document)
+        } else {
+            remove_unlocked(&receipt)
+        }
+    })
 }
 
 pub fn actor_fields(home: &HomeLayout, group_id: &str, actor_id: &str) -> Map<String, Value> {
@@ -199,6 +267,13 @@ pub fn actor_fields(home: &HomeLayout, group_id: &str, actor_id: &str) -> Map<St
     }
     let document = read(home, group_id, actor_id).unwrap_or_default();
     Map::from_iter([
+        (
+            "runtime_session_last_recovery_decision".into(),
+            document
+                .get("last_recovery_decision")
+                .cloned()
+                .unwrap_or(Value::Null),
+        ),
         (
             "runtime_session_status".into(),
             nullable_string(&document, "status"),
@@ -245,12 +320,70 @@ fn selected_path(home: &HomeLayout, group: &str, actor: &str) -> std::io::Result
     }
 }
 
+// All writers of the same receipt use this lock. Keep raw read/write helpers
+// unlocked so an admitted RMW operation cannot recursively acquire its own lock.
+fn with_receipt_lock<T>(
+    home: &HomeLayout,
+    group: &str,
+    actor: &str,
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    with_receipt_path_lock(&path(home, group, actor)?, operation)
+}
+
+fn with_receipt_path_lock<T>(
+    receipt: &Path,
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    // Injected admission failures carry the same tag as real lock failures;
+    // errors returned after operation admission remain unwrapped.
+    #[cfg(test)]
+    receipt_lock_tests::before_lock(receipt)
+        .map_err(|error| std::io::Error::new(error.kind(), ReceiptLockUnavailable(error)))?;
+    let mut admitted = false;
+    let result = cccc_core::fs::with_exclusive_lock(&receipt.with_extension("lock"), || {
+        admitted = true;
+        operation()
+    });
+    if admitted {
+        result
+    } else {
+        result.map_err(|error| std::io::Error::new(error.kind(), ReceiptLockUnavailable(error)))
+    }
+}
+
+#[derive(Debug)]
+struct ReceiptLockUnavailable(std::io::Error);
+impl std::fmt::Display for ReceiptLockUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Runtime receipt lock admission failed: {}", self.0)
+    }
+}
+impl std::error::Error for ReceiptLockUnavailable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+fn is_receipt_lock_unavailable(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<ReceiptLockUnavailable>())
+}
+
+#[cfg(test)]
+#[path = "runtime_session_receipt_lock_tests.rs"]
+mod receipt_lock_tests;
+
 fn read(home: &HomeLayout, group_id: &str, actor_id: &str) -> std::io::Result<Map<String, Value>> {
-    let value: Value = cccc_core::fs::read_json(&path(home, group_id, actor_id)?)?;
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| std::io::Error::other("runtime session document is not an object"))
+    let bytes = std::fs::read(path(home, group_id, actor_id)?)?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    value.as_object().cloned().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "runtime session document is not an object",
+        )
+    })
 }
 
 fn write(
@@ -259,6 +392,8 @@ fn write(
     actor_id: &str,
     document: &Map<String, Value>,
 ) -> std::io::Result<()> {
+    #[cfg(test)]
+    receipt_lock_tests::before_write(&path(home, group_id, actor_id)?)?;
     cccc_core::fs::write_json(&path(home, group_id, actor_id)?, document)
 }
 
@@ -332,6 +467,9 @@ fn stable_app_thread_command(command: &[String]) -> Vec<String> {
 
 fn model_from_command(command: &[String]) -> String {
     for (index, item) in command.iter().enumerate() {
+        if item == "--" {
+            break;
+        }
         if matches!(item.as_str(), "-m" | "--model") {
             return command.get(index + 1).cloned().unwrap_or_default();
         }
@@ -353,7 +491,7 @@ fn workspace_path(path: &Path) -> String {
         .into_owned()
 }
 
-fn resume_enabled() -> bool {
+pub(super) fn resume_enabled() -> bool {
     std::env::var("CCCC_RUNTIME_RESUME")
         .ok()
         .map(|value| !NO_RESUME_VALUES.contains(&value.trim().to_ascii_lowercase().as_str()))

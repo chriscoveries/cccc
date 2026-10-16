@@ -11,9 +11,14 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+mod cache_confirmation;
 mod command;
 mod control;
+mod model_switch;
+pub(super) mod model_trace;
 mod resume_failure;
+mod retarget;
+pub(crate) use retarget::validate_retarget;
 mod transcript;
 mod transcript_ack;
 #[cfg(all(test, unix))]
@@ -101,6 +106,16 @@ pub(super) fn settings_path(home: &cccc_core::HomeLayout, owner: &str) -> PathBu
     command::settings_path(home, owner)
 }
 
+/// Only a direct pre-input compatibility outcome permits a fresh launch.
+/// CleanupFailure deliberately hides this outcome until the owner has stopped.
+pub(super) fn model_change_requires_fresh(error: &io::Error) -> bool {
+    model_switch::is_requires_fresh(error)
+}
+
+pub(super) fn model_change_transition_id(error: &io::Error) -> Option<&str> {
+    model_switch::fresh_transition_id(error)
+}
+
 pub(super) async fn launch(
     prepared: command::PreparedClaude,
     cwd: &Path,
@@ -108,18 +123,97 @@ pub(super) async fn launch(
     purpose: SessionPurpose,
     requested_session_id: Option<&str>,
 ) -> io::Result<LaunchedClaude> {
-    launch_inner(prepared, cwd, generation, purpose, requested_session_id).await
+    Box::pin(launch_inner(
+        prepared,
+        cwd,
+        generation,
+        purpose,
+        requested_session_id,
+        None,
+        false,
+    ))
+    .await
 }
 
+pub(super) async fn launch_with_model(
+    prepared: command::PreparedClaude,
+    cwd: &Path,
+    generation: &str,
+    purpose: SessionPurpose,
+    requested_session_id: Option<&str>,
+    model: Option<&str>,
+) -> io::Result<LaunchedClaude> {
+    if model.is_none() {
+        return Box::pin(launch(
+            prepared,
+            cwd,
+            generation,
+            purpose,
+            requested_session_id,
+        ))
+        .await;
+    }
+    Box::pin(launch_inner(
+        prepared,
+        cwd,
+        generation,
+        purpose,
+        requested_session_id,
+        model,
+        false,
+    ))
+    .await
+}
+
+/// Explicit selection restores the conversation without applying actor model settings.
+pub(super) async fn launch_with_retarget_guard(
+    prepared: command::PreparedClaude,
+    cwd: &Path,
+    generation: &str,
+    purpose: SessionPurpose,
+    requested_session_id: Option<&str>,
+    model: Option<&str>,
+    exclusive: bool,
+) -> io::Result<LaunchedClaude> {
+    if !exclusive {
+        return Box::pin(launch_with_model(
+            prepared,
+            cwd,
+            generation,
+            purpose,
+            requested_session_id,
+            model,
+        ))
+        .await;
+    }
+    let id = requested_session_id
+        .ok_or_else(|| io::Error::other("Explicit Claude resume requires a session ID"))?;
+    retarget::ensure_available(&prepared.config_dir, id).await?;
+    Box::pin(launch_inner(
+        prepared,
+        cwd,
+        generation,
+        purpose,
+        Some(id),
+        None,
+        true,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn launch_inner(
     prepared: command::PreparedClaude,
     cwd: &Path,
     generation: &str,
     purpose: SessionPurpose,
     requested_session_id: Option<&str>,
+    model: Option<&str>,
+    exclusive: bool,
 ) -> io::Result<LaunchedClaude> {
-    command::require_supported_version(&prepared.executable, cwd, &prepared.launch_environment)
-        .await?;
+    let launcher_version =
+        command::require_supported_version(&prepared.executable, cwd, &prepared.launch_environment)
+            .await?;
     // Inspect durable job metadata BEFORE respawn can replace it. A receipt
     // alone does not imply that this session ever received its first prompt.
     let skip_existing_transcript = match requested_session_id {
@@ -130,6 +224,15 @@ async fn launch_inner(
     if let Some(session_id) = requested_session_id {
         validate_session_id(session_id)?;
         if let Some((endpoint, job)) = find_live_job(&prepared.config_dir, session_id).await? {
+            if exclusive {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "Claude session {session_id} became live in job {}; no foreign process was attached or stopped",
+                        job.short
+                    ),
+                ));
+            }
             validate_worker_version(&job)?;
             await_settled(&prepared.config_dir, &job, cwd).await?;
             return connect_launched(
@@ -140,9 +243,20 @@ async fn launch_inner(
                 true,
                 skip_existing_transcript,
                 false,
+                model,
             )
             .await;
         }
+    }
+
+    if requested_session_id.is_some()
+        && let Some(model) = model
+    {
+        // A cold resume will preserve its prior native model. Without a proven
+        // adapter, choose ordinary fresh configuration before spawning it.
+        // The live-job path above first checks its actual persisted model and
+        // can reattach without any model input even on another supported CLI.
+        model_switch::require_adapter(model, launcher_version)?;
     }
 
     let name = format!(
@@ -259,6 +373,7 @@ async fn launch_inner(
         resumed,
         skip_existing_transcript,
         true,
+        model,
     )
     .await
 }
@@ -341,7 +456,30 @@ async fn connect_launched(
     resumed: bool,
     skip_existing_transcript: bool,
     rollback_on_failure: bool,
+    model: Option<&str>,
 ) -> io::Result<LaunchedClaude> {
+    if let Some(model) = model
+        && let Err(error) = Box::pin(model_switch::apply(
+            &prepared.config_dir,
+            &endpoint,
+            &job,
+            model,
+            rollback_on_failure,
+        ))
+        .await
+    {
+        if rollback_on_failure {
+            let rollback = kill_and_confirm(&endpoint, &job.short).await;
+            if let Some(transition_id) = model_switch::fresh_transition_id(&error) {
+                model_trace::emit(
+                    "claude_model_fresh_cleanup",
+                    json!({"transition_id":transition_id,"short":job.short,"owned_launch":true,"cleanup_confirmed":rollback.is_ok(),"fresh_fallback_allowed":rollback.is_ok()}),
+                );
+            }
+            return Err(with_optional_cleanup_error(error, rollback.err()));
+        }
+        return Err(error);
+    }
     let state_path = prepared
         .config_dir
         .join("jobs")
