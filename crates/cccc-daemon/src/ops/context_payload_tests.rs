@@ -1,40 +1,48 @@
-//! Tests-only checkpoint: bounded `context_get detail=full` (train001 follow-up).
+//! Tests-only checkpoint v2: bounded `context_get detail=full` (train001).
 //!
-//! WIRING (root applies — this file is intentionally UNWIRED; no existing
-//! source was touched for this checkpoint). Append to the end of
-//! `crates/cccc-daemon/src/ops/context.rs`:
+//! Supersedes the v1 checkpoint file (preserved in git history, NOT amended)
+//! after six concrete review defects: OpResult is `Result<Map, OpError>`
+//! (not Value); owned-`Value` request args; exact test counts; no empty-Ok
+//! acceptance; fixture math that actually exceeds budget; a genuine
+//! dedupe RED plus error-size and field-level preservation pins.
+//!
+//! WIRING (root applies — UNWIRED; no existing source touched):
 //! ```ignore
 //! #[cfg(test)]
 //! #[path = "context_payload_tests.rs"]
 //! mod payload_tests;
 //! ```
-//! All tests drive the REAL `super::get` dispatch with real `DaemonRequest`s
-//! over a seeded `ContextStore` (same pattern as `task_list_tests.rs`).
-//! NOT compiled or run here — predictions below; root names actual RED.
+//! in `crates/cccc-daemon/src/ops/context.rs`. All tests drive the REAL
+//! `super::get` dispatch with real `DaemonRequest`s over a seeded
+//! `ContextStore` (pattern mirrors `task_list_tests.rs`). NOT compiled or
+//! run here — predictions below; root names actual RED.
 //!
-//! CONTRACT UNDER TEST (separate statement, not code): serialized full
-//! responses are bounded by FULL_BUDGET_BYTES (3 MiB = 3,145,728). A full
-//! read that cannot fit returns typed `context_too_large` with fixed
-//! recovery instructions (use `summary`/`overview` + `task_list`), never a
-//! silent partial context. `version`, `tasks_version`, and all existing
-//! error codes are unchanged on every path.
+//! CONTRACT UNDER TEST: serialized full responses are bounded by
+//! FULL_BUDGET_BYTES (3 MiB = 3,145,728). Reads that cannot fit return typed
+//! `context_too_large` with fixed recovery instructions, never silent
+//! partials. `version`, `tasks_version`, existing error codes unchanged.
 //!
-//! PREDICTIONS vs e1ada4e0 (unpatched): *_bounded_or_typed tests FAIL (Ok
-//! with multi-MB payload, no bound, no typed error); *_preserved and the
-//! resolvability halves PASS now and must stay green after the fix.
+//! PREDICTIONS vs e1ada4e0: `*_requires_typed_error` + `many_medium_*` +
+//! `dedupe_*` FAIL (unbounded multi-copy Ok); `normal_full_versions` +
+//! `summary_overview_errors` PASS now and must stay green.
 
 use super::*;
 use cccc_contracts::DaemonRequest;
 use cccc_core::{GroupStore, HomeLayout, context::ContextStore};
 use serde_json::{Map, Value, json};
 
-/// Proposed bound: 3 MiB serialized response bytes. The implementation must
-/// define the same value (suggested home: beside `MAX_PAGE_SIZE`-style
-/// constants); these tests pin the NUMBER, not the item path.
+/// Proposed bound: 3 MiB serialized response bytes (3,145,728 — binary).
+/// The implementation must define the same value; these tests pin the NUMBER.
 const FULL_BUDGET_BYTES: usize = 3 * 1024 * 1024;
-/// Oversized single card: larger than even a loose 4 MiB reading, so the
-/// bound decision cannot hide behind unit ambiguity (4 MiB = 4,194,304).
+/// Oversized single card: 4,500,000 notes bytes exceeds 3 MiB alone AND
+/// 4 MiB binary (4,194,304), so the bound decision cannot hide behind unit
+/// ambiguity and no dedupe shape can fit it.
 const GIANT_NOTES_BYTES: usize = 4_500_000;
+/// Medium field: 80 × 24 KiB canonical notes = 1,966,080 bytes fit alone,
+/// while TWO mandatory full copies (coordination.tasks + board buckets)
+/// reach 3,932,160 > budget regardless of the attention subset.
+const MEDIUM_COUNT: usize = 80;
+const MEDIUM_NOTES_BYTES: usize = 24 * 1024;
 
 fn request(group_id: &str, args: Value) -> DaemonRequest {
     let mut args = args.as_object().cloned().expect("args");
@@ -68,37 +76,35 @@ fn op(value: Value) -> Map<String, Value> {
     value.as_object().cloned().expect("op object")
 }
 
-fn full_bytes(result: &Value) -> usize {
+fn response_bytes(result: &Map<String, Value>) -> usize {
     serde_json::to_vec(result).map(|bytes| bytes.len()).unwrap_or(usize::MAX)
 }
 
-/// The bound-or-typed contract: EITHER a bounded success OR a small typed
-/// error. Asserts NEVER a huge unmarked success. `via` names the path.
-fn assert_bounded_or_typed(
-    outcome: Result<Value, crate::dispatch::OpError>,
+/// Typed-error requirement for fixtures that CANNOT fit: full unchanged
+/// content provably exceeds budget, so only `context_too_large` is
+/// acceptable — never a huge Ok, never an empty Ok. The error itself must
+/// stay small, serialized whole (code + message + details).
+fn require_typed_too_large(
+    outcome: Result<Map<String, Value>, crate::dispatch::OpError>,
     via: &str,
 ) {
     match outcome {
         Ok(result) => {
-            let bytes = full_bytes(&result);
-            assert!(
-                bytes <= FULL_BUDGET_BYTES,
-                "{via}: full response {bytes} bytes exceeds {FULL_BUDGET_BYTES} without a typed error"
-            );
-            assert!(
-                result.get("truncated").is_none(),
-                "{via}: unmarked partial context is never acceptable"
+            panic!(
+                "{via}: full unchanged content cannot fit yet returned Ok ({} bytes)",
+                response_bytes(&result)
             );
         }
         Err(error) => {
             assert_eq!(error.code, "context_too_large", "{via}: wrong error code");
-            assert!(
-                error.message.len() < 4096,
-                "{via}: oversized error must stay small"
-            );
+            let rendered =
+                serde_json::to_vec(&json!({"code": error.code, "message": error.message, "details": error.details}))
+                    .expect("error serializes");
+            assert!(rendered.len() < 4096, "{via}: oversized error must stay small");
+            let message = String::from_utf8_lossy(&rendered);
             for pointer in ["summary", "task_list"] {
                 assert!(
-                    error.message.contains(pointer),
+                    message.contains(pointer),
                     "{via}: recovery instructions must name {pointer}"
                 );
             }
@@ -107,8 +113,11 @@ fn assert_bounded_or_typed(
 }
 
 #[test]
-fn oversized_single_card_bounded_or_typed() {
-    // PREDICTION: RED on e1ada4e0 (≈13 MB Ok: 4.5 MB notes × 3 full copies).
+fn oversized_single_card_requires_typed_error() {
+    // Canonical single copy (4,500,000 notes bytes) already exceeds budget —
+    // no dedupe shape can fit it. PREDICTION: RED (≈13 MB Ok: 3 full copies).
+    let needed = GIANT_NOTES_BYTES;
+    assert!(needed > FULL_BUDGET_BYTES, "fixture must exceed budget in ONE copy");
     let (_temp, home, group_id) = seeded_home();
     sync_ops(
         &home,
@@ -119,34 +128,68 @@ fn oversized_single_card_bounded_or_typed() {
         ],
     );
     let outcome = super::get(&home, &request(&group_id, json!({"detail":"full"})));
-    assert_bounded_or_typed(outcome, "giant card");
+    require_typed_too_large(outcome, "giant card");
 }
 
 #[test]
-fn many_medium_tasks_bounded_or_typed() {
-    // PREDICTION: RED on e1ada4e0 (≈3.6 MB+: 60 × 20 KiB × 3 copies).
+fn many_medium_tasks_fit_only_deduped() {
+    // Canonical input fits (1,966,080) but TWO mandatory full copies
+    // (coordination.tasks + board buckets) reach 3,932,160 > budget whatever
+    // the attention subset holds. Assert the math BEFORE the op.
+    // PREDICTION: RED (≈3.9 MB+ Ok: 2 full copies + attention subset).
+    let canonical_min = MEDIUM_COUNT * MEDIUM_NOTES_BYTES;
+    assert!(canonical_min < FULL_BUDGET_BYTES, "canonical input itself fits");
+    assert!(2 * canonical_min > FULL_BUDGET_BYTES, "two copies must exceed budget");
     let (_temp, home, group_id) = seeded_home();
-    let mut ops: Vec<Map<String, Value>> = (0..60)
+    let ops: Vec<Map<String, Value>> = (0..MEDIUM_COUNT)
         .map(|index| {
             op(json!({
                 "op": "task.create",
                 "title": format!("medium {index:02}"),
-                "notes": "y".repeat(20 * 1024),
+                "notes": "y".repeat(MEDIUM_NOTES_BYTES),
                 "waiting_on": if index % 3 == 0 { "user" } else { "none" },
                 "handoff_to": if index % 5 == 0 { "peer" } else { "" },
             }))
         })
         .collect();
-    ops.push(op(json!({"op":"task.create","title":"blocked one","blocked_by":["T001"]})));
     sync_ops(&home, &group_id, ops);
-    let outcome = super::get(&home, &request(&group_id, json!({"detail":"full"})));
-    assert_bounded_or_typed(outcome, "many medium");
+    let result =
+        super::get(&home, &request(&group_id, json!({"detail":"full"}))).expect("medium full");
+    let bytes = response_bytes(&result);
+    assert!(bytes <= FULL_BUDGET_BYTES, "deduped medium board {bytes} bytes over budget");
+    // Content verification against seeded values — resolvability alone could
+    // pass on an emptied response. Canonical tasks complete, count and IDs
+    // exact, notes byte-exact. Order-independent: task numbering follows
+    // creation order, but the contract under test is content, not position.
+    let canonical = result["coordination"]["tasks"]
+        .as_array()
+        .expect("canonical tasks");
+    assert_eq!(canonical.len(), MEDIUM_COUNT, "no task dropped or invented");
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ids = std::collections::BTreeSet::new();
+    for task in canonical {
+        let title = task["title"].as_str().expect("title").to_owned();
+        let id = task["id"].as_str().expect("id").to_owned();
+        assert_eq!(task["notes"], "y".repeat(MEDIUM_NOTES_BYTES), "{title} notes byte-exact");
+        assert!(seen.insert(title.clone()), "duplicate title {title}");
+        assert!(ids.insert(id.clone()), "duplicate id {id}");
+    }
+    for index in 0..MEDIUM_COUNT {
+        assert!(seen.contains(&format!("medium {index:02}")), "missing medium {index:02}");
+    }
+    let want_ids: std::collections::BTreeSet<String> =
+        (1..=MEDIUM_COUNT).map(|n| format!("T{n:03}")).collect();
+    assert_eq!(ids, want_ids, "canonical IDs exact");
+    assert!(result.get("truncated").is_none(), "fitting board carries no markers");
 }
 
 #[test]
-fn giant_non_task_fields_bounded_or_typed() {
-    // agent_states/meta/brief/decisions ship whole in EVERY detail level.
-    // PREDICTION: RED on e1ada4e0 (≈4 MB+ Ok).
+fn giant_non_task_fields_require_typed_error() {
+    // agent_states/meta/brief/decisions ship whole in EVERY detail level, so
+    // no task-shape dedupe can save them: 3.5 MiB constructed > budget.
+    // PREDICTION: RED (multi-MB Ok).
+    let constructed: usize = 1024 * 1024 + 1024 * 1024 + 512 * 1024 + 1024 * 1024;
+    assert!(constructed > FULL_BUDGET_BYTES, "fixture must exceed budget");
     let (_temp, home, group_id) = seeded_home();
     sync_ops(
         &home,
@@ -173,81 +216,113 @@ fn giant_non_task_fields_bounded_or_typed() {
         ],
     );
     let outcome = super::get(&home, &request(&group_id, json!({"detail":"full"})));
-    assert_bounded_or_typed(outcome, "giant non-task fields");
+    require_typed_too_large(outcome, "giant non-task fields");
 }
 
-fn resolve_in_canonical(tasks: &Value, id: &str) -> bool {
-    tasks.as_array().is_some_and(|items| {
-        items.iter().any(|task| task.get("id").and_then(Value::as_str) == Some(id))
-    })
-}
+const LIGHTWEIGHT_REF_FIELDS: [&str; 2] = ["id", "status"];
 
-/// Every attention/board entry must EITHER be a full object whose id appears
-/// in canonical tasks, OR an id-ref resolving there. Accepts BOTH the current
-/// full-object shape AND the proposed ref shape — green now, green after.
-fn assert_resolvable(result: &Value, via: &str) {
-    let canonical = &result["coordination"]["tasks"];
-    assert!(canonical.is_array(), "{via}: canonical tasks array present");
-    let mut checked = 0usize;
-    for section in ["blocked", "waiting_user", "pending_handoffs"] {
-        if let Some(entries) = result["attention"][section].as_array() {
-            for entry in entries {
-                let id = entry.get("id").and_then(Value::as_str).expect("entry id");
-                assert!(resolve_in_canonical(canonical, id), "{via}: attention ref {id} resolves");
-                checked += 1;
-            }
-        }
+fn assert_lightweight(entry: &Value, via: &str) {
+    let object = entry.as_object().expect("ref object");
+    for key in object.keys() {
+        assert!(
+            LIGHTWEIGHT_REF_FIELDS.contains(&key.as_str()),
+            "{via}: ref carries undeclared field {key}"
+        );
     }
-    for bucket in ["planned", "active", "done", "archived"] {
-        if let Some(entries) = result["board"][bucket].as_array() {
-            for entry in entries {
-                let id = entry.get("id").and_then(Value::as_str).expect("entry id");
-                assert!(resolve_in_canonical(canonical, id), "{via}: board ref {id} resolves");
-                checked += 1;
-            }
-        }
-    }
-    assert!(checked > 0, "{via}: fixture must exercise at least one ref path");
+    assert!(entry.get("id").and_then(Value::as_str).is_some(), "{via}: ref needs id");
+    assert!(entry.get("notes").is_none(), "{via}: ref must not carry notes");
+    assert!(entry.get("checklist").is_none(), "{via}: ref must not carry checklist");
 }
 
 #[test]
-fn normal_full_resolvable_and_versioned() {
-    // PREDICTION: GREEN on e1ada4e0 (full objects resolve trivially) AND
-    // after the fix (id-refs resolve in canonical tasks). Pins the invariant
-    // across the migration instead of either shape.
+fn dedupe_refs_lightweight_canonical_complete() {
+    // Genuine dedupe RED: canonical coordination.tasks stay COMPLETE while
+    // every attention/board entry carries ONLY declared lightweight ref
+    // fields. Fails on current full-object copies; no shape-agnostic pass
+    // is accepted as the dedupe oracle (that lives in normal_full_versions).
+    // PREDICTION: RED (board/attention carry notes/checklist/custom blobs).
     let (_temp, home, group_id) = seeded_home();
     sync_ops(
         &home,
         &group_id,
         vec![
-            op(json!({"op":"task.create","title":"a","notes":"small","waiting_on":"user"})),
+            op(json!({"op":"task.create","title":"a","notes":"small notes here",
+                      "checklist":[{"id":"c1","text":"measure","status":"done"}],
+                      "waiting_on":"user","custom_blob":{"x":1}})),
             op(json!({"op":"task.create","title":"b","handoff_to":"peer"})),
             op(json!({"op":"task.create","title":"c"})),
         ],
     );
     let result =
         super::get(&home, &request(&group_id, json!({"detail":"full"}))).expect("normal full");
-    assert_eq!(result["coordination"]["tasks"][0]["notes"], "small");
-    assert_resolvable(&result, "normal full");
-    assert!(result.get("version").and_then(Value::as_str).is_some());
-    assert!(result.get("tasks_version").and_then(Value::as_str).is_some());
-    assert!(result.get("truncated").is_none());
+    let canonical = result["coordination"]["tasks"].as_array().expect("canonical");
+    assert_eq!(canonical.len(), 3);
+    let first = canonical
+        .iter()
+        .find(|task| task["title"] == "a")
+        .expect("task a canonical");
+    assert_eq!(first["notes"], "small notes here", "canonical notes intact");
+    assert_eq!(first["checklist"][0]["text"], "measure");
+    assert_eq!(first["custom_blob"]["x"], 1, "canonical custom fields intact");
+    let mut refs = 0usize;
+    for section in ["blocked", "waiting_user", "pending_handoffs"] {
+        if let Some(entries) = result["attention"][section].as_array() {
+            for entry in entries {
+                assert_lightweight(entry, "attention");
+                refs += 1;
+            }
+        }
+    }
+    for bucket in ["planned", "active", "done", "archived"] {
+        if let Some(entries) = result["board"][bucket].as_array() {
+            for entry in entries {
+                assert_lightweight(entry, "board");
+                refs += 1;
+            }
+        }
+    }
+    assert!(refs > 0, "fixture must exercise at least one ref path");
 }
 
 #[test]
-fn summary_overview_and_errors_preserved() {
-    // PREDICTION: GREEN on e1ada4e0 and after (no collateral from the fix).
+fn normal_full_versions_preserved() {
+    // Preservation: versions, error-shape stability, no markers on fitting
+    // boards. GREEN on e1ada4e0 and after.
     let (_temp, home, group_id) = seeded_home();
     sync_ops(&home, &group_id, vec![op(json!({"op":"task.create","title":"a"}))]);
+    let result =
+        super::get(&home, &request(&group_id, json!({"detail":"full"}))).expect("normal full");
+    assert!(result.get("version").and_then(Value::as_str).is_some());
+    assert!(result.get("tasks_version").and_then(Value::as_str).is_some());
+    assert!(result.get("truncated").is_none());
+    assert_eq!(result["coordination"]["tasks"].as_array().expect("tasks").len(), 1);
+}
+
+#[test]
+fn summary_overview_errors_preserved() {
+    // Field-level preservation (not just board absence): summary keeps the
+    // 18-field task shape incl. notes; overview keeps coordination notes and
+    // omits task collections. Error codes pinned. GREEN on both.
+    let (_temp, home, group_id) = seeded_home();
+    sync_ops(
+        &home,
+        &group_id,
+        vec![op(json!({"op":"task.create","title":"a","notes":"keep me",
+                        "checklist":[{"id":"c1","text":"m","status":"done"}]}))],
+    );
     let summary = super::get(&home, &request(&group_id, json!({"detail":"summary"})))
         .expect("summary");
     assert!(summary.get("board").is_none());
+    let task = &summary["coordination"]["tasks"][0];
+    assert_eq!(task["notes"], "keep me", "summary keeps notes (18-field shape)");
+    assert_eq!(task["checklist"][0]["text"], "m");
+    assert_eq!(summary["attention"]["blocked"], 0);
     let overview = super::get(&home, &request(&group_id, json!({"detail":"overview"})))
         .expect("overview");
     assert!(overview.get("board").is_none());
+    assert!(overview["coordination"].get("tasks").is_none());
     let bad = super::get(&home, &request(&group_id, json!({"detail":"bogus"}))).unwrap_err();
     assert_eq!(bad.code, "invalid_detail");
-    let missing =
-        super::get(&home, &request("g_missing", &json!({"detail":"full"}))).unwrap_err();
+    let missing = super::get(&home, &request("g_missing", json!({"detail":"full"}))).unwrap_err();
     assert_eq!(missing.code, "group_not_found");
 }
