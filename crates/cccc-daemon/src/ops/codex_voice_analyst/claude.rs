@@ -1667,6 +1667,9 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    include!("claude/fresh_session_identity_tests.rs");
+
+    #[cfg(unix)]
     struct ControlDirectory(PathBuf);
 
     #[cfg(unix)]
