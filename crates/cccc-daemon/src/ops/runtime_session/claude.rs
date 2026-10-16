@@ -10,6 +10,7 @@ use std::io;
 use std::path::Path;
 
 mod continuity;
+mod identity_conflict;
 mod retarget;
 pub(crate) use retarget::{Retarget, validate_retarget, write_retarget};
 
@@ -149,6 +150,11 @@ pub fn prepare_managed_with_policy(
     // An ordinary launch with resume disabled is a fresh launch, including
     // when an older saved receipt exists. Do not rewrite it as a failure.
     if !resume_enabled() {
+        // Disabling normal resume does not authorize silently retiring a known
+        // foreign-conversation conflict. Ordinary receipts still start fresh.
+        if let Ok(document) = read(home, group_id, actor_id) {
+            identity_conflict::require_clear(&document)?;
+        }
         return Ok(None);
     }
     with_optional_resume_lock(home, group_id, actor_id, None, || {
@@ -173,6 +179,9 @@ pub fn prepare_managed_with_policy(
         if !valid {
             return Ok(None);
         }
+        // A known transcript conflict is an authority fence, not configuration
+        // drift. Only explicit New Session or validated retarget may retire it.
+        identity_conflict::require_clear(&document)?;
         let selected = string(&document, "explicit_resume_session_id")
             == string(&document, "provider_session_id");
         let saved_cwd = std::path::PathBuf::from(string(&document, "workspace_path"));
@@ -222,6 +231,7 @@ pub fn prepare_managed_with_policy(
                 "identity_fingerprint",
             );
         }
+        identity_conflict::observe(home, group_id, actor_id, cwd, environment, &mut document)?;
         let model = model_from_command(base_command);
         let model_change = (model != string(&document, "model")).then_some(model.clone());
         if string(&document, "status") == "resume_failed" {
@@ -319,6 +329,7 @@ pub fn abandon_resume_attempt(
 ) -> io::Result<()> {
     super::with_receipt_lock(home, group, actor, || {
         let mut document = read(home, group, actor)?;
+        identity_conflict::require_clear(&document)?;
         if string(&document, "provider_session_id") == attempt.session_id
             && string(&document, "last_resume_attempt_id") == attempt.attempt_id
         {
@@ -353,6 +364,7 @@ pub fn archive_new_session(home: &HomeLayout, group: &str, actor: &str) -> io::R
         document.insert("provider_session_id".into(), json!(""));
         document.remove("explicit_resume_session_id");
         document.remove("explicit_resume_pending");
+        document.remove("claude_identity_conflict");
         document.insert("status".into(), json!("new_session"));
         document.insert("resume_eligible".into(), json!(false));
         continuity::decision(
@@ -494,6 +506,17 @@ pub fn record_managed(
             }
             Err(error) => return Err(error),
         };
+        // A delayed successful callback cannot erase a later conflict or
+        // replace a different conversation selected by a newer transaction.
+        identity_conflict::require_clear(&old)?;
+        if resumed
+            && valid_session_id(&string(&old, "provider_session_id"))
+            && string(&old, "provider_session_id") != session_id
+        {
+            return Err(io::Error::other(ResumeBlocked(
+                "Claude resume binding changed before success was recorded".into(),
+            )));
+        }
         let history = if valid_session_id(&string(&old, "provider_session_id"))
             && string(&old, "provider_session_id") != session_id
         {

@@ -52,6 +52,13 @@ pub(crate) fn validate_retarget(
             "Resume session requires a managed Claude Agent View receipt",
         ));
     }
+    if original.contains_key("claude_identity_conflict")
+        && string(&original, "provider_session_id") == session_id
+    {
+        let error = identity_conflict::require_clear(&original)
+            .expect_err("a known identity conflict cannot select its poisoned worker");
+        return Err(OpError::new("claude_identity_conflict", error.to_string()));
+    }
     let stripped = continuity::without_model(command);
     let legacy = continuity::prior_command(command, &string(&original, "model"));
     let exact = string(&original, "command_fingerprint") == command_fingerprint(command)
@@ -77,7 +84,9 @@ pub(crate) fn validate_retarget(
         session_id,
     )?;
     let mut target = original.clone();
-    if string(&original, "provider_session_id") != session_id {
+    if string(&original, "provider_session_id") != session_id
+        || original.contains_key("claude_identity_conflict")
+    {
         target.insert(
             "previous_sessions".into(),
             json!(continuity::archive(&original, "resume_session")),
@@ -106,6 +115,9 @@ pub(crate) fn validate_retarget(
     );
     target.insert("model_application".into(), json!({"action":"retained","retained_model":retained_model,"configured_model":model_from_command(command),"configured_model_applied":false}));
     target.insert("provider_session_id".into(), json!(session_id));
+    // archive() retained the observation; explicit selection is the authority
+    // to retire the current conflict, never an implicit Start or retry.
+    target.remove("claude_identity_conflict");
     target.insert("explicit_resume_session_id".into(), json!(session_id));
     // The foreign-live-job exclusion belongs to this retarget transaction.
     // Successful record_managed consumes it; the retained model preference

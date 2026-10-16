@@ -443,4 +443,5 @@ impl AnalystSession {
         session
     }
 }
+pub(crate) use claude::inspect_receipt_identity as inspect_claude_receipt_identity;
 pub(crate) use claude::validate_retarget as validate_claude_retarget;

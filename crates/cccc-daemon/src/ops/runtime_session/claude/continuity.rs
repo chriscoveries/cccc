@@ -82,6 +82,15 @@ pub(super) fn previous_sessions(document: &Map<String, Value>) -> Vec<Value> {
 pub(super) fn archive(document: &Map<String, Value>, reason: &str) -> Vec<Value> {
     let mut history = previous_sessions(document);
     let id = string(document, "provider_session_id");
+    if let Some(conflict) = document.get("claude_identity_conflict")
+        && let Some(entry) = history.iter_mut().find(|entry| {
+            entry["session_id"] == id
+                && entry["workspace_path"] == string(document, "workspace_path")
+                && entry["model"] == string(document, "model")
+        })
+    {
+        entry["claude_identity_conflict"] = conflict.clone();
+    }
     if valid_session_id(&id)
         && !history.iter().any(|entry| {
             entry["session_id"] == id
@@ -89,10 +98,12 @@ pub(super) fn archive(document: &Map<String, Value>, reason: &str) -> Vec<Value>
                 && entry["model"] == string(document, "model")
         })
     {
-        history.push(
-            json!({"session_id":id,"workspace_path":string(document,"workspace_path"),
-            "model":string(document,"model"),"replaced_at":utc_now(),"reason":reason}),
-        );
+        let mut entry = json!({"session_id":id,"workspace_path":string(document,"workspace_path"),
+            "model":string(document,"model"),"replaced_at":utc_now(),"reason":reason});
+        if let Some(conflict) = document.get("claude_identity_conflict") {
+            entry["claude_identity_conflict"] = conflict.clone();
+        }
+        history.push(entry);
         if history.len() > 20 {
             history.remove(0);
         }

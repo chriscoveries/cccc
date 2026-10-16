@@ -11,6 +11,32 @@ pub(crate) fn validate_retarget(
     let config = command::existing_config_dir(environment).map_err(|error| {
         OpError::new("claude_config_unavailable", format!("The actor's Claude config directory cannot be resolved without creating or changing it: {error}"))
     })?;
+    let (_, retained_model) = inspect_transcript(&config, cwd, session_id)?;
+    let live_config = config.clone();
+    let id = session_id.to_owned();
+    // Use the same daemon-owned async runtime as managed launch, including sync IPC callers.
+    super::super::super::local_headless::run_managed_launch(async move {
+        ensure_available(&live_config, &id).await
+    })
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::WouldBlock {
+            OpError::new("claude_session_live", error.to_string())
+        } else {
+            OpError::new(
+                "claude_session_check_failed",
+                format!("Could not verify whether Claude session {session_id} is live: {error}"),
+            )
+        }
+    })?;
+    Ok(retained_model)
+}
+
+/// Read-only transcript evidence. This confers no permission to resume it.
+pub(super) fn inspect_transcript(
+    config: &Path,
+    cwd: &Path,
+    session_id: &str,
+) -> Result<(PathBuf, Option<String>), OpError> {
     let workspace = cwd.canonicalize().map_err(OpError::io)?;
     let projects = config.join("projects");
     let transcript = find_transcript(&projects, &workspace, session_id)?;
@@ -82,30 +108,14 @@ pub(crate) fn validate_retarget(
         .is_some_and(|p| p == workspace);
     if !residence_matches
         && !latest_matches
-        && !native_worktree_matches(&config, session_id, &workspace)?
+        && !native_worktree_matches(config, session_id, &workspace)?
     {
         return Err(OpError::new(
             "claude_workspace_mismatch",
             "Claude transcript residence, latest cwd and native worktree do not match the launch workspace",
         ));
     }
-    let live_config = config.clone();
-    let id = session_id.to_owned();
-    // Use the same daemon-owned async runtime as managed launch, including sync IPC callers.
-    super::super::super::local_headless::run_managed_launch(async move {
-        ensure_available(&live_config, &id).await
-    })
-    .map_err(|error| {
-        if error.kind() == io::ErrorKind::WouldBlock {
-            OpError::new("claude_session_live", error.to_string())
-        } else {
-            OpError::new(
-                "claude_session_check_failed",
-                format!("Could not verify whether Claude session {session_id} is live: {error}"),
-            )
-        }
-    })?;
-    Ok(retained_model)
+    Ok((transcript, retained_model))
 }
 
 /// Prefer the launch project's transcript. A uniquely identified transcript in
@@ -211,12 +221,12 @@ fn native_worktree_matches(
 
 /// Recheck at launch; explicit retarget never adopts another process's live job.
 pub(super) async fn ensure_available(config: &Path, session_id: &str) -> io::Result<()> {
-    if let Some((_, job)) = find_live_job(config, session_id).await? {
+    if let Some(short) = live_conversation_holder(config, session_id).await? {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             format!(
                 "Session {session_id} is live in Claude Agent View job {}. Stop it through its owner before resuming; CCCC will not stop another session",
-                job.short
+                short
             ),
         ));
     }
@@ -229,6 +239,61 @@ pub(super) async fn ensure_available(config: &Path, session_id: &str) -> io::Res
         ));
     }
     Ok(())
+}
+
+// A native control worker can hold a different transcript after named
+// adoption. Such a worker excludes retarget even without a registry entry.
+async fn live_conversation_holder(config: &Path, session_id: &str) -> io::Result<Option<String>> {
+    let endpoint = match control::Endpoint::resolve(config) {
+        Ok(endpoint) => endpoint,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let jobs = match control::list(&endpoint).await {
+        Ok(jobs) => jobs,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::ConnectionAborted
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    endpoint.validate_credentials()?;
+    for value in &jobs {
+        let job = parse_job_required(value)?;
+        if job.session_id == session_id {
+            return Ok(Some(job.short));
+        }
+        let state = read_job_state(config, &job, &job.cwd)?;
+        let state_cwd = state["cwd"].as_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Live Claude worker has no verifiable cwd",
+            )
+        })?;
+        if Path::new(state_cwd).canonicalize()? != job.cwd.canonicalize()? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Live Claude worker cwd disagrees with its control record",
+            ));
+        }
+        if state["resumeSessionId"].as_str().map(str::trim) == Some(session_id) {
+            return Ok(Some(job.short));
+        }
+    }
+    Ok(None)
 }
 
 fn registry_holder(config: &Path, session_id: &str) -> io::Result<Option<u32>> {
