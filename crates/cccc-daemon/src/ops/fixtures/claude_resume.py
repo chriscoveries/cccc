@@ -23,6 +23,44 @@ def write_json(path, value):
     temporary.replace(path)
 
 
+def read_request(connection):
+    # A canceled readiness probe may close before writing its whole frame.
+    # Reject that connection without taking down the sole cleanup/list server.
+    try:
+        with connection.makefile("rb", buffering=0) as reader:
+            line = reader.readline(512 * 1024 + 1)
+    except ConnectionError:
+        return None
+    if not line.endswith(b"\n") or len(line) > 512 * 1024:
+        return None
+    try:
+        request = json.loads(line)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return request if isinstance(request, dict) and isinstance(request.get("op"), str) else None
+
+
+def send_response(connection, response):
+    try:
+        connection.sendall(json.dumps(response).encode() + b"\n")
+        return True
+    except ConnectionError:
+        # Native clients may abandon an outstanding has/attach at their timeout.
+        # The next owned kill/list request must still reach this server.
+        return False
+
+
+def fresh_model_flags(arguments):
+    # New screen fixtures must describe the model actually passed by CCCC,
+    # rather than manufacturing the expected target in durable native state.
+    for index, argument in enumerate(arguments):
+        if argument in ("--model", "-m") and index + 1 < len(arguments):
+            return ["--model", arguments[index + 1]]
+        if argument.startswith("--model="):
+            return ["--model", argument.split("=", 1)[1]]
+    return []
+
+
 if len(sys.argv) > 1 and sys.argv[1] == "server":
     root = pathlib.Path(sys.argv[2]).resolve()
     directory = pathlib.Path("/tmp") / f"cc-daemon-{os.getuid()}" / hashlib.sha256(str(root).encode()).hexdigest()[:8]
@@ -40,8 +78,9 @@ if len(sys.argv) > 1 and sys.argv[1] == "server":
     while True:
         connection, _ = listener.accept()
         with connection:
-            line = connection.makefile("rb").readline()
-            request = json.loads(line)
+            request = read_request(connection)
+            if request is None:
+                continue
             op = request["op"]
             with (root / "control_operations").open("a") as operations:
                 operations.write(json.dumps({"op": op, "short": request.get("short")}) + "\n")
@@ -55,6 +94,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "server":
                     state = json.loads((root / "jobs" / short / "state.json").read_text())
                     jobs.append({"short": short, "sessionId": state["sessionId"],
                                  "cwd": state["cwd"], "cliVersion": version})
+            selected_job = next((job for job in jobs if job["short"] == request.get("short")), None)
             if op == "list":
                 if (root / "fixture_cleanup_failed").exists():
                     result = {"ok": False, "op": op, "code": "EPROTO", "error": "fixture cleanup unknown"}
@@ -63,9 +103,17 @@ if len(sys.argv) > 1 and sys.argv[1] == "server":
             elif op == "attach" and (root / "mode").read_text().startswith("model_adapter_screen_"):
                 # New screen tests alone use a threaded attachment so real has
                 # probes and owned cleanup remain serviced while replay streams.
+                if selected_job is None:
+                    send_response(connection, {"ok": False, "op": op, "code": "ENOJOB", "error": "fixture job is not active"})
+                    continue
+                if request.get("auth") != key.read_text().strip():
+                    send_response(connection, {"ok": False, "op": op, "code": "EAUTH", "error": "fixture authentication failed"})
+                    continue
                 mode = (root / "mode").read_text()
                 attached = connection.dup()
-                connection.sendall(b'{"ok":true,"op":"attach","imarkNonce":"0123456789abcdef0123456789abcdef"}\n')
+                if not send_response(connection, {"ok": True, "op": op, "imarkNonce": "0123456789abcdef0123456789abcdef"}):
+                    attached.close()
+                    continue
 
                 def serve_attachment(stream, attachment_mode):
                     with stream:
@@ -96,9 +144,15 @@ if len(sys.argv) > 1 and sys.argv[1] == "server":
                 threading.Thread(target=serve_attachment, args=(attached, mode), daemon=True).start()
                 continue
             elif op == "has" and (root / "mode").read_text().startswith("model_adapter_screen_"):
-                result = {"ok": True, "op": op, "alive": True, "ready": True}
+                # Match this request's short, not another active job or stale
+                # state.json. A successful kill removes its active marker;
+                # deliberately refused cleanup leaves that marker present.
+                alive = selected_job is not None
+                result = {"ok": True, "op": op, "alive": alive, "ready": alive}
             elif op == "kill":
-                if (root / "mode").read_text() in ("model_adapter_cleanup_failure", "model_adapter_screen_unreadable_cleanup_failure"):
+                if selected_job is None:
+                    result = {"ok": False, "op": op, "code": "ENOJOB", "error": "fixture job is not active"}
+                elif (root / "mode").read_text() in ("model_adapter_cleanup_failure", "model_adapter_screen_unreadable_cleanup_failure"):
                     (root / "fixture_cleanup_failed").touch()
                     result = {"ok": False, "op": op, "code": "EPROTO", "error": "fixture stop refused"}
                 else:
@@ -107,7 +161,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "server":
                     result = {"ok": True, "op": op}
             else:
                 result = {"ok": False, "op": op, "code": "EPROTO", "error": "unexpected fixture operation"}
-            connection.sendall(json.dumps(result).encode() + b"\n")
+            send_response(connection, result)
 elif "--version" in sys.argv:
     root = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"])
     version_path = root / "fixture_launcher_version"
@@ -158,6 +212,8 @@ else:
         if mode.startswith("model_adapter"):
             model = "sonnet" if "--resume" in sys.argv else "opus"
             state.update({"resumeSessionId": session, "respawnFlags": ["--model", model]})
+            if mode.startswith("model_adapter_screen_") and "--resume" not in sys.argv:
+                state["respawnFlags"] = fresh_model_flags(sys.argv[1:])
         write_json(root / "jobs" / short / "state.json", state)
         (root / active).touch()
         print(f"started · {short}")
