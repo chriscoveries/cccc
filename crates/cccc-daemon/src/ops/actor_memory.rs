@@ -732,3 +732,7 @@ mod pty_policy_red;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "actor_memory_recipient_binding_tests.rs"]
 pub(crate) mod recipient_binding_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "actor_memory/must3_gap_tests.rs"]
+pub(crate) mod must3_gap_tests;
