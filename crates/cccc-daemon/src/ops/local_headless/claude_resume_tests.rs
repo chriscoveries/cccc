@@ -1910,6 +1910,33 @@ fn unreadable_evicted_pre_input_screen_falls_back_fresh_after_confirmed_owned_cl
     assert_eq!(receipt["failure_count"], 0);
     assert_eq!(receipt["last_resume_attempt_id"], "");
     assert_eq!(receipt["model"], "opus");
+    let launches: Vec<Vec<String>> = std::fs::read_to_string(f.config.join("launch_arguments"))
+        .expect("actual native argv")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("argv JSON"))
+        .collect();
+    assert_eq!(launches.len(), 2);
+    assert!(
+        launches[0]
+            .windows(2)
+            .any(|pair| pair == ["--resume", SAVED])
+    );
+    assert!(!launches[1].iter().any(|argument| argument == "--resume"));
+    assert!(
+        launches[1]
+            .windows(2)
+            .any(|pair| pair == ["--model", "opus"]),
+        "fresh fallback must actually pass its configured model to the native CLI"
+    );
+    let native: Value = cccc_core::fs::read_json(&f.config.join("jobs/abcdef12/state.json"))
+        .expect("actual fresh native state");
+    assert_eq!(native["sessionId"], receipt["provider_session_id"]);
+    assert_eq!(native["resumeSessionId"], native["sessionId"]);
+    assert_eq!(
+        native["respawnFlags"],
+        json!(["--model", "opus"]),
+        "native state derives from argv, not the receipt's configured-model projection"
+    );
     assert!(
         receipt["previous_sessions"]
             .as_array()
