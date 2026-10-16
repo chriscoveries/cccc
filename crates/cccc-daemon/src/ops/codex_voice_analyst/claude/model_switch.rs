@@ -423,7 +423,7 @@ mod wiring_tests {
                 .lines()
                 .filter_map(|line| line.strip_prefix(PREFIX))
                 .map(|line| {
-                    assert!(PREFIX.len() + line.len() + 1 <= 4096);
+                    assert!(PREFIX.len() + line.len() < 4096);
                     serde_json::from_str(line).expect("bounded metadata JSON")
                 })
                 .collect();
