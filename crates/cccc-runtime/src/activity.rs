@@ -1,5 +1,5 @@
 //! Per-session terminal activity: when the PTY last produced output, when a
-//! delivery last reached its input, and how many output bytes arrived recently.
+//! nonempty user/control write was admitted, and how many output bytes arrived recently.
 //!
 //! The daemon owns the PTY master, so these are observed facts rather than
 //! screen scraping. Interpretation (working / idle) belongs to the caller.
@@ -28,7 +28,8 @@ pub struct ActivitySnapshot {
     pub last_input: Option<ActivityInstant>,
     /// `(age, bytes)` per one-second bucket, newest first, within `ACTIVITY_RETENTION`.
     pub recent_output: Vec<(Duration, u64)>,
-    /// Output bytes observed since the most recent input delivery.
+    /// Output bytes observed since the most recent admitted nonempty input write.
+    /// Admission is conservative: a failed/cancelled write may have sent a prefix.
     pub output_bytes_since_input: u64,
 }
 
