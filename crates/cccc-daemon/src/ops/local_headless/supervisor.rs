@@ -17,15 +17,15 @@ use tracing::Instrument;
 #[cfg(all(test, unix))]
 #[path = "control_fixture.rs"]
 pub(in crate::ops::local_headless) mod control_fixture;
+#[cfg(all(test, target_os = "linux"))]
+#[path = "memory_policy_red.rs"]
+mod memory_policy_red;
 #[cfg(all(test, unix))]
 #[path = "notice_gate_tests.rs"]
 mod notice_gate_tests;
 #[cfg(all(test, unix))]
 #[path = "shutdown_tests.rs"]
 mod shutdown_tests;
-#[cfg(all(test, target_os = "linux"))]
-#[path = "memory_policy_red.rs"]
-mod memory_policy_red;
 #[cfg(all(test, unix))]
 #[path = "viewer_detach_tests.rs"]
 mod viewer_detach_tests;
