@@ -429,3 +429,8 @@ pub(super) fn tick_detection(home: &HomeLayout, group: &GroupDoc) -> io::Result<
 #[cfg(all(test, target_os = "linux"))]
 #[path = "pty_tests.rs"]
 mod tests;
+
+// Tests-only owner MUST1/MUST2 policy regressions; no production change here.
+#[cfg(all(test, target_os = "linux"))]
+#[path = "memory_musts_notice_tests.rs"]
+mod memory_musts_notice;

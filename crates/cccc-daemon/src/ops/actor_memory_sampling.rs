@@ -282,7 +282,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn known_unreadable_zombie_member_cannot_be_hidden_by_a_readable_owned_parent() {
+    fn memory_must2_known_zombie_member_contributes_zero_with_readable_owned_parent() {
         use std::path::PathBuf;
         use std::process::{Child, Command, ExitStatus, Stdio};
         use std::time::{Duration, Instant};
@@ -408,10 +408,23 @@ finally:
             included,
             "the unreadable child was in the observed parent tree"
         );
+        // Owner MUST2 changes the old zombie-as-unknown policy: a positively
+        // observed zombie contributes zero, so the readable remainder is complete.
+        // Count and fixed touched-allocation floor are checked separately;
+        // sequential samples are non-atomic and need not be byte-identical.
+        assert_eq!(single.1, 1, "only the readable parent counts as sampled");
         assert_eq!(
-            (single, union),
-            ((0, 0), (0, 0)),
-            "neither single-root nor union sampling may advertise a partial total"
+            union.1, 1,
+            "the zombie is known zero, not an unreadable member"
         );
+        assert!(
+            single.0 >= 8 * 1024,
+            "single-root retains the touched allocation"
+        );
+        assert!(union.0 >= 8 * 1024, "union retains the touched allocation");
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "memory_musts_sampling_tests.rs"]
+mod memory_musts_members;
