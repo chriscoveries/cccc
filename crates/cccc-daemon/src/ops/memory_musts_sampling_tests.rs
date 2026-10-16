@@ -34,8 +34,8 @@ const FIXTURE_TIMEOUT: Duration = Duration::from_secs(10);
 /// process: the fixture program's finite self-expiry ends the LIVE phase
 /// (CPU loop), while an exited-but-unreaped zombie still needs a reaper
 /// (parent guard, or init after reparenting) — self-expiry does not reap.
-/// That residual is explicit and bounded (180 s worst case per fixture), not
-/// claimed impossible.
+/// The 180 s bound covers the live phase only. Reaping after an abandoned
+/// guard remains a separate residual, not a guaranteed outcome of self-expiry.
 struct ReapedOnDrop(Option<Child>);
 
 impl ReapedOnDrop {
@@ -47,8 +47,8 @@ impl ReapedOnDrop {
 impl Drop for ReapedOnDrop {
     fn drop(&mut self) {
         if let Some(mut child) = self.0.take() {
-            // Best-effort only: a failed kill means the child is already
-            // gone; the bounded poll below never blocks either way.
+            // A failed kill proves nothing about liveness. Polling remains
+            // bounded whether signaling succeeded or failed.
             let _ = child.kill();
             let deadline = Instant::now() + Duration::from_secs(2);
             while Instant::now() < deadline {
