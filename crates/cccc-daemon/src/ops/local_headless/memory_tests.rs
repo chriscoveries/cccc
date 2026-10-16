@@ -609,3 +609,67 @@ fn failed_attempt_commit_still_stops_the_closed_generation_and_retains_exact_res
         1
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_memory_tick_without_configured_foreman_does_not_close_or_reserve_attempt() {
+    let f = Fixture::new(false);
+    f.materialize();
+    let before = f.candidate();
+    let (memory, counted) = crate::ops::actor_memory_sampling::tree_rss_kib(
+        i32::try_from(before.provider_pid).expect("owned PID"),
+    );
+    assert!(
+        counted > 0 && memory > 1024,
+        "actual owned fixture is over 1MiB"
+    );
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    let group = store
+        .mutate(&f.group.group_id, |group| {
+            group.actors[0].memory_limit_mb = 1;
+            group.actors[0].internal_kind = Some("fixture_hidden".into());
+            Ok(group.clone())
+        })
+        .expect("no visible/configured foreman");
+    let requests = f.requests();
+    let receipt = std::fs::read(f.receipt()).expect("exact receipt");
+    assert!(
+        actor_memory::tick(&f.home, &group).is_err(),
+        "no concrete recipient must fail before native maintenance"
+    );
+    assert_eq!(
+        f.candidate(),
+        before,
+        "same owned generation and provider PID"
+    );
+    assert_eq!(
+        std::fs::read(f.receipt()).expect("retained receipt"),
+        receipt
+    );
+    assert_eq!(
+        f.requests(),
+        requests,
+        "no extra native load/new/cancel work"
+    );
+    assert!(
+        !store
+            .state_dir(&group.group_id)
+            .expect("state")
+            .join("actor_memory.json")
+            .exists(),
+        "no actual attempt reservation"
+    );
+    assert!(
+        actor_memory::required_resume(&f.home, &group.group_id, "worker")
+            .expect("required state")
+            .is_none(),
+        "no pre-close native obligation was written"
+    );
+    let events = cccc_core::ledger::read_all(&store.ledger_path(&group.group_id).expect("ledger"))
+        .expect("events");
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.kind == "system.notify" && event.data["kind"] == "memory_restart")
+    );
+}

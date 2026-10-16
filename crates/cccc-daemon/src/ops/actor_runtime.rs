@@ -131,6 +131,13 @@ fn apply_resolved_with_policy(
     if kind != "actor.new_session" {
         enforce_required_memory_resume(home, group, actor)?;
     }
+    #[cfg(all(test, unix))]
+    memory_delivery_tests::manual_admission::checkpoint(
+        home,
+        &group.group_id,
+        actor_id,
+        memory_delivery_tests::manual_admission::ManualPhase::BeforeStop,
+    );
     // Also retire a disconnected registration whose previous cleanup failed.
     stop_registered(group, actor_id)?;
     if kind == "actor.new_session" {
@@ -212,6 +219,13 @@ fn start_local_headless(
         super::runtime_mcp::prepare(home, actor.runtime, &actor.command, &cwd, &mut env)?;
     }
     actor.env = env;
+    #[cfg(all(test, unix))]
+    memory_delivery_tests::manual_admission::checkpoint(
+        home,
+        &group.group_id,
+        &actor.id,
+        memory_delivery_tests::manual_admission::ManualPhase::BeforePermit,
+    );
     let _start_permit = crate::runtime_start_gate::permit(home)
         .map_err(|message| OpError::new("runtime_shutting_down", message))?;
     let result = if explicit {
@@ -260,6 +274,13 @@ fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionSt
     let cwd = working_directory(group, &actor)?;
     let mut env = environment::launch_env(home, group, &actor);
     super::runtime_mcp::prepare(home, actor.runtime, &command, &cwd, &mut env)?;
+    #[cfg(all(test, unix))]
+    memory_delivery_tests::manual_admission::checkpoint(
+        home,
+        &group.group_id,
+        &actor.id,
+        memory_delivery_tests::manual_admission::ManualPhase::BeforePermit,
+    );
     let _start_permit = crate::runtime_start_gate::permit(home)
         .map_err(|message| OpError::new("runtime_shutting_down", message))?;
     let command = cccc_runtime::resolve_command_executable(&command, &env);

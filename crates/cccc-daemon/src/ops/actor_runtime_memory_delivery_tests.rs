@@ -523,3 +523,6 @@ fn corrupt_memory_requirement_blocks_every_new_raw_start_without_becoming_a_fres
         );
     }
 }
+
+#[path = "actor_runtime_manual_admission_tests.rs"]
+pub(super) mod manual_admission;
