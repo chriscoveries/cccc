@@ -36,12 +36,28 @@ pub(crate) fn memory_candidate(group_id: &str, actor_id: &str) -> Option<MemoryC
 /// The callback checks final owned RSS, the fresh limit and cooldown under the
 /// same gate as controlled input. Only a successful protocol idle-close may
 /// retire the provider; a skipped check leaves delivery and ownership intact.
+#[cfg(all(test, unix))]
 pub(crate) fn restart_for_memory(
     home: &HomeLayout,
     group_id: &str,
     actor_id: &str,
     expected: &MemoryCandidate,
     admit: impl FnOnce(&GroupDoc, &Actor, &MemoryCandidate) -> io::Result<bool>,
+) -> io::Result<MemoryRestartOutcome> {
+    restart_for_memory_with_commit(home, group_id, actor_id, expected, admit, || Ok(()))
+}
+
+/// `commit` is invoked exactly once after authoritative idle-close succeeds.
+/// A busy refusal never reserves cooldown. The exact-resume sidecar remains
+/// durable before close; a failed cooldown commit still tears down this closed
+/// generation and leaves the sidecar in place for explicit recovery.
+pub(crate) fn restart_for_memory_with_commit(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    expected: &MemoryCandidate,
+    admit: impl FnOnce(&GroupDoc, &Actor, &MemoryCandidate) -> io::Result<bool>,
+    commit: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<MemoryRestartOutcome> {
     // This binding must precede both gates: joining a cancelled worker can
     // require those gates, so every return releases them before joining it.
@@ -119,7 +135,21 @@ pub(crate) fn restart_for_memory(
     // A worker may already be waiting in actor.start before its controlled
     // submission. Cancel now, but join only after both admission gates drop.
     _delivery_shutdown = super::super::actor_delivery::cancel_actor(group_id, actor_id);
-    supervisor::stop_locked(&key)?;
+    let committed = commit();
+    // Cleanup must run even if persisting the actual attempt fails. The old
+    // protocol has already revoked prompt admission at this point.
+    let stopped = supervisor::stop_locked(&key);
+    if let Err(primary) = committed {
+        return Err(match stopped {
+            Ok(()) => super::super::actor_memory::blocked_resume(format!(
+                "Could not persist the memory restart cooldown: {primary}"
+            )),
+            Err(cleanup) => super::super::actor_memory::blocked_resume(format!(
+                "Could not persist the memory restart cooldown: {primary}; closed-generation cleanup also failed: {cleanup}"
+            )),
+        });
+    }
+    stopped?;
     let launch_home = home.clone();
     let app = run_managed_launch(async move {
         AnalystSession::launch_actor_resume_only(&launch_home, config, required_id).await

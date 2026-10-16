@@ -1,4 +1,4 @@
-//! Resident-memory sampling for one actor process tree.
+//! Process-tree memory sampling: Linux resident plus swapped pages.
 //!
 //! Linux reads `/proc` directly; macOS goes through `ps` (the workspace
 //! forbids `unsafe`, so no sysctl FFI); other platforms report nothing.
@@ -7,30 +7,27 @@
 
 use std::collections::HashMap;
 
-/// Parse `VmRSS: <kb> kB` out of a Linux `/proc/<pid>/status` body.
-/// Returns resident KiB. Anything unparseable (exited, kernel thread) is
-/// `None` — skipped, never counted as zero.
+/// Sum resident and swapped KiB from Linux `/proc/<pid>/status`.
+/// The historical parser name is retained for the isolated port's callers.
+/// Missing, duplicate, overflowing or malformed counters are unreadable,
+/// never evidence that a process has zero swapped memory.
 #[cfg(any(test, target_os = "linux"))]
 pub fn parse_vmrss_kb(status: &str) -> Option<u64> {
-    for line in status.lines() {
-        let Some(rest) = line.strip_prefix("VmRSS:") else {
-            continue;
-        };
-        let num: String = rest
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .filter(|ch| ch.is_ascii_digit())
-            .collect();
-        if num.is_empty() {
-            continue;
+    fn field(status: &str, prefix: &str) -> Option<u64> {
+        let mut matches = status.lines().filter_map(|line| line.strip_prefix(prefix));
+        let line = matches.next()?;
+        if matches.next().is_some() {
+            return None;
         }
-        if let Ok(kb) = num.parse::<u64>() {
-            return Some(kb);
+        let mut tokens = line.split_whitespace();
+        let number = tokens.next()?;
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
         }
+        let value = number.parse::<u64>().ok()?;
+        (tokens.next() == Some("kB") && tokens.next().is_none()).then_some(value)
     }
-    None
+    field(status, "VmRSS:")?.checked_add(field(status, "VmSwap:")?)
 }
 
 /// Parse `ps -o rss= -p <pid>` output (KiB). A zero RSS is real (freshly
@@ -45,7 +42,7 @@ pub fn parse_ps_rss(text: &str) -> Option<u64> {
     }
 }
 
-/// Resident KiB of one pid, or `None` when unreadable.
+/// Linux resident-plus-swap KiB of one pid, or `None` when unreadable.
 #[cfg(target_os = "linux")]
 fn rss_kb_of(pid: i32) -> Option<u64> {
     let body = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
@@ -153,7 +150,9 @@ fn ppid_table_inverted() -> HashMap<i32, Vec<i32>> {
     children
 }
 
-/// Sum resident KiB over `root` plus currently-visible descendants. Pids that
+/// Sum accounted KiB over `root` plus currently-visible descendants.
+/// Linux includes VmRSS + VmSwap; the existing Darwin fallback is RSS only.
+/// This partial patch does not complete the Darwin accounting policy. Pids that
 /// vanish mid-scan contribute nothing. Returns `(total_kib, counted)`.
 pub fn tree_rss_kib(root: i32) -> (u64, usize) {
     let mut total = 0u64;

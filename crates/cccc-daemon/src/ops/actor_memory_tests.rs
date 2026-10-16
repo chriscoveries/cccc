@@ -2,10 +2,10 @@ use cccc_contracts::Actor;
 use serde_json::json;
 
 #[test]
-fn actor_memory_limit_round_trips_and_defaults_off() {
+fn actor_memory_limit_round_trips_and_defaults_to_4096() {
     let original = Actor::new("memory-worker");
     let default = serde_json::to_value(&original).expect("serialize default actor");
-    assert!(default.get("memory_limit_mb").is_none());
+    assert_eq!(default["memory_limit_mb"], json!(4096));
     let mut configured = default;
     configured["memory_limit_mb"] = json!(256);
     let actor: Actor = serde_json::from_value(configured).expect("configured actor");

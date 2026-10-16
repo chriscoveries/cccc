@@ -5,7 +5,8 @@
 //! The callback compares a fresh process-tree sample with the fresh limit.
 //! Viewer, PTY and multi-root topologies are skipped rather than guessed at.
 //!
-//! Reserve a durable 30-minute cooldown before attempting maintenance and keep
+//! Reserve a durable 30-minute cooldown only after authoritative idle-close
+//! starts a real maintenance attempt, and keep
 //! an exact-resume requirement through failed stop/start. No replacement may
 //! silently create a new conversation. Successful and failed attempts append
 //! one outcome and target the available foreman through durable delivery.
@@ -21,8 +22,9 @@ use serde_json::{Value, json};
 use super::actor_memory_sampling as sampling;
 
 /// Minimum seconds between restarts of one actor, even across daemon
-/// restarts. The marker is written *before* the restart is attempted, so a
-/// crash mid-restart still holds the window (fail quiet, never hot-loop).
+/// restarts. The marker is written after authoritative idle-close and before
+/// provider teardown or replacement. Busy refusals never consume this window.
+/// The pre-close exact-resume sidecar fences a crash before marker persistence.
 const RESTART_COOLDOWN_SECS: u64 = 1800;
 
 /// Cooldown file name inside the group's state dir.
@@ -187,7 +189,7 @@ fn notice(
     group_id: &str,
     actor_id: &str,
     limit_mb: u64,
-    rss_mb: u64,
+    memory_mb: u64,
     outcome: &str,
     detail: &str,
 ) -> Event {
@@ -198,14 +200,15 @@ fn notice(
         "priority": "normal",
         "title": "Actor memory ceiling",
         "message": format!(
-            "actor {actor_id} resident {rss_mb} MiB over limit {limit_mb} MiB while idle: {outcome}. {detail}",
+            "actor {actor_id} accounted memory {memory_mb} MiB over limit {limit_mb} MiB while idle: {outcome}. {detail}",
         ),
         "to": ["@foreman"],
         "im_visibility": "internal",
         "context": {
             "actor_id": actor_id,
             "limit_mb": limit_mb,
-            "rss_mb": rss_mb,
+            "memory_mb": memory_mb,
+            "sampling_basis": if cfg!(target_os = "linux") { "linux_rss_plus_swap" } else if cfg!(target_os = "macos") { "macos_rss_only" } else { "unsupported" },
             "outcome": outcome,
         },
     })
@@ -220,7 +223,7 @@ fn notice(
 /// no signals.
 pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
     use super::local_headless::memory::{
-        MemoryRestartOutcome, memory_candidate, restart_for_memory,
+        MemoryRestartOutcome, memory_candidate, restart_for_memory_with_commit,
     };
     let mut out = Vec::new();
     let now = now_secs();
@@ -246,7 +249,8 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
             continue;
         }
         let mut admitted = None;
-        let result = restart_for_memory(
+        let attempted = std::cell::Cell::new(false);
+        let result = restart_for_memory_with_commit(
             home,
             &group.group_id,
             &actor.id,
@@ -269,17 +273,20 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
                 if counted == 0 || rss_kib <= u64::from(limit) * 1024 {
                     return Ok(false);
                 }
-                // Reserve durably before retiring admission or ownership. An
-                // interrupted/failed attempt must not retry in a hot loop.
-                write_cooldown(home, &fresh.group_id, &actor.id, now)?;
                 admitted = Some((limit, rss_kib.div_ceil(1024)));
                 Ok(true)
+            },
+            || {
+                // A positive authoritative close has begun an actual restart.
+                // Busy refusals never reach this callback or consume cooldown.
+                attempted.set(true);
+                write_cooldown(home, &group.group_id, &actor.id, now_secs())
             },
         );
         match result {
             Ok(MemoryRestartOutcome::Skipped) => {}
             Ok(MemoryRestartOutcome::Restarted) => {
-                let (limit, rss_mb) = admitted.ok_or_else(|| {
+                let (limit, memory_mb) = admitted.ok_or_else(|| {
                     io::Error::other("memory restart completed without admission evidence")
                 })?;
                 out.push(emit(
@@ -287,7 +294,7 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
                     &group.group_id,
                     &actor.id,
                     u64::from(limit),
-                    rss_mb,
+                    memory_mb,
                     "restarted",
                     "Verified native ACP session resumed.",
                 )?);
@@ -300,18 +307,27 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
                 }
             }
             Err(error) => {
-                if let Some((limit, rss_mb)) = admitted {
+                if let Some((limit, memory_mb)) = admitted.filter(|_| attempted.get()) {
+                    let cooldown_holds = read_cooldowns(home, &group.group_id)
+                        .ok()
+                        .and_then(|marks| marks.get(&actor.id).copied())
+                        .is_some_and(|at| now_secs() < at.saturating_add(RESTART_COOLDOWN_SECS));
+                    let recovery = if cooldown_holds {
+                        "Cooldown holds; exact session resume remains required."
+                    } else {
+                        "Cooldown was not persisted; exact session resume remains required. Operator recovery is needed."
+                    };
                     out.push(emit(
                         home,
                         &group.group_id,
                         &actor.id,
                         u64::from(limit),
-                        rss_mb,
+                        memory_mb,
                         "restart_failed",
-                        &format!("Memory maintenance failed: {error}. Cooldown holds."),
+                        &format!("Memory maintenance failed: {error}. {recovery}"),
                     )?);
                 } else {
-                    tracing::warn!(%error, actor_id = %actor.id, "memory maintenance preflight failed without stopping the actor");
+                    tracing::warn!(%error, actor_id = %actor.id, "memory maintenance admission failed or was unconfirmed");
                 }
                 // Failed attempts retain a durable exact-resume requirement.
                 // Do not redispatch into ordinary automatic startup here.
@@ -326,11 +342,11 @@ fn emit(
     group_id: &str,
     actor_id: &str,
     limit_mb: u64,
-    rss_mb: u64,
+    memory_mb: u64,
     outcome: &str,
     detail: &str,
 ) -> io::Result<Event> {
-    let mut event = notice(group_id, actor_id, limit_mb, rss_mb, outcome, detail);
+    let mut event = notice(group_id, actor_id, limit_mb, memory_mb, outcome, detail);
     let store = cccc_core::GroupStore::new(home.clone())?;
     let group = store.load(group_id)?;
     if let Ok(foreman) = cccc_core::actors::unique_available_foreman(&group) {
@@ -412,7 +428,7 @@ mod tests {
         assert_eq!(event.data["kind"], "memory_restart");
         assert_eq!(event.data["to"], json!(["@foreman"]));
         assert_eq!(event.data["context"]["outcome"], "restarted");
-        assert_eq!(event.data["context"]["rss_mb"], 1024);
+        assert_eq!(event.data["context"]["memory_mb"], 1024);
     }
 
     #[test]

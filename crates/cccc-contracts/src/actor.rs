@@ -234,17 +234,18 @@ pub struct Actor {
     pub generation: String,
     #[serde(default)]
     pub updated_at: String,
-    /// Per-actor resident-memory ceiling in MiB. Zero (the default) means no
-    /// ceiling: the field is omitted from serialized actors when zero, and any
-    /// nonzero value is enforced while the actor is idle, never mid-turn.
+    /// Per-actor memory ceiling in MiB, including resident and swapped pages.
+    /// Defaults to 4096 for every lane. Explicit zero disables the ceiling;
+    /// preserve it when serializing so a reload cannot re-enable enforcement.
+    /// Enforcement requires verified idle admission and exact session recovery.
     /// Plain `u32` so negative, fractional, string and overflowing inputs are
     /// rejected at deserialization.
-    #[serde(default, skip_serializing_if = "is_zero_mb")]
+    #[serde(default = "default_memory_limit_mb")]
     pub memory_limit_mb: u32,
 }
 
-fn is_zero_mb(value: &u32) -> bool {
-    *value == 0
+const fn default_memory_limit_mb() -> u32 {
+    4096
 }
 
 impl Actor {
@@ -276,7 +277,7 @@ impl Actor {
             created_at: now.clone(),
             generation: String::new(),
             updated_at: now,
-            memory_limit_mb: 0,
+            memory_limit_mb: default_memory_limit_mb(),
         }
     }
 

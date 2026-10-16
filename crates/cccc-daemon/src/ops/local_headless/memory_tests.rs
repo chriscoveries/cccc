@@ -539,3 +539,73 @@ fn disappearing_receipt_blocks_memory_and_ordinary_fresh_fallback() {
 fn changed_receipt_blocks_memory_and_ordinary_fresh_fallback() {
     receipt_race_never_creates_a_fresh_session(false);
 }
+
+// Append to local_headless/memory_tests.rs only with the production proposal.
+#[test]
+fn refused_idle_close_never_invokes_the_attempt_commit_callback() {
+    let f = Fixture::new(false);
+    f.materialize();
+    let before = f.candidate();
+    let item = f.item();
+    super::super::block_on_managed(item.managed.start_turn(
+        item.managed.generation(),
+        "held",
+        "HOLD fixture",
+    ))
+    .expect("held prompt");
+    assert_eq!(
+        restart_for_memory_with_commit(
+            &f.home,
+            &f.group.group_id,
+            "worker",
+            &before,
+            |_, _, _| Ok(true),
+            || panic!("busy refusal is not a restart attempt"),
+        )
+        .expect("busy skip"),
+        MemoryRestartOutcome::Skipped,
+    );
+    assert_eq!(f.candidate(), before);
+}
+
+#[test]
+fn failed_attempt_commit_still_stops_the_closed_generation_and_retains_exact_resume() {
+    let f = Fixture::new(false);
+    f.materialize();
+    let before = f.candidate();
+    let original = f.item();
+    let required_id = original.managed.thread_id().to_owned();
+    let error = restart_for_memory_with_commit(
+        &f.home,
+        &f.group.group_id,
+        "worker",
+        &before,
+        |_, _, _| Ok(true),
+        || {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected cooldown write failure",
+            ))
+        },
+    )
+    .expect_err("commit must fail");
+    assert!(actor_memory::is_resume_blocked(&error));
+    assert!(memory_candidate(&f.group.group_id, "worker").is_none());
+    assert!(
+        !original.running(),
+        "closed generation must not remain registered as healthy"
+    );
+    let required = actor_memory::required_resume(&f.home, &f.group.group_id, "worker")
+        .expect("durable requirement")
+        .expect("requirement retained");
+    assert_eq!(required.generation, before.generation);
+    assert_eq!(required.session_id, required_id);
+    assert!(!f.requests().iter().any(|r| r["method"] == "session/load"));
+    assert_eq!(
+        f.requests()
+            .iter()
+            .filter(|r| r["method"] == "session/new")
+            .count(),
+        1
+    );
+}
