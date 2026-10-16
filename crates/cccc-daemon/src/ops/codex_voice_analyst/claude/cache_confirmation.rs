@@ -124,14 +124,124 @@ mod tests {
         }
     }
     #[test]
-    fn incomplete_redraw_and_overflow_fail_closed() {
+    fn incomplete_redraw_and_unknown_catalog_fail_closed() {
         let mut screen = Screen::default();
         screen.feed(&frame(MODAL)).expect("fixture");
         screen.feed(b"\x1b[?2026h\x1b[2J").expect("fixture");
         assert!(!screen.cache_cost("Opus 5.5"));
-        assert!(screen.feed(&vec![b'x'; MAX_OUTPUT]).is_err());
+        screen
+            .feed(&vec![b'x'; MAX_OUTPUT])
+            .expect("window eviction is nonfatal");
+        assert!(!screen.cache_cost("Opus 5.5"));
+        assert!(!screen.empty_prompt());
         assert_eq!(label("opus", (2, 1, 293)), Some("Opus 5.5"));
         assert_eq!(label("opus", (2, 1, 294)), None);
         assert_eq!(label("other", (2, 1, 293)), None);
+    }
+    // PROPOSED TESTS ONLY; not run. Append inside cache_confirmation.rs's `tests`
+    // module on 82b9bdff. Uses its existing Screen, MAX_OUTPUT, frame and MODAL.
+    // Replace incomplete_redraw_and_overflow_fail_closed's overflow-is-error clause:
+    // normal window eviction must be nonfatal, while incomplete/unknown screen
+    // state must remain unauthorized.
+
+    #[test]
+    fn replay_larger_than_window_recovers_at_current_complete_paint() {
+        let mut screen = Screen::default();
+        let old = frame("old conversation output, no input prompt");
+        // Every frame fits; their total exceeds the retention window many times.
+        for _ in 0..(MAX_OUTPUT * 3 / old.len() + 1) {
+            screen
+                .feed(&old)
+                .expect("history eviction must not fail model recovery");
+        }
+        assert!(
+            screen.output.len() <= MAX_OUTPUT,
+            "history storage must remain bounded"
+        );
+        screen.feed(&frame(MODAL)).expect("current dialog");
+        assert!(screen.cache_cost("Opus 5.5"));
+        assert!(!screen.empty_prompt());
+        screen
+            .feed(&frame("❯\r\n⏵⏵ bypass permissions on"))
+            .expect("current prompt");
+        assert!(screen.empty_prompt());
+        assert!(!screen.cache_cost("Opus 5.5"));
+    }
+
+    #[test]
+    fn single_large_attachment_chunk_keeps_the_current_screen() {
+        let mut screen = Screen::default();
+        let mut replay = vec![b'x'; MAX_OUTPUT * 3];
+        replay.extend(frame(MODAL));
+        screen
+            .feed(&replay)
+            .expect("a large native replay is not a failed resume");
+        assert!(
+            screen.output.len() <= MAX_OUTPUT,
+            "large chunk storage must remain bounded"
+        );
+        assert!(screen.cache_cost("Opus 5.5"));
+    }
+
+    #[test]
+    fn eviction_invalidates_old_dialog_until_a_complete_recovery_paint() {
+        let mut screen = Screen::default();
+        screen.feed(&frame(MODAL)).expect("original dialog");
+        assert!(screen.cache_cost("Opus 5.5"));
+        // No new full-screen recovery anchor in this large incremental repaint.
+        let mut unknown = b"\x1b[?2026h".to_vec();
+        unknown.extend(vec![b'x'; MAX_OUTPUT * 2]);
+        unknown.extend(b"\x1b[?2026l");
+        screen.feed(&unknown).expect("eviction itself is nonfatal");
+        assert!(!screen.cache_cost("Opus 5.5"));
+        assert!(!screen.empty_prompt());
+        let repaint = frame(MODAL);
+        screen
+            .feed(&repaint[..repaint.len() - 1])
+            .expect("split repaint");
+        assert!(!screen.cache_cost("Opus 5.5"));
+        screen
+            .feed(&repaint[repaint.len() - 1..])
+            .expect("paint completed");
+        assert!(screen.cache_cost("Opus 5.5"));
+    }
+
+    #[test]
+    fn recovery_anchor_and_utf8_split_at_every_byte_are_stream_safe() {
+        let mut screen = Screen::default();
+        screen
+            .feed(&vec![b'x'; MAX_OUTPUT + 17])
+            .expect("old replay");
+        for byte in frame(MODAL) {
+            screen.feed(&[byte]).expect("fragmented native output");
+        }
+        assert!(screen.cache_cost("Opus 5.5"));
+        screen
+            .feed(b"\x1b[?2026h\x1b[2J")
+            .expect("new incomplete paint");
+        assert!(!screen.cache_cost("Opus 5.5"));
+    }
+
+    #[test]
+    fn no_recovery_anchor_inside_osc_or_dcs_can_authorize_input() {
+        for string_start in [b"\x1b]title;".as_slice(), b"\x1bPignored;".as_slice()] {
+            let mut screen = Screen::default();
+            screen.feed(string_start).expect("control string");
+            screen
+                .feed(&vec![b'x'; MAX_OUTPUT * 2])
+                .expect("eviction in control string");
+            // An arbitrary tail slice starts inside the string and would render
+            // this as a valid modal. A streaming top-level parser must ignore it.
+            screen
+                .feed(&frame(MODAL))
+                .expect("bytes inside the control string");
+            assert!(!screen.cache_cost("Opus 5.5"));
+            assert!(!screen.empty_prompt());
+            screen.feed(b"\x1b\\").expect("terminate control string");
+            screen
+                .feed(&frame(MODAL))
+                .expect("real complete recovery paint");
+            assert!(screen.cache_cost("Opus 5.5"));
+        }
     }
 }

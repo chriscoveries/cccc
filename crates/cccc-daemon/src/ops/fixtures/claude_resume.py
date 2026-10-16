@@ -12,6 +12,7 @@ import tty
 SAVED = "52b41c61-e23c-4b7c-8b60-809c347451b5"
 FRESH = "ca52e69a-6596-4abd-a0ec-3e8690dc70e1"
 SHORT = "abcdef12"
+FRESH_SHORT = "fedcba21"
 
 
 def write_json(path, value):
@@ -41,20 +42,29 @@ if len(sys.argv) > 1 and sys.argv[1] == "server":
             line = connection.makefile("rb").readline()
             request = json.loads(line)
             op = request["op"]
+            with (root / "control_operations").open("a") as operations:
+                operations.write(json.dumps({"op": op, "short": request.get("short")}) + "\n")
+            version_path = root / "fixture_cli_version"
+            version = version_path.read_text().strip() if version_path.exists() else "2.1.286"
             jobs = []
-            if (root / "active").exists():
-                state = json.loads((root / "jobs" / SHORT / "state.json").read_text())
-                jobs = [{"short": SHORT, "sessionId": state["sessionId"], "cwd": state["cwd"], "cliVersion": "2.1.286"}]
+            for active, short in [("active", SHORT), ("fresh_active", FRESH_SHORT)]:
+                if (root / active).exists():
+                    state = json.loads((root / "jobs" / short / "state.json").read_text())
+                    jobs.append({"short": short, "sessionId": state["sessionId"],
+                                 "cwd": state["cwd"], "cliVersion": version})
             if op == "list":
                 result = {"ok": True, "op": op, "jobs": jobs}
             elif op == "kill":
-                (root / "active").unlink(missing_ok=True)
+                active = "fresh_active" if request.get("short") == FRESH_SHORT else "active"
+                (root / active).unlink(missing_ok=True)
                 result = {"ok": True, "op": op}
             else:
                 result = {"ok": False, "op": op, "code": "EPROTO", "error": "unexpected fixture operation"}
             connection.sendall(json.dumps(result).encode() + b"\n")
 elif "--version" in sys.argv:
-    print("2.1.286 (Claude Code)")
+    version_path = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"]) / "fixture_cli_version"
+    version = version_path.read_text().strip() if version_path.exists() else "2.1.286"
+    print(f"{version} (Claude Code)")
 else:
     root = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"])
     mode = (root / "mode").read_text()
@@ -84,14 +94,19 @@ else:
                  "subtype": "turn_duration"},
             ]
             path.write_text("".join(json.dumps(record) + "\n" for record in records))
-        write_json(root / "jobs" / SHORT / "state.json", {
-            "sessionId": session, "daemonShort": SHORT, "cwd": os.getcwd(),
+        # The survivor tests keep the old worker live while a distinct fresh
+        # job starts. All pre-existing fixture modes retain the original shape.
+        distinct = mode == "surviving_model" and "--resume" not in sys.argv
+        short = FRESH_SHORT if distinct else SHORT
+        active = "fresh_active" if distinct else "active"
+        write_json(root / "jobs" / short / "state.json", {
+            "sessionId": session, "daemonShort": short, "cwd": os.getcwd(),
             "tempo": "idle", "inFlight": {"tasks": 0, "queued": 0},
             "intent": "history-bearing", "linkScanOffset": 0,
             "linkScanPath": str(path) if path.exists() else None, "outcome": None,
         })
-        (root / "active").touch()
-        print(f"started · {SHORT}")
+        (root / active).touch()
+        print(f"started · {short}")
     else:
         # Native attach or the temporary trust prompt. No model task is executed.
         tty.setraw(0)

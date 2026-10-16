@@ -1165,17 +1165,58 @@ fn ordinary_lifecycle_uses_current_workspace_instead_of_saved_receipt() {
 
 #[test]
 fn resume_disabled_starts_fresh_even_when_a_saved_receipt_exists() {
-    if isolated("resume_disabled_starts_fresh_even_when_a_saved_receipt_exists") {
+    const TEST: &str = "resume_disabled_starts_fresh_even_when_a_saved_receipt_exists";
+    if let Ok(root) = std::env::var("CCCC_TEST_RESUME_OFF_HOME") {
+        let home = HomeLayout::from_path(root).expect("seeded receipt home");
+        let group_id = std::env::var("CCCC_TEST_RESUME_OFF_GROUP").expect("seeded group");
+        let group = GroupStore::new(home.clone())
+            .expect("store")
+            .load(&group_id)
+            .expect("group");
+        let response = crate::handle_request(
+            &home,
+            &DaemonRequest {
+                v: 1,
+                op: "actor_start".into(),
+                args: json!({"group_id":group_id,"actor_id":"claude-1","by":"user"})
+                    .as_object()
+                    .expect("arguments")
+                    .clone(),
+            },
+        );
+        // Retire this subprocess's session even when its startup assertion fails.
+        super::super::actor_delivery::shutdown_actor(&group_id, "claude-1");
+        let _ = super::super::actor_runtime::apply(&home, &group, "claude-1", "actor.stop");
+        assert!(
+            response.ok,
+            "resume-off must start fresh: {:?}",
+            response.error
+        );
+        return;
+    }
+    if isolated(TEST) {
         return;
     }
     let f = Fixture::new("healthy");
-    // This exact test runs in its own child process; no parallel tests share this env.
-    unsafe { std::env::set_var("CCCC_RUNTIME_RESUME", "off") };
-    let response = f.lifecycle("actor_start");
+    assert_eq!(f.receipt()["provider_session_id"], SAVED);
+    // Seed while resume is enabled, then pass the off setting at subprocess
+    // creation. No unsafe process-wide environment mutation is required.
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            &format!("ops::local_headless::claude_resume_tests::{TEST}"),
+            "--exact",
+            "--nocapture",
+        ])
+        .env("CCCC_TEST_RESUME_OFF_HOME", f.home.root())
+        .env("CCCC_TEST_RESUME_OFF_GROUP", &f.group.group_id)
+        .env("CCCC_RUNTIME_RESUME", "off")
+        .output()
+        .expect("resume-off lifecycle subprocess");
     assert!(
-        response.ok,
-        "resume-off must start fresh: {:?}",
-        response.error
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(f.launches(), 1);
     assert_eq!(
@@ -1185,4 +1226,270 @@ fn resume_disabled_starts_fresh_even_when_a_saved_receipt_exists() {
     let state: Value = cccc_core::fs::read_json(&f.config.join("jobs/abcdef12/state.json"))
         .expect("actual fresh job");
     assert_ne!(state["sessionId"], SAVED);
+}
+
+// PROPOSED TESTS ONLY; not run. Append to local_headless/claude_resume_tests.rs.
+// Uses the existing isolated local Agent View fixture and lifecycle path.
+// The fixture's launcher and live job advertise supported CLI 2.1.286, which
+// is outside the model-dialog adapter's exact 2.1.293 allowlist.
+
+#[test]
+fn model_drift_on_supported_cli_without_a_dialog_adapter_starts_fresh_before_resume() {
+    if isolated("model_drift_on_supported_cli_without_a_dialog_adapter_starts_fresh_before_resume")
+    {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    let history = f
+        .config
+        .join("projects/workspace")
+        .join(format!("{SAVED}.jsonl"));
+    let original_history = std::fs::read(&history).expect("original saved history");
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    let mut group = store.load(&f.group.group_id).expect("group");
+    group.actors[0]
+        .command
+        .extend(["--model".into(), "opus".into()]);
+    store.save(&group).expect("model change");
+
+    let response = f.lifecycle("actor_start");
+    assert!(
+        response.ok,
+        "supported CLI must remain usable: {:?}",
+        response.error
+    );
+    assert!(super::running(&f.group.group_id, &f.actor.id));
+    assert_eq!(
+        f.launches(),
+        1,
+        "compatibility must be decided before launching the old resume"
+    );
+    let args: Vec<String> = serde_json::from_str(
+        std::fs::read_to_string(f.config.join("launch_arguments"))
+            .expect("launch trace")
+            .lines()
+            .next()
+            .expect("one fresh launch"),
+    )
+    .expect("argument JSON");
+    assert!(!args.iter().any(|arg| arg == "--resume"));
+    assert!(args.windows(2).any(|pair| pair == ["--model", "opus"]));
+    let receipt = f.receipt();
+    assert_ne!(receipt["provider_session_id"], SAVED);
+    assert_eq!(receipt["status"], "usable");
+    assert_eq!(receipt["model"], "opus");
+    assert_eq!(receipt["failure_count"], 0);
+    assert!(
+        receipt["previous_sessions"]
+            .as_array()
+            .expect("archive")
+            .iter()
+            .any(|entry| entry["session_id"] == SAVED)
+    );
+    assert_eq!(
+        std::fs::read(&history).expect("saved history retained"),
+        original_history
+    );
+    let input = std::fs::read_to_string(f.config.join("received")).unwrap_or_default();
+    assert!(
+        !input.contains("/model"),
+        "unknown dialog adapters never send model commands"
+    );
+}
+
+#[test]
+fn explicit_retained_model_survives_the_second_stop_start() {
+    if isolated("explicit_retained_model_survives_the_second_stop_start") {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    let cwd = super::super::actor_runtime::working_directory(&f.group, &f.actor).expect("cwd");
+    let history = f.retarget_history(cwd.to_str().expect("cwd string"));
+    use std::io::Write;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(history)
+            .expect("history"),
+        "{}",
+        json!({"type":"assistant","cwd":cwd,"sessionId":SAVED,
+            "message":{"model":"claude-haiku-4-5","content":[]}})
+    )
+    .expect("append model");
+    f.wrong_receipt();
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    let mut group = store.load(&f.group.group_id).expect("group");
+    group.actors[0]
+        .command
+        .extend(["--model".into(), "opus".into()]);
+    store.save(&group).expect("actor settings");
+
+    let selected = f.resume_session(SAVED);
+    assert!(selected.ok, "{:?}", selected.error);
+    // This assertion is already RED at 82b: record_managed drops the marker.
+    assert_eq!(f.receipt()["explicit_resume_session_id"], SAVED);
+    let stopped = f.lifecycle("actor_stop");
+    assert!(stopped.ok, "{:?}", stopped.error);
+    let restarted = f.lifecycle("actor_start");
+    assert!(restarted.ok, "{:?}", restarted.error);
+    let receipt = f.receipt();
+    assert_eq!(receipt["provider_session_id"], SAVED);
+    assert_eq!(receipt["explicit_resume_session_id"], SAVED);
+    assert_eq!(receipt["model"], "claude-haiku-4-5");
+    assert_eq!(receipt["model_application"]["configured_model"], "opus");
+    assert_eq!(
+        receipt["model_application"]["configured_model_applied"],
+        false
+    );
+    assert_eq!(f.launches(), 2);
+    for line in std::fs::read_to_string(f.config.join("launch_arguments"))
+        .expect("launches")
+        .lines()
+    {
+        let args: Vec<String> = serde_json::from_str(line).expect("arguments");
+        assert_eq!(args, ["--bg", "--resume", SAVED]);
+    }
+    assert!(
+        !std::fs::read_to_string(f.config.join("received"))
+            .unwrap_or_default()
+            .contains("/model")
+    );
+    let fresh = f.lifecycle("actor_new_session");
+    assert!(
+        fresh.ok,
+        "New Session must explicitly clear the retained selection: {:?}",
+        fresh.error
+    );
+    assert_ne!(f.receipt()["provider_session_id"], SAVED);
+    assert!(
+        f.receipt()
+            .get("explicit_resume_session_id")
+            .is_none_or(|id| id == "")
+    );
+    assert_eq!(f.receipt()["model"], "opus");
+}
+
+// PROPOSED TESTS ONLY; not run. Append to local_headless/claude_resume_tests.rs
+// together with surviving_worker_fixture_red.patch. No production source edits
+// are included. The old worker is represented by the fixture's real local
+// control server, with separate durable state/active markers for both jobs.
+
+fn assert_surviving_worker_model_policy(actual_model: &str, expect_same_id: bool) {
+    let f = Fixture::new("surviving_model");
+    std::fs::write(f.config.join("fixture_cli_version"), "2.1.293")
+        .expect("proven adapter version");
+    let cwd = super::super::actor_runtime::working_directory(&f.group, &f.actor).expect("cwd");
+    let history = f
+        .config
+        .join("projects/workspace")
+        .join(format!("{SAVED}.jsonl"));
+    let original_history = std::fs::read(&history).expect("old transcript");
+    let old_state_path = f.config.join("jobs/abcdef12/state.json");
+    std::fs::create_dir_all(old_state_path.parent().expect("old job directory"))
+        .expect("job directory");
+    cccc_core::fs::write_json(
+        &old_state_path,
+        &json!({
+            "sessionId":SAVED, "resumeSessionId":SAVED, "daemonShort":"abcdef12", "cwd":cwd,
+            "tempo":"idle", "inFlight":{"tasks":0,"queued":0}, "intent":"history-bearing",
+            "linkScanOffset":0, "linkScanPath":history, "outcome":null,
+            "respawnFlags":["--model",actual_model]
+        }),
+    )
+    .expect("surviving worker state");
+    let original_state = std::fs::read(&old_state_path).expect("old state bytes");
+    std::fs::write(f.config.join("active"), "").expect("surviving old worker");
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    let mut group = store.load(&f.group.group_id).expect("group");
+    group.actors[0]
+        .command
+        .extend(["--model".into(), "opus".into()]);
+    store.save(&group).expect("current actor model");
+
+    let started = f.lifecycle("actor_start");
+    assert!(
+        started.ok,
+        "supported surviving worker must not fail model_ownership: {:?}",
+        started.error
+    );
+    assert!(super::running(&f.group.group_id, &f.actor.id));
+    let receipt = f.receipt();
+    assert_eq!(receipt["status"], "usable");
+    assert_eq!(receipt["failure_count"], 0);
+    assert_eq!(receipt["model"], "opus");
+    if expect_same_id {
+        assert_eq!(receipt["provider_session_id"], SAVED);
+        assert_eq!(
+            f.launches(),
+            0,
+            "matching persisted model needs only reattach"
+        );
+    } else {
+        assert_ne!(receipt["provider_session_id"], SAVED);
+        assert_eq!(
+            f.launches(),
+            1,
+            "unknown exclusive UI ownership chooses one ordinary fresh launch"
+        );
+        assert!(
+            receipt["previous_sessions"]
+                .as_array()
+                .expect("archive")
+                .iter()
+                .any(|entry| entry["session_id"] == SAVED)
+        );
+        let args: Vec<String> = serde_json::from_str(
+            std::fs::read_to_string(f.config.join("launch_arguments"))
+                .expect("launch args")
+                .lines()
+                .next()
+                .expect("one launch"),
+        )
+        .expect("argument JSON");
+        assert!(!args.iter().any(|arg| arg == "--resume"));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "opus"]));
+        let operations =
+            std::fs::read_to_string(f.config.join("control_operations")).expect("control trace");
+        for line in operations.lines() {
+            let operation: Value = serde_json::from_str(line).expect("operation JSON");
+            assert!(
+                !(operation["short"] == "abcdef12"
+                    && (operation["op"] == "attach" || operation["op"] == "kill")),
+                "a foreign surviving UI must not receive model input or cleanup"
+            );
+        }
+    }
+    assert!(
+        f.config.join("active").exists(),
+        "old surviving worker remains alive"
+    );
+    assert_eq!(
+        std::fs::read(&old_state_path).expect("old worker metadata"),
+        original_state
+    );
+    assert_eq!(
+        std::fs::read(&history).expect("old conversation"),
+        original_history
+    );
+    assert!(
+        !std::fs::read_to_string(f.config.join("received"))
+            .unwrap_or_default()
+            .contains("/model")
+    );
+}
+
+#[test]
+fn unowned_surviving_worker_model_drift_starts_fresh_without_touching_the_old_ui() {
+    if isolated("unowned_surviving_worker_model_drift_starts_fresh_without_touching_the_old_ui") {
+        return;
+    }
+    assert_surviving_worker_model_policy("sonnet", false);
+}
+
+#[test]
+fn surviving_worker_with_already_applied_model_reattaches_without_a_new_launch() {
+    if isolated("surviving_worker_with_already_applied_model_reattaches_without_a_new_launch") {
+        return;
+    }
+    assert_surviving_worker_model_policy("opus", true);
 }
