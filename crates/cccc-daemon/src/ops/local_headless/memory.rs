@@ -65,6 +65,17 @@ pub(crate) fn restart_for_memory_with_commit(
     let Ok(_permit) = crate::runtime_start_gate::permit(home) else {
         return Ok(MemoryRestartOutcome::Skipped);
     };
+
+    // Tests-only MUST3 interposition — ORDERING BOUNDARY: placed before
+    // StartGuard::acquire (and before any input_gate take). A managed
+    // submit_batch try_acquires this same guard, so an interposed submit can
+    // only genuinely ACCEPT here, never defer; once the guard is held below,
+    // acceptance is structurally impossible. The future input-record recheck
+    // must therefore be evaluated under the guard at the final close/stop,
+    // against a record this window can still advance. No-op when unarmed.
+    #[cfg(all(test, target_os = "linux"))]
+    super::super::actor_memory::must3_gap_tests::interpose_submit(home, group_id, actor_id);
+
     let key = (group_id.to_owned(), actor_id.to_owned());
     let _start = supervisor::StartGuard::acquire(&key)?;
     let Some(item) = supervisor::lookup(&key) else {

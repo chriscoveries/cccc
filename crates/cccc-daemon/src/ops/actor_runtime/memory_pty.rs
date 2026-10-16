@@ -64,12 +64,14 @@ pub(crate) fn restart_for_memory_pty(
         return Ok(FreshOutcome::Skipped);
     }
 
-    // Tests-only MUST3 interposition: a real, armed submit may land here —
-    // between the final quiet recheck above and the commit/stop below — so the
-    // submit-in-gap regression is a genuine interleaving, never a written
-    // activity field. No-op in every non-armed (and every non-test) run.
+    // Tests-only MUST3 interposition — ORDERING BOUNDARY: this point holds no
+    // gate the submit needs (no input_gate), and the future recheck must take
+    // its guard only AFTER here. A real, armed submit may land between the
+    // final quiet recheck above and the commit/stop below, so the submit-in-gap
+    // regression is a genuine interleaving, never a written activity field.
+    // No-op in every non-armed (and every non-test) run.
     #[cfg(all(test, target_os = "linux"))]
-    actor_memory::must3_gap_tests::interpose_submit(home, &fresh, actor_id);
+    actor_memory::must3_gap_tests::interpose_submit(home, group_id, actor_id);
 
     // Final admitted attempt boundary: persistence failure must leave the
     // worker, owned provider and receipt untouched. A committed attempt is

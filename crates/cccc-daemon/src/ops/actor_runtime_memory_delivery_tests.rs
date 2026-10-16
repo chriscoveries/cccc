@@ -530,22 +530,35 @@ pub(super) mod manual_admission;
 // ---- MUST3 (tests-only): managed accepted/rejected submit contracts ----
 // Real admission through the isolated ACP fixture; no synthetic activity.
 
-fn provider_requests_total(f: &Fixture) -> usize {
+/// The fixture logs every provider RPC; only `session/prompt` is a submit —
+/// initialization traffic (`initialize`, `session/new`, ...) must not count
+/// as a submit record (MUST3 review: a raw line count proves nothing).
+fn count_prompts(f: &Fixture) -> usize {
     std::fs::read_to_string(f.workspace.join("candidate_requests.jsonl"))
-        .map(|body| body.lines().count())
+        .map(|body| {
+            body.lines()
+                .filter(|line| {
+                    serde_json::from_str::<Value>(line).expect("RPC JSON")["method"]
+                        == "session/prompt"
+                })
+                .count()
+        })
         .unwrap_or(0)
 }
 
-/// Pin: a real ACCEPTED managed submit reaches the provider — the acceptance
-/// that MUST3's input record must cover. GREEN today; the managed half of the
-/// accepted-submit contract, independent of the (unimplemented) input seq.
+/// Pin: a real ACCEPTED managed submit reaches the provider as a prompt —
+/// baseline counted AFTER fixture initialization, so the delta is the submit
+/// record itself. GREEN today; the managed half of the accepted-submit
+/// contract, independent of the (unimplemented) input seq.
 #[test]
 fn accepted_managed_submit_reaches_the_provider() {
     let f = Fixture::new(false);
-    f.materialize();
-    assert!(
-        provider_requests_total(&f) >= 1,
-        "an accepted managed submit must reach the provider at least once"
+    let baseline = count_prompts(&f);
+    f.materialize(); // asserts BatchSubmission::Accepted, then waits idle
+    assert_eq!(
+        count_prompts(&f),
+        baseline + 1,
+        "exactly one session/prompt must arrive for the accepted managed submit"
     );
 }
 
@@ -568,8 +581,55 @@ fn cancelled_before_managed_admission_defers_without_provider_traffic() {
         "cancelled-before-admission must defer, not deliver"
     );
     assert_eq!(
-        provider_requests_total(&f),
+        count_prompts(&f),
         0,
-        "no provider traffic may appear for a cancelled managed submit"
+        "no session/prompt may appear for a cancelled managed submit"
+    );
+}
+
+/// Owner MUST3 managed-accept-input behavior, now with a REAL RED: an
+/// accepted-and-completed managed submit lands at the native flow's gap point
+/// (before StartGuard acquisition, so it genuinely accepts), and the restart
+/// must then be vetoed. RED on current source: nothing records the accepted
+/// input, so `restart_for_memory_with_commit` proceeds to close and replace
+/// the provider session. After the fix: Skipped, same provider session id,
+/// commit never reached.
+#[test]
+fn real_accepted_managed_submit_before_native_maintenance_vetoes_the_restart() {
+    let f = Fixture::new(false);
+    f.materialize(); // accepted + completed (idle) — provider session established
+    let expected = f.candidate();
+    let session_before = f.session_id();
+    let commit_calls = std::sync::atomic::AtomicUsize::new(0);
+    let _arm = crate::ops::actor_memory::must3_gap_tests::arm(
+        f.home.root().to_path_buf(),
+        f.group.group_id.clone(),
+        "worker".into(),
+    );
+    let outcome = crate::ops::local_headless::memory::restart_for_memory_with_commit(
+        &f.home,
+        &f.group.group_id,
+        "worker",
+        &expected,
+        |_, _, _| Ok(true),
+        || {
+            commit_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        },
+    )
+    .expect("native maintenance returns");
+    assert_eq!(
+        outcome,
+        crate::ops::local_headless::memory::MemoryRestartOutcome::Skipped,
+        "accepted input newer than the maintenance observation must veto the restart"
+    );
+    assert_eq!(
+        f.session_id(),
+        session_before,
+        "the owned provider session must be untouched"
+    );
+    assert!(
+        commit_calls.load(std::sync::atomic::Ordering::SeqCst) == 0,
+        "commit must never be reached when the restart is vetoed"
     );
 }
