@@ -267,4 +267,245 @@ printf 'started · abcdef12\n'
     async fn fresh_launch_without_a_named_conversation_still_completes_a_turn() {
         Fixture::new(false, false).first_turn().await;
     }
+
+    impl Fixture {
+        async fn launch_with_late_identity(
+            &self,
+            resume_id: &str,
+            tempo: &str,
+        ) -> io::Result<LaunchedClaude> {
+            let initial_path = self.config.join("fresh.json");
+            let mut initial: Value =
+                serde_json::from_slice(&std::fs::read(&initial_path)?).map_err(io::Error::other)?;
+            initial["tempo"] = json!("active");
+            initial["resumeSessionId"] = Value::Null;
+            cccc_core::fs::write_json(&initial_path, &initial)?;
+            let mut barrier = FreshSettleBarrier::register(&self.config, SHORT)?;
+            let launch = self.launch();
+            tokio::pin!(launch);
+            tokio::select! {
+                result = &mut launch => {
+                    let detail = match result {
+                        Ok(launched) => {
+                            // Dropping the observer must not send an explicit
+                            // stop to a job whose ownership is under test.
+                            drop(launched);
+                            "launch returned before the busy snapshot".to_owned()
+                        }
+                        Err(error) => format!("launch failed before the busy snapshot: {error}"),
+                    };
+                    return Err(io::Error::other(detail));
+                }
+                reached = barrier.reached() => reached?,
+            }
+            // The real launch has checked its initial fresh state and is now
+            // held after reading a busy settlement snapshot. Publish a whole
+            // new state before releasing it, without a timing-based sleep.
+            let path = self.config.join("jobs").join(SHORT).join("state.json");
+            let mut state: Value =
+                serde_json::from_slice(&std::fs::read(&path)?).map_err(io::Error::other)?;
+            state["resumeSessionId"] = json!(resume_id);
+            state["tempo"] = json!(tempo);
+            cccc_core::fs::write_json(&path, &state)?;
+            barrier.release()?;
+            tokio::time::timeout(LIVE_SETTLE_TIMEOUT * 2, &mut launch)
+                .await
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "fixture launch exceeded its own settlement deadline",
+                    )
+                })?
+        }
+
+        async fn reject_late_foreign_identity(&self, tempo: &str) {
+            let result = self.launch_with_late_identity(SAVED, tempo).await;
+            let error = match result {
+                Err(error) => error,
+                Ok(launched) => {
+                    drop(launched);
+                    panic!("fresh startup accepted a foreign resume published while settling");
+                }
+            };
+            let endpoint = control::Endpoint::resolve(&self.config).expect("fixture endpoint");
+            let jobs = control::list(&endpoint).await.expect("fixture job list");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+            assert!(error.to_string().contains("fresh launch"), "{error}");
+            assert!(error.to_string().contains("resumed"), "{error}");
+            assert_eq!(self.replies.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                self.kills.load(Ordering::SeqCst),
+                0,
+                "late foreign identity never establishes ownership for rollback"
+            );
+            assert_eq!(
+                std::fs::read(&self.saved).expect("saved transcript"),
+                self.original
+            );
+            assert!(
+                jobs.iter()
+                    .any(|job| job["short"] == SHORT && job["sessionId"] == WORKER),
+                "the unowned native job remains listed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn late_idle_foreign_resume_is_rejected_before_any_prompt() {
+        Fixture::new(true, false)
+            .reject_late_foreign_identity("idle")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn late_active_foreign_resume_is_rejected_without_killing_the_job() {
+        Fixture::new(true, false)
+            .reject_late_foreign_identity("active")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn late_same_worker_identity_still_completes_a_first_turn() {
+        let fixture = Fixture::new(true, false);
+        let launched = fixture
+            .launch_with_late_identity(WORKER, "idle")
+            .await
+            .expect("same-worker identity is a fresh startup");
+        assert_eq!(launched.session_id, WORKER);
+        assert!(!launched.resumed);
+        let mut events = launched.protocol.subscribe();
+        launched
+            .protocol
+            .start_prompt("first-turn", "say alive")
+            .await
+            .expect("first prompt accepted");
+        let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let event = events.recv().await.expect("managed event");
+                if event.message["method"] == "turn/completed" {
+                    break Ok(());
+                }
+                if event.message["method"] == MANAGED_AGENT_DISCONNECTED_METHOD {
+                    break Err(event.message);
+                }
+            }
+        })
+        .await;
+        let alive = launched.protocol.running();
+        let replies = fixture.replies.load(Ordering::SeqCst);
+        let kills_before_owned_cleanup = fixture.kills.load(Ordering::SeqCst);
+        let saved = std::fs::read(&fixture.saved).expect("saved transcript");
+        let cleanup = launched.protocol.close().await;
+        assert!(
+            matches!(outcome, Ok(Ok(()))),
+            "first turn failed: {outcome:?}"
+        );
+        assert!(alive, "healthy same-worker identity remains running");
+        assert_eq!(replies, 1);
+        assert_eq!(kills_before_owned_cleanup, 0);
+        assert_eq!(saved, fixture.original);
+        cleanup.expect("explicit cleanup of the proven fresh job");
+    }
+}
+
+struct FreshSettlePending {
+    token: u64,
+    reached: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+type FreshSettleKey = (PathBuf, String);
+
+fn fresh_settle_barriers()
+-> &'static Mutex<std::collections::HashMap<FreshSettleKey, FreshSettlePending>> {
+    static BARRIERS: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<FreshSettleKey, FreshSettlePending>>,
+    > = std::sync::OnceLock::new();
+    BARRIERS.get_or_init(Default::default)
+}
+
+struct FreshSettleBarrier {
+    key: FreshSettleKey,
+    token: u64,
+    reached: Option<oneshot::Receiver<()>>,
+    release: Option<oneshot::Sender<()>>,
+}
+
+impl FreshSettleBarrier {
+    fn register(config_dir: &Path, short: &str) -> io::Result<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let token = NEXT.fetch_add(1, Ordering::Relaxed);
+        let key = (config_dir.to_path_buf(), short.to_owned());
+        let (reached_sender, reached) = oneshot::channel();
+        let (release, release_receiver) = oneshot::channel();
+        let mut barriers = fresh_settle_barriers()
+            .lock()
+            .map_err(|_| io::Error::other("fixture barrier registry poisoned"))?;
+        let std::collections::hash_map::Entry::Vacant(entry) = barriers.entry(key.clone()) else {
+            return Err(io::Error::other("fixture path already has a barrier owner"));
+        };
+        entry.insert(FreshSettlePending {
+            token,
+            reached: reached_sender,
+            release: release_receiver,
+        });
+        Ok(Self {
+            key,
+            token,
+            reached: Some(reached),
+            release: Some(release),
+        })
+    }
+
+    async fn reached(&mut self) -> io::Result<()> {
+        let receiver = self
+            .reached
+            .take()
+            .ok_or_else(|| io::Error::other("fixture busy observation may only be awaited once"))?;
+        tokio::time::timeout(LAUNCH_TIMEOUT + JOB_READY_TIMEOUT, receiver)
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "fixture busy snapshot not reached")
+            })?
+            .map_err(|_| io::Error::other("fixture busy observation was cancelled"))
+    }
+
+    fn release(&mut self) -> io::Result<()> {
+        self.release
+            .take()
+            .ok_or_else(|| io::Error::other("fixture barrier was already released"))?
+            .send(())
+            .map_err(|_| io::Error::other("fixture launch stopped before release"))
+    }
+}
+
+impl Drop for FreshSettleBarrier {
+    fn drop(&mut self) {
+        // Release an already-entered launch before attempting registry cleanup.
+        // Cancellation or an assertion failure must never leave it waiting.
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        if let Ok(mut barriers) = fresh_settle_barriers().lock()
+            && barriers
+                .get(&self.key)
+                .is_some_and(|pending| pending.token == self.token)
+        {
+            barriers.remove(&self.key);
+        }
+    }
+}
+
+pub(super) async fn observe_fresh_settle_busy(config_dir: &Path, short: &str) {
+    let pending = {
+        let Ok(mut barriers) = fresh_settle_barriers().lock() else {
+            return;
+        };
+        barriers.remove(&(config_dir.to_path_buf(), short.to_owned()))
+    };
+    if let Some(pending) = pending
+        && pending.reached.send(()).is_ok()
+    {
+        let _ = pending.release.await;
+    }
 }
