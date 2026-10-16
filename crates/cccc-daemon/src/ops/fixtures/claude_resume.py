@@ -7,6 +7,7 @@ import pathlib
 import socket
 import sys
 import time
+import threading
 import tty
 
 SAVED = "52b41c61-e23c-4b7c-8b60-809c347451b5"
@@ -59,8 +60,45 @@ if len(sys.argv) > 1 and sys.argv[1] == "server":
                     result = {"ok": False, "op": op, "code": "EPROTO", "error": "fixture cleanup unknown"}
                 else:
                     result = {"ok": True, "op": op, "jobs": jobs}
+            elif op == "attach" and (root / "mode").read_text().startswith("model_adapter_screen_"):
+                # New screen tests alone use a threaded attachment so real has
+                # probes and owned cleanup remain serviced while replay streams.
+                mode = (root / "mode").read_text()
+                attached = connection.dup()
+                connection.sendall(b'{"ok":true,"op":"attach","imarkNonce":"0123456789abcdef0123456789abcdef"}\n')
+
+                def serve_attachment(stream, attachment_mode):
+                    with stream:
+                        try:
+                            stream.sendall(b"x" * (384 * 1024))
+                            stream.sendall(b'\x1b_cc-d-imark;{"kind":"prompt_idle","nonce":"0123456789abcdef0123456789abcdef"}\x1b\\')
+                            prompt = "❯\r\n⏵⏵ bypass permissions on".encode()
+                            if attachment_mode.endswith("post_input"):
+                                stream.sendall(b"\x1b[?2026h\x1b[2J\x1b[H" + prompt + b"\x1b[?2026l")
+                            elif attachment_mode.endswith("draft"):
+                                stream.sendall(b"\x1b[?2026h\x1b[2J\x1b[H" + "❯ existing draft\r\n⏵⏵ bypass permissions on".encode() + b"\x1b[?2026l")
+                            else:
+                                # Complete incremental paint, but no retained
+                                # reconstruction anchor after actual eviction.
+                                stream.sendall(b"\x1b[?2026h" + prompt + b"\x1b[?2026l")
+                            while True:
+                                data = stream.recv(4096)
+                                if not data:
+                                    break
+                                with (root / "model_native_input").open("ab") as trace:
+                                    trace.write(data)
+                                if attachment_mode.endswith("post_input"):
+                                    stream.sendall(b"x" * (384 * 1024))
+                                    stream.sendall(b"\x1b[?2026hincremental output\x1b[?2026l")
+                        except (BrokenPipeError, ConnectionResetError):
+                            pass
+
+                threading.Thread(target=serve_attachment, args=(attached, mode), daemon=True).start()
+                continue
+            elif op == "has" and (root / "mode").read_text().startswith("model_adapter_screen_"):
+                result = {"ok": True, "op": op, "alive": True, "ready": True}
             elif op == "kill":
-                if (root / "mode").read_text() == "model_adapter_cleanup_failure":
+                if (root / "mode").read_text() in ("model_adapter_cleanup_failure", "model_adapter_screen_unreadable_cleanup_failure"):
                     (root / "fixture_cleanup_failed").touch()
                     result = {"ok": False, "op": op, "code": "EPROTO", "error": "fixture stop refused"}
                 else:

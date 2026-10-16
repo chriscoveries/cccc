@@ -383,4 +383,112 @@ mod wiring_tests {
         replay.extend(frame(MODAL));
         exchange(replay, true, false).await;
     }
+
+    #[test]
+    fn opt_in_model_trace_captures_actual_eviction_and_confirmation_with_one_identity_join() {
+        const TEST: &str = "ops::codex_voice_analyst::claude::model_switch::wiring_tests::opt_in_model_trace_captures_actual_eviction_and_confirmation_with_one_identity_join";
+        const CHILD: &str = "CCCC_TEST_MODEL_TRACE_CAPTURE";
+        const PREFIX: &str = "[cccc-claude-model] ";
+        if std::env::var(CHILD).as_deref() == Ok("1") {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("fixture runtime")
+                .block_on(exchange_with_history(
+                    frame(MODAL),
+                    true,
+                    false,
+                    vec![b'x'; 384 * 1024],
+                ));
+            return;
+        }
+        for enabled in [true, false] {
+            let mut child =
+                std::process::Command::new(std::env::current_exe().expect("test binary"));
+            child.args([TEST, "--exact", "--nocapture"]).env(CHILD, "1");
+            if enabled {
+                child.env("CCCC_CLAUDE_MODEL_TRACE", "1");
+            } else {
+                child.env_remove("CCCC_CLAUDE_MODEL_TRACE");
+            }
+            let output = child.output().expect("capture subprocess");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let records: Vec<Value> = stderr
+                .lines()
+                .filter_map(|line| line.strip_prefix(PREFIX))
+                .map(|line| {
+                    assert!(PREFIX.len() + line.len() + 1 <= 4096);
+                    serde_json::from_str(line).expect("bounded metadata JSON")
+                })
+                .collect();
+            if !enabled {
+                assert!(records.is_empty(), "metadata capture is default silent");
+                continue;
+            }
+            assert!(
+                !records.is_empty(),
+                "opt-in must work without a tracing subscriber"
+            );
+            let start = records
+                .iter()
+                .find(|record| record["event"] == "claude_model_transition_started")
+                .expect("start metadata");
+            let transition = start["transition_id"].as_str().expect("transition ID");
+            assert_eq!(transition.len(), 32);
+            assert_eq!(start["short"], "01234567");
+            assert!(
+                records
+                    .iter()
+                    .all(|record| record["transition_id"] == transition)
+            );
+            let eviction = records
+                .iter()
+                .find(|record| {
+                    record["event"] == "claude_model_screen_evicted"
+                        && record["stage"] == "pre_input"
+                })
+                .expect("actual pre-input screen eviction");
+            assert!(eviction["received_bytes"].as_u64().expect("received") > 128 * 1024);
+            assert_eq!(eviction["max_output_bytes"], 128 * 1024);
+            assert!(eviction["retained_from"].as_u64().expect("evicted prefix") > 0);
+            assert_eq!(eviction["anchor_known"], false);
+            let recovery = records
+                .iter()
+                .find(|record| record["event"] == "claude_model_screen_recovered")
+                .expect("reconstruction evidence");
+            assert_eq!(recovery["screen_id"], eviction["screen_id"]);
+            assert_eq!(recovery["complete_frame"], true);
+            assert!(records.iter().any(|record| record["event"]
+                == "claude_model_persisted_confirmed"
+                && record["configured_model_confirmed"] == true));
+            for record in &records {
+                let object = record.as_object().expect("metadata object");
+                for forbidden in [
+                    "target_model",
+                    "model",
+                    "screen",
+                    "prompt",
+                    "account",
+                    "auth",
+                    "nonce",
+                    "attachId",
+                    "environment",
+                ] {
+                    assert!(
+                        !object.contains_key(forbidden),
+                        "metadata must omit {forbidden}"
+                    );
+                }
+            }
+            assert!(!stderr.contains("Switch model?"));
+            assert!(!stderr.contains("Opus 5.5"));
+            assert!(!stderr.contains("This conversation is cached"));
+        }
+    }
 }

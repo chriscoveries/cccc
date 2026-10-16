@@ -185,3 +185,7 @@ mod tests {
         assert_eq!(continuity::previous_sessions(&document).len(), 20);
     }
 }
+
+#[cfg(test)]
+#[path = "retarget_lock_acceptance_tests.rs"]
+mod lock_acceptance_tests;

@@ -160,3 +160,31 @@ fn queued_observation_does_not_resurrect_a_removed_receipt() {
         "a late observation must not recreate retired session state"
     );
 }
+
+thread_local! {
+    static FAIL_WRITE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+pub(super) fn fail_next_write(receipt: &Path) {
+    FAIL_WRITE.with(|slot| *slot.borrow_mut() = Some(receipt.to_path_buf()));
+}
+
+pub(super) fn before_write(receipt: &Path) -> std::io::Result<()> {
+    let fail = FAIL_WRITE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_deref() == Some(receipt) {
+            slot.take();
+            true
+        } else {
+            false
+        }
+    });
+    if fail {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "fixture mandatory receipt write denied",
+        ))
+    } else {
+        Ok(())
+    }
+}
