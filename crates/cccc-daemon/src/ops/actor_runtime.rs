@@ -7,13 +7,18 @@ use crate::dispatch::OpError;
 use crate::ops::actor_profile_runtime;
 
 mod attributed_reap;
+mod delivery;
 mod environment;
+#[cfg(all(test, unix))]
+#[path = "actor_runtime_memory_delivery_tests.rs"]
+mod memory_delivery_tests;
 mod persistence;
 mod reconcile;
 pub(crate) mod terminal_history;
 #[cfg(test)]
 mod untrusted_workspace_tests;
 pub(crate) use attributed_reap::reap_group;
+pub(crate) use delivery::start_for_delivery;
 pub use persistence::persist_lifecycle;
 pub(crate) use reconcile::record_process_exit;
 pub use reconcile::{reap_exited, reconcile_exited};
@@ -123,6 +128,9 @@ fn apply_resolved_with_policy(
             },
         );
     }
+    if kind != "actor.new_session" {
+        enforce_required_memory_resume(home, group, actor)?;
+    }
     // Also retire a disconnected registration whose previous cleanup failed.
     stop_registered(group, actor_id)?;
     if kind == "actor.new_session" {
@@ -135,6 +143,10 @@ fn apply_resolved_with_policy(
         } else {
             super::runtime_session::remove(home, &group.group_id, actor_id).map_err(OpError::io)?;
         }
+    }
+    if kind == "actor.new_session" {
+        super::actor_memory::clear_required_resume(home, &group.group_id, actor_id, None)
+            .map_err(OpError::io)?;
     }
     super::capabilities::apply_actor_startup_baseline(home, group, actor);
     if actor.runtime == ActorRuntime::Deepseek {
@@ -157,6 +169,34 @@ fn apply_resolved_with_policy(
         return Ok(None);
     }
     start(home, group, actor).map(Some)
+}
+
+/// Every new backend must honor a durable maintenance obligation. Healthy
+/// idempotent owner checks happen before this; explicit New Session clears it
+/// through the existing lifecycle path before any replacement is launched.
+fn enforce_required_memory_resume(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+) -> Result<(), OpError> {
+    let required =
+        super::actor_memory::required_resume(home, &group.group_id, &actor.id).map_err(|_| {
+            launch_error(super::actor_memory::blocked_resume(
+                "Could not verify the memory-maintenance resume requirement before startup",
+            ))
+        })?;
+    if let Some(required) = required
+        && (actor.runtime != required.runtime
+            || !super::codex_voice_analyst::AnalystSession::supports_memory_restart(
+                actor.runtime,
+                actor.runtime_mode,
+            ))
+    {
+        return Err(launch_error(super::actor_memory::blocked_resume(
+            "Actor settings no longer select the Runtime required by memory maintenance",
+        )));
+    }
+    Ok(())
 }
 
 fn start_local_headless(
@@ -183,6 +223,9 @@ fn start_local_headless(
 }
 
 fn launch_error(error: std::io::Error) -> OpError {
+    if super::actor_memory::is_resume_blocked(&error) {
+        return OpError::new(RUNTIME_RESUME_FAILED, error.to_string());
+    }
     if super::runtime_session::resume_failure::is_blocked(&error) {
         return OpError::new(RUNTIME_RESUME_FAILED, error.to_string());
     }

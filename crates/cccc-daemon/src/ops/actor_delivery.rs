@@ -11,6 +11,7 @@ use crate::ops::actor_delivery_worker;
 mod drain;
 mod lifecycle;
 pub(crate) use drain::{drain_group, pending_group_ids};
+pub(crate) use lifecycle::{DeferredWorkerShutdown, cancel_actor};
 pub use lifecycle::{shutdown_actor, shutdown_all, shutdown_group};
 
 const QUEUE_CAPACITY: usize = 256;
@@ -126,9 +127,13 @@ impl DeliveryWorker {
         self.stop();
     }
 
-    fn stop(&mut self) {
+    fn cancel(&mut self) {
         self.cancelled.store(true, Ordering::Release);
         self.sender.take();
+    }
+
+    fn stop(&mut self) {
+        self.cancel();
         if let Some(thread) = self.thread.take()
             && thread.join().is_err()
         {
@@ -317,6 +322,15 @@ pub fn dispatch(home: &HomeLayout, group: &GroupDoc, event: &Event) -> DispatchR
 }
 
 fn event_targets_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
+    if event.kind == "system.notify"
+        && event.data.get("kind").and_then(serde_json::Value::as_str) == Some("memory_restart")
+    {
+        return event
+            .data
+            .get("target_actor_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(actor_id);
+    }
     if event.kind == "system.notify"
         && matches!(
             event.data.get("kind").and_then(serde_json::Value::as_str),
