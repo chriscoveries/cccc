@@ -237,11 +237,21 @@ pub struct Actor {
     /// Per-actor memory ceiling in MiB, including resident and swapped pages.
     /// Defaults to 4096 for every lane. Explicit zero disables the ceiling;
     /// preserve it when serializing so a reload cannot re-enable enforcement.
-    /// Enforcement requires verified idle admission and exact session recovery.
+    /// Native ACP enforcement requires verified idle admission and exact recovery.
+    /// Other runtimes only restart fresh with the separate PTY opt-in.
     /// Plain `u32` so negative, fractional, string and overflowing inputs are
     /// rejected at deserialization.
     #[serde(default = "default_memory_limit_mb")]
     pub memory_limit_mb: u32,
+    /// Opt in to fresh restart (no resume) for non-native-ACP runtimes after
+    /// ten minutes of observed PTY output silence with no newer input.
+    /// False by default; a durable native exact-resume requirement still wins.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub memory_limit_restart_pty: bool,
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 const fn default_memory_limit_mb() -> u32 {
@@ -278,6 +288,7 @@ impl Actor {
             generation: String::new(),
             updated_at: now,
             memory_limit_mb: default_memory_limit_mb(),
+            memory_limit_restart_pty: false,
         }
     }
 

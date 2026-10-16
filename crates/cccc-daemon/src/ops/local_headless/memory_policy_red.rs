@@ -319,10 +319,20 @@ fn authoritative_busy_refusal_does_not_consume_cooldown_despite_stale_idle_proje
         before,
         "busy provider must remain owned and running"
     );
-    assert!(
-        f.notices().is_empty(),
-        "no restart attempt means no restart outcome"
+    let notices = f.notices();
+    assert_eq!(
+        notices.len(),
+        1,
+        "over-limit busy detection still reports once"
     );
+    assert_eq!(notices[0].data["context"]["action"], "detection_only");
+    assert_eq!(notices[0].data["context"]["outcome"], "over_limit");
+    assert_eq!(notices[0].data["target_actor_id"], "lead");
+    assert!(!cccc_core::inbox::is_for_actor(
+        &f.group,
+        &notices[0],
+        "worker"
+    ));
     assert!(
         !f.cooldown_path().exists(),
         "refused idle-close must not suppress enforcement for 30 minutes"

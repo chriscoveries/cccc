@@ -524,6 +524,25 @@ impl AnalystSession {
                 .all(|process| process.running())
     }
 
+    /// Read-only accounting roots. This does not grant maintenance ownership,
+    /// provider idleness, or permission to signal an observed process ID.
+    pub(crate) fn owned_process_roots_for_memory_observation(&self) -> Vec<u32> {
+        let mut roots = self
+            .process
+            .iter()
+            .chain(self.auxiliary_processes.iter())
+            .filter(|process| process.running())
+            .filter_map(|process| process.id())
+            .collect::<Vec<_>>();
+        roots.sort_unstable();
+        roots.dedup();
+        roots
+    }
+
+    pub(crate) fn resumed_for_memory_observation(&self) -> bool {
+        self.thread_resumed
+    }
+
     pub(crate) fn process_id(&self) -> Option<u32> {
         self.process.as_ref().and_then(|process| process.id())
     }

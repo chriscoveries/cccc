@@ -40,6 +40,16 @@ pub fn permit(home: &HomeLayout) -> Result<StartPermit, &'static str> {
     Ok(StartPermit { _guard: guard })
 }
 
+/// Serialize an explicit stop with admitted starts even after shutdown has
+/// closed launch admission. This never changes the home's allow/prevent state.
+/// Low-level stop helpers called under an existing permit must not reacquire it.
+pub fn stop_permit() -> Result<StartPermit, &'static str> {
+    let guard = gates()
+        .lock()
+        .map_err(|_| "runtime start gate is poisoned")?;
+    Ok(StartPermit { _guard: guard })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

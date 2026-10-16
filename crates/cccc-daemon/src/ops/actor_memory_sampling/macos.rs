@@ -158,6 +158,27 @@ fn verify_same_observed_parentage(
     Ok(())
 }
 
+/// Union only the processes visible in this snapshot. Transient processes and
+/// descendant PID reuse between snapshots remain outside this observation.
+fn observed_union(
+    roots: &[i32],
+    table: &std::collections::HashMap<i32, i32>,
+) -> io::Result<Vec<i32>> {
+    if roots.is_empty() || roots.len() > MAX_TREE_PIDS {
+        return Err(io::Error::other("invalid observed process root count"));
+    }
+    let mut union = std::collections::BTreeSet::new();
+    for &root in roots {
+        union.extend(tree_members(root, table)?);
+        if union.len() > MAX_TREE_PIDS {
+            return Err(io::Error::other(
+                "observed process union exceeded sampling bound",
+            ));
+        }
+    }
+    Ok(union.into_iter().collect())
+}
+
 #[cfg(target_os = "macos")]
 fn command(program: &str) -> std::process::Command {
     let mut command = std::process::Command::new(program);
@@ -210,9 +231,17 @@ async fn parentage() -> io::Result<std::collections::HashMap<i32, i32>> {
 /// this sampler only measures its argument and never chooses a stop target.
 #[cfg(target_os = "macos")]
 pub(super) async fn tree_footprint_kib(root: i32) -> io::Result<(u64, usize)> {
+    roots_footprint_kib(vec![root]).await
+}
+
+/// All roots share one observation deadline and each observed PID is queried
+/// once. Neither summing overlapping trees nor resetting the budget per root
+/// can inflate a sample or multiply its advertised asynchronous time bound.
+#[cfg(target_os = "macos")]
+pub(super) async fn roots_footprint_kib(roots: Vec<i32>) -> io::Result<(u64, usize)> {
     tokio::time::timeout(TREE_TIMEOUT, async move {
         let before = parentage().await?;
-        let members = tree_members(root, &before)?;
+        let members = observed_union(&roots, &before)?;
         let mut total = 0_u64;
         for &pid in &members {
             let output = capture_vmmap(pid).await?;
@@ -227,7 +256,10 @@ pub(super) async fn tree_footprint_kib(root: i32) -> io::Result<(u64, usize)> {
                 .checked_add(kib)
                 .ok_or_else(|| io::Error::other("owned footprint sum overflowed"))?;
         }
-        verify_same_observed_parentage(root, &before, &parentage().await?)?;
+        let after = parentage().await?;
+        for root in roots {
+            verify_same_observed_parentage(root, &before, &after)?;
+        }
         Ok((total, members.len()))
     })
     .await
@@ -368,6 +400,22 @@ mod parentage_tests {
             .map(|pid| (pid as i32, if pid == 1 { 0 } else { 1 }))
             .collect();
         assert!(tree_members(1, &table).is_err());
+    }
+
+    #[test]
+    fn overlapping_and_disjoint_roots_form_one_bounded_observed_union() {
+        let table = parse_parentage("10 1\n11 10\n12 11\n20 1\n21 20\n").expect("parentage");
+        assert_eq!(
+            observed_union(&[10, 11, 10], &table).expect("overlap"),
+            vec![10, 11, 12]
+        );
+        assert_eq!(
+            observed_union(&[10, 20], &table).expect("disjoint"),
+            vec![10, 11, 12, 20, 21]
+        );
+        assert!(observed_union(&[], &table).is_err());
+        assert!(observed_union(&[99], &table).is_err());
+        assert!(observed_union(&[10; MAX_TREE_PIDS + 1], &table).is_err());
     }
 }
 
