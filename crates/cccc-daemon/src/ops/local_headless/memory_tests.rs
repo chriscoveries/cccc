@@ -673,3 +673,155 @@ fn native_memory_tick_without_configured_foreman_does_not_close_or_reserve_attem
             .any(|event| event.kind == "system.notify" && event.data["kind"] == "memory_restart")
     );
 }
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum RecipientRoleChange {
+    Disabled,
+    Internal,
+    AllInternal,
+}
+
+#[cfg(target_os = "linux")]
+fn assert_native_admitted_recipient_survives_role_change(
+    change: RecipientRoleChange,
+    reject_load: bool,
+) {
+    let f = Fixture::new(false);
+    // Join any regression-created delivery worker before the provider fixture is
+    // dropped, including assertion-unwind paths. All provider work is offline.
+    struct DeliveryCleanup(String);
+    impl Drop for DeliveryCleanup {
+        fn drop(&mut self) {
+            crate::ops::actor_delivery::shutdown_group(&self.0);
+        }
+    }
+    let _cleanup = DeliveryCleanup(f.group.group_id.clone());
+    f.materialize();
+    let before = f.candidate();
+    let session_id = f.item().managed.thread_id().to_owned();
+    let (memory, counted) = crate::ops::actor_memory_sampling::tree_rss_kib(
+        i32::try_from(before.provider_pid).expect("owned PID"),
+    );
+    assert!(
+        counted > 0 && memory > 1024,
+        "actual native fixture exceeds limit"
+    );
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    let group = store
+        .mutate(&f.group.group_id, |group| {
+            group.actors[0].memory_limit_mb = 1;
+            let mut lead = Actor::new("lead");
+            lead.memory_limit_mb = 0;
+            group.actors.insert(0, lead);
+            Ok(group.clone())
+        })
+        .expect("configured concrete lead before admission");
+    if reject_load {
+        std::fs::write(
+            f.workspace.join("candidate_reject_load"),
+            b"reject existing offline session",
+        )
+        .expect("offline load refusal");
+    }
+    let home = f.home.clone();
+    let gid = group.group_id.clone();
+    let changed = std::sync::Arc::new(AtomicBool::new(false));
+    let did_change = std::sync::Arc::clone(&changed);
+    let _hook = actor_memory::recipient_binding_tests::AdmissionHook::new(
+        &f.home,
+        &group.group_id,
+        "worker",
+        Box::new(move || {
+            GroupStore::new(home)?.mutate(&gid, |group| {
+                match change {
+                    RecipientRoleChange::Disabled => group.actors[0].enabled = false,
+                    RecipientRoleChange::Internal => {
+                        group.actors[0].internal_kind = Some("fixture_hidden".into())
+                    }
+                    RecipientRoleChange::AllInternal => {
+                        for actor in &mut group.actors {
+                            actor.internal_kind = Some("fixture_hidden".into());
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            did_change.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        }),
+    );
+    // The one-shot mutation runs after the actual tick selected its admission,
+    // before the coordinator's idle-close/stop/load and before outcome append.
+    let result = actor_memory::tick(&f.home, &group);
+    crate::ops::actor_delivery::shutdown_group(&group.group_id);
+    assert!(
+        changed.load(std::sync::atomic::Ordering::Acquire),
+        "actual native admission seam was reached"
+    );
+    let events = result.expect("admitted concrete destination survives later role configuration");
+    let expected_outcome = if reject_load {
+        "restart_failed"
+    } else {
+        "restarted"
+    };
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].data["context"]["outcome"], expected_outcome);
+    assert_eq!(
+        events[0].data["target_actor_id"], "lead",
+        "bind the final admission destination, not a later role snapshot"
+    );
+    assert_eq!(events[0].data["to"], json!(["@foreman"]));
+    assert!(!cccc_runtime::status(&group.group_id, "lead").is_ok_and(|s| s.running));
+    let ledger = cccc_core::ledger::read_all(&store.ledger_path(&group.group_id).expect("ledger"))
+        .expect("events");
+    let outcomes: Vec<_> = ledger
+        .iter()
+        .filter(|e| e.kind == "system.notify" && e.data["kind"] == "memory_restart")
+        .collect();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].id, events[0].id);
+    assert_eq!(outcomes[0].data["target_actor_id"], "lead");
+    if reject_load {
+        assert!(memory_candidate(&group.group_id, "worker").is_none());
+        let required = actor_memory::required_resume(&f.home, &group.group_id, "worker")
+            .expect("required")
+            .expect("failed exact resume obligation retained");
+        assert_eq!(required.session_id, session_id);
+    } else {
+        let after = f.candidate();
+        assert_ne!(after.generation, before.generation);
+        assert_eq!(f.item().managed.thread_id(), session_id);
+    }
+    let requests = f.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r["method"] == "session/new")
+            .count(),
+        1,
+        "no fresh conversation fallback"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r["method"] == "session/load")
+            .count(),
+        1,
+        "one exact load attempt"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_success_keeps_admitted_target_after_foreman_disabled_or_made_internal() {
+    for change in [RecipientRoleChange::Disabled, RecipientRoleChange::Internal] {
+        assert_native_admitted_recipient_survives_role_change(change, false);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_failure_keeps_admitted_target_after_all_roles_become_internal() {
+    assert_native_admitted_recipient_survives_role_change(RecipientRoleChange::AllInternal, true);
+}

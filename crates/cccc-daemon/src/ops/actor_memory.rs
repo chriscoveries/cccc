@@ -276,6 +276,12 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
                     return Ok(false);
                 }
                 admitted = Some((limit, rss_kib.div_ceil(1024)));
+                #[cfg(all(test, target_os = "linux"))]
+                recipient_binding_tests::after_native_admission(
+                    home,
+                    &fresh.group_id,
+                    &fresh_actor.id,
+                )?;
                 Ok(true)
             },
             || {
@@ -680,3 +686,7 @@ mod tests {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "actor_memory_pty_policy_red.rs"]
 mod pty_policy_red;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "actor_memory_recipient_binding_tests.rs"]
+pub(crate) mod recipient_binding_tests;
