@@ -362,6 +362,8 @@ fn write(
     actor_id: &str,
     document: &Map<String, Value>,
 ) -> std::io::Result<()> {
+    #[cfg(test)]
+    receipt_lock_tests::before_write(&path(home, group_id, actor_id)?)?;
     cccc_core::fs::write_json(&path(home, group_id, actor_id)?, document)
 }
 

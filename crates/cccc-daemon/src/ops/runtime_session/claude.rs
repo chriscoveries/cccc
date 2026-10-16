@@ -664,3 +664,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "claude_lock_acceptance_tests.rs"]
+mod lock_acceptance_tests;

@@ -1863,3 +1863,193 @@ fn explicit_changed_model_after_failed_resume_starts_fresh_on_supported_cli() {
         );
     }
 }
+
+#[test]
+fn unreadable_evicted_pre_input_screen_falls_back_fresh_after_confirmed_owned_cleanup() {
+    const TEST: &str =
+        "unreadable_evicted_pre_input_screen_falls_back_fresh_after_confirmed_owned_cleanup";
+    if isolated(TEST) {
+        return;
+    }
+    let f = Fixture::new("model_adapter_screen_unreadable");
+    std::fs::write(f.config.join("fixture_cli_version"), "2.1.293")
+        .expect("proven adapter version");
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    store
+        .mutate(&f.group.group_id, |group| {
+            group.actors[0]
+                .command
+                .extend(["--model".into(), "opus".into()]);
+            Ok(())
+        })
+        .expect("model-only drift");
+    let history = f
+        .config
+        .join("projects/workspace")
+        .join(format!("{SAVED}.jsonl"));
+    let original = std::fs::read(&history).expect("saved conversation");
+    let result = f.lifecycle("actor_start");
+    assert!(
+        result.ok,
+        "unreadable screen is a pre-input compatibility outcome: {:?}",
+        result.error
+    );
+    assert!(super::running(&f.group.group_id, &f.actor.id));
+    assert_eq!(
+        std::fs::read_to_string(f.config.join("launches")).expect("launch trace"),
+        "resume\nfresh\n"
+    );
+    assert_eq!(
+        std::fs::read(f.config.join("model_native_input")).unwrap_or_default(),
+        b"",
+        "no /model byte before fresh fallback"
+    );
+    let receipt = f.receipt();
+    assert_ne!(receipt["provider_session_id"], SAVED);
+    assert_eq!(receipt["status"], "usable");
+    assert_eq!(receipt["failure_count"], 0);
+    assert_eq!(receipt["last_resume_attempt_id"], "");
+    assert_eq!(receipt["model"], "opus");
+    assert!(
+        receipt["previous_sessions"]
+            .as_array()
+            .expect("archive")
+            .iter()
+            .any(|entry| entry["session_id"] == SAVED)
+    );
+    assert_eq!(
+        std::fs::read(history).expect("retained old history"),
+        original
+    );
+    let operations =
+        std::fs::read_to_string(f.config.join("control_operations")).expect("control trace");
+    assert_eq!(
+        operations
+            .lines()
+            .filter(|line| serde_json::from_str::<Value>(line).expect("op JSON")["op"] == "kill")
+            .count(),
+        1,
+        "owned resume job must be confirmed stopped before fresh launch"
+    );
+}
+
+#[test]
+fn readable_draft_post_input_failure_and_uncertain_cleanup_never_fall_back_fresh() {
+    const TEST: &str =
+        "readable_draft_post_input_failure_and_uncertain_cleanup_never_fall_back_fresh";
+    if isolated(TEST) {
+        return;
+    }
+    for mode in [
+        "model_adapter_screen_draft",
+        "model_adapter_screen_post_input",
+        "model_adapter_screen_unreadable_cleanup_failure",
+    ] {
+        let f = Fixture::new(mode);
+        std::fs::write(f.config.join("fixture_cli_version"), "2.1.293").expect("adapter version");
+        GroupStore::new(f.home.clone())
+            .expect("store")
+            .mutate(&f.group.group_id, |group| {
+                group.actors[0]
+                    .command
+                    .extend(["--model".into(), "opus".into()]);
+                Ok(())
+            })
+            .expect("model-only drift");
+        let result = f.lifecycle("actor_start");
+        assert!(!result.ok, "{mode} must remain a real failure");
+        assert_eq!(f.launches(), 1, "{mode} cannot start fresh");
+        assert_eq!(f.receipt()["provider_session_id"], SAVED);
+        assert_eq!(f.receipt()["status"], "resume_failed");
+        assert_eq!(f.receipt()["failure_count"], 1);
+        assert!(!super::running(&f.group.group_id, &f.actor.id));
+        let bytes = std::fs::read(f.config.join("model_native_input")).unwrap_or_default();
+        if mode.ends_with("post_input") {
+            assert_eq!(bytes, b"/model opus\r");
+        } else {
+            assert!(
+                bytes.is_empty(),
+                "{mode} must never receive speculative input"
+            );
+        }
+        if mode.ends_with("cleanup_failure") {
+            assert!(
+                f.config.join("active").exists(),
+                "unknown cleanup preserves old ownership evidence"
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_manual_start_and_restart_fall_back_fresh_when_optional_receipt_lock_has_io_error() {
+    const TEST: &str =
+        "ordinary_manual_start_and_restart_fall_back_fresh_when_optional_receipt_lock_has_io_error";
+    if isolated_with_lock_warning_capture(TEST) {
+        return;
+    }
+    for operation in ["actor_start", "actor_restart"] {
+        let f = Fixture::new("healthy");
+        let receipt = f
+            .home
+            .groups_dir()
+            .join(&f.group.group_id)
+            .join("state/runtime_sessions/claude-1.json");
+        let before = std::fs::read(&receipt).expect("usable receipt");
+        let lock = receipt.with_extension("lock");
+        std::fs::remove_file(&lock).expect("remove owned lock file");
+        std::fs::create_dir(&lock).expect("real lock-admission IO error");
+        let result = f.lifecycle(operation);
+        assert!(
+            result.ok,
+            "{operation} ordinary optional resume must retain fresh policy: {:?}",
+            result.error
+        );
+        assert!(super::running(&f.group.group_id, &f.actor.id));
+        assert_eq!(
+            std::fs::read_to_string(f.config.join("launches")).expect("launch trace"),
+            "fresh\n"
+        );
+        let state: Value = cccc_core::fs::read_json(&f.config.join("jobs/abcdef12/state.json"))
+            .expect("actual fresh job");
+        assert_ne!(state["sessionId"], SAVED);
+        assert_eq!(
+            std::fs::read(receipt).expect("no receipt rewrite without lock"),
+            before
+        );
+    }
+}
+
+fn isolated_with_lock_warning_capture(test: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "CCCC_TEST_CLAUDE_RESUME";
+    if std::env::var(CHILD).ok().as_deref() == Some(test) {
+        return false;
+    }
+    let temp = tempfile::tempdir().expect("isolated warning capture");
+    let launcher = temp.path().join("cccc");
+    std::fs::write(&launcher, "#!/bin/sh\nexit 0\n").expect("launcher");
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            &format!("ops::local_headless::claude_resume_tests::{test}"),
+            "--exact",
+            "--nocapture",
+        ])
+        .env(CHILD, test)
+        .env("CCCC_LAUNCHER_PATH", launcher)
+        .env("CCCC_HOME", temp.path().join("home"))
+        .env("CODEX_HOME", temp.path().join("codex"))
+        .env("CLAUDE_CONFIG_DIR", temp.path().join("claude"))
+        .output()
+        .expect("warning subprocess");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("[cccc] Optional Claude resume lock admission failed; using ordinary fresh-start policy."),
+        "actual degraded fresh start must warn even without a tracing subscriber");
+    true
+}

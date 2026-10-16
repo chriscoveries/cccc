@@ -605,3 +605,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "control_acceptance_tests.rs"]
+mod acceptance_tests;

@@ -392,3 +392,7 @@ mod tests {
         assert!(screen.empty_prompt());
     }
 }
+
+#[cfg(test)]
+#[path = "cache_confirmation_acceptance_tests.rs"]
+mod acceptance_tests;
