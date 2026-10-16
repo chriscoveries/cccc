@@ -1,7 +1,8 @@
 //! Automatic startup shares maintenance admission without entering manual stop policy.
 use super::{
-    actor_is_running, actor_profile_runtime, environment, is_structured, launch_error,
-    runtime_error, stop_registered, terminal_history, working_directory,
+    actor_is_running, actor_profile_runtime, enforce_required_memory_resume, environment,
+    is_structured, launch_error, runtime_error, stop_registered, terminal_history,
+    working_directory,
 };
 use crate::dispatch::OpError;
 use crate::ops::{capabilities, deepseek_runtime, local_headless, runtime_mcp};
@@ -48,6 +49,7 @@ pub(crate) fn start_for_delivery(
         capabilities::apply_actor_startup_baseline(home, group, &actor);
         return Ok(true);
     }
+    enforce_required_memory_resume(home, group, &actor)?;
     // A disconnected managed registration may now be configured for a different
     // backend. Preserve automatic backend transitions under the same admission.
     stop_registered(group, actor_id)?;

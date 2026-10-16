@@ -91,6 +91,9 @@ pub(super) fn apply_resolved(
             },
         );
     }
+    if kind != "actor.new_session" {
+        enforce_required_memory_resume(home, group, actor)?;
+    }
     // Also retire a disconnected registration whose previous cleanup failed.
     stop_registered(group, actor_id)?;
     if kind == "actor.new_session" {
@@ -116,6 +119,34 @@ pub(super) fn apply_resolved(
         return Ok(None);
     }
     start(home, group, actor).map(Some)
+}
+
+/// Every new backend must honor a durable maintenance obligation. Healthy
+/// idempotent owner checks happen before this; explicit New Session clears it
+/// through the existing lifecycle path before any replacement is launched.
+fn enforce_required_memory_resume(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+) -> Result<(), OpError> {
+    let required =
+        super::actor_memory::required_resume(home, &group.group_id, &actor.id).map_err(|_| {
+            launch_error(super::actor_memory::blocked_resume(
+                "Could not verify the memory-maintenance resume requirement before startup",
+            ))
+        })?;
+    if let Some(required) = required
+        && (actor.runtime != required.runtime
+            || !super::codex_voice_analyst::AnalystSession::supports_memory_restart(
+                actor.runtime,
+                actor.runtime_mode,
+            ))
+    {
+        return Err(launch_error(super::actor_memory::blocked_resume(
+            "Actor settings no longer select the Runtime required by memory maintenance",
+        )));
+    }
+    Ok(())
 }
 
 fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<(), OpError> {
