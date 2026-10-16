@@ -323,25 +323,7 @@ async fn launch_inner(
     };
     if requested_session_id.is_none() {
         let state = read_job_state(&prepared.config_dir, &job, cwd)?;
-        if state
-            .get("resumeSessionId")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .is_some_and(|id| id != job.session_id)
-        {
-            // A fresh command may have reattached a pre-existing Agent View
-            // job. Ownership is unproven: do not stop it or expose a client
-            // that can admit a prompt and discover the mismatch mid-turn.
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Claude fresh launch unexpectedly resumed an existing conversation \
-                     in Agent View job {}; no prompt was sent and the job was left running",
-                    job.short,
-                ),
-            ));
-        }
+        require_fresh_identity(&job, &state)?;
     }
     if let Err(error) = validate_worker_version(&job) {
         let rollback = kill_and_confirm(&endpoint, &job.short).await;
@@ -354,7 +336,22 @@ async fn launch_inner(
         let rollback = kill_and_confirm(&endpoint, &job.short).await;
         return Err(with_optional_cleanup_error(error, rollback.err()));
     }
-    if let Err(error) = await_settled(&prepared.config_dir, &job, cwd).await {
+    if let Err(error) = await_settled_with_identity(
+        &prepared.config_dir,
+        &job,
+        cwd,
+        requested_session_id.is_none(),
+    )
+    .await
+    {
+        // Agent View can publish the resumed identity after the job first
+        // appears. A later mismatch still establishes no ownership for stop.
+        if error
+            .get_ref()
+            .is_some_and(|source| source.is::<UnexpectedFreshResume>())
+        {
+            return Err(error);
+        }
         let rollback = kill_and_confirm(&endpoint, &job.short).await;
         return Err(with_optional_cleanup_error(error, rollback.err()));
     }
@@ -846,19 +843,71 @@ fn unsettled_error(short: &str, state: &Value) -> io::Error {
     )
 }
 
+#[derive(Debug)]
+struct UnexpectedFreshResume {
+    short: String,
+}
+
+impl std::fmt::Display for UnexpectedFreshResume {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Claude fresh launch unexpectedly resumed an existing conversation \
+             in Agent View job {}; no prompt was sent and the job was left running",
+            self.short,
+        )
+    }
+}
+
+impl std::error::Error for UnexpectedFreshResume {}
+
+fn require_fresh_identity(job: &Job, state: &Value) -> io::Result<()> {
+    if state
+        .get("resumeSessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .is_some_and(|id| id != job.session_id)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            UnexpectedFreshResume {
+                short: job.short.clone(),
+            },
+        ));
+    }
+    Ok(())
+}
+
 /// Wait briefly for the session to be at its prompt. For a live worker this
 /// absorbs the tail of a finishing turn; for a freshly woken one it covers the
 /// window between the job appearing in `list` and Agent View rewriting state.
 async fn await_settled(config_dir: &Path, job: &Job, expected_cwd: &Path) -> io::Result<Value> {
+    await_settled_with_identity(config_dir, job, expected_cwd, false).await
+}
+
+async fn await_settled_with_identity(
+    config_dir: &Path,
+    job: &Job,
+    expected_cwd: &Path,
+    require_fresh: bool,
+) -> io::Result<Value> {
     let deadline = tokio::time::Instant::now() + LIVE_SETTLE_TIMEOUT;
     loop {
         let state = read_job_state(config_dir, job, expected_cwd)?;
+        if require_fresh {
+            // Check even busy snapshots: otherwise a foreign resumed job can
+            // reach the timeout and be killed by normal startup rollback.
+            require_fresh_identity(job, &state)?;
+        }
         if classify_quiescence(&state) == Quiescence::Settled {
             return Ok(state);
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(unsettled_error(&job.short, &state));
         }
+        #[cfg(all(test, unix))]
+        tests::observe_fresh_settle_busy(config_dir, &job.short).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -1654,6 +1703,9 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    #[cfg(unix)]
+    include!("claude/fresh_session_identity_tests.rs");
+
     struct ControlDirectory(PathBuf);
 
     #[cfg(unix)]
