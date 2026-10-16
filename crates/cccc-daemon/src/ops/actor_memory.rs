@@ -522,15 +522,14 @@ mod tests {
     }
 
     #[test]
-    fn memory_restart_without_an_available_foreman_stays_ledger_only() {
+    fn memory_restart_disabled_configured_foreman_is_targeted_and_durably_recoverable() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
         home.initialize().expect("initialize");
         let store = cccc_core::GroupStore::new(home.clone()).expect("store");
         let mut group = store
-            .create("memory routing no foreman", "")
+            .create("memory routing disabled foreman", "")
             .expect("group");
-        // Exercise recipient selection instead of the stopped-group early exit.
         group.state = cccc_contracts::GroupState::Active;
         let mut lead = cccc_contracts::Actor::new("lead");
         lead.enabled = false;
@@ -545,24 +544,77 @@ mod tests {
             "restart_failed",
             "receipt missing",
         )
-        .expect("emit outcome");
-        assert!(event.data.get("target_actor_id").is_none());
+        .expect("emit real outcome");
+        assert_eq!(
+            event.data["target_actor_id"], "lead",
+            "configured role retains its durable inbox while disabled"
+        );
+        assert_eq!(event.data["to"], json!(["@foreman"]));
         let report = super::super::actor_delivery::dispatch(&home, &group, &event);
         super::super::actor_delivery::shutdown_group(&group.group_id);
-        assert_eq!(report.targeted, 0, "never fall back to broadcasting");
-        assert_eq!(report.queued, 0);
-        for actor in &group.actors {
-            assert!(
-                super::super::runtime_delivery::pending_sources(&home, &group, actor, 10)
-                    .expect("ledger-only notice recovery")
-                    .is_empty(),
-                "no foreman means no runtime recipient"
+        assert_eq!(
+            report.targeted, 1,
+            "only the configured foreman is selected"
+        );
+        assert_eq!(report.queued, 0, "disabled foreman is never woken");
+        assert!(!cccc_runtime::status(&group.group_id, "lead").is_ok_and(|s| s.running));
+        for (actor, expected) in [(&group.actors[0], true), (&group.actors[1], false)] {
+            let pending = super::super::runtime_delivery::pending_sources(&home, &group, actor, 10)
+                .expect("durable recovery");
+            assert_eq!(
+                pending.iter().any(|item| item.id == event.id),
+                expected,
+                "only the concrete recipient can recover this outcome"
             );
         }
         let ledger =
             cccc_core::ledger::read_all(&store.ledger_path(&group.group_id).expect("path"))
                 .expect("ledger");
-        assert_eq!(ledger.iter().filter(|item| item.kind == "system.notify" && item.data["kind"] == "memory_restart").count(), 1);
+        assert_eq!(ledger.iter().filter(|item| item.id == event.id).count(), 1);
+    }
+
+    #[test]
+    fn memory_restart_without_any_configured_foreman_fails_before_ledger_append() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("initialize");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+        let mut group = store
+            .create("memory routing absent foreman", "")
+            .expect("group");
+        group.actors = vec![cccc_contracts::Actor::new("hidden")];
+        group.actors[0].internal_kind = Some("fixture_hidden".into());
+        store.save(&group).expect("all internal actors");
+        let path = store.ledger_path(&group.group_id).expect("ledger path");
+        let before = std::fs::read(&path).unwrap_or_default();
+        assert!(
+            emit(
+                &home,
+                &group.group_id,
+                "hidden",
+                500,
+                800,
+                "restart_failed",
+                "missing receipt"
+            )
+            .is_err(),
+            "real emit must reject a targetless outcome"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap_or_default(),
+            before,
+            "never append an unrecoverable/broadcast outcome"
+        );
+        assert!(
+            !cooldown_path(&home, &group.group_id)
+                .expect("attempt state")
+                .exists()
+        );
+        assert!(
+            super::super::runtime_delivery::pending_sources(&home, &group, &group.actors[0], 10)
+                .expect("hidden actor recovery")
+                .is_empty()
+        );
     }
 
     #[test]
