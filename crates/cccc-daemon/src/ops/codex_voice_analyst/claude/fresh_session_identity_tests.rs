@@ -17,6 +17,7 @@ mod fresh_session_identity_tests {
         saved: PathBuf,
         original: Vec<u8>,
         replies: Arc<std::sync::atomic::AtomicUsize>,
+        kills: Arc<std::sync::atomic::AtomicUsize>,
         server: tokio::task::JoinHandle<()>,
     }
 
@@ -40,7 +41,7 @@ mod fresh_session_identity_tests {
             let original = format!(
                 "{}\n",
                 json!({"type":"custom-title", "sessionId":SAVED,
-                    "customTitle":"cccc-actor-12345678"})
+                    "customTitle":if pre_named { "cccc-actor-12345678" } else { "unrelated-session" }})
             )
             .into_bytes();
             std::fs::write(&saved, &original).expect("pre-named transcript");
@@ -71,13 +72,19 @@ if [ "${1-}" = '--version' ]; then
     printf '2.1.286 (Claude Code)\n'
     exit 0
 fi
-named=0
+selected_name=
+expect_name=0
 for arg in "$@"; do
-    if [ "$arg" = '--name' ]; then named=1; fi
+    if [ "$expect_name" = 1 ]; then
+        selected_name=$arg
+        expect_name=0
+    elif [ "$arg" = '--name' ]; then
+        expect_name=1
+    fi
 done
 printf '%s\n' "$@" > "$CLAUDE_CONFIG_DIR/argv"
 if [ -f "$CLAUDE_CONFIG_DIR/force-resume" ] ||
-   { [ "$named" = 1 ] && [ -f "$CLAUDE_CONFIG_DIR/pre-named" ]; }; then
+   { [ "$selected_name" = 'cccc-actor-12345678' ] && [ -f "$CLAUDE_CONFIG_DIR/pre-named" ]; }; then
     /bin/cp "$CLAUDE_CONFIG_DIR/resumed.json" "$CLAUDE_CONFIG_DIR/jobs/abcdef12/state.json"
 else
     /bin/cp "$CLAUDE_CONFIG_DIR/fresh.json" "$CLAUDE_CONFIG_DIR/jobs/abcdef12/state.json"
@@ -89,7 +96,9 @@ printf 'started · abcdef12\n'
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
                 .expect("executable permissions");
             let replies = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let kills = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let server_replies = Arc::clone(&replies);
+            let server_kills = Arc::clone(&kills);
             let server_config = config.clone();
             let server_workspace = workspace.clone();
             let server = tokio::spawn(async move {
@@ -141,6 +150,7 @@ printf 'started · abcdef12\n'
                             json!({"ok":true,"op":"reply"})
                         }
                         "kill" => {
+                            server_kills.fetch_add(1, Ordering::SeqCst);
                             stopped = true;
                             json!({"ok":true,"op":"kill"})
                         }
@@ -162,6 +172,7 @@ printf 'started · abcdef12\n'
                 saved,
                 original,
                 replies,
+                kills,
                 server,
             }
         }
@@ -241,6 +252,11 @@ printf 'started · abcdef12\n'
         assert!(error.to_string().contains("fresh launch"), "{error}");
         assert!(error.to_string().contains("resumed"), "{error}");
         assert_eq!(fixture.replies.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            fixture.kills.load(Ordering::SeqCst),
+            0,
+            "an unexpectedly adopted conversation has no proven CCCC ownership"
+        );
         assert_eq!(
             std::fs::read(&fixture.saved).expect("saved transcript"),
             fixture.original
