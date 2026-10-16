@@ -72,7 +72,8 @@ async fn hash_prefix(file: &mut tokio::fs::File, offset: u64) -> io::Result<Sha2
         file.seek(std::io::SeekFrom::Start(0)).await?;
         let mut remaining = offset;
         let mut digest = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
+        // Keep the buffer off the deeply nested managed-launch future stack.
+        let mut buffer = vec![0u8; 64 * 1024];
         while remaining > 0 {
             let wanted = remaining.min(buffer.len() as u64) as usize;
             file.read_exact(&mut buffer[..wanted]).await?;
