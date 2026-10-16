@@ -225,8 +225,7 @@ pub(super) async fn ensure_available(config: &Path, session_id: &str) -> io::Res
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             format!(
-                "Session {session_id} is live in Claude Agent View job {}. Stop it through its owner before resuming; CCCC will not stop another session",
-                short
+                "Session {session_id} is live in Claude Agent View job {short}. Stop it through its owner before resuming; CCCC will not stop another session"
             ),
         ));
     }
