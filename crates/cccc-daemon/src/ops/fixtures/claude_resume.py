@@ -44,7 +44,9 @@ if len(sys.argv) > 1 and sys.argv[1] == "server":
             op = request["op"]
             with (root / "control_operations").open("a") as operations:
                 operations.write(json.dumps({"op": op, "short": request.get("short")}) + "\n")
-            version_path = root / "fixture_cli_version"
+            version_path = root / "fixture_worker_version"
+            if not version_path.exists():
+                version_path = root / "fixture_cli_version"
             version = version_path.read_text().strip() if version_path.exists() else "2.1.286"
             jobs = []
             for active, short in [("active", SHORT), ("fresh_active", FRESH_SHORT)]:
@@ -53,16 +55,26 @@ if len(sys.argv) > 1 and sys.argv[1] == "server":
                     jobs.append({"short": short, "sessionId": state["sessionId"],
                                  "cwd": state["cwd"], "cliVersion": version})
             if op == "list":
-                result = {"ok": True, "op": op, "jobs": jobs}
+                if (root / "fixture_cleanup_failed").exists():
+                    result = {"ok": False, "op": op, "code": "EPROTO", "error": "fixture cleanup unknown"}
+                else:
+                    result = {"ok": True, "op": op, "jobs": jobs}
             elif op == "kill":
-                active = "fresh_active" if request.get("short") == FRESH_SHORT else "active"
-                (root / active).unlink(missing_ok=True)
-                result = {"ok": True, "op": op}
+                if (root / "mode").read_text() == "model_adapter_cleanup_failure":
+                    (root / "fixture_cleanup_failed").touch()
+                    result = {"ok": False, "op": op, "code": "EPROTO", "error": "fixture stop refused"}
+                else:
+                    active = "fresh_active" if request.get("short") == FRESH_SHORT else "active"
+                    (root / active).unlink(missing_ok=True)
+                    result = {"ok": True, "op": op}
             else:
                 result = {"ok": False, "op": op, "code": "EPROTO", "error": "unexpected fixture operation"}
             connection.sendall(json.dumps(result).encode() + b"\n")
 elif "--version" in sys.argv:
-    version_path = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"]) / "fixture_cli_version"
+    root = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"])
+    version_path = root / "fixture_launcher_version"
+    if not version_path.exists():
+        version_path = root / "fixture_cli_version"
     version = version_path.read_text().strip() if version_path.exists() else "2.1.286"
     print(f"{version} (Claude Code)")
 else:
@@ -94,17 +106,21 @@ else:
                  "subtype": "turn_duration"},
             ]
             path.write_text("".join(json.dumps(record) + "\n" for record in records))
-        # The survivor tests keep the old worker live while a distinct fresh
-        # job starts. All pre-existing fixture modes retain the original shape.
+        # Survivor tests preserve the old live job while a distinct fresh
+        # job starts. Existing fixture modes retain their original shape.
         distinct = mode == "surviving_model" and "--resume" not in sys.argv
         short = FRESH_SHORT if distinct else SHORT
         active = "fresh_active" if distinct else "active"
-        write_json(root / "jobs" / short / "state.json", {
+        state = {
             "sessionId": session, "daemonShort": short, "cwd": os.getcwd(),
             "tempo": "idle", "inFlight": {"tasks": 0, "queued": 0},
             "intent": "history-bearing", "linkScanOffset": 0,
             "linkScanPath": str(path) if path.exists() else None, "outcome": None,
-        })
+        }
+        if mode.startswith("model_adapter"):
+            model = "sonnet" if "--resume" in sys.argv else "opus"
+            state.update({"resumeSessionId": session, "respawnFlags": ["--model", model]})
+        write_json(root / "jobs" / short / "state.json", state)
         (root / active).touch()
         print(f"started · {short}")
     else:
