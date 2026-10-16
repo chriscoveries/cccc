@@ -5,6 +5,37 @@ use cccc_contracts::{DaemonRequest, Event, RunnerKind};
 use cccc_core::{GroupStore, HomeLayout};
 use std::collections::BTreeMap;
 
+// A successful idempotent Start records an observation; every conversation and
+// recovery-gate field must otherwise remain unchanged.
+fn assert_start_preserved_receipt(receipt: &std::path::Path, retained: &[u8]) {
+    let mut before: serde_json::Value = serde_json::from_slice(retained).expect("old receipt JSON");
+    let mut after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(receipt).expect("retained receipt"))
+            .expect("new receipt JSON");
+    let timestamp = after["updated_at"].as_str().expect("diagnostic timestamp");
+    assert!(
+        !timestamp.is_empty(),
+        "diagnostic timestamp must be present"
+    );
+    assert_eq!(
+        after["last_recovery_decision"],
+        serde_json::json!({
+            "action": "skip", "reason": "already_running", "at": timestamp,
+            "session_id": before["provider_session_id"].as_str().unwrap_or("")
+        }),
+        "Start must report that the existing owner was retained"
+    );
+    for document in [&mut before, &mut after] {
+        let object = document.as_object_mut().expect("receipt object");
+        object.remove("updated_at");
+        object.remove("last_recovery_decision");
+    }
+    assert_eq!(
+        after, before,
+        "Start must preserve all non-diagnostic receipt fields"
+    );
+}
+
 #[test]
 fn actor_start_preserves_a_healthy_acp_owner_despite_a_failed_native_receipt() {
     use std::os::unix::fs::PermissionsExt;
@@ -85,7 +116,7 @@ fn actor_start_preserves_a_healthy_acp_owner_despite_a_failed_native_receipt() {
                 generation,
                 "Start must not replace a healthy ACP owner"
             );
-            assert_eq!(std::fs::read(&receipt).expect("retained receipt"), retained);
+            assert_start_preserved_receipt(&receipt, &retained);
         }
         let requests =
             std::fs::read_to_string(temp.path().join("v3_requests.jsonl")).expect("ACP requests");
@@ -168,10 +199,7 @@ fn actor_start_preserves_a_healthy_native_owner_after_saved_runtime_changes() {
                 "Start must not apply saved settings to a healthy native owner"
             );
             assert!(response.ok, "{:?}", response.error);
-            assert_eq!(
-                std::fs::read(&receipt).expect("old receipt retained"),
-                retained
-            );
+            assert_start_preserved_receipt(&receipt, &retained);
         }));
         if cccc_runtime::status(&group.group_id, "peer").is_ok_and(|status| status.running) {
             cccc_runtime::stop(&group.group_id, "peer").expect("clean up native fixture");

@@ -124,6 +124,7 @@ interface AgentTabProps {
   onLaunch: () => void;
   onRelaunch: () => void;
   onNewSession: () => void;
+  onResumeSession: (sessionId: string) => void;
   onEdit: () => void;
   onRemove: () => void;
   onInbox: () => void;
@@ -150,6 +151,7 @@ export function AgentTab({
   onLaunch,
   onRelaunch,
   onNewSession,
+  onResumeSession,
   onEdit,
   onRemove,
   onInbox,
@@ -425,6 +427,10 @@ export function AgentTab({
   const handleNewSession = () => {
     if (!window.confirm(t("newSessionConfirm"))) return;
     onNewSession();
+  };
+  const handleResumeSession = () => {
+    const sessionId = window.prompt(t("resumeSessionPrompt"))?.trim();
+    if (sessionId) onResumeSession(sessionId);
   };
   const stoppedTerminalOutputText = getStoppedTerminalOutputText(stoppedTerminalText, workingState);
   const resumeFailureNotice = hasRuntimeResumeFailure ? (
@@ -792,6 +798,7 @@ export function AgentTab({
             onTakeover={requestTakeover}
             onHistory={() => setHistoryOpen(true)}
             onNewSession={handleNewSession}
+            onResumeSession={actor.runtime === "claude" ? handleResumeSession : undefined}
             onRestart={onRelaunch}
             onStop={onQuit}
             onEdit={onEdit}
@@ -1202,6 +1209,15 @@ export function AgentTab({
                   {!isSmallScreen && t("relaunch")}
                 </button>
               ) : null}
+              {actor.runtime === "claude" ? (
+                <button
+                  onClick={handleResumeSession}
+                  disabled={isBusy}
+                  className={`${secondaryActionButtonClass} flex-shrink-0 whitespace-nowrap`}
+                >
+                  {t("resumeSession")}
+                </button>
+              ) : null}
               {canStartNewSession ? (
                 <button
                   onClick={handleNewSession}
@@ -1234,6 +1250,15 @@ export function AgentTab({
                 <PlayIcon size={16} />
                 {isBusy ? t("common:loading") : t(isDots ? dotsStartKey : "launch")}
               </button>
+              {actor.runtime === "claude" ? (
+                <button
+                  onClick={handleResumeSession}
+                  disabled={isBusy}
+                  className={`${secondaryActionButtonClass} flex-shrink-0 whitespace-nowrap`}
+                >
+                  {t("resumeSession")}
+                </button>
+              ) : null}
               {canStartNewSession ? (
                 <button
                   onClick={handleNewSession}
