@@ -20,7 +20,6 @@ pub(crate) fn inspect_receipt_identity(
     if jobs.canonicalize()? != jobs {
         return Err(invalid("Claude jobs directory contains a symlink"));
     }
-    let workspace = cwd.canonicalize()?;
     let mut observations = Vec::new();
     let mut divergent = false;
     for entry in entries {
@@ -54,6 +53,9 @@ pub(crate) fn inspect_receipt_identity(
         if state["sessionId"].as_str() != Some(worker) {
             continue;
         }
+        // A missing old workspace is relevant only when this is our saved
+        // worker. Unrelated jobs must not prevent ordinary drift selecting fresh.
+        let workspace = cwd.canonicalize()?;
         if state["daemonShort"].as_str() != Some(short.as_str()) {
             return Err(invalid(
                 "Saved Claude worker has conflicting short identity",

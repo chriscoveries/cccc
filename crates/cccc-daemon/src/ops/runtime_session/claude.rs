@@ -147,16 +147,6 @@ pub fn prepare_managed_with_policy(
     environment: &BTreeMap<String, String>,
     _explicit: bool,
 ) -> io::Result<Option<ResumeAttempt>> {
-    // An ordinary launch with resume disabled is a fresh launch, including
-    // when an older saved receipt exists. Do not rewrite it as a failure.
-    if !resume_enabled() {
-        // Disabling normal resume does not authorize silently retiring a known
-        // foreign-conversation conflict. Ordinary receipts still start fresh.
-        if let Ok(document) = read(home, group_id, actor_id) {
-            identity_conflict::require_clear(&document)?;
-        }
-        return Ok(None);
-    }
     with_optional_resume_lock(home, group_id, actor_id, None, || {
         let mut document = match read(home, group_id, actor_id) {
             Ok(document) => document,
@@ -182,9 +172,26 @@ pub fn prepare_managed_with_policy(
         // A known transcript conflict is an authority fence, not configuration
         // drift. Only explicit New Session or validated retarget may retire it.
         identity_conflict::require_clear(&document)?;
+        let saved_cwd = std::path::PathBuf::from(string(&document, "workspace_path"));
+        // Observe the saved worker before any configuration decision can select
+        // fresh. The old job belongs to its saved workspace, not the newly
+        // requested one. Current config scope is the only available authority;
+        // a legacy fingerprint cannot locate an earlier account/config root.
+        identity_conflict::observe(
+            home,
+            group_id,
+            actor_id,
+            &saved_cwd,
+            environment,
+            &mut document,
+        )?;
+        // Disabling resume still means fresh for an ordinary receipt. It does
+        // not authorize dropping a newly observed foreign conversation.
+        if !resume_enabled() {
+            return Ok(None);
+        }
         let selected = string(&document, "explicit_resume_session_id")
             == string(&document, "provider_session_id");
-        let saved_cwd = std::path::PathBuf::from(string(&document, "workspace_path"));
         if workspace_path(cwd) != workspace_path(&saved_cwd) {
             return incompatible_receipt(
                 home,
@@ -231,7 +238,6 @@ pub fn prepare_managed_with_policy(
                 "identity_fingerprint",
             );
         }
-        identity_conflict::observe(home, group_id, actor_id, cwd, environment, &mut document)?;
         let model = model_from_command(base_command);
         let model_change = (model != string(&document, "model")).then_some(model.clone());
         if string(&document, "status") == "resume_failed" {
