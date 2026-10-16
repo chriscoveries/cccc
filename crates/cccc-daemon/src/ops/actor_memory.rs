@@ -624,3 +624,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "actor_memory_pty_policy_red.rs"]
+mod pty_policy_red;
