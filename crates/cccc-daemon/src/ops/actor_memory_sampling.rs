@@ -225,4 +225,30 @@ mod tests {
         // carry the coverage.
         true
     }
+
+    // Append inside actor_memory_sampling::tests on 4583 only. The sampler module
+    // does not exist in 953; do not claim this supplemental parser test is portable.
+    #[test]
+    fn swapped_out_owned_pages_still_count_toward_the_ceiling() {
+        let status = "Name:\towned-provider\nPid:\t41\nVmSize:\t10485760 kB\nVmRSS:\t524288 kB\nVmSwap:\t3670017 kB\n";
+        // 512 MiB resident + 3584 MiB and one KiB swapped exceeds 4096 MiB.
+        // The existing production sampler's parser is exercised, not a duplicate
+        // predicate or a mocked replacement sampler.
+        let sampled_kib = parse_vmrss_kb(status).expect("sample attributable pages");
+        assert_eq!(sampled_kib, 4_194_305);
+        assert!(sampled_kib > 4096 * 1024);
+    }
+
+    #[test]
+    fn unreadable_swap_or_malformed_units_are_not_reported_as_zero_memory() {
+        for status in [
+            "VmRSS: 512 kB\n",
+            "VmRSS: 12x34 kB\nVmSwap: 0 kB\n",
+            "VmRSS: 512 MB\nVmSwap: 0 kB\n",
+            "VmRSS: 512 kB\nVmSwap: 0 kB\nVmSwap: 1 kB\n",
+            "VmRSS: 18446744073709551615 kB\nVmSwap: 1 kB\n",
+        ] {
+            assert_eq!(parse_vmrss_kb(status), None, "unreadable sample: {status}");
+        }
+    }
 }

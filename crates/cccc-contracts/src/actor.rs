@@ -300,6 +300,10 @@ fn global_scope() -> String {
 }
 
 #[cfg(test)]
+#[path = "actor_memory_policy_red.rs"]
+mod memory_policy_red;
+
+#[cfg(test)]
 mod tests {
     use super::{Actor, ActorRuntime, RunnerKind, RuntimeMode, RuntimeStateSource};
 
