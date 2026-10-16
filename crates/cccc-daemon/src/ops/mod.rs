@@ -4,6 +4,8 @@ mod actor_delivery_preamble;
 mod actor_delivery_render;
 mod actor_delivery_worker;
 mod actor_listing;
+mod actor_memory;
+mod actor_memory_sampling;
 mod actor_profile_runtime;
 pub(crate) mod actor_respawn_backoff;
 pub(crate) mod actor_runtime;
@@ -132,3 +134,6 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
 }
 
 mod connect_cancellation;
+
+#[cfg(test)]
+mod actor_memory_tests;

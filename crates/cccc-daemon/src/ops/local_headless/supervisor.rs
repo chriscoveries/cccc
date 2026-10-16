@@ -17,6 +17,9 @@ use tracing::Instrument;
 #[cfg(all(test, unix))]
 #[path = "control_fixture.rs"]
 pub(in crate::ops::local_headless) mod control_fixture;
+#[cfg(all(test, target_os = "linux"))]
+#[path = "memory_policy_red.rs"]
+mod memory_policy_red;
 #[cfg(all(test, unix))]
 #[path = "notice_gate_tests.rs"]
 mod notice_gate_tests;
@@ -44,6 +47,15 @@ pub(super) struct StartGuard {
 }
 
 impl StartGuard {
+    pub(super) fn try_acquire(key: &Key) -> io::Result<Option<Self>> {
+        let mut active = starts().0.lock().map_err(|_| poisoned())?;
+        if active.contains(key) {
+            return Ok(None);
+        }
+        active.insert(key.clone());
+        Ok(Some(Self { key: key.clone() }))
+    }
+
     pub(super) fn acquire(key: &Key) -> io::Result<Self> {
         let (active, changed) = starts();
         let mut active = active.lock().map_err(|_| poisoned())?;
@@ -185,6 +197,28 @@ pub(super) fn attach_managed(
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
     });
+    let required =
+        match super::super::actor_memory::required_resume(home, &group.group_id, &actor.id) {
+            Ok(required) => required,
+            Err(_) => {
+                return Err(cleanup_failed_start(
+                    &item,
+                    super::super::actor_memory::blocked_resume(
+                        "Could not verify the memory-maintenance resume requirement at attachment",
+                    ),
+                ));
+            }
+        };
+    if let Some(required) = &required
+        && !app.resumed_native_session_is(required.runtime, &required.session_id)
+    {
+        return Err(cleanup_failed_start(
+            &item,
+            super::super::actor_memory::blocked_resume(
+                "Managed attachment did not load the required native ACP session",
+            ),
+        ));
+    }
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
     }
@@ -229,7 +263,38 @@ pub(super) fn attach_managed(
     {
         return Err(cleanup_failed_start(&item, error));
     }
+    if let Some(required) = &required {
+        clear_attached_requirement(home, group, actor, &key, required)?;
+    }
     super::output::emit(&item, "headless.session.started", Map::new());
+    Ok(())
+}
+
+fn clear_attached_requirement(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    key: &Key,
+    required: &super::super::actor_memory::RequiredResume,
+) -> io::Result<()> {
+    if super::super::actor_memory::clear_required_resume(
+        home,
+        &group.group_id,
+        &actor.id,
+        Some(required),
+    )
+    .is_err()
+    {
+        let primary = super::super::actor_memory::blocked_resume(
+            "Could not retire the memory-maintenance resume requirement after attachment",
+        );
+        return Err(match stop_locked(key) {
+            Ok(()) => primary,
+            Err(cleanup) => {
+                io::Error::other(format!("{primary}; attachment cleanup failed: {cleanup}"))
+            }
+        });
+    }
     Ok(())
 }
 
@@ -347,7 +412,7 @@ pub fn ensure_viewer(group_id: &str, actor_id: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn stop_locked(key: &Key) -> io::Result<()> {
+pub(super) fn stop_locked(key: &Key) -> io::Result<()> {
     // A prompt may have been registered while stop was waiting for its start.
     super::workspace_trust_recovery::cancel(key)?;
     let Some(item) = lookup(key) else {
@@ -486,7 +551,11 @@ pub fn submit_batch(
     source_events: &[Event],
     cancelled: &AtomicBool,
 ) -> BatchSubmission {
-    let Some(item) = lookup(&(group.group_id.clone(), actor.id.clone())) else {
+    let key = (group.group_id.clone(), actor.id.clone());
+    let Ok(Some(_start)) = StartGuard::try_acquire(&key) else {
+        return BatchSubmission::Deferred;
+    };
+    let Some(item) = lookup(&key) else {
         return BatchSubmission::Deferred;
     };
     if !item.running() {
@@ -656,7 +725,7 @@ fn render_turn(event: &Event) -> Option<(String, String)> {
     })
 }
 
-fn lookup(key: &Key) -> Option<Arc<Session>> {
+pub(super) fn lookup(key: &Key) -> Option<Arc<Session>> {
     sessions().read().ok()?.get(key).cloned()
 }
 
@@ -706,7 +775,7 @@ pub(crate) fn cancel_turn(group: &str, actor: &str, generation: &str) -> io::Res
     Ok(true)
 }
 
-fn working_directory(group: &GroupDoc, actor: &Actor) -> io::Result<std::path::PathBuf> {
+pub(super) fn working_directory(group: &GroupDoc, actor: &Actor) -> io::Result<std::path::PathBuf> {
     let wanted = if actor.default_scope_key.is_empty() {
         &group.active_scope_key
     } else {

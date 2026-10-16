@@ -19,6 +19,10 @@ const WEB_MODEL_TARGETS_KEY: &str = "web_model_browser_targets";
 const WEB_MODEL_DELIVERY_PREFERENCES_KEY: &str = "web_model_delivery_preferences";
 const RUNTIME_STATES_KEY: &str = "runtime_states";
 
+#[cfg(all(test, unix))]
+#[path = "actors_memory_lifecycle_tests.rs"]
+mod memory_lifecycle_tests;
+
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "actor_list" => Operation::new(Read, list),
@@ -118,7 +122,7 @@ fn add(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             OpError::io(error),
         ));
     }
-    if let Err(error) = runtime_session::native_acp::retire_all(home, &group_id, &added.id) {
+    if let Err(error) = retire_native_session_state(home, &group_id, &added.id) {
         return Err(super::actor_saga::rollback_added(
             home,
             &group_id,
@@ -153,6 +157,17 @@ fn add(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         }
     };
     object(json!({"actor": added, "event": event}))
+}
+
+fn retire_native_session_state(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+) -> std::io::Result<()> {
+    // A failed receipt cleanup must retain its exact-resume fence. Addition
+    // rolls back on error; removal calls this only after its event commits.
+    runtime_session::native_acp::retire_all(home, group_id, actor_id)?;
+    super::actor_memory::clear_required_resume(home, group_id, actor_id, None)
 }
 
 fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
@@ -606,8 +621,8 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     if let Err(error) = runtime_session::antigravity::remove(home, &group_id, &actor_id) {
         tracing::warn!(%error,%group_id,%actor_id,"post-commit ACP receipt cleanup failed");
     }
-    if let Err(error) = runtime_session::native_acp::retire_all(home, &group_id, &actor_id) {
-        tracing::warn!(%error,%group_id,%actor_id,"post-commit native ACP receipt cleanup failed");
+    if let Err(error) = retire_native_session_state(home, &group_id, &actor_id) {
+        tracing::warn!(%error,%group_id,%actor_id,"post-commit native ACP receipt or memory requirement cleanup failed");
     }
     object(json!({"actor_id": actor_id, "event": event}))
 }
