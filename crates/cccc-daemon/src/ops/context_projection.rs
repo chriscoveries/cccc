@@ -22,6 +22,10 @@ pub(super) fn project(document: ContextDoc, version: String, detail: &str) -> Va
     ]);
     if detail == "full" {
         result.insert("board".into(), board(&tasks));
+        result.insert(
+            "task_details_path".into(),
+            Value::String("coordination.tasks".into()),
+        );
     }
     Value::Object(result)
 }
@@ -112,6 +116,12 @@ fn status(task: &Map<String, Value>) -> &str {
         .unwrap_or("planned")
 }
 
+// Full task data is canonical in coordination.tasks. Board and attention
+// retain status alongside the ID for consumers that filter archived tasks.
+fn task_ref(task: &Map<String, Value>) -> Value {
+    json!({"id": task.get("id"), "status": status(task)})
+}
+
 fn is_blocked(task: &Map<String, Value>) -> bool {
     task.get("blocked_by")
         .and_then(Value::as_array)
@@ -179,8 +189,7 @@ fn attention(tasks: &[Map<String, Value>], full: bool) -> Value {
                         .is_some_and(|value| !value.is_empty()),
                     _ => false,
                 })
-                .cloned()
-                .map(Value::Object)
+                .map(task_ref)
                 .collect::<Vec<_>>()
         };
         json!({
@@ -206,8 +215,7 @@ fn board(tasks: &[Map<String, Value>]) -> Value {
                 tasks
                     .iter()
                     .filter(|task| status(task) == wanted)
-                    .cloned()
-                    .map(Value::Object)
+                    .map(task_ref)
                     .collect(),
             ),
         );

@@ -4777,12 +4777,17 @@ Result:
     done?: Array<Record<string, unknown>>
     archived?: Array<Record<string, unknown>>
   }
+  task_details_path?: "coordination.tasks"
   meta?: Record<string, unknown>
 }
 ```
 
 Notes:
-- Task objects returned in `coordination.tasks`, `board`, or `task_list` include `task_type`.
+- Complete task objects returned in `coordination.tasks` or `task_list` include
+  `task_type`. In full context, `board` and `attention` entries are lightweight
+  `{id, status}` references to `coordination.tasks`; they carry no duplicate task
+  notes, checklists, or custom fields. `task_details_path` names that canonical
+  collection.
 - Daemon IPC defaults `detail` to `full`; the Web HTTP route defaults it to
   `summary` for routine refreshes.
 - `detail="overview"` does not read task files and omits `coordination.tasks`,
@@ -4795,7 +4800,14 @@ Notes:
   `coordination.tasks` MUST retain every task-editor field, including
   `outcome`, `notes`, and `checklist`, so a summary refresh cannot erase a
   client's editable draft.
-- `detail="full"` returns the complete task objects and board projections.
+- `detail="full"` returns complete canonical tasks and reference projections.
+  Its whole serialized result is limited to 3 MiB (3,145,728 bytes), including
+  metadata and coordination fields. A result that cannot fit returns the small
+  typed error `context_too_large` with fixed recovery instructions; no tasks or
+  fields are silently truncated. Summary and overview keep their existing
+  shapes and are not covered by this byte limit. `task_list` supports selecting
+  a task or paging by count; that count is not a byte ceiling for large tasks.
+  The full-result limit does not include transport or MCP envelope overhead.
 - MCP convenience tools MUST preserve their focused response contracts instead
   of exposing this complete snapshot: `cccc_coordination(action="get")` returns
   only `version`, `coordination`, `attention`, `board`, and `tasks_summary`, while

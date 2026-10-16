@@ -37,9 +37,35 @@ fn get(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     }
     .map_err(OpError::io)?;
     let version = contexts.version(&document).map_err(OpError::io)?;
-    object(super::context_projection::project(
-        document, version, &detail,
-    ))
+    let result = super::context_projection::project(document, version, &detail);
+    if detail == "full" {
+        // Count the final JSON encoding, including escaping and non-task fields,
+        // without allocating another copy of a potentially oversized response.
+        serde_json::to_writer(FullContextBudget(FULL_CONTEXT_BYTES), &result).map_err(|_| {
+            OpError::new(
+                "context_too_large",
+                "Full context exceeds the 3 MiB response limit. Request context_get with detail=summary or overview; use task_list for task data.",
+            )
+        })?;
+    }
+    object(result)
+}
+
+const FULL_CONTEXT_BYTES: usize = 3 * 1024 * 1024;
+
+struct FullContextBudget(usize);
+
+impl std::io::Write for FullContextBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.checked_sub(bytes.len()).ok_or_else(|| {
+            std::io::Error::other("serialized full context exceeds its byte budget")
+        })?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn sync(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
