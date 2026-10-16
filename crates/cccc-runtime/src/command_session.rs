@@ -55,13 +55,12 @@ impl CommandSession {
             .map_err(|_| RuntimeError::Poisoned)?
             .input_gate();
         let _input = gate.lock().map_err(|_| RuntimeError::Poisoned)?;
-        let writer = self
-            .0
-            .lock()
-            .map_err(|_| RuntimeError::Poisoned)?
-            .input_writer()?;
+        let (writer, activity) = {
+            let mut session = self.0.lock().map_err(|_| RuntimeError::Poisoned)?;
+            (session.input_writer()?, session.activity_tracker())
+        };
         // Never hold the lifecycle lock across input: timeout/stop must be able
         // to terminate a child that is not reading its PTY.
-        crate::pty_input::write_input(&writer, data)
+        crate::pty_input::write_input(&writer, data, &activity)
     }
 }

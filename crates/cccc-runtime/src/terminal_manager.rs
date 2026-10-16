@@ -119,12 +119,15 @@ pub(crate) fn write_from_attachment(
     let Some(_guard) = crate::cancellation::lock_interruptibly(&gate, &revoked)? else {
         return Ok(false);
     };
-    let writer = session
-        .lock()
-        .map_err(|_| RuntimeError::Poisoned)?
-        .input_writer_from_attachment(registry, attachment_id)?;
+    let (writer, activity) = {
+        let mut session = session.lock().map_err(|_| RuntimeError::Poisoned)?;
+        (
+            session.input_writer_from_attachment(registry, attachment_id)?,
+            session.activity_tracker(),
+        )
+    };
     let Some(writer) = writer else {
         return Ok(false);
     };
-    crate::pty_input::write_input_interruptibly(&writer, data, &revoked)
+    crate::pty_input::write_input_interruptibly(&writer, data, &activity, &revoked)
 }

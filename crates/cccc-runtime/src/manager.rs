@@ -213,10 +213,10 @@ pub fn submit_sequence_interruptible(
         return Ok(false);
     }
     let session = lookup(group_id, actor_id)?;
-    let (gate, activity) = {
-        let session = session.lock().map_err(|_| RuntimeError::Poisoned)?;
-        (session.input_gate(), session.activity_tracker())
-    };
+    let gate = session
+        .lock()
+        .map_err(|_| RuntimeError::Poisoned)?
+        .input_gate();
     let Some(_guard) = lock_interruptibly(&gate, &|| cancelled.load(Ordering::Acquire))? else {
         return Ok(false);
     };
@@ -243,9 +243,6 @@ pub fn submit_sequence_interruptible(
             return Ok(false);
         }
     }
-    // Only completed deliveries count as input; raw writes, attached
-    // keystrokes and automatic terminal query replies do not.
-    activity.record_input();
     Ok(true)
 }
 
@@ -283,17 +280,19 @@ fn write_locked(
     data: &[u8],
     cancelled: Option<&AtomicBool>,
 ) -> Result<bool, RuntimeError> {
-    let writer = session
-        .lock()
-        .map_err(|_| RuntimeError::Poisoned)?
-        .input_writer()?;
+    let (writer, activity) = {
+        let mut session = session.lock().map_err(|_| RuntimeError::Poisoned)?;
+        (session.input_writer()?, session.activity_tracker())
+    };
     // The input gate preserves ordering; blocking IO must not hold the Session
     // lock required by status, stop and process cleanup. Pin this generation.
     match cancelled {
-        Some(cancelled) => crate::pty_input::write_input_interruptibly(&writer, data, &|| {
-            cancelled.load(Ordering::Acquire)
-        }),
-        None => crate::pty_input::write_input(&writer, data).map(|()| true),
+        Some(cancelled) => {
+            crate::pty_input::write_input_interruptibly(&writer, data, &activity, &|| {
+                cancelled.load(Ordering::Acquire)
+            })
+        }
+        None => crate::pty_input::write_input(&writer, data, &activity).map(|()| true),
     }
 }
 
