@@ -190,8 +190,20 @@ impl AnalystSession {
                     super::super::runtime_session::abandon_claude_resume_attempt(
                         home, group_id, actor_id, attempt,
                     )?;
+                    if let Some(transition_id) = claude::model_change_transition_id(&error) {
+                        claude::model_trace::emit(
+                            "claude_model_fresh_attempt_abandoned",
+                            json!({"transition_id":transition_id,"exact_attempt_retired":true}),
+                        );
+                    }
                 }
                 resume_attempt = None;
+                if let Some(transition_id) = claude::model_change_transition_id(&error) {
+                    claude::model_trace::emit(
+                        "claude_model_fresh_dispatched",
+                        json!({"transition_id":transition_id,"bytes_written":0,"owned_cleanup_confirmed":true}),
+                    );
+                }
                 match claude::prepare(
                     home,
                     &command,

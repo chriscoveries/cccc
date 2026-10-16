@@ -1,6 +1,6 @@
 //! Apply model-only drift through Claude's native local-command handler.
 use super::{Job, control, read_job_state};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{io, path::Path, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -8,20 +8,39 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// provider resume. Only the direct type permits the caller's fresh fallback;
 /// a cleanup failure wrapping it must never permit another launch.
 #[derive(Debug)]
-struct RequiresFresh(&'static str);
+struct RequiresFresh {
+    reason: &'static str,
+    transition_id: Option<String>,
+}
 impl std::fmt::Display for RequiresFresh {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "Claude model configuration requires a fresh session: {}",
-            self.0
+            self.reason
         )
     }
 }
 impl std::error::Error for RequiresFresh {}
 
 pub(super) fn requires_fresh(reason: &'static str) -> io::Error {
-    io::Error::other(RequiresFresh(reason))
+    io::Error::other(RequiresFresh {
+        reason,
+        transition_id: None,
+    })
+}
+pub(super) fn requires_fresh_in_transition(reason: &'static str, transition_id: &str) -> io::Error {
+    io::Error::other(RequiresFresh {
+        reason,
+        transition_id: Some(transition_id.to_owned()),
+    })
+}
+pub(super) fn fresh_transition_id(error: &io::Error) -> Option<&str> {
+    error
+        .get_ref()?
+        .downcast_ref::<RequiresFresh>()?
+        .transition_id
+        .as_deref()
 }
 pub(super) fn is_requires_fresh(error: &io::Error) -> bool {
     error
@@ -81,8 +100,17 @@ pub(super) async fn apply(
 ) -> io::Result<()> {
     let model = if model.is_empty() { "default" } else { model };
     control::validate_model(model)?;
+    let transition_id = uuid::Uuid::new_v4().simple().to_string();
+    super::model_trace::emit(
+        "claude_model_transition_started",
+        json!({"transition_id":transition_id,"short":job.short,"owned_launch":owned_launch}),
+    );
     let original = read_job_state(config, job, &job.cwd)?;
     if confirmed(&original, job, model)? {
+        super::model_trace::emit(
+            "claude_model_persisted_confirmed",
+            json!({"transition_id":transition_id,"short":job.short,"configured_model_confirmed":true,"model_input_sent":false}),
+        );
         return Ok(());
     }
     if !owned_launch {
@@ -92,24 +120,31 @@ pub(super) async fn apply(
     }
     require_adapter(model, job.cli_version)?;
     let target_label = super::cache_confirmation::label(model, job.cli_version);
-    let mut screen = super::cache_confirmation::Screen::default();
+    let mut screen = super::cache_confirmation::Screen::with_trace("post_input", &transition_id);
     let mut confirmed_dialog = false;
-    let mut stream = control::model_input(endpoint, &job.short, model, || {
-        confirmed(&read_job_state(config, job, &job.cwd)?, job, model).map(|_| ())
-    })
+    let mut stream = control::model_input_with_trace(
+        endpoint,
+        &job.short,
+        model,
+        || confirmed(&read_job_state(config, job, &job.cwd)?, job, model).map(|_| ()),
+        &transition_id,
+    )
     .await?;
+    let result: io::Result<()> = async {
     let started = tokio::time::Instant::now();
     let deadline = started + Duration::from_secs(10);
     let mut output = [0_u8; 8192];
     loop {
         let state = read_job_state(config, job, &job.cwd)?;
         if confirmed(&state, job, model)? {
+            super::model_trace::emit("claude_model_persisted_confirmed", json!({"transition_id":transition_id,"short":job.short,"configured_model_confirmed":true,"model_input_sent":true}));
             return Ok(());
         }
         if !confirmed_dialog && target_label.is_some_and(|label| screen.cache_cost(label)) {
             // The current complete native repaint identifies the cache-cost
             // modal and selected requested model. Hooks/drafts never qualify.
             if confirmed(&read_job_state(config, job, &job.cwd)?, job, model)? {
+                super::model_trace::emit("claude_model_persisted_confirmed", json!({"transition_id":transition_id,"short":job.short,"configured_model_confirmed":true,"model_input_sent":true}));
                 return Ok(());
             }
             stream.write_all(b"\r").await?;
@@ -132,6 +167,14 @@ pub(super) async fn apply(
             }
         }
     }
+    }.await;
+    if result.is_err() {
+        super::model_trace::emit(
+            "claude_model_post_input_failed",
+            json!({"transition_id":transition_id,"short":job.short,"model_input_sent":true,"fresh_fallback_allowed":false}),
+        );
+    }
+    result
 }
 
 #[cfg(test)]
