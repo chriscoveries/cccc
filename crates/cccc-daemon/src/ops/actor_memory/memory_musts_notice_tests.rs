@@ -173,6 +173,11 @@ fn same_actor_distinct_reasons_a_b_a_red_on_4881() {
     let notices = memory_notices(&f.home, &group.group_id);
     assert_eq!(notices.len(), 3);
     assert!(notices.iter().all(|e| event_actor_of(e) == "ghost"));
+    assert!(
+        notices
+            .iter()
+            .all(|e| outcome_of(e) == "detection_unavailable")
+    );
     assert!(message_of(&notices[2]).contains(REASON_UNATTRIBUTABLE));
 }
 
