@@ -238,15 +238,6 @@ async fn launch_inner(
         }
     }
 
-    let name = format!(
-        "cccc-{}-{}",
-        match purpose {
-            SessionPurpose::VoiceAnalyst => "voice-analyst",
-            SessionPurpose::Actor => "actor",
-            SessionPurpose::VoiceSecretary => "voice-secretary",
-        },
-        &generation[..generation.len().min(8)]
-    );
     let mut arguments = Vec::new();
     if let Some(session_id) = requested_session_id {
         // Agent View resumes the exact durable session only when no launch
@@ -254,7 +245,9 @@ async fn launch_inner(
         arguments.extend(["--bg".into(), "--resume".into(), session_id.into()]);
     } else {
         arguments.extend(prepared.arguments.iter().cloned());
-        arguments.extend(["--name".into(), name, "--bg".into()]);
+        // --name selects an existing named conversation in Agent View. Fresh
+        // launches must not supply a selector that can silently resume history.
+        arguments.push("--bg".into());
     }
     let mut command = command::process_command(
         &prepared.executable,
@@ -328,6 +321,28 @@ async fn launch_inner(
             return Err(with_optional_cleanup_error(error, rollback.err()));
         }
     };
+    if requested_session_id.is_none() {
+        let state = read_job_state(&prepared.config_dir, &job, cwd)?;
+        if state
+            .get("resumeSessionId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .is_some_and(|id| id != job.session_id)
+        {
+            // A fresh command may have reattached a pre-existing Agent View
+            // job. Ownership is unproven: do not stop it or expose a client
+            // that can admit a prompt and discover the mismatch mid-turn.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Claude fresh launch unexpectedly resumed an existing conversation \
+                     in Agent View job {}; no prompt was sent and the job was left running",
+                    job.short,
+                ),
+            ));
+        }
+    }
     if let Err(error) = validate_worker_version(&job) {
         let rollback = kill_and_confirm(&endpoint, &job.short).await;
         return Err(with_optional_cleanup_error(error, rollback.err()));
