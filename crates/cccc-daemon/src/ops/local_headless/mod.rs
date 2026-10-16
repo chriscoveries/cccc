@@ -128,7 +128,7 @@ fn managed_runtime() -> &'static tokio::runtime::Runtime {
     super::codex_voice_analyst::managed_runtime()
 }
 
-fn run_managed_launch<F, T>(future: F) -> std::io::Result<T>
+pub(crate) fn run_managed_launch<F, T>(future: F) -> std::io::Result<T>
 where
     F: Future<Output = std::io::Result<T>> + Send + 'static,
     T: Send + 'static,

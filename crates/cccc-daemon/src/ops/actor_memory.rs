@@ -208,7 +208,9 @@ fn notice(
             "actor_id": actor_id,
             "limit_mb": limit_mb,
             "memory_mb": memory_mb,
-            "sampling_basis": if cfg!(target_os = "linux") { "linux_rss_plus_swap" } else if cfg!(target_os = "macos") { "macos_rss_only" } else { "unsupported" },
+            "sampling_basis": sampling::accounting_basis(),
+            "sampling_model": "non_atomic_observed_process_tree",
+            "sampling_budget_ms": sampling::accounting_budget_ms(),
             "outcome": outcome,
         },
     })
@@ -429,6 +431,18 @@ mod tests {
         assert_eq!(event.data["to"], json!(["@foreman"]));
         assert_eq!(event.data["context"]["outcome"], "restarted");
         assert_eq!(event.data["context"]["memory_mb"], 1024);
+        assert_eq!(
+            event.data["context"]["sampling_basis"],
+            sampling::accounting_basis()
+        );
+        assert_eq!(
+            event.data["context"]["sampling_model"],
+            "non_atomic_observed_process_tree"
+        );
+        assert_eq!(
+            event.data["context"]["sampling_budget_ms"],
+            serde_json::json!(sampling::accounting_budget_ms())
+        );
     }
 
     #[test]

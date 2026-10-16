@@ -1,11 +1,38 @@
-//! Process-tree memory sampling: Linux resident plus swapped pages.
-//!
-//! Linux reads `/proc` directly; macOS goes through `ps` (the workspace
-//! forbids `unsafe`, so no sysctl FFI); other platforms report nothing.
-//! Pids that vanish mid-scan contribute nothing. Pure parsers are unit
-//! tested on every platform.
+//! Process-tree accounted memory: Linux VmRSS+VmSwap, Darwin physical footprint.
+//! Incomplete Darwin captures are unreadable, never RSS-only or partial totals.
+//! Actual provider ownership/generation is checked by the maintenance coordinator.
 
 use std::collections::HashMap;
+
+#[cfg(any(test, target_os = "macos"))]
+mod macos;
+
+pub fn accounting_basis() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        "linux_rss_plus_swap"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::ACCOUNTING_BASIS
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        "unsupported"
+    }
+}
+
+/// Async observation budget, excluding the existing owned-command cleanup.
+pub fn accounting_budget_ms() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        u64::try_from(macos::TREE_TIMEOUT.as_millis()).ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
 
 /// Sum resident and swapped KiB from Linux `/proc/<pid>/status`.
 /// The historical parser name is retained for the isolated port's callers.
@@ -30,38 +57,11 @@ pub fn parse_vmrss_kb(status: &str) -> Option<u64> {
     field(status, "VmRSS:")?.checked_add(field(status, "VmSwap:")?)
 }
 
-/// Parse `ps -o rss= -p <pid>` output (KiB). A zero RSS is real (freshly
-/// spawned): reported, not dropped. Anything else unparseable is `None`.
-/// Production use is macOS-only today; the unit test below runs everywhere.
-#[cfg(any(test, target_os = "macos"))]
-pub fn parse_ps_rss(text: &str) -> Option<u64> {
-    match text.split_whitespace().next() {
-        Some("0") => Some(0),
-        Some(first) => first.parse::<u64>().ok().filter(|kb| *kb > 0),
-        None => None,
-    }
-}
-
 /// Linux resident-plus-swap KiB of one pid, or `None` when unreadable.
 #[cfg(target_os = "linux")]
 fn rss_kb_of(pid: i32) -> Option<u64> {
     let body = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     parse_vmrss_kb(&body)
-}
-
-#[cfg(target_os = "macos")]
-fn rss_kb_of(pid: i32) -> Option<u64> {
-    let output = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid.to_string()])
-        .env("LC_ALL", "C")
-        .output()
-        .ok()?;
-    parse_ps_rss(&String::from_utf8_lossy(&output.stdout))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn rss_kb_of(_pid: i32) -> Option<u64> {
-    None
 }
 
 /// Parent pid of one pid, or `None` when unreadable.
@@ -94,66 +94,32 @@ pub fn bfs_tree(root: i32, children: &HashMap<i32, Vec<i32>>) -> Vec<i32> {
     members
 }
 
-/// Pids of `root` plus currently-visible descendants, root first. One
-/// platform snapshot per call; an exit race just shrinks the set.
+/// Linux root plus currently visible descendants, root first.
+#[cfg(target_os = "linux")]
 pub fn tree_pids(root: i32) -> Vec<i32> {
-    #[cfg(target_os = "linux")]
-    {
-        let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
-        if let Ok(dir) = std::fs::read_dir("/proc") {
-            for entry in dir.flatten() {
-                let name = entry.file_name();
-                let Ok(candidate) = name.to_string_lossy().parse::<i32>() else {
-                    continue;
-                };
-                if candidate <= 0 {
-                    continue;
-                }
-                if let Some(ppid) = ppid_of(candidate) {
-                    children.entry(ppid).or_default().push(candidate);
-                }
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    if let Ok(dir) = std::fs::read_dir("/proc") {
+        for entry in dir.flatten() {
+            let name = entry.file_name();
+            let Ok(candidate) = name.to_string_lossy().parse::<i32>() else {
+                continue;
+            };
+            if candidate <= 0 {
+                continue;
+            }
+            if let Some(ppid) = ppid_of(candidate) {
+                children.entry(ppid).or_default().push(candidate);
             }
         }
-        bfs_tree(root, &children)
     }
-    #[cfg(target_os = "macos")]
-    {
-        bfs_tree(root, &ppid_table_inverted())
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        vec![root]
-    }
+    bfs_tree(root, &children)
 }
 
-/// Inverted parentage table (parent -> children) from one `ps` pass.
-#[cfg(target_os = "macos")]
-fn ppid_table_inverted() -> HashMap<i32, Vec<i32>> {
-    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid="])
-        .env("LC_ALL", "C")
-        .output()
-    else {
-        return children;
-    };
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut tokens = line.split_whitespace();
-        if let (Some(candidate), Some(ppid)) = (tokens.next(), tokens.next())
-            && let (Ok(candidate), Ok(ppid)) = (candidate.parse::<i32>(), ppid.parse::<i32>())
-            && candidate > 0
-            && ppid >= 0
-        {
-            children.entry(ppid).or_default().push(candidate);
-        }
-    }
-    children
-}
-
-/// Sum accounted KiB over `root` plus currently-visible descendants.
-/// Linux includes VmRSS + VmSwap; the existing Darwin fallback is RSS only.
-/// This partial patch does not complete the Darwin accounting policy. Pids that
-/// vanish mid-scan contribute nothing. Returns `(total_kib, counted)`.
+/// Linux retains its existing resident+swap accounting. Darwin requires a
+/// bounded non-atomic pass over the observed physical-footprint tree. (0,0)
+/// means unreadable/unsupported, not a valid zero footprint. The enforcement
+/// caller skips counted==0; root ownership/idle authority is kept separately.
+#[cfg(target_os = "linux")]
 pub fn tree_rss_kib(root: i32) -> (u64, usize) {
     let mut total = 0u64;
     let mut counted = 0usize;
@@ -164,6 +130,17 @@ pub fn tree_rss_kib(root: i32) -> (u64, usize) {
         }
     }
     (total, counted)
+}
+
+#[cfg(target_os = "macos")]
+pub fn tree_rss_kib(root: i32) -> (u64, usize) {
+    super::local_headless::run_managed_launch(async move { macos::tree_footprint_kib(root).await })
+        .unwrap_or((0, 0))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn tree_rss_kib(_root: i32) -> (u64, usize) {
+    (0, 0)
 }
 
 #[cfg(test)]
@@ -177,14 +154,6 @@ mod tests {
         assert_eq!(parse_vmrss_kb("Name:\tsleep\n"), None);
         assert_eq!(parse_vmrss_kb("VmRSS:\t kB\n"), None);
         assert_eq!(parse_vmrss_kb(""), None);
-    }
-
-    #[test]
-    fn ps_rss_parses_kilobytes() {
-        assert_eq!(parse_ps_rss("  3936\n"), Some(3936));
-        assert_eq!(parse_ps_rss("0\n"), Some(0));
-        assert_eq!(parse_ps_rss(""), None);
-        assert_eq!(parse_ps_rss("abc\n"), None);
     }
 
     #[test]
