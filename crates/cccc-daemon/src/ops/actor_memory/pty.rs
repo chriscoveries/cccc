@@ -147,8 +147,11 @@ fn recover_pending(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>
             }
             if cccc_core::ledger::find_event(&ledger, &record.id)?.is_none() {
                 cccc_core::ledger::append(&ledger, record)?;
-                appended.push(record.clone());
             }
+            // The previous append may have committed before its caller could
+            // receive the event. Re-offer the same identity once; runtime delivery
+            // claims, rather than allocating a new notice, arbitrate submission.
+            appended.push(record.clone());
             mark.pending = None;
             changed = true;
         }
@@ -232,6 +235,15 @@ pub(super) fn tick_detection(home: &HomeLayout, group: &GroupDoc) -> io::Result<
         .iter()
         .filter(|a| a.enabled && a.memory_limit_mb != 0)
     {
+        // A real attempt already reported this actor in this window. Keep this
+        // check ahead of profile/sample diagnostics as well as over-limit reports.
+        // Previously persisted pending events were recovered before this loop.
+        if read_cooldowns(home, &group.group_id)?
+            .get(&stored.id)
+            .is_some_and(|at| now_secs() < at.saturating_add(RESTART_COOLDOWN_SECS))
+        {
+            continue;
+        }
         let actor = match super::super::actor_profile_runtime::resolve(home, stored) {
             Ok(actor) => actor,
             Err(_) => {
@@ -269,13 +281,6 @@ pub(super) fn tick_detection(home: &HomeLayout, group: &GroupDoc) -> io::Result<
             }
         };
         if sample.total_kib <= u64::from(actor.memory_limit_mb) * 1024 {
-            continue;
-        }
-        // A real attempt has already produced its own notice in this window.
-        if read_cooldowns(home, &group.group_id)?
-            .get(&actor.id)
-            .is_some_and(|at| now_secs() < at.saturating_add(RESTART_COOLDOWN_SECS))
-        {
             continue;
         }
         let required_block = if is_native_acp(&actor) {

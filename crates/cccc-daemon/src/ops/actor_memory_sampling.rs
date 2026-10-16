@@ -121,15 +121,10 @@ pub fn tree_pids(root: i32) -> Vec<i32> {
 /// caller skips counted==0; root ownership/idle authority is kept separately.
 #[cfg(target_os = "linux")]
 pub fn tree_rss_kib(root: i32) -> (u64, usize) {
-    let mut total = 0u64;
-    let mut counted = 0usize;
-    for pid in tree_pids(root) {
-        if let Some(kb) = rss_kb_of(pid) {
-            total = total.saturating_add(kb);
-            counted += 1;
-        }
-    }
-    (total, counted)
+    let Ok(root) = u32::try_from(root) else {
+        return (0, 0);
+    };
+    roots_rss_kib(&[root])
 }
 
 #[cfg(target_os = "macos")]
@@ -159,13 +154,16 @@ pub fn roots_rss_kib(roots: &[u32]) -> (u64, usize) {
     let mut total = 0_u64;
     let mut counted = 0_usize;
     for pid in members {
-        if let Some(kib) = rss_kb_of(pid) {
-            let Some(sum) = total.checked_add(kib) else {
-                return (0, 0);
-            };
-            total = sum;
-            counted += 1;
-        }
+        // A known observed member without both counters makes the union
+        // unreadable. A readable sibling cannot turn unknown memory into zero.
+        let Some(kib) = rss_kb_of(pid) else {
+            return (0, 0);
+        };
+        let Some(sum) = total.checked_add(kib) else {
+            return (0, 0);
+        };
+        total = sum;
+        counted += 1;
     }
     (total, counted)
 }
