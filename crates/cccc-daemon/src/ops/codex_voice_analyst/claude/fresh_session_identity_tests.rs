@@ -406,6 +406,29 @@ printf 'started · abcdef12\n'
         assert_eq!(saved, fixture.original);
         cleanup.expect("explicit cleanup of the proven fresh job");
     }
+    #[tokio::test]
+    async fn identity_receipt_retarget_refuses_live_adopted_worker_without_registry() {
+        let fixture = Fixture::new(true, true);
+        std::fs::copy(
+            fixture.config.join("resumed.json"),
+            fixture.config.join("jobs").join(SHORT).join("state.json"),
+        )
+        .expect("publish worker W adopting S");
+        assert!(
+            !fixture.config.join("sessions").exists(),
+            "no registry fallback in this control"
+        );
+        let result = retarget::ensure_available(&fixture.config, SAVED).await;
+        fixture.server.abort();
+        let error = result.expect_err("a live worker W holding S excludes explicit resume S");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock, "{error}");
+        assert_eq!(fixture.kills.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.replies.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            std::fs::read(&fixture.saved).expect("retained history"),
+            fixture.original
+        );
+    }
 }
 
 struct FreshSettlePending {

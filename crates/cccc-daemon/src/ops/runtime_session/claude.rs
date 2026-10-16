@@ -24,6 +24,10 @@ mod failure_tests;
 #[path = "claude_continuity_tests.rs"]
 mod continuity_tests;
 
+#[cfg(test)]
+#[path = "claude_identity_receipt_tests.rs"]
+mod identity_receipt_tests;
+
 pub struct ResumeAttempt {
     pub session_id: String,
     pub attempt_id: String,
