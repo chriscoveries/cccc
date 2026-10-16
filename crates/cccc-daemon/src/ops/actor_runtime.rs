@@ -12,6 +12,7 @@ mod environment;
 #[cfg(all(test, unix))]
 #[path = "actor_runtime_memory_delivery_tests.rs"]
 mod memory_delivery_tests;
+mod memory_pty;
 mod persistence;
 mod reconcile;
 pub(crate) mod terminal_history;
@@ -19,6 +20,7 @@ pub(crate) mod terminal_history;
 mod untrusted_workspace_tests;
 pub(crate) use attributed_reap::reap_group;
 pub(crate) use delivery::start_for_delivery;
+pub(crate) use memory_pty::{FreshOutcome, restart_for_memory_pty};
 pub use persistence::persist_lifecycle;
 pub(crate) use reconcile::record_process_exit;
 pub use reconcile::{reap_exited, reconcile_exited};
@@ -75,6 +77,10 @@ fn apply_with_policy(
         .map_err(OpError::io)?;
     }
     if kind == "actor.stop" {
+        // Shutdown forbids starts, but explicit stop must still serialize with
+        // admitted maintenance without reopening launch admission.
+        let _stop_permit = crate::runtime_start_gate::stop_permit()
+            .map_err(|message| OpError::new("runtime_shutting_down", message))?;
         return stop_registered(group, actor_id);
     }
     let actor = actor_profile_runtime::resolve(home, stored_actor)?;
@@ -105,6 +111,18 @@ fn apply_resolved_with_policy(
             "This Group's secretary is managed by the global Voice Secretary; it is not an Actor runtime",
         ));
     }
+    // Serialize the entire lifecycle with maintenance and delivery admission.
+    // Required-resume checks must happen after waiting for any older operation,
+    // and shutdown refusal must leave even an idempotent owner untouched.
+    #[cfg(all(test, unix))]
+    memory_delivery_tests::manual_admission::checkpoint(
+        home,
+        &group.group_id,
+        &actor.id,
+        memory_delivery_tests::manual_admission::ManualPhase::BeforePermit,
+    );
+    let _start_permit = crate::runtime_start_gate::permit(home)
+        .map_err(|message| OpError::new("runtime_shutting_down", message))?;
     if !matches!(kind, "actor.restart" | "actor.new_session") && actor_is_running(group, actor) {
         super::runtime_session::recovery_decision(
             home,
@@ -219,15 +237,6 @@ fn start_local_headless(
         super::runtime_mcp::prepare(home, actor.runtime, &actor.command, &cwd, &mut env)?;
     }
     actor.env = env;
-    #[cfg(all(test, unix))]
-    memory_delivery_tests::manual_admission::checkpoint(
-        home,
-        &group.group_id,
-        &actor.id,
-        memory_delivery_tests::manual_admission::ManualPhase::BeforePermit,
-    );
-    let _start_permit = crate::runtime_start_gate::permit(home)
-        .map_err(|message| OpError::new("runtime_shutting_down", message))?;
     let result = if explicit {
         super::local_headless::start_with_policy(home, group, &actor, true)
     } else {
@@ -274,15 +283,6 @@ fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionSt
     let cwd = working_directory(group, &actor)?;
     let mut env = environment::launch_env(home, group, &actor);
     super::runtime_mcp::prepare(home, actor.runtime, &command, &cwd, &mut env)?;
-    #[cfg(all(test, unix))]
-    memory_delivery_tests::manual_admission::checkpoint(
-        home,
-        &group.group_id,
-        &actor.id,
-        memory_delivery_tests::manual_admission::ManualPhase::BeforePermit,
-    );
-    let _start_permit = crate::runtime_start_gate::permit(home)
-        .map_err(|message| OpError::new("runtime_shutting_down", message))?;
     let command = cccc_runtime::resolve_command_executable(&command, &env);
     let history =
         terminal_history::config(home, &group.group_id, &actor.id).map_err(OpError::io)?;
@@ -386,6 +386,10 @@ pub(crate) fn stop_all() -> Result<Vec<SessionStatus>, cccc_runtime::RuntimeErro
 }
 
 pub fn stop_group(home: &HomeLayout, group: &GroupDoc) -> Result<Vec<SessionStatus>, OpError> {
+    // Callers cancel and join delivery before entering this outer lifecycle.
+    // The shared low-level stop helpers also serve already-admitted callers.
+    let _stop_permit = crate::runtime_start_gate::stop_permit()
+        .map_err(|message| OpError::new("runtime_shutting_down", message))?;
     super::dots_events::invalidate_group(home, group)?;
     super::local_headless::stop_group(&group.group_id).map_err(OpError::io)?;
     super::deepseek_runtime::stop_group(&group.group_id);

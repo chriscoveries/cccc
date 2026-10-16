@@ -67,7 +67,11 @@ pub(crate) fn start_for_delivery(
 // Admission is held by start_for_delivery. These launch sequences deliberately
 // do not call the manual lifecycle helpers, which acquire their own permit and
 // may apply an explicit resume/restart policy.
-fn start_managed(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<(), OpError> {
+pub(super) fn start_managed(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+) -> Result<(), OpError> {
     let mut actor = environment::resolve_launch_actor(home, group, actor)?;
     let cwd = working_directory(group, &actor)?;
     let mut env = environment::launch_env(home, group, &actor);
@@ -78,7 +82,11 @@ fn start_managed(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<(
     local_headless::start(home, group, &actor).map_err(launch_error)
 }
 
-fn start_terminal(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<(), OpError> {
+pub(super) fn start_terminal(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+) -> Result<(), OpError> {
     let actor = environment::resolve_launch_actor(home, group, actor)?;
     let command = if actor.command.is_empty() {
         cccc_runtime::default_command(actor.runtime)

@@ -143,6 +143,60 @@ pub fn tree_rss_kib(_root: i32) -> (u64, usize) {
     (0, 0)
 }
 
+/// Measure the union of observed process trees, without counting a provider
+/// twice when its owned helper is already a descendant of another root.
+/// This is non-atomic accounting, never process ownership or stop authority.
+/// Invalid/unsupported roots and unreadable observations return count zero.
+#[cfg(target_os = "linux")]
+pub fn roots_rss_kib(roots: &[u32]) -> (u64, usize) {
+    let Some(roots) = checked_roots(roots) else {
+        return (0, 0);
+    };
+    let mut members = std::collections::BTreeSet::new();
+    for root in roots {
+        members.extend(tree_pids(root));
+    }
+    let mut total = 0_u64;
+    let mut counted = 0_usize;
+    for pid in members {
+        if let Some(kib) = rss_kb_of(pid) {
+            let Some(sum) = total.checked_add(kib) else {
+                return (0, 0);
+            };
+            total = sum;
+            counted += 1;
+        }
+    }
+    (total, counted)
+}
+
+#[cfg(target_os = "macos")]
+pub fn roots_rss_kib(roots: &[u32]) -> (u64, usize) {
+    let Some(roots) = checked_roots(roots) else {
+        return (0, 0);
+    };
+    super::local_headless::run_managed_launch(
+        async move { macos::roots_footprint_kib(roots).await },
+    )
+    .unwrap_or((0, 0))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn roots_rss_kib(_roots: &[u32]) -> (u64, usize) {
+    (0, 0)
+}
+
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn checked_roots(roots: &[u32]) -> Option<Vec<i32>> {
+    if roots.is_empty() || roots.len() > 128 {
+        return None;
+    }
+    roots
+        .iter()
+        .map(|pid| i32::try_from(*pid).ok().filter(|pid| *pid > 1))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +221,14 @@ mod tests {
         rest.sort_unstable();
         assert_eq!(rest, vec![2, 3, 4]);
         assert_eq!(bfs_tree(9, &children), vec![9]);
+    }
+
+    #[test]
+    fn observation_roots_reject_empty_init_overflow_and_unbounded_inputs() {
+        for roots in [vec![], vec![0], vec![1], vec![u32::MAX], vec![2; 129]] {
+            assert_eq!(checked_roots(&roots), None, "{roots:?}");
+        }
+        assert_eq!(checked_roots(&[41, 42, 41]), Some(vec![41, 42, 41]));
     }
 
     #[test]

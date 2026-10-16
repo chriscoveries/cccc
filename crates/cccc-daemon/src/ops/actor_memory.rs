@@ -1,15 +1,13 @@
-//! Optional resident-memory ceilings for directly owned native ACP providers.
+//! Per-actor advisory RSS+swap/footprint detection and bounded memory policy.
 //!
-//! A nonzero limit enables observation. Enforcement requires one owned child,
-//! a matching materialized receipt and authoritative idle-close admission.
-//! The callback compares a fresh process-tree sample with the fresh limit.
-//! Viewer, PTY and multi-root topologies are skipped rather than guessed at.
+//! Native ACP enforcement requires a directly owned child, a matching receipt,
+//! authoritative idle-close and exact-session recovery. Its durable obligation
+//! survives every failure. Other runtimes require explicit fresh-only PTY
+//! opt-in and cf959bff's ten-minute observed quiet predicate.
 //!
-//! Reserve a durable 30-minute cooldown only after authoritative idle-close
-//! starts a real maintenance attempt, and keep
-//! an exact-resume requirement through failed stop/start. No replacement may
-//! silently create a new conversation. Successful and failed attempts append
-//! one outcome and target the available foreman through durable delivery.
+//! Detection samples attributable provider roots even when restart is unsafe.
+//! Measurement is advisory, non-atomic and never creates ownership/idle proof.
+//! Detection notices and actual restart attempts have separate durable cooldowns.
 
 use std::collections::HashMap;
 use std::io;
@@ -20,6 +18,9 @@ use cccc_core::{GroupDoc, HomeLayout};
 use serde_json::{Value, json};
 
 use super::actor_memory_sampling as sampling;
+mod claude_observation;
+pub(crate) mod observation;
+pub(crate) mod pty;
 
 /// Minimum seconds between restarts of one actor, even across daemon
 /// restarts. The marker is written after authoritative idle-close and before
@@ -224,6 +225,14 @@ fn notice(
 /// caller to dispatch. Pure observation when nothing qualifies: no writes,
 /// no signals.
 pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
+    // Admission uses the persisted current configuration, never a stale caller copy.
+    let fresh = cccc_core::GroupStore::new(home.clone())?.load(&group.group_id)?;
+    let mut events = tick_native(home, &fresh)?;
+    events.extend(pty::tick_detection(home, &fresh)?);
+    Ok(events)
+}
+
+fn tick_native(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
     use super::local_headless::memory::{
         MemoryRestartOutcome, memory_candidate, restart_for_memory_with_commit,
     };
@@ -250,6 +259,7 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
         if counted == 0 || observed_kib <= u64::from(limit_mb) * 1024 {
             continue;
         }
+        pty::configured_foreman(group)?;
         let mut admitted = None;
         let attempted = std::cell::Cell::new(false);
         let result = restart_for_memory_with_commit(
@@ -258,6 +268,7 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
             &actor.id,
             &candidate,
             |fresh, fresh_actor, owned| {
+                let recipient = NoticeRecipient::configured(fresh)?;
                 let limit = fresh_actor.memory_limit_mb;
                 let now = now_secs();
                 if !fresh_actor.enabled
@@ -275,7 +286,7 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
                 if counted == 0 || rss_kib <= u64::from(limit) * 1024 {
                     return Ok(false);
                 }
-                admitted = Some((limit, rss_kib.div_ceil(1024)));
+                admitted = Some((limit, rss_kib.div_ceil(1024), recipient));
                 #[cfg(all(test, target_os = "linux"))]
                 recipient_binding_tests::after_native_admission(
                     home,
@@ -294,17 +305,19 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
         match result {
             Ok(MemoryRestartOutcome::Skipped) => {}
             Ok(MemoryRestartOutcome::Restarted) => {
-                let (limit, memory_mb) = admitted.ok_or_else(|| {
+                let (limit, memory_mb, recipient) = admitted.ok_or_else(|| {
                     io::Error::other("memory restart completed without admission evidence")
                 })?;
-                out.push(emit(
+                out.push(recipient.append(
                     home,
-                    &group.group_id,
-                    &actor.id,
-                    u64::from(limit),
-                    memory_mb,
-                    "restarted",
-                    "Verified native ACP session resumed.",
+                    notice(
+                        &group.group_id,
+                        &actor.id,
+                        u64::from(limit),
+                        memory_mb,
+                        "restarted",
+                        "Verified native ACP session resumed.",
+                    ),
                 )?);
                 // The coordinator has released its admission guard. Pending
                 // deliveries can now target the verified replacement session.
@@ -315,7 +328,7 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
                 }
             }
             Err(error) => {
-                if let Some((limit, memory_mb)) = admitted.filter(|_| attempted.get()) {
+                if let Some((limit, memory_mb, recipient)) = admitted.filter(|_| attempted.get()) {
                     let cooldown_holds = read_cooldowns(home, &group.group_id)
                         .ok()
                         .and_then(|marks| marks.get(&actor.id).copied())
@@ -325,14 +338,16 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
                     } else {
                         "Cooldown was not persisted; exact session resume remains required. Operator recovery is needed."
                     };
-                    out.push(emit(
+                    out.push(recipient.append(
                         home,
-                        &group.group_id,
-                        &actor.id,
-                        u64::from(limit),
-                        memory_mb,
-                        "restart_failed",
-                        &format!("Memory maintenance failed: {error}. {recovery}"),
+                        notice(
+                            &group.group_id,
+                            &actor.id,
+                            u64::from(limit),
+                            memory_mb,
+                            "restart_failed",
+                            &format!("Memory maintenance failed: {error}. {recovery}"),
+                        ),
                     )?);
                 } else {
                     tracing::warn!(%error, actor_id = %actor.id, "memory maintenance admission failed or was unconfirmed");
@@ -345,6 +360,38 @@ pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
     Ok(out)
 }
 
+/// A concrete destination selected by final maintenance admission. Keeping this
+/// value never asserts that the actor will still exist or be deliverable later.
+struct NoticeRecipient {
+    actor_id: String,
+}
+impl NoticeRecipient {
+    fn configured(group: &GroupDoc) -> io::Result<Self> {
+        let id = &pty::configured_foreman(group)?.id;
+        if cccc_core::actors::validate_actor_id(id)? != *id {
+            return Err(io::Error::other(
+                "Memory outcome recipient is not a concrete actor ID",
+            ));
+        }
+        Ok(Self {
+            actor_id: id.clone(),
+        })
+    }
+
+    /// Append to the admitted ID without loading role/liveness configuration.
+    fn append(self, home: &HomeLayout, mut event: Event) -> io::Result<Event> {
+        event
+            .data
+            .insert("target_actor_id".into(), json!(self.actor_id));
+        let store = cccc_core::GroupStore::new(home.clone())?;
+        cccc_core::ledger::append(&store.ledger_path(&event.group_id)?, &event)?;
+        Ok(event)
+    }
+}
+
+// Retained standalone unit-routing path; all production native outcomes use
+// their final admitted destination rather than reloading role configuration.
+#[cfg(test)]
 fn emit(
     home: &HomeLayout,
     group_id: &str,
@@ -354,17 +401,12 @@ fn emit(
     outcome: &str,
     detail: &str,
 ) -> io::Result<Event> {
-    let mut event = notice(group_id, actor_id, limit_mb, memory_mb, outcome, detail);
-    let store = cccc_core::GroupStore::new(home.clone())?;
-    let group = store.load(group_id)?;
-    if let Ok(foreman) = cccc_core::actors::unique_available_foreman(&group) {
-        event
-            .data
-            .insert("target_actor_id".into(), json!(foreman.id));
-    }
-    let path = store.ledger_path(group_id)?;
-    cccc_core::ledger::append(&path, &event)?;
-    Ok(event)
+    // Standalone callers intentionally resolve the current configured role.
+    let group = cccc_core::GroupStore::new(home.clone())?.load(group_id)?;
+    NoticeRecipient::configured(&group)?.append(
+        home,
+        notice(group_id, actor_id, limit_mb, memory_mb, outcome, detail),
+    )
 }
 
 #[cfg(test)]

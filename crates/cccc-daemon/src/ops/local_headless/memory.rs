@@ -186,3 +186,40 @@ fn launch_config(
 #[cfg(all(test, unix))]
 #[path = "memory_tests.rs"]
 mod tests;
+
+/// Registry observation only. Never expose viewer PID as the provider root.
+pub(crate) struct ManagedMemoryObservation {
+    pub running: bool,
+    pub generation: String,
+    pub runtime: cccc_contracts::ActorRuntime,
+    pub session_id: String,
+    pub roots: Vec<u32>,
+    pub environment: std::collections::BTreeMap<String, String>,
+    pub command: Vec<String>,
+    pub resumed: bool,
+}
+
+pub(crate) fn observe_managed(
+    home: &HomeLayout,
+    group: &str,
+    actor: &str,
+) -> io::Result<Option<ManagedMemoryObservation>> {
+    let Some(item) = supervisor::lookup(&(group.to_owned(), actor.to_owned())) else {
+        return Ok(None);
+    };
+    if item.home.root() != home.root() {
+        return Err(io::Error::other(
+            "Managed memory observation belongs to a different home",
+        ));
+    }
+    Ok(Some(ManagedMemoryObservation {
+        running: item.running(),
+        generation: item.managed.generation().to_owned(),
+        runtime: item.managed.runtime(),
+        session_id: item.managed.thread_id().to_owned(),
+        roots: item.managed.owned_process_roots_for_memory_observation(),
+        environment: item.managed.tui_environment(),
+        command: item.managed.actor_tui_command(),
+        resumed: item.managed.resumed_for_memory_observation(),
+    }))
+}
