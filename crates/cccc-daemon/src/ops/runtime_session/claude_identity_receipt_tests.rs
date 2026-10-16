@@ -534,3 +534,134 @@ fn known_conflict_stays_blocked_with_resume_disabled() {
     );
     assert_eq!(f.receipt(), before);
 }
+
+fn assert_first_observation_blocks_before_fresh(f: &Fixture) {
+    let before = f.receipt();
+    assert!(before.get("claude_identity_conflict").is_none());
+    let error = f
+        .prepare()
+        .err()
+        .expect("first identity observation must precede implicit fresh");
+    assert!(
+        is_resume_blocked(&error),
+        "identity block, not fresh: {error}"
+    );
+    assert_block_choices(&error.to_string());
+    let after = f.receipt();
+    assert_durable_w_and_s(&after);
+    assert_eq!(after["provider_session_id"], WORKER_W);
+    assert_eq!(
+        after["last_resume_attempt_id"],
+        before["last_resume_attempt_id"]
+    );
+    assert_eq!(after["failure_count"], before["failure_count"]);
+}
+
+#[test]
+fn first_observation_precedes_command_fingerprint_drift() {
+    let mut f = Fixture::new();
+    f.record_worker();
+    f.write_adopting_observation();
+    f.command.extend(["--effort".into(), "high".into()]);
+    assert_first_observation_blocks_before_fresh(&f);
+}
+
+#[test]
+fn first_observation_precedes_environment_fingerprint_drift() {
+    let mut f = Fixture::new();
+    f.record_worker();
+    f.write_adopting_observation();
+    // The provider configuration root remains the same. Only the resolved
+    // launch identity changes; no credentials are read or changed.
+    f.env
+        .insert("IDENTITY_RECEIPT_TEST_OPTION".into(), "changed".into());
+    assert_first_observation_blocks_before_fresh(&f);
+}
+
+#[test]
+fn first_observation_uses_saved_workspace_before_workspace_drift() {
+    let mut f = Fixture::new();
+    f.record_worker();
+    f.write_adopting_observation();
+    // The old worker and transcript still belong to the saved workspace.
+    // Looking at the new requested workspace must not erase that evidence.
+    f.cwd = f._temp.path().join("new-workspace");
+    std::fs::create_dir(&f.cwd).expect("new requested workspace");
+    assert_first_observation_blocks_before_fresh(&f);
+}
+
+#[test]
+fn ordinary_receipts_keep_fresh_behavior_on_configuration_drift() {
+    for drift in 0..3 {
+        let mut f = Fixture::new();
+        f.record_worker();
+        let before = f.receipt();
+        match drift {
+            0 => f.command.extend(["--effort".into(), "high".into()]),
+            1 => {
+                f.env
+                    .insert("IDENTITY_RECEIPT_TEST_OPTION".into(), "changed".into());
+            }
+            _ => {
+                f.cwd = f._temp.path().join("new-workspace");
+                std::fs::create_dir(&f.cwd).expect("new requested workspace");
+            }
+        }
+        assert!(f.prepare().expect("ordinary configuration drift").is_none());
+        let after = f.receipt();
+        assert!(after.get("claude_identity_conflict").is_none());
+        assert_eq!(after["provider_session_id"], WORKER_W);
+        assert_eq!(
+            after["last_resume_attempt_id"],
+            before["last_resume_attempt_id"]
+        );
+        assert_eq!(after["failure_count"], before["failure_count"]);
+    }
+}
+
+#[test]
+fn first_observation_is_not_skipped_with_resume_disabled() {
+    if let Ok(root) = std::env::var("CCCC_TEST_RECEIPT_ORDER_ROOT") {
+        let root = std::path::PathBuf::from(root);
+        let home = HomeLayout::from_path(root.join("home")).expect("existing home");
+        let group = std::env::var("CCCC_TEST_RECEIPT_ORDER_GROUP").expect("owned group");
+        let env = BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".into(),
+            root.join("claude-config").to_string_lossy().into_owned(),
+        )]);
+        let error = prepare_managed(
+            &home,
+            &group,
+            ACTOR,
+            &root.join("workspace"),
+            &["claude".into()],
+            &env,
+        )
+        .err()
+        .expect("resume-off must assess observable identity before fresh");
+        assert!(is_resume_blocked(&error));
+        assert_block_choices(&error.to_string());
+        let document = read(&home, &group, ACTOR).expect("durable first discovery");
+        assert_durable_w_and_s(&document);
+        assert_eq!(document["provider_session_id"], WORKER_W);
+        assert_eq!(document["last_resume_attempt_id"], "");
+        return;
+    }
+    let f = Fixture::new();
+    f.record_worker();
+    f.write_adopting_observation();
+    // No initial prepare: the child must discover the conflict itself.
+    let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", "ops::runtime_session::claude::identity_receipt_tests::first_observation_is_not_skipped_with_resume_disabled", "--nocapture"])
+        .env("CCCC_RUNTIME_RESUME", "0")
+        .env("CCCC_TEST_RECEIPT_ORDER_ROOT", f._temp.path())
+        .env("CCCC_TEST_RECEIPT_ORDER_GROUP", &f.group)
+        .output().expect("isolated first-observation resume-off test");
+    assert!(
+        child.status.success(),
+        "first-discovery resume-off control failed: {} {}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert_durable_w_and_s(&f.receipt());
+}
