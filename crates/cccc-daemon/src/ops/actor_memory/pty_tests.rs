@@ -467,3 +467,94 @@ fn already_appended_pending_detection_is_offered_once_when_sampling_is_disabled(
             .exists()
     );
 }
+
+// ---- MUST3 (tests-only): input record vs the quiet-to-stop gap ----
+// Real interleavings only: every submit below travels the actor's own
+// entrypoint; no activity field is ever written by a test.
+
+/// The regression itself: a REAL accepted submit lands in the final
+/// quiet-to-stop gap of the maintenance flow. The owned actor must survive
+/// (same pid, still running) and the attempt cooldown must stay unspent —
+/// the stop decision has to recheck under the actor guard, not trust the
+/// earlier quiet observation. RED on current source: nothing rechecks, so
+/// the flow commits (cooldown written) and stops the actor anyway.
+#[test]
+fn real_submit_in_the_final_quiet_to_stop_gap_keeps_the_owned_actor_and_spends_no_cooldown() {
+    let f = opted_in_fixture();
+    let before = f.status();
+    let _age = Age::new(&f.group.group_id, "worker");
+    let sample = super::super::observation::observe(&f.home, &f.group, &f.group.actors[1])
+        .expect("actual observation")
+        .expect("owned root");
+    crate::ops::actor_memory::must3_gap_tests::arm(
+        f.home.root().to_path_buf(),
+        f.group.group_id.clone(),
+        "worker".into(),
+    );
+    let outcome = super::super::super::actor_runtime::restart_for_memory_pty(
+        &f.home,
+        &f.group.group_id,
+        "worker",
+        &sample,
+        |_, _| Ok(true),
+        || Ok(()),
+    )
+    .expect("maintenance returns");
+    assert_eq!(
+        outcome,
+        super::super::super::actor_runtime::FreshOutcome::Skipped,
+        "newer input in the gap must veto the stop"
+    );
+    assert!(f.status().running, "owned actor must stay alive");
+    assert_eq!(
+        f.status().pid,
+        before.pid,
+        "the actor must be the same owned process, not a replacement"
+    );
+    assert!(
+        !super::super::cooldown_path(&f.home, &f.group.group_id)
+            .expect("attempt path")
+            .exists(),
+        "no attempt may be committed when the stop is vetoed"
+    );
+}
+
+/// Control: a submit cancelled before admission records NO input — a
+/// cancelled-before-accept send must not veto a later legitimate stop.
+#[test]
+fn cancelled_before_admission_records_no_input() {
+    let f = opted_in_fixture();
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+    let accepted = super::super::super::actor_delivery::submit_terminal_text(
+        &f.group.group_id,
+        &f.group.actors[1],
+        "must3 cancelled control",
+        &cancelled,
+    );
+    assert!(!accepted, "a cancelled submit must not deliver");
+    let snapshot = cccc_runtime::activity(&f.group.group_id, "worker").expect("activity");
+    assert!(
+        snapshot.last_input.is_none(),
+        "cancelled-before-accept must leave the input record untouched"
+    );
+}
+
+/// Pin: a real ACCEPTED submit records input before it returns, which is the
+/// record the stop-side recheck reads. GREEN today (terminal side): this is
+/// the contract the gap regression protects, stated independently of it.
+#[test]
+fn accepted_submit_records_input_before_it_returns() {
+    let f = opted_in_fixture();
+    let accepted = super::super::super::actor_delivery::submit_terminal_text(
+        &f.group.group_id,
+        &f.group.actors[1],
+        "must3 accepted pin",
+        &std::sync::atomic::AtomicBool::new(false),
+    );
+    assert!(accepted, "the fixture submit must be accepted");
+    let snapshot = cccc_runtime::activity(&f.group.group_id, "worker").expect("activity");
+    assert!(
+        snapshot.last_input.is_some(),
+        "an accepted submit must record input before completion"
+    );
+}
