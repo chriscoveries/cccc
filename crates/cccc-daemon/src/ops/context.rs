@@ -224,3 +224,7 @@ fn authorize(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "context_payload_tests.rs"]
+mod payload_tests;

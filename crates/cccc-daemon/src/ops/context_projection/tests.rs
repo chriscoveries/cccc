@@ -48,14 +48,17 @@ fn summary_preserves_every_editable_task_field() {
 }
 
 #[test]
-fn full_context_keeps_task_objects_in_the_board_projection() {
+fn full_context_keeps_complete_task_objects_in_the_canonical_projection() {
     let result = project(document(), "v1".into(), "full");
     let task = &result["coordination"]["tasks"][0];
 
     assert_eq!(task["notes"], "large private notes");
     assert_eq!(task["checklist"][0]["text"], "measure");
     assert_eq!(result["board"]["planned"][0]["id"], "task-1");
-    assert_eq!(result["board"]["planned"][0]["task_type"], "standard");
+    // Owner874 removes duplicate full payloads: complete task fields stay in
+    // coordination.tasks while board/attention become explicit id/status refs.
+    assert_eq!(task["task_type"], "standard");
+    assert_eq!(result["board"]["planned"][0]["status"], "planned");
     assert_eq!(result["board"]["active"], json!([]));
     assert_eq!(result["tasks_summary"]["blocked"], 1);
     assert_eq!(result["attention"]["blocked"][0]["id"], "task-1");
