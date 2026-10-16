@@ -15,6 +15,7 @@ mod cache_confirmation;
 mod command;
 mod control;
 mod model_switch;
+pub(super) mod model_trace;
 mod resume_failure;
 mod retarget;
 pub(crate) use retarget::validate_retarget;
@@ -110,6 +111,10 @@ pub(super) fn settings_path(home: &cccc_core::HomeLayout, owner: &str) -> PathBu
 /// CleanupFailure deliberately hides this outcome until the owner has stopped.
 pub(super) fn model_change_requires_fresh(error: &io::Error) -> bool {
     model_switch::is_requires_fresh(error)
+}
+
+pub(super) fn model_change_transition_id(error: &io::Error) -> Option<&str> {
+    model_switch::fresh_transition_id(error)
 }
 
 pub(super) async fn launch(
@@ -466,6 +471,12 @@ async fn connect_launched(
     {
         if rollback_on_failure {
             let rollback = kill_and_confirm(&endpoint, &job.short).await;
+            if let Some(transition_id) = model_switch::fresh_transition_id(&error) {
+                model_trace::emit(
+                    "claude_model_fresh_cleanup",
+                    json!({"transition_id":transition_id,"short":job.short,"owned_launch":true,"cleanup_confirmed":rollback.is_ok(),"fresh_fallback_allowed":rollback.is_ok()}),
+                );
+            }
             return Err(with_optional_cleanup_error(error, rollback.err()));
         }
         return Err(error);

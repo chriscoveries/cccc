@@ -335,9 +335,38 @@ fn with_receipt_path_lock<T>(
     receipt: &Path,
     operation: impl FnOnce() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
-    #[cfg(test)]
-    receipt_lock_tests::before_lock(receipt)?;
-    cccc_core::fs::with_exclusive_lock(&receipt.with_extension("lock"), operation)
+    let mut admitted = false;
+    let result = (|| {
+        #[cfg(test)]
+        receipt_lock_tests::before_lock(receipt)?;
+        cccc_core::fs::with_exclusive_lock(&receipt.with_extension("lock"), || {
+            admitted = true;
+            operation()
+        })
+    })();
+    if admitted {
+        result
+    } else {
+        result.map_err(|error| std::io::Error::new(error.kind(), ReceiptLockUnavailable(error)))
+    }
+}
+
+#[derive(Debug)]
+struct ReceiptLockUnavailable(std::io::Error);
+impl std::fmt::Display for ReceiptLockUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Runtime receipt lock admission failed: {}", self.0)
+    }
+}
+impl std::error::Error for ReceiptLockUnavailable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+fn is_receipt_lock_unavailable(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<ReceiptLockUnavailable>())
 }
 
 #[cfg(test)]

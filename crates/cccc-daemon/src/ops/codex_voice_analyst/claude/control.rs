@@ -221,11 +221,23 @@ pub(super) fn validate_model(model: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn model_input(
     endpoint: &Endpoint,
     short: &str,
     model: &str,
     verify_session: impl FnOnce() -> io::Result<()>,
+) -> io::Result<PlatformStream> {
+    let transition_id = uuid::Uuid::new_v4().simple().to_string();
+    model_input_with_trace(endpoint, short, model, verify_session, &transition_id).await
+}
+
+pub(super) async fn model_input_with_trace(
+    endpoint: &Endpoint,
+    short: &str,
+    model: &str,
+    verify_session: impl FnOnce() -> io::Result<()>,
+    transition_id: &str,
 ) -> io::Result<PlatformStream> {
     validate_model(model)?;
     let mut stream = connect(endpoint).await?;
@@ -253,15 +265,30 @@ pub(super) async fn model_input(
         .and_then(Value::as_str)
         .filter(|nonce| nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .ok_or_else(|| {
-            super::model_switch::requires_fresh("native prompt readiness is unsupported")
+            super::model_switch::requires_fresh_in_transition(
+                "native prompt readiness is unsupported",
+                transition_id,
+            )
         })?;
     let mut marks = NativePromptMarks::default();
-    let mut screen = super::cache_confirmation::Screen::default();
+    let mut screen = super::cache_confirmation::Screen::with_trace("pre_input", transition_id);
     // Attach acknowledges the supervisor connection before a resumed worker is
     // ready. Native writes made during that interval can be dropped.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut output = [0_u8; 8192];
+    let mut last_has_ready = false;
     loop {
+        // A completed readiness probe can authorize compatibility fallback at
+        // the ordinary deadline; an in-flight transport timeout cannot.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(readiness_timeout(
+                &screen,
+                transition_id,
+                short,
+                last_has_ready && marks.ready,
+                verify_session,
+            ));
+        }
         let state = tokio::time::timeout_at(
             deadline,
             request(
@@ -270,24 +297,20 @@ pub(super) async fn model_input(
             ),
         )
         .await
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Claude model switch could not be confirmed: worker did not become ready",
-            )
-        })??;
+        .map_err(|_| strict_readiness_timeout())??;
         require_ok(state.clone(), "has")?;
-        if state.get("alive").and_then(Value::as_bool) == Some(true)
-            && state.get("ready").and_then(Value::as_bool) == Some(true)
-            && marks.ready
-            && screen.empty_prompt()
-        {
+        last_has_ready = state.get("alive").and_then(Value::as_bool) == Some(true)
+            && state.get("ready").and_then(Value::as_bool) == Some(true);
+        if last_has_ready && marks.ready && screen.empty_prompt() {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Claude model switch could not be confirmed: worker did not become ready",
+            return Err(readiness_timeout(
+                &screen,
+                transition_id,
+                short,
+                last_has_ready && marks.ready,
+                verify_session,
             ));
         }
         tokio::select! {
@@ -298,15 +321,59 @@ pub(super) async fn model_input(
                     "Claude model switch could not be confirmed: worker attachment closed")); }
                 marks.feed(&output[..count], nonce);
                 screen.feed(&output[..count])?;
+                #[cfg(all(test, unix))]
+                acceptance_tests::after_screen_feed(endpoint, count, deadline);
             }
         }
     }
     verify_session()?;
+    // Admission is logged before writing: a partial write failure must never
+    // be described as zero input or reclassified as a fresh compatibility path.
+    super::model_trace::emit(
+        "claude_model_input_admitted",
+        json!({"transition_id":transition_id,"short":short,"bytes_attempted":model.len()+8}),
+    );
     stream
         .write_all(format!("/model {model}\r").as_bytes())
         .await?;
     stream.flush().await?;
+    super::model_trace::emit(
+        "claude_model_input_sent",
+        json!({"transition_id":transition_id,"short":short,"bytes_written":model.len()+8}),
+    );
     Ok(stream)
+}
+
+fn readiness_timeout(
+    screen: &super::cache_confirmation::Screen,
+    transition_id: &str,
+    short: &str,
+    native_ready: bool,
+    verify_session: impl FnOnce() -> io::Result<()>,
+) -> io::Error {
+    if native_ready && screen.unreadable_after_eviction() {
+        // Revalidate the same native identity before exposing a fresh path,
+        // just as we do before admitting the first model-command byte.
+        if let Err(error) = verify_session() {
+            return error;
+        }
+        super::model_trace::emit(
+            "claude_model_pre_input_fresh_requested",
+            json!({"transition_id":transition_id,"short":short,"reason":"unreadable_evicted_screen","bytes_written":0}),
+        );
+        return super::model_switch::requires_fresh_in_transition(
+            "native attachment did not provide a readable repaint after eviction",
+            transition_id,
+        );
+    }
+    strict_readiness_timeout()
+}
+
+fn strict_readiness_timeout() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        "Claude model switch could not be confirmed: worker did not become ready",
+    )
 }
 
 pub(super) async fn interrupt(endpoint: &Endpoint, short: &str) -> io::Result<()> {

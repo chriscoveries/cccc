@@ -29,7 +29,12 @@ pub(crate) fn validate_retarget(
             "Claude session ID must be a UUID",
         ));
     }
-    let original = read(home, group_id, actor_id).map_err(|error| {
+    // Lock only the receipt snapshot read. Native preflight and the later
+    // explicit target write remain separate operations, not one new RMW fence.
+    let original = super::super::with_receipt_lock(home, group_id, actor_id, || {
+        read(home, group_id, actor_id)
+    })
+    .map_err(|error| {
         OpError::new(
             "claude_receipt_missing",
             format!(

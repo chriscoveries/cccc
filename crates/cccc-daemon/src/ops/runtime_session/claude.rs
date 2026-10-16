@@ -51,6 +51,68 @@ pub fn is_resume_blocked(error: &io::Error) -> bool {
         .is_some_and(|inner| inner.is::<ResumeBlocked>())
 }
 
+// Optional resume may retain upstream fresh-start behavior when the lock
+// itself cannot be acquired. Never downgrade a callback/write error, genuine
+// contention, selected intent, an in-flight attempt, or prior failed evidence.
+fn with_optional_resume_lock<T>(
+    home: &HomeLayout,
+    group: &str,
+    actor: &str,
+    fresh: T,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let result = super::with_receipt_lock(home, group, actor, operation);
+    let Err(error) = &result else {
+        return result;
+    };
+    if !super::is_receipt_lock_unavailable(error) || error.kind() == io::ErrorKind::WouldBlock {
+        return result;
+    }
+    let ordinary = match read(home, group, actor) {
+        Ok(document) => {
+            let marker = |key: &str| {
+                document
+                    .get(key)
+                    .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
+            };
+            !marker("explicit_resume_session_id")
+                && !document
+                    .get("explicit_resume_pending")
+                    .is_some_and(|value| !value.is_null() && value.as_bool() != Some(false))
+                && string(&document, "status") != "resume_failed"
+                && !marker("last_resume_attempt_id")
+                && !marker("last_resume_error")
+                && !marker("last_failed_resume_model")
+                && document
+                    .get("failure_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    == 0
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+            ) =>
+        {
+            true
+        }
+        Err(_) => false,
+    };
+    if ordinary {
+        tracing::warn!(error_kind = ?error.kind(),
+            "optional Claude resume skipped because receipt lock admission failed; using ordinary fresh-start policy");
+        // The daemon has no global tracing subscriber. Keep this degraded-start
+        // warning observable without logging receipt/error/account contents.
+        let mut stderr = std::io::stderr().lock();
+        let _ = std::io::Write::write_all(&mut stderr,
+            b"[cccc] Optional Claude resume lock admission failed; using ordinary fresh-start policy.\n");
+        Ok(fresh)
+    } else {
+        result
+    }
+}
+
 pub fn prepare_managed(
     home: &HomeLayout,
     group_id: &str,
@@ -85,7 +147,7 @@ pub fn prepare_managed_with_policy(
     if !resume_enabled() {
         return Ok(None);
     }
-    super::with_receipt_lock(home, group_id, actor_id, || {
+    with_optional_resume_lock(home, group_id, actor_id, None, || {
         let mut document = match read(home, group_id, actor_id) {
             Ok(document) => document,
             Err(error)
@@ -363,7 +425,7 @@ fn retry_failed_resume_matching(
     if !resume_enabled() {
         return Ok(false);
     }
-    super::with_receipt_lock(home, group_id, actor_id, || {
+    with_optional_resume_lock(home, group_id, actor_id, false, || {
         let mut document = match read(home, group_id, actor_id) {
             Ok(document) => document,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),

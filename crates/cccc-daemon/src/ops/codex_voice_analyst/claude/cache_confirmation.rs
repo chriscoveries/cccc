@@ -1,5 +1,6 @@
 //! Confirm only the current native cache-cost dialog, never a generic Enter retry.
 use crate::ops::terminal_text;
+use serde_json::json;
 use std::io;
 
 const MAX_OUTPUT: usize = 128 * 1024;
@@ -8,6 +9,10 @@ pub(super) struct Screen {
     received: u64,
     anchor: Option<u64>,
     scanner: PaintScanner,
+    evicted: bool,
+    screen_id: u64,
+    stage: &'static str,
+    transition_id: String,
 }
 impl Default for Screen {
     fn default() -> Self {
@@ -18,10 +23,38 @@ impl Default for Screen {
             // replay as before. After eviction, require a full recovery paint.
             anchor: Some(0),
             scanner: PaintScanner::default(),
+            evicted: false,
+            screen_id: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
+            stage: "unspecified",
+            transition_id: String::new(),
         }
     }
 }
 impl Screen {
+    pub(super) fn with_trace(stage: &'static str, transition_id: &str) -> Self {
+        Self {
+            stage,
+            transition_id: transition_id.to_owned(),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn unreadable_after_eviction(&self) -> bool {
+        // An incomplete next frame does not erase a known draft/modal. Only
+        // actual loss of reconstruction after eviction permits fresh fallback.
+        let unreadable = self.evicted && self.anchor.is_none();
+        if unreadable {
+            super::model_trace::emit(
+                "claude_model_screen_unreadable",
+                json!({"transition_id":self.transition_id,"screen_id":self.screen_id,"stage":self.stage,"received_bytes":self.received,"retained_bytes":self.output.len(),"retained_from":self.received-self.output.len() as u64,"max_output_bytes":MAX_OUTPUT,"anchor_known":self.anchor.is_some(),"current_paint_complete":self.scanner.completed_at==Some(self.received)}),
+            );
+        }
+        unreadable
+    }
+
     pub(super) fn feed(&mut self, bytes: &[u8]) -> io::Result<()> {
         for &byte in bytes {
             // After 2^64 received bytes, lose authorization rather than
@@ -33,16 +66,35 @@ impl Screen {
             }
             let offset = self.received;
             self.received += 1;
+            let first_eviction = self.output.len() == MAX_OUTPUT && !self.evicted;
             if self.output.len() == MAX_OUTPUT {
                 self.output.pop_front();
+                self.evicted = true;
             }
             self.output.push_back(byte);
-            if let Some(anchor) = self.scanner.feed(byte, offset) {
-                self.anchor = Some(anchor);
-            }
+            let recovery = self.scanner.feed(byte, offset);
             let retained_from = self.received - self.output.len() as u64;
             if self.anchor.is_some_and(|anchor| anchor < retained_from) {
                 self.anchor = None;
+                super::model_trace::emit(
+                    "claude_model_screen_anchor_lost",
+                    json!({"transition_id": self.transition_id, "screen_id":self.screen_id,"stage":self.stage,"received_bytes":self.received,"retained_bytes":self.output.len(),"retained_from":retained_from,"max_output_bytes":MAX_OUTPUT}),
+                );
+            }
+            if let Some(recovery) = recovery.filter(|recovery| recovery.at >= retained_from) {
+                if self.anchor.is_none() {
+                    super::model_trace::emit(
+                        "claude_model_screen_recovered",
+                        json!({"transition_id": self.transition_id, "screen_id":self.screen_id,"stage":self.stage,"received_bytes":self.received,"retained_bytes":self.output.len(),"retained_from":retained_from,"max_output_bytes":MAX_OUTPUT,"anchor_at":recovery.at,"sequence_class":recovery.order,"scrollback_clear":recovery.scrollback_clear,"complete_frame":true}),
+                    );
+                }
+                self.anchor = Some(recovery.at);
+            }
+            if first_eviction {
+                super::model_trace::emit(
+                    "claude_model_screen_evicted",
+                    json!({"transition_id": self.transition_id, "screen_id":self.screen_id,"stage":self.stage,"received_bytes":self.received,"retained_bytes":self.output.len(),"retained_from":retained_from,"max_output_bytes":MAX_OUTPUT,"evicted_bytes":retained_from,"anchor_known":self.anchor.is_some()}),
+                );
             }
         }
         Ok(())
@@ -114,7 +166,15 @@ struct PaintScanner {
     state: ScanState,
     synchronized: bool,
     clear_at: Option<u64>,
+    home_at: Option<u64>,
+    frame_anchor: Option<RecoveryAnchor>,
+    frame_scrollback_clear: bool,
     completed_at: Option<u64>,
+}
+struct RecoveryAnchor {
+    at: u64,
+    order: &'static str,
+    scrollback_clear: bool,
 }
 #[derive(Default)]
 enum ScanState {
@@ -133,13 +193,13 @@ enum ScanState {
     },
 }
 impl PaintScanner {
-    fn feed(&mut self, byte: u8, offset: u64) -> Option<u64> {
+    fn feed(&mut self, byte: u8, offset: u64) -> Option<RecoveryAnchor> {
         match std::mem::take(&mut self.state) {
             ScanState::Ground => {
                 if byte == 0x1b {
                     self.state = ScanState::Escape { at: offset };
                 } else {
-                    self.clear_at = None;
+                    self.reset_run();
                 }
             }
             ScanState::Escape { at } => match byte {
@@ -150,21 +210,21 @@ impl PaintScanner {
                     }
                 }
                 b']' | b'P' | b'X' | b'^' | b'_' => {
-                    self.clear_at = None;
+                    self.reset_run();
                     self.state = ScanState::String {
                         osc: byte == b']',
                         escaped: false,
                     };
                 }
                 0x1b => {
-                    self.clear_at = None;
+                    self.reset_run();
                     self.state = ScanState::Escape { at: offset };
                 }
-                _ => self.clear_at = None,
+                _ => self.reset_run(),
             },
             ScanState::Csi { at, mut bytes } => {
                 if byte == 0x1b {
-                    self.clear_at = None;
+                    self.reset_run();
                     self.state = ScanState::Escape { at: offset };
                 } else if (0x40..=0x7e).contains(&byte) {
                     bytes.push(byte);
@@ -173,7 +233,7 @@ impl PaintScanner {
                     bytes.push(byte);
                     self.state = ScanState::Csi { at, bytes };
                 } else {
-                    self.clear_at = None;
+                    self.reset_run();
                 }
             }
             ScanState::String { osc, escaped } => {
@@ -187,23 +247,56 @@ impl PaintScanner {
         }
         None
     }
-    fn sequence(&mut self, bytes: &[u8], at: u64, end: u64) -> Option<u64> {
+    fn reset_run(&mut self) {
+        self.clear_at = None;
+        self.home_at = None;
+    }
+    fn sequence(&mut self, bytes: &[u8], at: u64, end: u64) -> Option<RecoveryAnchor> {
         match bytes {
             b"?2026h" => {
                 self.synchronized = true;
-                self.clear_at = None;
+                self.reset_run();
+                self.frame_anchor = None;
+                self.frame_scrollback_clear = false;
                 self.completed_at = None;
             }
             b"?2026l" => {
                 self.completed_at = self.synchronized.then_some(end);
+                let anchor = self
+                    .synchronized
+                    .then(|| self.frame_anchor.take())
+                    .flatten();
                 self.synchronized = false;
-                self.clear_at = None;
+                self.reset_run();
+                return anchor.map(|mut anchor| {
+                    anchor.scrollback_clear = self.frame_scrollback_clear;
+                    anchor
+                });
             }
-            b"2J" if self.synchronized => self.clear_at = Some(at),
+            b"2J" if self.synchronized => {
+                self.clear_at = Some(at);
+                if let Some(home) = self.home_at {
+                    self.frame_anchor = Some(RecoveryAnchor {
+                        at: home,
+                        order: "home_then_clear",
+                        scrollback_clear: false,
+                    });
+                }
+            }
+            // 3J clears saved scrollback, not the visible display. It is
+            // permitted anywhere in the reset run but cannot replace 2J.
+            b"3J" if self.synchronized => self.frame_scrollback_clear = true,
             b"H" | b"1H" | b"1;1H" | b"f" | b"1f" | b"1;1f" if self.synchronized => {
-                return self.clear_at.take();
+                self.home_at = Some(at);
+                if let Some(clear) = self.clear_at {
+                    self.frame_anchor = Some(RecoveryAnchor {
+                        at: clear,
+                        order: "clear_then_home",
+                        scrollback_clear: false,
+                    });
+                }
             }
-            _ => self.clear_at = None,
+            _ => self.reset_run(),
         }
         None
     }
