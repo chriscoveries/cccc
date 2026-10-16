@@ -1806,7 +1806,7 @@ fn explicit_changed_model_after_failed_resume_starts_fresh_on_supported_cli() {
         )
         .expect("record the failed Sonnet attempt");
         assert_eq!(f.receipt()["status"], "resume_failed");
-        assert_eq!(f.receipt()["last_failed_resume_model"], "sonnet");
+        assert_eq!(f.receipt()["model"], "sonnet");
         let history = f
             .config
             .join("projects/workspace")
