@@ -1,5 +1,7 @@
 #[cfg(all(test, unix))]
 mod claude_resume_tests;
+#[cfg(all(test, unix))]
+pub(crate) mod completion_fixture;
 mod events;
 mod events_migration;
 #[cfg(test)]

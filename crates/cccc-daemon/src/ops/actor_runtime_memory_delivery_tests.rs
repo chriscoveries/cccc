@@ -149,27 +149,23 @@ impl Fixture {
     }
 
     fn materialize(&self) {
-        let before = crate::ops::actor_memory::must3_gap_tests::completed_turn_count(
-            &self.home,
+        let completion = local_headless::completion_fixture::Completion::subscribe(
             &self.group.group_id,
             "worker",
         );
+        let event = self.job().event;
+        let delegation = format!("actor-delivery:{}", event.id);
         assert_eq!(
             local_headless::submit_batch(
                 &self.home,
                 &self.group,
                 &self.group.actors[0],
-                &[self.job().event],
+                &[event],
                 &AtomicBool::new(false),
             ),
             local_headless::BatchSubmission::Accepted,
         );
-        crate::ops::actor_memory::must3_gap_tests::wait_for_completed_turn(
-            &self.home,
-            &self.group.group_id,
-            "worker",
-            before,
-        );
+        completion.wait(&delegation);
     }
 
     fn receipt(&self) -> PathBuf {
@@ -607,6 +603,7 @@ fn memory_must3_cancelled_before_managed_admission_defers_without_provider_traff
 /// armed half failing on the intended outcome (Restarted where Skipped is
 /// asserted) with the control green first; any other shape is a fixture
 /// defect, not MUST3 evidence.
+#[cfg(target_os = "linux")]
 #[test]
 fn memory_must3_real_accepted_managed_submit_before_native_maintenance_vetoes_the_restart() {
     let f = Fixture::new(false);
