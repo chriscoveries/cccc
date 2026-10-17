@@ -149,6 +149,11 @@ impl Fixture {
     }
 
     fn materialize(&self) {
+        let before = crate::ops::actor_memory::must3_gap_tests::completed_turn_count(
+            &self.home,
+            &self.group.group_id,
+            "worker",
+        );
         assert_eq!(
             local_headless::submit_batch(
                 &self.home,
@@ -159,11 +164,12 @@ impl Fixture {
             ),
             local_headless::BatchSubmission::Accepted,
         );
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !local_headless::ready_for_mail_notice(&self.group.group_id, "worker") {
-            assert!(std::time::Instant::now() < deadline, "idle fixture");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        crate::ops::actor_memory::must3_gap_tests::wait_for_completed_turn(
+            &self.home,
+            &self.group.group_id,
+            "worker",
+            before,
+        );
     }
 
     fn receipt(&self) -> PathBuf {

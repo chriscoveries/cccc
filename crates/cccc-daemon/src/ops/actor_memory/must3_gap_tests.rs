@@ -20,6 +20,31 @@ use super::*;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, OnceLock};
 
+/// These fixtures have one private actor and submit one turn at a time. Waiting
+/// only for the idle projection can return before the reader sees turn/started.
+/// Require a new real completion as well; no retry or synthetic activity.
+pub(crate) fn completed_turn_count(home: &HomeLayout, group: &str, actor: &str) -> usize {
+    let store = cccc_core::GroupStore::new(home.clone()).expect("fixture store");
+    cccc_core::ledger::read_all(&store.ledger_path(group).expect("fixture ledger"))
+        .expect("fixture events")
+        .iter()
+        .filter(|event| event.kind == "headless.turn.completed" && event.data["actor_id"] == actor)
+        .count()
+}
+
+pub(crate) fn wait_for_completed_turn(home: &HomeLayout, group: &str, actor: &str, before: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while completed_turn_count(home, group, actor) <= before
+        || !crate::ops::local_headless::ready_for_mail_notice(group, actor)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture submit must produce a new real completed turn and idle projection"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 type Target = (std::path::PathBuf, String, String);
 
 fn armed() -> &'static Mutex<Option<Target>> {
@@ -144,6 +169,7 @@ pub(crate) fn interpose_submit(home: &HomeLayout, group_id: &str, actor_id: &str
         // Managed path: a real accepted submission that is also COMPLETED
         // before maintenance resumes — accepted-then-completed is exactly the
         // behavior owner MUST3 must veto on.
+        let before = completed_turn_count(home, group_id, actor_id);
         let mut event = cccc_contracts::Event::new("chat.message", group_id);
         event.by = "user".into();
         event.data = serde_json::json!({"to":[actor_id],
@@ -165,14 +191,7 @@ pub(crate) fn interpose_submit(home: &HomeLayout, group_id: &str, actor_id: &str
             ),
             "the managed gap submit itself must be accepted for the regression to be real"
         );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !crate::ops::local_headless::ready_for_mail_notice(group_id, actor_id) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the managed gap submit must complete, not merely be accepted"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        wait_for_completed_turn(home, group_id, actor_id, before);
     } else {
         // PTY path: the terminal submit (input_gate guard, `record_input` on
         // completion) — the flow restart_for_memory_pty can actually reach.
