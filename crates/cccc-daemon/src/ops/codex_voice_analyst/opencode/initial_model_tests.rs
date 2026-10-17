@@ -45,7 +45,6 @@ struct Harness {
     spawned_environment: BTreeMap<String, String>,
     tui_command: Vec<String>,
     config_options: Vec<Value>,
-    root: std::path::PathBuf,
     #[allow(dead_code)] // keeps the tempdir alive for the test body
     _temp: tempfile::TempDir,
 }
@@ -105,7 +104,11 @@ async fn run_launch(
 ) -> Result<Harness, LaunchFailure> {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().to_path_buf();
-    let executable = root.join("fake-opencode");
+    let executable = root.join(if runtime == super::super::ActorRuntime::Kilo {
+        "kilo"
+    } else {
+        "opencode"
+    });
     std::fs::write(&executable, FAKE_BACKEND).expect("write fake backend");
     let mut permissions = std::fs::metadata(&executable)
         .expect("fake metadata")
@@ -180,7 +183,6 @@ async fn run_launch(
         spawned_environment,
         tui_command,
         config_options,
-        root,
         _temp: temp,
     })
 }
