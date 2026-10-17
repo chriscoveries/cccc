@@ -42,7 +42,16 @@ pub(crate) async fn build(
         .map(Vec::as_slice)
         .unwrap_or_default();
 
-    let context = daemon(client, "context_get", request_args(&group_id, &actor_id)).await?;
+    let (context, tasks_unavailable) =
+        match daemon(client, "context_get", request_args(&group_id, &actor_id)).await {
+            Ok(context) => (context, false),
+            Err(error) if error.code == "context_too_large" => {
+                let mut overview_args = request_args(&group_id, &actor_id);
+                overview_args.insert("detail".into(), json!("overview"));
+                (daemon(client, "context_get", overview_args).await?, true)
+            }
+            Err(error) => return Err(error),
+        };
 
     let mut inbox_args = request_args(&group_id, &actor_id);
     inbox_args.insert(
@@ -52,7 +61,17 @@ pub(crate) async fn build(
     let inbox = daemon(client, "inbox_peek", inbox_args).await?;
 
     let runtime_meta = load_runtime_meta(home, &group_id, &actor_id);
-    let recovery_pack = build_recovery_pack(&context, &actor_id, &runtime_meta, Utc::now());
+    let recovery_pack = if tasks_unavailable {
+        build_recovery_pack_with_task_availability(
+            &context,
+            &actor_id,
+            &runtime_meta,
+            Utc::now(),
+            true,
+        )
+    } else {
+        build_recovery_pack(&context, &actor_id, &runtime_meta, Utc::now())
+    };
     let context_hygiene = recovery_pack
         .get("context_hygiene")
         .cloned()
@@ -168,6 +187,16 @@ fn build_recovery_pack(
     runtime_meta: &Map<String, Value>,
     now: DateTime<Utc>,
 ) -> Value {
+    build_recovery_pack_with_task_availability(context, actor_id, runtime_meta, now, false)
+}
+
+fn build_recovery_pack_with_task_availability(
+    context: &Map<String, Value>,
+    actor_id: &str,
+    runtime_meta: &Map<String, Value>,
+    now: DateTime<Utc>,
+    tasks_unavailable: bool,
+) -> Value {
     let actor_state = context
         .get("agent_states")
         .and_then(Value::as_array)
@@ -238,6 +267,12 @@ fn build_recovery_pack(
         "recent_handoffs": recent_notes(coordination, "recent_handoffs"),
         "context_hygiene": hygiene,
     });
+    if tasks_unavailable {
+        // Overview omits tasks. Preserve that distinction through shrinking
+        // and projection instead of presenting the empty slice as no work.
+        pack["tasks"]["full_context_unavailable"] = json!(true);
+        pack["tasks"]["full_context_via"] = json!("task_list");
+    }
     let constraints = brief.and_then(|value| value.get("constraints"));
     // Reserve a small explicit omission notice while trimming the other context.
     // Never turn a partial constraint into an apparently complete instruction.

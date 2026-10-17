@@ -4808,6 +4808,12 @@ Notes:
   shapes and are not covered by this byte limit. `task_list` supports selecting
   a task or paging by count; that count is not a byte ceiling for large tasks.
   The full-result limit does not include transport or MCP envelope overhead.
+- MCP bootstrap retries only `context_too_large` with one overview read. It
+  preserves the overview's identity and coordination recovery data and marks
+  `recovery.task_slice.full_context_unavailable=true` with
+  `full_context_via="task_list"`. An empty fallback task slice is unavailable
+  data, not proof that the actor has no tasks. Other errors, including a failed
+  overview read, propagate without an empty recovery packet.
 - MCP convenience tools MUST preserve their focused response contracts instead
   of exposing this complete snapshot: `cccc_coordination(action="get")` returns
   only `version`, `coordination`, `attention`, `board`, and `tasks_summary`, while
