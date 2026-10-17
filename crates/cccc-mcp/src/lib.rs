@@ -540,3 +540,7 @@ async fn write_response(output: &mut tokio::io::Stdout, response: &Value) -> Res
 mod connect_tests;
 #[cfg(test)]
 mod cross_group_file_tests;
+
+#[cfg(all(test, unix))]
+#[path = "context_envelope_tests.rs"]
+mod envelope_tests;
