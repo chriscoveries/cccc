@@ -58,10 +58,64 @@ pub fn parse_vmrss_kb(status: &str) -> Option<u64> {
 }
 
 /// Linux resident-plus-swap KiB of one pid, or `None` when unreadable.
-#[cfg(target_os = "linux")]
+/// Test-support only after MUST2: the production union reads each status
+/// body once through `read_member_kib` so one read distinguishes measured
+/// from known-zero and unknown; this helper keeps the inline test's
+/// observation assertions unchanged.
+#[cfg(all(test, target_os = "linux"))]
 fn rss_kb_of(pid: i32) -> Option<u64> {
     let body = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     parse_vmrss_kb(&body)
+}
+
+/// One observed member's memory classification from a single status read.
+///
+/// MUST2 (Linux known-zero): a member is `Measured` only when its counters
+/// parse; it is `KnownZero` only when its zero state is positively observed
+/// (the pid vanished with `NotFound`, or `/proc/<pid>/status` reports
+/// `State: Z`); everything else — `EACCES`, malformed counters, short reads,
+/// any other error — stays `Unknown`. Unknown memory must remain unavailable
+/// rather than silently undercounted: no readable sibling may turn it into
+/// zero, and no extra kill, probe or ppid pass is added to re-classify it.
+#[cfg(target_os = "linux")]
+enum MemberRead {
+    Measured(u64),
+    KnownZero,
+    Unknown,
+}
+
+/// Classify one already-read `/proc/<pid>/status` body. Pure so the
+/// unrepresented unknown branches (malformed counters, missing counters
+/// outside the zombie state) are covered without fabricating `/proc`.
+#[cfg(target_os = "linux")]
+fn classify_status_body(body: &str) -> MemberRead {
+    let state_is_zombie = body.lines().any(|line| {
+        line.strip_prefix("State:")
+            .and_then(|state| state.split_whitespace().next())
+            == Some("Z")
+    });
+    if state_is_zombie {
+        // A positively identified zombie holds no measurable memory:
+        // known zero, not an unreadable sample and not a readable zero.
+        return MemberRead::KnownZero;
+    }
+    match parse_vmrss_kb(body) {
+        Some(kib) => MemberRead::Measured(kib),
+        None => MemberRead::Unknown,
+    }
+}
+
+/// One status read per observed member, classified per MUST2.
+#[cfg(target_os = "linux")]
+fn read_member_kib(pid: i32) -> MemberRead {
+    match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        // Positively observed absence between the tree walk and this read:
+        // the member vanished. Known zero, not unknown and not readable.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => MemberRead::KnownZero,
+        // Every other read failure leaves the member's memory unknown.
+        Err(_) => MemberRead::Unknown,
+        Ok(body) => classify_status_body(&body),
+    }
 }
 
 /// Parent pid of one pid, or `None` when unreadable.
@@ -142,6 +196,9 @@ pub fn tree_rss_kib(_root: i32) -> (u64, usize) {
 /// twice when its owned helper is already a descendant of another root.
 /// This is non-atomic accounting, never process ownership or stop authority.
 /// Invalid/unsupported roots and unreadable observations return count zero.
+/// A positively known-zero member (ENOENT-vanished or `State: Z`) returns
+/// zero contribution without counting as readable; unknown observations
+/// still make the whole union (0, 0) — never a generic partial total.
 #[cfg(target_os = "linux")]
 pub fn roots_rss_kib(roots: &[u32]) -> (u64, usize) {
     let Some(roots) = checked_roots(roots) else {
@@ -154,16 +211,23 @@ pub fn roots_rss_kib(roots: &[u32]) -> (u64, usize) {
     let mut total = 0_u64;
     let mut counted = 0_usize;
     for pid in members {
-        // A known observed member without both counters makes the union
-        // unreadable. A readable sibling cannot turn unknown memory into zero.
-        let Some(kib) = rss_kb_of(pid) else {
-            return (0, 0);
-        };
-        let Some(sum) = total.checked_add(kib) else {
-            return (0, 0);
-        };
-        total = sum;
-        counted += 1;
+        // One status read per member (MUST2): measured counters add to the
+        // union; a positively known-zero member (vanished or zombie)
+        // contributes zero without counting as a readable sample; unknown
+        // memory keeps the whole union unavailable. A readable sibling
+        // cannot turn unknown memory into zero, and no generic partial
+        // total is ever returned.
+        match read_member_kib(pid) {
+            MemberRead::KnownZero => {}
+            MemberRead::Measured(kib) => {
+                let Some(sum) = total.checked_add(kib) else {
+                    return (0, 0);
+                };
+                total = sum;
+                counted += 1;
+            }
+            MemberRead::Unknown => return (0, 0),
+        }
     }
     (total, counted)
 }
@@ -422,6 +486,53 @@ finally:
             "single-root retains the touched allocation"
         );
         assert!(union.0 >= 8 * 1024, "union retains the touched allocation");
+    }
+
+    // MUST2 classification coverage for the unrepresented unknown branches:
+    // the root's 19 assertions already cover measured, vanished and zombie
+    // members; these pin the remaining classifier outcomes without
+    // fabricating /proc entries or changing any existing assertion.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn status_classification_separates_measured_known_zero_and_unknown() {
+        assert!(matches!(
+            classify_status_body(
+                "Name:\tsleep\nState:\tS (sleeping)\nVmRSS:\t12345 kB\nVmSwap:\t0 kB\n"
+            ),
+            MemberRead::Measured(12345)
+        ));
+        // A positively identified zombie is known zero even when stale
+        // counters are present: the observed state is the authority.
+        assert!(matches!(
+            classify_status_body(
+                "Name:\tdefunct\nState:\tZ (zombie)\nVmRSS:\t0 kB\nVmSwap:\t0 kB\n"
+            ),
+            MemberRead::KnownZero
+        ));
+        // Unrepresented unknown branches: malformed counters and missing
+        // counters on a LIVE member stay unknown, never known zero.
+        assert!(matches!(
+            classify_status_body(
+                "Name:\tsleep\nState:\tS (sleeping)\nVmRSS:\t12x34 kB\nVmSwap:\t0 kB\n"
+            ),
+            MemberRead::Unknown
+        ));
+        assert!(matches!(
+            classify_status_body("Name:\tsleep\nState:\tR (running)\n"),
+            MemberRead::Unknown
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vanished_member_read_is_known_zero_after_reap() {
+        let mut child = std::process::Command::new("true").spawn().expect("spawn");
+        let pid = child.id() as i32;
+        child.wait().expect("reap");
+        // Absence is positively observed (NotFound) and classified known
+        // zero; pid reuse across this instant is the same bounded race the
+        // members suite already accepts for its reaped fixtures.
+        assert!(matches!(read_member_kib(pid), MemberRead::KnownZero));
     }
 }
 
