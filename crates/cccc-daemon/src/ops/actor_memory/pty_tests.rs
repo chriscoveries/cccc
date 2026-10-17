@@ -231,7 +231,7 @@ fn detection_pending_append_recovery_never_duplicates_or_uses_attempt_marker() {
     cccc_core::fs::write_json(&path, &marks)
         .expect("pending marker simulates crash before commit mark");
     assert!(
-        emit_detection(&f.home, &f.group, event.clone())
+        emit_detection(&f.home, &f.group, event.clone(), "legacy pending fixture")
             .expect("recover pending")
             .is_none()
     );
@@ -438,9 +438,7 @@ fn already_appended_pending_detection_is_offered_once_when_sampling_is_disabled(
     let recovered = super::super::tick(&f.home, &f.group).expect("actual recovery pass");
     let second = super::super::tick(&f.home, &f.group).expect("second recovery pass");
     let ledger = cccc_core::ledger::read_all(&ledger_path).expect("ledger after recovery");
-    let marks: HashMap<String, DetectionMark> =
-        serde_json::from_slice(&std::fs::read(&detection_path).expect("committed marker"))
-            .expect("detection marks");
+    let marks = read_detection_marks(&detection_path).expect("detection marks");
     assert_eq!(
         recovered.len(),
         1,

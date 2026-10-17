@@ -61,10 +61,75 @@ struct DetectionMark {
     pending: Option<Event>,
 }
 
-/// This file is deliberately separate from real restart-attempt cooldown.
-/// Pending event ID is persisted before append, then reconciled via ledger
-/// lookup after failure/crash. A committed append never gets a second event ID.
-fn emit_detection(home: &HomeLayout, group: &GroupDoc, event: Event) -> io::Result<Option<Event>> {
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct UnavailableMark {
+    #[serde(flatten)]
+    mark: DetectionMark,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActorDetectionMarks {
+    #[serde(default)]
+    over: Option<DetectionMark>,
+    #[serde(default)]
+    unavailable: Option<UnavailableMark>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StoredDetectionMark {
+    Legacy(DetectionMark),
+    Classes(ActorDetectionMarks),
+}
+
+fn read_detection_marks(
+    path: &std::path::Path,
+) -> io::Result<HashMap<String, ActorDetectionMarks>> {
+    let stored: HashMap<String, StoredDetectionMark> = match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(error),
+    };
+    Ok(stored
+        .into_iter()
+        .map(|(actor, mark)| {
+            let classes = match mark {
+                StoredDetectionMark::Classes(classes) => classes,
+                StoredDetectionMark::Legacy(mark) => {
+                    if mark.pending.as_ref().is_some_and(|event| {
+                        event.data["context"]["outcome"] == "detection_unavailable"
+                    }) {
+                        ActorDetectionMarks {
+                            unavailable: Some(UnavailableMark { mark, reason: None }),
+                            over: None,
+                        }
+                    } else {
+                        // A committed old mark has no outcome/reason. Preserve its
+                        // possibly-spent over window; never guess from rendered prose.
+                        ActorDetectionMarks {
+                            over: Some(mark),
+                            unavailable: None,
+                        }
+                    }
+                }
+            };
+            (actor, classes)
+        })
+        .collect())
+}
+
+/// The stable key is supplied as a static reason, never extracted from rendered
+/// messages, limits, memory values or timestamps. Over notices keep their own
+/// clock; unavailable repeats do not refresh any timestamp.
+fn emit_detection(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    event: Event,
+    reason: &'static str,
+) -> io::Result<Option<Event>> {
     let store = cccc_core::GroupStore::new(home.clone())?;
     let path = store.state_dir(&group.group_id)?.join(DETECTION_FILE);
     let ledger = store.ledger_path(&group.group_id)?;
@@ -72,19 +137,33 @@ fn emit_detection(home: &HomeLayout, group: &GroupDoc, event: Event) -> io::Resu
         .as_str()
         .ok_or_else(|| io::Error::other("Memory notice actor is missing"))?
         .to_owned();
+    let unavailable = event.data["context"]["outcome"] == "detection_unavailable";
     cccc_core::fs::with_exclusive_lock(&path.with_extension("lock"), || {
-        let mut marks: HashMap<String, DetectionMark> = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => HashMap::new(),
-            Err(e) => return Err(e),
-        };
+        let mut marks = read_detection_marks(&path)?;
         let now = now_secs();
-        let (record, at) = match marks.get(&actor) {
+        let classes = marks.entry(actor.clone()).or_default();
+        let prior = if unavailable {
+            classes.unavailable.as_ref().map(|state| &state.mark)
+        } else {
+            classes.over.as_ref()
+        };
+        let (record, at) = match prior {
             Some(DetectionMark {
                 at,
                 pending: Some(record),
             }) => (record.clone(), *at),
-            Some(mark) if now < mark.at.saturating_add(RESTART_COOLDOWN_SECS) => return Ok(None),
+            Some(_)
+                if unavailable
+                    && classes
+                        .unavailable
+                        .as_ref()
+                        .is_some_and(|state| state.reason.as_deref() == Some(reason)) =>
+            {
+                return Ok(None);
+            }
+            Some(mark) if !unavailable && now < mark.at.saturating_add(RESTART_COOLDOWN_SECS) => {
+                return Ok(None);
+            }
             _ => {
                 if event.data["target_actor_id"]
                     .as_str()
@@ -94,13 +173,18 @@ fn emit_detection(home: &HomeLayout, group: &GroupDoc, event: Event) -> io::Resu
                         "Memory detection notice has no concrete durable foreman target",
                     ));
                 }
-                marks.insert(
-                    actor.clone(),
-                    DetectionMark {
-                        at: now,
-                        pending: Some(event.clone()),
-                    },
-                );
+                let mark = DetectionMark {
+                    at: now,
+                    pending: Some(event.clone()),
+                };
+                if unavailable {
+                    classes.unavailable = Some(UnavailableMark {
+                        mark,
+                        reason: Some(reason.to_owned()),
+                    });
+                } else {
+                    classes.over = Some(mark);
+                }
                 cccc_core::fs::write_json_committed(&path, &marks)?;
                 (event, now)
             }
@@ -109,15 +193,25 @@ fn emit_detection(home: &HomeLayout, group: &GroupDoc, event: Event) -> io::Resu
         if appended {
             cccc_core::ledger::append(&ledger, &record)?;
         }
-        marks.insert(actor, DetectionMark { at, pending: None });
+        let classes = marks.get_mut(&actor).expect("notice mark retained");
+        let mark = if unavailable {
+            &mut classes
+                .unavailable
+                .as_mut()
+                .expect("unavailable mark retained")
+                .mark
+        } else {
+            classes.over.as_mut().expect("over mark retained")
+        };
+        *mark = DetectionMark { at, pending: None };
         cccc_core::fs::write_json_committed(&path, &marks)?;
         Ok(appended.then_some(record))
     })
 }
 
-/// Recover a pending notice even if the actor subsequently stopped, went below
-/// the limit, or opted out. Otherwise a crash before append could strand the
-/// observed event indefinitely behind an unrelated future sampling condition.
+/// Recover both classes before considering current actor state. The event ID is
+/// committed before append and re-offered after recovery, preserving delivery
+/// arbitration even when the previous append had already committed.
 fn recover_pending(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
     let store = cccc_core::GroupStore::new(home.clone())?;
     let path = store.state_dir(&group.group_id)?.join(DETECTION_FILE);
@@ -126,39 +220,74 @@ fn recover_pending(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>
     }
     let ledger = store.ledger_path(&group.group_id)?;
     cccc_core::fs::with_exclusive_lock(&path.with_extension("lock"), || {
-        let mut marks: HashMap<String, DetectionMark> = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error),
-        };
+        let mut marks = read_detection_marks(&path)?;
         let mut appended = Vec::new();
-        let mut changed = false;
-        for mark in marks.values_mut() {
-            let Some(record) = mark.pending.as_ref() else {
-                continue;
-            };
-            if record.data["target_actor_id"]
-                .as_str()
-                .is_none_or(str::is_empty)
+        for classes in marks.values_mut() {
+            for mark in classes
+                .over
+                .iter_mut()
+                .chain(classes.unavailable.iter_mut().map(|state| &mut state.mark))
             {
-                return Err(io::Error::other(
-                    "Pending memory detection has no concrete durable target",
-                ));
+                let Some(record) = mark.pending.as_ref() else {
+                    continue;
+                };
+                if record.data["target_actor_id"]
+                    .as_str()
+                    .is_none_or(str::is_empty)
+                {
+                    return Err(io::Error::other(
+                        "Pending memory detection has no concrete durable target",
+                    ));
+                }
+                if cccc_core::ledger::find_event(&ledger, &record.id)?.is_none() {
+                    cccc_core::ledger::append(&ledger, record)?;
+                }
+                appended.push(record.clone());
+                mark.pending = None;
             }
-            if cccc_core::ledger::find_event(&ledger, &record.id)?.is_none() {
-                cccc_core::ledger::append(&ledger, record)?;
+        }
+        if !appended.is_empty() {
+            cccc_core::fs::write_json_committed(&path, &marks)?;
+        }
+        Ok(appended)
+    })
+}
+
+/// A real recovery/disable clears only unavailable state, silently. Never drop
+/// a pending event: a concurrent emitter's observed notice still needs recovery.
+fn clear_unavailable(home: &HomeLayout, group: &GroupDoc, actor: Option<&str>) -> io::Result<()> {
+    let store = cccc_core::GroupStore::new(home.clone())?;
+    let path = store.state_dir(&group.group_id)?.join(DETECTION_FILE);
+    if !path.exists() {
+        return Ok(());
+    }
+    cccc_core::fs::with_exclusive_lock(&path.with_extension("lock"), || {
+        let mut marks = read_detection_marks(&path)?;
+        let mut changed = false;
+        for (id, classes) in &mut marks {
+            let clear = actor.map_or_else(
+                || {
+                    !group
+                        .actors
+                        .iter()
+                        .any(|a| a.id == *id && a.enabled && a.memory_limit_mb != 0)
+                },
+                |selected| selected == id,
+            );
+            if clear
+                && classes
+                    .unavailable
+                    .as_ref()
+                    .is_some_and(|state| state.mark.pending.is_none())
+            {
+                classes.unavailable = None;
+                changed = true;
             }
-            // The previous append may have committed before its caller could
-            // receive the event. Re-offer the same identity once; runtime delivery
-            // claims, rather than allocating a new notice, arbitrate submission.
-            appended.push(record.clone());
-            mark.pending = None;
-            changed = true;
         }
         if changed {
             cccc_core::fs::write_json_committed(&path, &marks)?;
         }
-        Ok(appended)
+        Ok(())
     })
 }
 
@@ -176,7 +305,7 @@ fn report(
     actor: &Actor,
     sample: Option<&observation::Observation>,
     outcome: &str,
-    detail: &str,
+    detail: &'static str,
     action: &str,
 ) -> io::Result<Option<Event>> {
     let foreman = configured_foreman(group)?;
@@ -220,7 +349,7 @@ fn report(
         }
     }
     if action == "detection_only" {
-        emit_detection(home, group, event)
+        emit_detection(home, group, event, detail)
     } else {
         let store = cccc_core::GroupStore::new(home.clone())?;
         cccc_core::ledger::append(&store.ledger_path(&group.group_id)?, &event)?;
@@ -230,6 +359,7 @@ fn report(
 
 pub(super) fn tick_detection(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
     let mut events = recover_pending(home, group)?;
+    clear_unavailable(home, group, None)?;
     for stored in group
         .actors
         .iter()
@@ -264,7 +394,10 @@ pub(super) fn tick_detection(home: &HomeLayout, group: &GroupDoc) -> io::Result<
         let sampled = observation::observe(home, group, &actor);
         let sample = match sampled {
             Ok(Some(sample)) => sample,
-            Ok(None) => continue,
+            Ok(None) => {
+                clear_unavailable(home, group, Some(&actor.id))?;
+                continue;
+            }
             Err(reason) => {
                 if let Some(e) = report(
                     home,
@@ -280,6 +413,7 @@ pub(super) fn tick_detection(home: &HomeLayout, group: &GroupDoc) -> io::Result<
                 continue;
             }
         };
+        clear_unavailable(home, group, Some(&actor.id))?;
         if sample.total_kib <= u64::from(actor.memory_limit_mb) * 1024 {
             continue;
         }
