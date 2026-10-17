@@ -593,13 +593,14 @@ fn cancelled_before_managed_admission_defers_without_provider_traffic() {
 /// then re-materialize + re-observe, then the ARMED run asserting the veto.
 /// On current source the armed half is RED: nothing records the accepted
 /// input, so maintenance closes and replaces the provider session. The
-/// control is the discriminator: every gate between the hook and close
-/// (StartGuard, candidate equality, resume id, required_resume, group/actor
-/// state) is identical for both halves, so a gate-caused Skipped would have
-/// stopped the control too and failed its Restarted assert — an armed-half
-/// Skipped can therefore only come from the interposed accepted input, whose
-/// single completed turn perturbs no candidate field (same provider process,
-/// same generation and thread id, freshly re-observed after the control).
+/// control narrows false-pass explanations — every gate between the hook and
+/// close is identical for both halves, so a gate-caused Skipped would have
+/// stopped the control too — but it does NOT prove every armed gate
+/// unchanged (a drift introduced by the completed turn itself would evade
+/// the control), so the baseline run remains the authority: it must show the
+/// armed half failing on the intended outcome (Restarted where Skipped is
+/// asserted) with the control green first; any other shape is a fixture
+/// defect, not MUST3 evidence.
 #[test]
 fn real_accepted_managed_submit_before_native_maintenance_vetoes_the_restart() {
     let f = Fixture::new(false);
