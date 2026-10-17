@@ -587,19 +587,60 @@ fn cancelled_before_managed_admission_defers_without_provider_traffic() {
     );
 }
 
-/// Owner MUST3 managed-accept-input behavior, now with a REAL RED: an
-/// accepted-and-completed managed submit lands at the native flow's gap point
-/// (before StartGuard acquisition, so it genuinely accepts), and the restart
-/// must then be vetoed. RED on current source: nothing records the accepted
-/// input, so `restart_for_memory_with_commit` proceeds to close and replace
-/// the provider session. After the fix: Skipped, same provider session id,
-/// commit never reached.
+/// Owner MUST3 managed-accept-input behavior, with BOTH vacuity guards the
+/// review required. Structure: an UNARMED same-flow control first (must
+/// Restart with commit reached — proving the fixture reaches close at all),
+/// then re-materialize + re-observe, then the ARMED run asserting the veto.
+/// On current source the armed half is RED: nothing records the accepted
+/// input, so maintenance closes and replaces the provider session. The
+/// control is the discriminator: every gate between the hook and close
+/// (StartGuard, candidate equality, resume id, required_resume, group/actor
+/// state) is identical for both halves, so a gate-caused Skipped would have
+/// stopped the control too and failed its Restarted assert — an armed-half
+/// Skipped can therefore only come from the interposed accepted input, whose
+/// single completed turn perturbs no candidate field (same provider process,
+/// same generation and thread id, freshly re-observed after the control).
 #[test]
 fn real_accepted_managed_submit_before_native_maintenance_vetoes_the_restart() {
     let f = Fixture::new(false);
     f.materialize(); // accepted + completed (idle) — provider session established
+
+    // CONTROL (unarmed): the identical call must reach close and restart.
+    let control_expected = f.candidate();
+    let control_commits = std::sync::atomic::AtomicUsize::new(0);
+    let control_outcome = crate::ops::local_headless::memory::restart_for_memory_with_commit(
+        &f.home,
+        &f.group.group_id,
+        "worker",
+        &control_expected,
+        |_, _, _| Ok(true),
+        || {
+            control_commits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        },
+    )
+    .expect("unarmed control maintenance returns");
+    assert_eq!(
+        control_outcome,
+        crate::ops::local_headless::memory::MemoryRestartOutcome::Restarted,
+        "unarmed control proves the fixture reaches close — a gate-caused \
+         Skipped here means the armed half below would be vacuous"
+    );
+    assert_eq!(
+        control_commits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the control's commit must be reached"
+    );
+
+    // Re-materialize the replacement session and re-observe the candidate so
+    // the armed half differs from the control ONLY by the interposed input.
+    f.materialize();
     let expected = f.candidate();
     let session_before = f.session_id();
+    // Oracle note (oc-muse secondary): the native commit has no single
+    // persistence file like the PTY side's cooldown, so this half rests on
+    // the commit-call counter + session-id preservation, not on a
+    // would-be-real write.
     let commit_calls = std::sync::atomic::AtomicUsize::new(0);
     let _arm = crate::ops::actor_memory::must3_gap_tests::arm(
         f.home.root().to_path_buf(),
@@ -617,7 +658,7 @@ fn real_accepted_managed_submit_before_native_maintenance_vetoes_the_restart() {
             Ok(())
         },
     )
-    .expect("native maintenance returns");
+    .expect("armed maintenance returns");
     assert_eq!(
         outcome,
         crate::ops::local_headless::memory::MemoryRestartOutcome::Skipped,
@@ -628,8 +669,9 @@ fn real_accepted_managed_submit_before_native_maintenance_vetoes_the_restart() {
         session_before,
         "the owned provider session must be untouched"
     );
-    assert!(
-        commit_calls.load(std::sync::atomic::Ordering::SeqCst) == 0,
+    assert_eq!(
+        commit_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
         "commit must never be reached when the restart is vetoed"
     );
 }
