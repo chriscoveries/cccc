@@ -194,7 +194,7 @@ fn environment_with(content: Option<&str>) -> BTreeMap<String, String> {
     environment
 }
 
-fn get(environment: &BTreeMap<String, String>, key: &str) -> Option<&str> {
+fn get<'a>(environment: &'a BTreeMap<String, String>, key: &str) -> Option<&'a str> {
     environment.get(key).map(String::as_str)
 }
 
