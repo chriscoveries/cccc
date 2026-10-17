@@ -12,6 +12,8 @@ use std::time::Duration;
 
 mod command;
 #[cfg(test)]
+mod initial_model_tests;
+#[cfg(test)]
 mod launch_tests;
 mod lifecycle;
 #[cfg(test)]
