@@ -134,8 +134,9 @@ pub fn stop_if_started_at(
     Ok(Some(status))
 }
 
-/// Generation-local completed-input marker. Raw writes and cancelled deliveries
-/// do not advance it. Saturation refuses maintenance instead of wrapping.
+/// Generation-local admitted-input marker. A nonempty write attempt advances
+/// it before IO, including a later partial failure or cancellation. A delivery
+/// cancelled before admission does not. Saturation refuses maintenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputCheckpoint {
     pub started_at: String,
@@ -151,7 +152,7 @@ pub fn input_checkpoint(group_id: &str, actor_id: &str) -> Result<InputCheckpoin
     })
 }
 
-/// Hold the same gate as completed delivery through the final input comparison,
+/// Hold the same gate as input admission through the final input comparison,
 /// durable admission callback and owned stop. Registry lookup releases its read
 /// lock before waiting for input_gate; gate -> session matches submit's order.
 /// The callback must not submit input, join a delivery worker or reenter this
