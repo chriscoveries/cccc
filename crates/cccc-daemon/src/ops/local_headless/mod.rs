@@ -110,6 +110,9 @@ struct Session {
     stop_lock: Mutex<()>,
     startup_prompt: Mutex<Option<String>>,
     active_turn: Mutex<Option<ActiveTurn>>,
+    /// Accepted controlled input in this managed generation, including turns
+    /// already completed or later cancelled. This is not an active-turn veto.
+    input_sequence: std::sync::atomic::AtomicU64,
 }
 
 fn poisoned() -> std::io::Error {

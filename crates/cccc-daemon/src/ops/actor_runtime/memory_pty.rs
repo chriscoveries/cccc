@@ -20,7 +20,7 @@ pub(crate) fn restart_for_memory_pty(
     commit: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<FreshOutcome> {
     // A cancelled worker may need this permit. Drop it before deferred join.
-    let _shutdown: actor_delivery::DeferredWorkerShutdown;
+    let mut _shutdown: Option<actor_delivery::DeferredWorkerShutdown> = None;
     let Ok(_permit) = crate::runtime_start_gate::permit(home) else {
         return Ok(FreshOutcome::Skipped);
     };
@@ -58,6 +58,11 @@ pub(crate) fn restart_for_memory_pty(
     {
         return Ok(FreshOutcome::Skipped);
     }
+    // Capture before the final quiet predicate: input between this capture and
+    // that predicate either fails quiet or advances the guarded sequence below.
+    let Ok(input) = cccc_runtime::input_checkpoint(group_id, actor_id) else {
+        return Ok(FreshOutcome::Skipped);
+    };
     if actor_memory::required_resume(home, group_id, actor_id)?.is_some()
         || !actor_memory::pty::quiet_live(group_id, actor_id)
     {
@@ -76,9 +81,34 @@ pub(crate) fn restart_for_memory_pty(
     // Final admitted attempt boundary: persistence failure must leave the
     // worker, owned provider and receipt untouched. A committed attempt is
     // followed directly by the ordinary owned stop (never a sampled-PID signal).
-    commit()?;
-    _shutdown = actor_delivery::cancel_actor(group_id, actor_id);
-    stop_registered(&fresh, actor_id).map_err(|e| io::Error::other(e.message))?;
+    let before_stop = || {
+        commit()?;
+        _shutdown = Some(actor_delivery::cancel_actor(group_id, actor_id));
+        Ok(())
+    };
+    let stopped = match &expected.identity {
+        actor_memory::observation::Identity::Terminal { started_at, .. } => {
+            if input.started_at != *started_at {
+                return Ok(FreshOutcome::Skipped);
+            }
+            cccc_runtime::stop_if_input_unchanged(group_id, actor_id, &input, before_stop)
+                .map_err(io::Error::other)?
+                .is_some()
+        }
+        actor_memory::observation::Identity::Managed { generation, .. } => {
+            crate::ops::local_headless::memory::stop_pty_if_input_unchanged(
+                home,
+                group_id,
+                actor_id,
+                generation,
+                &input,
+                before_stop,
+            )?
+        }
+    };
+    if !stopped {
+        return Ok(FreshOutcome::Skipped);
+    }
     // A concurrent durable native obligation must survive every failure path.
     if actor_memory::required_resume(home, group_id, actor_id)?.is_some() {
         return Err(actor_memory::blocked_resume(
