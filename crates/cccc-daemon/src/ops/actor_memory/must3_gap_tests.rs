@@ -27,10 +27,28 @@ fn armed() -> &'static Mutex<Option<Target>> {
     ARMED.get_or_init(|| Mutex::new(None))
 }
 
-/// RAII arm: dropped (including while a test unwinds from a panic) it
-/// disarms, so an early exit can never leave the one-shot slot armed for an
-/// unrelated maintenance call.
+/// Process-global serialization shared by BOTH arm users (the PTY gap test
+/// and the managed native-flow test), held from `arm()` through the whole
+/// maintenance call via the ArmGuard's lifetime. The two tests live in the
+/// same lib test binary and run in parallel by default; without this, the
+/// second `arm()` would panic on the one-slot assert and read exactly like a
+/// regression. Blocking (not try-lock): an overlap waits its turn instead of
+/// failing — the full suite must pass on default parallelism, not only under
+/// `--test-threads=1`. Lock order: this serial gate is acquired FIRST and the
+/// armed-slot lock is only ever taken while it is held; no other code path
+/// takes them in the opposite order, so there is no inversion.
+fn serialization() -> &'static Mutex<()> {
+    static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| Mutex::new(()))
+}
+
+/// RAII arm: holds the shared serialization gate (see `serialization`) for
+/// its whole lifetime — i.e. from arm through the maintenance call — and on
+/// drop (including while a test unwinds from a panic) disarms only if the
+/// slot is still its own, so an early exit can never leave the one-shot
+/// armed for an unrelated maintenance call.
 pub(crate) struct ArmGuard {
+    _serial: std::sync::MutexGuard<'static, ()>,
     home: std::path::PathBuf,
     group_id: String,
     actor_id: String,
@@ -50,12 +68,16 @@ impl Drop for ArmGuard {
 }
 
 /// Arm exactly one submit-in-gap for this (home, group, actor); the guard
-/// disarms on drop. One armed target at a time is asserted.
+/// serializes arm-through-maintenance across tests and disarms on drop. One
+/// armed target at a time is asserted (a second arm now means a bug in the
+/// serialization, not a race, because the caller would be holding the gate).
 pub(crate) fn arm(home: std::path::PathBuf, group_id: String, actor_id: String) -> ArmGuard {
+    let serial = serialization().lock().expect("must3 serial gate");
     let mut slot = armed().lock().expect("must3 gap arm");
     assert!(slot.is_none(), "one armed gap submit at a time");
     *slot = Some((home.clone(), group_id.clone(), actor_id.clone()));
     ArmGuard {
+        _serial: serial,
         home,
         group_id,
         actor_id,
@@ -70,16 +92,20 @@ pub(crate) fn interpose_submit(home: &HomeLayout, group_id: &str, actor_id: &str
     let armed_target = {
         let mut slot = armed().lock().expect("must3 gap arm");
         match slot.as_ref() {
-            Some(target) if target.1 == group_id && target.2 == actor_id => slot.take(),
+            Some(target)
+                if target.0 == home.root() && target.1 == group_id && target.2 == actor_id =>
+            {
+                slot.take()
+            }
             _ => return,
         }
     };
     let Some((home_root, armed_group, armed_actor)) = armed_target else {
         return;
     };
-    assert_eq!(home.root(), home_root, "armed for a different home");
-    assert_eq!(group_id, armed_group);
-    assert_eq!(actor_id, armed_actor);
+    debug_assert_eq!(home.root(), home_root);
+    debug_assert_eq!(group_id, armed_group);
+    debug_assert_eq!(actor_id, armed_actor);
     let store = cccc_core::GroupStore::new(home.clone()).expect("group store");
     let group = store.load(group_id).expect("fresh group");
     let Some(actor) = group
