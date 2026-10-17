@@ -61,7 +61,7 @@ struct DetectionMark {
     pending: Option<Event>,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct UnavailableMark {
     #[serde(flatten)]
     mark: DetectionMark,
@@ -69,7 +69,7 @@ struct UnavailableMark {
     reason: Option<String>,
 }
 
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActorDetectionMarks {
     #[serde(default)]
