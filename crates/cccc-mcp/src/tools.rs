@@ -41,6 +41,50 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn context_recovery_schema_exposes_smaller_projections() {
+        let catalog = super::catalog();
+        let context = catalog
+            .iter()
+            .find(|tool| tool["name"] == "cccc_context_get")
+            .expect("context tool");
+        let schema = &context["inputSchema"];
+        assert_eq!(
+            schema["properties"]["detail"]["type"], "string",
+            "typed context_too_large instructs a detail=overview recovery; clients must be able to express it"
+        );
+        assert_eq!(
+            schema["properties"]["detail"]["enum"],
+            serde_json::json!(["full", "summary", "overview"])
+        );
+        assert_eq!(schema["properties"]["detail"]["default"], "full");
+        assert!(
+            !schema["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|key| key == "detail")),
+            "default-full callers remain valid"
+        );
+    }
+
+    #[test]
+    fn context_recovery_schema_preserves_archived_and_group_controls() {
+        let catalog = super::catalog();
+        let context = catalog
+            .iter()
+            .find(|tool| tool["name"] == "cccc_context_get")
+            .expect("context tool");
+        assert_eq!(
+            context["inputSchema"]["properties"]["group_id"]["type"],
+            "string"
+        );
+        assert_eq!(
+            context["inputSchema"]["properties"]["include_archived"]["type"],
+            "boolean"
+        );
+        assert_eq!(context["annotations"]["readOnlyHint"], true);
+        assert_eq!(context["annotations"]["destructiveHint"], false);
+    }
+
+    #[test]
     fn every_published_tool_has_an_intended_exposure_path() {
         let ordinary = cccc_core::actor_base_tool_names("peer", None);
         let temp = tempfile::tempdir().expect("temp");
