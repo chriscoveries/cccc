@@ -52,7 +52,9 @@ struct Harness {
 
 /// Err payload that keeps the tempdir ALIVE and carries spawn evidence
 /// captured while it was still alive — a deleted directory must never make
-/// `!exists()` vacuously true.
+/// `!exists()` vacuously true. `Debug` is required: every
+/// `run_launch(...).await.expect(...)` demands `E: Debug` (E0277).
+#[derive(Debug)]
 struct LaunchFailure {
     error: std::io::Error,
     /// Captured at failure time, before any cleanup: did a backend actually
@@ -455,50 +457,68 @@ async fn explicit_model_merges_inherited_config_in_isolated_subprocess() {
         )
         .await
         .expect("child launch against the fake backend");
-        let merged: Value = serde_json::from_str(
-            harness
-                .spawned_environment
-                .get(CONFIG_KEY)
-                .expect("spawned env must carry the inherited config"),
-        )
-        .expect("merged output is canonical JSON");
-        assert_eq!(
-            merged["model"].as_str(),
-            Some("probe/second"),
-            "explicit model must be injected into the EFFECTIVE inherited config"
-        );
         let inherited: Value = serde_json::from_str(&known).expect("known config is JSON");
-        assert_eq!(
-            merged["theme"].as_str(),
-            inherited["theme"].as_str(),
-            "inherited values must survive the merge: {merged}"
-        );
-        // The returned metadata legitimately knows only the explicit map;
-        // the condition lives on the spawned oracle (asymmetric BY DESIGN,
-        // not vacuous — the spawned value is known, not ambient-guessed).
-        assert!(
-            harness.launched_environment.get(CONFIG_KEY).is_none(),
-            "returned launch metadata never fabricates an inherited key"
-        );
+        // BOTH oracles: production launch uses the merged effective
+        // environment for the backend AND returns it for the viewer, so a
+        // correct pre-spawn injection naturally appears in the returned env
+        // too. Requiring the returned key to be absent would demand a
+        // metadata-only omission implementation policy never describes —
+        // asserting the merged result itself on both oracles instead.
+        for oracle in [&harness.launched_environment, &harness.spawned_environment] {
+            let merged: Value = serde_json::from_str(
+                oracle
+                    .get(CONFIG_KEY)
+                    .expect("merged effective config present on this oracle"),
+            )
+            .expect("merged output is canonical JSON");
+            assert_eq!(
+                merged["model"].as_str(),
+                Some("probe/second"),
+                "explicit model must be injected into the EFFECTIVE inherited config"
+            );
+            assert_eq!(
+                merged["theme"].as_str(),
+                inherited["theme"].as_str(),
+                "inherited theme must survive the merge: {merged}"
+            );
+            assert_eq!(
+                merged["marker"].as_str(),
+                inherited["marker"].as_str(),
+                "unrelated inherited marker must survive the merge: {merged}"
+            );
+        }
         return;
     }
     // Parent: re-exec this exact test with a cleared environment and a
     // KNOWN nonsecret inherited config.
+    //
+    // Filter: `--exact` with the FULL module path (chain verified in
+    // source: lib.rs `mod ops` -> ops/mod.rs `mod codex_voice_analyst` ->
+    // codex_voice_analyst.rs `mod opencode` -> opencode.rs
+    // `mod initial_model_tests`) so no accidental other match can run. The
+    // "running 1 test" / "1 passed" assertion below still guards against
+    // path drift: a wrong --exact path runs ZERO tests, exits 0, and would
+    // otherwise turn the parent green without testing anything.
     let known = r#"{"theme":"dark","marker":"inherited-known"}"#;
     let exe = std::env::current_exe().expect("test binary path");
     let output = std::process::Command::new(&exe)
-        .arg("explicit_model_merges_inherited_config_in_isolated_subprocess")
+        .arg("ops::codex_voice_analyst::opencode::initial_model_tests::explicit_model_merges_inherited_config_in_isolated_subprocess")
+        .arg("--exact")
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("OC_INITIAL_MODEL_CHILD", "1")
         .env(CONFIG_KEY, known)
         .output()
         .expect("spawn the isolated child oracle");
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "isolated subprocess oracle failed:\n--- stdout ---\n{}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        "isolated subprocess oracle failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("running 1 test") && stdout.contains("1 passed"),
+        "the child must have actually run and passed exactly one test, not exited vacuously:\n{stdout}"
     );
 }
 
