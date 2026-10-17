@@ -25,7 +25,27 @@ async fn live_kilo_submitted_model_reaches_acp_when_enabled() {
     }
 }
 
+// Uses the real native backend, but only local fixture models and noReply.
+// The production merge must change session/new's initial default while later
+// explicit native submissions remain free to select another model. This is
+// native ACP/HTTP evidence, not a claim about interactive TUI key handling.
+#[tokio::test]
+async fn live_opencode_merged_default_and_later_choice_when_enabled() {
+    if std::env::var("CCCC_OPENCODE_INITIAL_MODEL_LIVE").as_deref() != Ok("1") {
+        return;
+    }
+    submitted_model_with_initial_default("opencode", "OPENCODE", Some("cccc-probe/second")).await;
+}
+
 async fn submitted_model_reaches_acp(runtime: &'static str, prefix: &str) {
+    submitted_model_with_initial_default(runtime, prefix, None).await;
+}
+
+async fn submitted_model_with_initial_default(
+    runtime: &'static str,
+    prefix: &str,
+    initial_model: Option<&str>,
+) {
     let temp = tempfile::tempdir().expect("isolated home");
     let root = temp.path();
     let port = lifecycle::reserve_loopback_port().expect("port");
@@ -33,7 +53,7 @@ async fn submitted_model_reaches_acp(runtime: &'static str, prefix: &str) {
     let password = uuid::Uuid::new_v4().to_string();
     let executable =
         std::env::var(format!("CCCC_{prefix}_EXECUTABLE")).unwrap_or_else(|_| runtime.into());
-    let environment = BTreeMap::from([
+    let mut environment = BTreeMap::from([
         ("HOME".into(), root.to_string_lossy().into_owned()),
         ("XDG_CONFIG_HOME".into(), root.join("config").to_string_lossy().into_owned()),
         ("XDG_DATA_HOME".into(), root.join("data").to_string_lossy().into_owned()),
@@ -55,6 +75,11 @@ async fn submitted_model_reaches_acp(runtime: &'static str, prefix: &str) {
             }}
         }).to_string()),
     ]);
+    if let Some(model) = initial_model {
+        assert_eq!(runtime, "opencode");
+        initial_config::apply(&mut environment, Some(model))
+            .expect("production initial config merge");
+    }
     let command = vec![
         executable,
         "acp".into(),
@@ -99,7 +124,10 @@ async fn submitted_model_reaches_acp(runtime: &'static str, prefix: &str) {
         .expect("session");
     let id = created["sessionId"].as_str().expect("session id");
     let mode = option(&created, "mode").expect("current native mode");
-    assert_eq!(option(&created, "model"), Some("cccc-probe/first"));
+    assert_eq!(
+        option(&created, "model"),
+        Some(initial_model.unwrap_or("cccc-probe/first"))
+    );
     lifecycle::attach(&protocol, &endpoint, runtime, &password, id, root)
         .await
         .expect("SSE bridge");
@@ -108,6 +136,20 @@ async fn submitted_model_reaches_acp(runtime: &'static str, prefix: &str) {
         .timeout(Duration::from_secs(10))
         .build()
         .expect("HTTP client");
+    if let Some(model) = initial_model {
+        let config: Value = client
+            .get(format!("{endpoint}/config"))
+            .basic_auth(runtime, Some(&password))
+            .send()
+            .await
+            .expect("read native initial config")
+            .error_for_status()
+            .expect("native config response")
+            .json()
+            .await
+            .expect("native config JSON");
+        assert_eq!(config["model"].as_str(), Some(model));
+    }
 
     for (model, variant) in [
         ("second", "high"),
