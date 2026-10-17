@@ -474,3 +474,89 @@ fn wait_for(mut ready: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// A PTY whose TUI never acknowledges paste mode — the cline-a shape.
+#[cfg(target_os = "linux")]
+fn start_non_paste_tui(group_id: &str) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().expect("tempdir");
+    cccc_runtime::start(cccc_runtime::LaunchSpec {
+        group_id: group_id.into(),
+        actor_id: "peer".into(),
+        runner: RunnerKind::Pty,
+        command: vec![
+            "sh".into(),
+            "-c".into(),
+            "stty raw -echo; touch ready; sleep 30".into(),
+        ],
+        cwd: temp.path().into(),
+        env: Default::default(),
+        cols: 80,
+        rows: 24,
+    })
+    .expect("terminal");
+    wait_for(|| temp.path().join("ready").exists());
+    temp
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn input_wait_reports_timeout_when_the_tui_never_enables_paste() {
+    let group_id = format!("g_input_wait_timeout_{}", std::process::id());
+    let _temp = start_non_paste_tui(&group_id);
+    let cancelled = AtomicBool::new(false);
+    let outcome = wait_for_input_mode(&group_id, "peer", &cancelled);
+    cccc_runtime::stop(&group_id, "peer").expect("cleanup");
+    // Before this slice the elapsed wait returned true, certifying an
+    // assumed-ready input; the typed outcome lets the caller grade instead.
+    assert_eq!(outcome, InputModeOutcome::TimedOut);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn input_wait_reports_cancelled_when_interrupted() {
+    let group_id = format!("g_input_wait_cancelled_{}", std::process::id());
+    let _temp = start_non_paste_tui(&group_id);
+    let cancelled = AtomicBool::new(true);
+    let outcome = wait_for_input_mode(&group_id, "peer", &cancelled);
+    cccc_runtime::stop(&group_id, "peer").expect("cleanup");
+    assert_eq!(outcome, InputModeOutcome::Cancelled);
+}
+
+#[test]
+fn an_unconfirmed_terminal_delivery_settles_ambiguous_instead_of_accepted() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let mut group = store.create("unconfirmed delivery", "").expect("group");
+    let actor = Actor::new("peer1");
+    group.actors.push(actor.clone());
+    store.save(&group).expect("save group");
+    let mut event = Event::new("chat.message", &group.group_id);
+    event.by = "user".into();
+    event.data = serde_json::json!({"to":["peer1"],"text":"notice","message_mode":"send"})
+        .as_object()
+        .expect("data")
+        .clone();
+    cccc_core::ledger::append(
+        &store.ledger_path(&group.group_id).expect("ledger path"),
+        &event,
+    )
+    .expect("append source");
+    let job = DeliveryJob {
+        home: home.clone(),
+        group: group.clone(),
+        actor: actor.clone(),
+        event: event.clone(),
+    };
+    unconfirmed_jobs(
+        &[job],
+        "input mode was not confirmed before the write; 6 bytes were written, so submission cannot be confirmed",
+    );
+    assert_eq!(
+        crate::ops::runtime_delivery::latest_state(&home, &group.group_id, &actor.id, &event.id)
+            .expect("latest state")
+            .expect("delivery state")
+            .0,
+        "ambiguous"
+    );
+}

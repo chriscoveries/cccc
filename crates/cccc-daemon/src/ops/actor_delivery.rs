@@ -22,18 +22,47 @@ const TERMINAL_REPEAT_SUBMIT_DELAY: std::time::Duration = std::time::Duration::f
 
 type Key = (String, String);
 
+/// A native terminal submission graded by what was actually written.
+/// Confirmed means the payload and at least one submit key went to a lane
+/// whose input readiness was confirmed; Unconfirmed means bytes reached the
+/// PTY but nothing proves the lane will submit them (an empty submit
+/// sequence, or an input mode that was never confirmed); Failed means
+/// nothing was written and the delivery stays retryable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SubmissionOutcome {
+    Confirmed,
+    Unconfirmed { reason: String },
+    Failed,
+}
+
 /// Deliver text to the Runtime's native terminal. A successful return means
 /// the payload and submit keys were written to that terminal; whether the
 /// Runtime steers the active turn or queues the input remains its own policy.
+/// This is the plain write verdict — callers that must not report success
+/// without proof of submission use `submit_terminal_text_checked`.
 pub(super) fn submit_terminal_text(
     group_id: &str,
     actor: &Actor,
     text: &str,
     cancelled: &AtomicBool,
 ) -> bool {
+    submit_terminal_text_checked(group_id, actor, text, true, cancelled)
+        != SubmissionOutcome::Failed
+}
+
+/// Same write as `submit_terminal_text`, graded by what could be confirmed:
+/// `input_confirmed` carries the caller's input-readiness verdict, and an
+/// empty submit sequence can never be confirmed regardless of it.
+pub(super) fn submit_terminal_text_checked(
+    group_id: &str,
+    actor: &Actor,
+    text: &str,
+    input_confirmed: bool,
+    cancelled: &AtomicBool,
+) -> SubmissionOutcome {
     let raw = text.trim_end_matches(['\r', '\n']);
     if raw.is_empty() {
-        return false;
+        return SubmissionOutcome::Failed;
     }
     if super::local_headless::running(group_id, &actor.id)
         && !cccc_runtime::wait_for_input_ready(
@@ -44,7 +73,7 @@ pub(super) fn submit_terminal_text(
         )
         .unwrap_or(false)
     {
-        return false;
+        return SubmissionOutcome::Failed;
     }
     let bracketed = raw.contains(['\r', '\n'])
         && cccc_runtime::bracketed_paste_enabled(group_id, &actor.id).unwrap_or(false);
@@ -61,7 +90,8 @@ pub(super) fn submit_terminal_text(
     } else {
         TERMINAL_SUBMIT_DELAY
     };
-    cccc_runtime::submit_sequence_interruptible(
+    let submitted_bytes = payload.len() + submits.iter().map(|bytes| bytes.len()).sum::<usize>();
+    let written = cccc_runtime::submit_sequence_interruptible(
         group_id,
         &actor.id,
         payload.as_bytes(),
@@ -70,7 +100,25 @@ pub(super) fn submit_terminal_text(
         TERMINAL_REPEAT_SUBMIT_DELAY,
         cancelled,
     )
-    .unwrap_or(false)
+    .unwrap_or(false);
+    if !written {
+        return SubmissionOutcome::Failed;
+    }
+    if submits.is_empty() {
+        return SubmissionOutcome::Unconfirmed {
+            reason: format!(
+                "terminal submit sequence is empty for this Actor; {submitted_bytes} bytes were written with no submit key, so submission cannot be confirmed"
+            ),
+        };
+    }
+    if !input_confirmed {
+        return SubmissionOutcome::Unconfirmed {
+            reason: format!(
+                "input mode was not confirmed before the write; {submitted_bytes} bytes were written, so submission cannot be confirmed"
+            ),
+        };
+    }
+    SubmissionOutcome::Confirmed
 }
 
 pub(super) fn terminal_submit_sequence(actor: &Actor) -> &'static [&'static [u8]] {
@@ -1001,5 +1049,87 @@ mod tests {
                 .iter()
                 .any(|item| item.0 == group.group_id)
         );
+    }
+
+    /// A PTY that never acknowledges paste mode — the claw cline-a shape:
+    /// writes succeed, but the TUI cannot be assumed to submit them.
+    #[cfg(target_os = "linux")]
+    fn start_non_paste_tui(temp: &tempfile::TempDir, group_id: &str, actor_id: &str) {
+        cccc_runtime::start(cccc_runtime::LaunchSpec {
+            group_id: group_id.into(),
+            actor_id: actor_id.into(),
+            runner: cccc_contracts::RunnerKind::Pty,
+            command: vec![
+                "sh".into(),
+                "-c".into(),
+                "stty raw -echo; touch ready; sleep 30".into(),
+            ],
+            cwd: temp.path().into(),
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        })
+        .expect("terminal");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !temp.path().join("ready").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_zero_submit_actor_is_never_graded_confirmed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let group_id = format!("g_fail_loud_empty_submit_{}", std::process::id());
+        let mut actor = Actor::new("peer");
+        actor.submit = ActorSubmit::None;
+        start_non_paste_tui(&temp, &group_id, &actor.id);
+        let cancelled = AtomicBool::new(false);
+        let outcome = submit_terminal_text_checked(&group_id, &actor, "notice", true, &cancelled);
+        cccc_runtime::stop(&group_id, &actor.id).expect("cleanup");
+        match outcome {
+            SubmissionOutcome::Unconfirmed { reason } => {
+                assert!(reason.contains("submit key"), "{reason}");
+                assert!(reason.contains("bytes were written"), "{reason}");
+            }
+            other => panic!("zero-submit actor must be unconfirmed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_unconfirmed_input_mode_is_unconfirmed_not_accepted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let group_id = format!("g_fail_loud_unconfirmed_input_{}", std::process::id());
+        let actor = Actor::new("peer");
+        start_non_paste_tui(&temp, &group_id, &actor.id);
+        let cancelled = AtomicBool::new(false);
+        let outcome = submit_terminal_text_checked(&group_id, &actor, "notice", false, &cancelled);
+        cccc_runtime::stop(&group_id, &actor.id).expect("cleanup");
+        match outcome {
+            SubmissionOutcome::Unconfirmed { reason } => {
+                assert!(reason.contains("input mode"), "{reason}");
+                assert!(reason.contains("bytes were written"), "{reason}");
+            }
+            other => panic!("unconfirmed input mode must be unconfirmed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_confirmed_submit_key_stays_confirmed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let group_id = format!("g_fail_loud_confirmed_{}", std::process::id());
+        let actor = Actor::new("peer");
+        start_non_paste_tui(&temp, &group_id, &actor.id);
+        let cancelled = AtomicBool::new(false);
+        let outcome = submit_terminal_text_checked(&group_id, &actor, "notice", true, &cancelled);
+        assert_eq!(outcome, SubmissionOutcome::Confirmed);
+        // The plain write verdict used by non-delivery callers is unchanged.
+        assert!(
+            submit_terminal_text(&group_id, &actor, "notice", &cancelled),
+            "write verdict must not change for existing callers"
+        );
+        cccc_runtime::stop(&group_id, &actor.id).expect("cleanup");
     }
 }

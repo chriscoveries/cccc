@@ -3,7 +3,7 @@ use cccc_core::GroupStore;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::ops::actor_delivery::{DeliveryJob, complete_job};
+use crate::ops::actor_delivery::{DeliveryJob, SubmissionOutcome, complete_job};
 use crate::ops::actor_runtime;
 
 const PREAMBLE_DELAY: Duration = Duration::from_millis(500);
@@ -22,6 +22,18 @@ pub enum BatchOutcome {
     /// has no attached scope); the delivery must be settled Failed instead of
     /// retried.
     Terminal(String),
+}
+
+/// What the bounded input-mode wait could prove about the lane's terminal.
+/// Ready means the TUI acknowledged paste mode; TimedOut means the wait
+/// expired without that acknowledgment, so any write that follows must be
+/// graded unconfirmed instead of assumed ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputModeOutcome {
+    Ready,
+    NotRunning,
+    Cancelled,
+    TimedOut,
 }
 
 /// Scope-resolution errors match `actor_new_session`: without an attached scope
@@ -90,11 +102,20 @@ pub fn process_batch(
         Err(reason) => return BatchOutcome::Terminal(reason),
     };
     let first_delivery = *preamble_session != status.started_at;
+    let mut input_confirmed = true;
     if first_delivery {
-        if current_actor.runtime != ActorRuntime::Custom
-            && !wait_for_input_mode(&current_group.group_id, &current_actor.id, cancelled)
-        {
-            return BatchOutcome::Retry;
+        if current_actor.runtime != ActorRuntime::Custom {
+            match wait_for_input_mode(&current_group.group_id, &current_actor.id, cancelled) {
+                InputModeOutcome::Ready => {}
+                InputModeOutcome::NotRunning | InputModeOutcome::Cancelled => {
+                    return BatchOutcome::Retry;
+                }
+                // The lane never acknowledged paste mode. The payload still
+                // goes out below, but the delivery settles unconfirmed
+                // instead of this wait silently certifying an assumed-ready
+                // input.
+                InputModeOutcome::TimedOut => input_confirmed = false,
+            }
         }
         // agy can enable paste mode before its conversation input is mounted.
         // The ordinary submit delay comes AFTER writing and cannot protect the
@@ -143,12 +164,28 @@ pub fn process_batch(
             "[CCCC] If this conversation has not completed CCCC initialization, call cccc_bootstrap before handling this task. Otherwise continue without repeating bootstrap.\n\n{payload}"
         );
     }
-    if submit_text(&current_group.group_id, &current_actor, &payload, cancelled) {
-        preamble_session.clone_from(&status.started_at);
-        finish_jobs(jobs);
-        return BatchOutcome::Delivered;
+    match submit_text_checked(
+        &current_group.group_id,
+        &current_actor,
+        &payload,
+        input_confirmed,
+        cancelled,
+    ) {
+        SubmissionOutcome::Confirmed => {
+            preamble_session.clone_from(&status.started_at);
+            finish_jobs(jobs);
+            BatchOutcome::Delivered
+        }
+        SubmissionOutcome::Unconfirmed { reason } => {
+            // Bytes reached the PTY, so the preamble session advances, but
+            // nothing proves the lane will submit them: settle visibly
+            // instead of recording an accepted the sender would trust.
+            preamble_session.clone_from(&status.started_at);
+            unconfirmed_jobs(jobs, &reason);
+            BatchOutcome::Delivered
+        }
+        SubmissionOutcome::Failed => BatchOutcome::Retry,
     }
-    BatchOutcome::Retry
 }
 
 fn process_deepseek_batch(
@@ -330,25 +367,68 @@ fn submit_text(group_id: &str, actor: &Actor, text: &str, cancelled: &AtomicBool
     super::actor_delivery::submit_terminal_text(group_id, actor, text, cancelled)
 }
 
+fn submit_text_checked(
+    group_id: &str,
+    actor: &Actor,
+    text: &str,
+    input_confirmed: bool,
+    cancelled: &AtomicBool,
+) -> super::actor_delivery::SubmissionOutcome {
+    super::actor_delivery::submit_terminal_text_checked(
+        group_id,
+        actor,
+        text,
+        input_confirmed,
+        cancelled,
+    )
+}
+
 #[cfg(test)]
 fn submit_sequence(actor: &Actor) -> &'static [&'static [u8]] {
     super::actor_delivery::terminal_submit_sequence(actor)
 }
 
-fn wait_for_input_mode(group_id: &str, actor_id: &str, cancelled: &AtomicBool) -> bool {
+/// Mirror of the managed path's Unconfirmed arm: the original claim stays
+/// unretryable, in-flight is released, and the ledger records the uncertainty
+/// the sender must see instead of an accepted.
+fn unconfirmed_jobs(jobs: &[DeliveryJob], reason: &str) {
+    for job in jobs {
+        if let Err(error) = crate::ops::runtime_delivery::append_state(
+            &job.home,
+            &job.group.group_id,
+            &job.actor.id,
+            &job.actor.created_at,
+            &job.event.id,
+            super::actor_delivery::delivery_transport(&job.home, &job.group, &job.actor),
+            crate::ops::runtime_delivery::DeliveryOutcome::Ambiguous(reason),
+        ) {
+            tracing::error!(message=%error.message, event_id=%job.event.id, "failed to persist unconfirmed terminal delivery");
+        }
+        super::actor_delivery::release_in_flight(job);
+    }
+}
+
+fn wait_for_input_mode(group_id: &str, actor_id: &str, cancelled: &AtomicBool) -> InputModeOutcome {
     let deadline = std::time::Instant::now() + INPUT_MODE_TIMEOUT;
     while std::time::Instant::now() < deadline {
         if cccc_runtime::bracketed_paste_enabled(group_id, actor_id).unwrap_or(false) {
-            return true;
+            return InputModeOutcome::Ready;
         }
         if !cccc_runtime::status(group_id, actor_id).is_ok_and(|status| status.running) {
-            return false;
+            return InputModeOutcome::NotRunning;
         }
         if !interruptible_sleep(Duration::from_millis(50), cancelled) {
-            return false;
+            return InputModeOutcome::Cancelled;
         }
     }
-    !cancelled.load(Ordering::Acquire)
+    // A TUI that never acknowledged paste mode gets no ready signal: the
+    // caller may still write, but must grade the delivery unconfirmed rather
+    // than treat the elapsed wait as success.
+    if cancelled.load(Ordering::Acquire) {
+        InputModeOutcome::Cancelled
+    } else {
+        InputModeOutcome::TimedOut
+    }
 }
 
 pub(super) fn interruptible_sleep(duration: Duration, cancelled: &AtomicBool) -> bool {
