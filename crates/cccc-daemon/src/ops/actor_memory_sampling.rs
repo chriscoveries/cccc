@@ -72,11 +72,13 @@ fn rss_kb_of(pid: i32) -> Option<u64> {
 ///
 /// MUST2 (Linux known-zero): a member is `Measured` only when its counters
 /// parse; it is `KnownZero` only when its zero state is positively observed
-/// (the pid vanished with `NotFound`, or `/proc/<pid>/status` reports
-/// `State: Z`); everything else — `EACCES`, malformed counters, short reads,
-/// any other error — stays `Unknown`. Unknown memory must remain unavailable
-/// rather than silently undercounted: no readable sibling may turn it into
-/// zero, and no extra kill, probe or ppid pass is added to re-classify it.
+/// (the pid vanished with `NotFound`, or a **unique** `/proc/<pid>/status`
+/// `State:` field reports `Z` — conflicting duplicate State fields are
+/// malformed and stay `Unknown`); everything else — `EACCES`, malformed
+/// counters, short reads, any other error — stays `Unknown`. Unknown memory
+/// must remain unavailable rather than silently undercounted: no readable
+/// sibling may turn it into zero, and no extra kill, probe or ppid pass is
+/// added to re-classify it.
 #[cfg(target_os = "linux")]
 enum MemberRead {
     Measured(u64),
@@ -89,13 +91,20 @@ enum MemberRead {
 /// outside the zombie state) are covered without fabricating `/proc`.
 #[cfg(target_os = "linux")]
 fn classify_status_body(body: &str) -> MemberRead {
-    let state_is_zombie = body.lines().any(|line| {
-        line.strip_prefix("State:")
-            .and_then(|state| state.split_whitespace().next())
-            == Some("Z")
-    });
-    if state_is_zombie {
-        // A positively identified zombie holds no measurable memory:
+    let mut states = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("State:"));
+    let first = states.next();
+    if states.next().is_some() {
+        // Conflicting duplicate State fields are malformed evidence: the
+        // member stays unknown rather than resolving to known zero, even
+        // when one line looks like a zombie and the counters parse.
+        return MemberRead::Unknown;
+    }
+    if let Some(state) = first
+        && state.split_whitespace().next() == Some("Z")
+    {
+        // A uniquely identified zombie holds no measurable memory:
         // known zero, not an unreadable sample and not a readable zero.
         return MemberRead::KnownZero;
     }
@@ -196,7 +205,8 @@ pub fn tree_rss_kib(_root: i32) -> (u64, usize) {
 /// twice when its owned helper is already a descendant of another root.
 /// This is non-atomic accounting, never process ownership or stop authority.
 /// Invalid/unsupported roots and unreadable observations return count zero.
-/// A positively known-zero member (ENOENT-vanished or `State: Z`) returns
+/// A positively known-zero member (ENOENT-vanished or a uniquely `State: Z`
+/// member) returns
 /// zero contribution without counting as readable; unknown observations
 /// still make the whole union (0, 0) — never a generic partial total.
 #[cfg(target_os = "linux")]
@@ -520,6 +530,33 @@ finally:
         assert!(matches!(
             classify_status_body("Name:\tsleep\nState:\tR (running)\n"),
             MemberRead::Unknown
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn conflicting_duplicate_state_fields_stay_unknown() {
+        // Duplicate State fields are conflicting evidence: unknown even when
+        // one line looks like a zombie and the counters parse, in either
+        // order — only a unique State field may authorize known zero.
+        assert!(matches!(
+            classify_status_body(
+                "Name:\tdefunct\nState:\tZ (zombie)\nState:\tS (sleeping)\nVmRSS:\t12345 kB\nVmSwap:\t0 kB\n"
+            ),
+            MemberRead::Unknown
+        ));
+        assert!(matches!(
+            classify_status_body(
+                "Name:\tdefunct\nState:\tS (sleeping)\nState:\tZ (zombie)\nVmRSS:\t12345 kB\nVmSwap:\t0 kB\n"
+            ),
+            MemberRead::Unknown
+        ));
+        // A unique zombie state remains known zero.
+        assert!(matches!(
+            classify_status_body(
+                "Name:\tdefunct\nState:\tZ (zombie)\nVmRSS:\t0 kB\nVmSwap:\t0 kB\n"
+            ),
+            MemberRead::KnownZero
         ));
     }
 
