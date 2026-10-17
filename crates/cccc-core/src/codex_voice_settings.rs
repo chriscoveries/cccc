@@ -260,6 +260,7 @@ fn identity_fingerprint(runtime: ActorRuntime, environment: &BTreeMap<String, St
         ActorRuntime::Claude => unreachable!("Claude fingerprints the full resolved launch"),
         ActorRuntime::Grok => &["GROK_HOME", "HOME", "USERPROFILE"],
         ActorRuntime::Pi => &["PI_CODING_AGENT_DIR", "HOME", "USERPROFILE"],
+        ActorRuntime::Muse => &["HOME", "USERPROFILE", "XDG_DATA_HOME", "XDG_CONFIG_HOME"],
         ActorRuntime::Kilo => &[
             "HOME",
             "USERPROFILE",
