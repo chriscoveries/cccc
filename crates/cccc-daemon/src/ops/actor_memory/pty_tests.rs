@@ -479,7 +479,8 @@ fn already_appended_pending_detection_is_offered_once_when_sampling_is_disabled(
 /// earlier quiet observation. RED on current source: nothing rechecks, so
 /// the flow commits (cooldown written) and stops the actor anyway.
 #[test]
-fn real_submit_in_the_final_quiet_to_stop_gap_keeps_the_owned_actor_and_spends_no_cooldown() {
+fn memory_must3_real_submit_in_the_final_quiet_to_stop_gap_keeps_the_owned_actor_and_spends_no_cooldown()
+ {
     let f = opted_in_fixture();
     let before = f.status();
     let _age = Age::new(&f.group.group_id, "worker");
@@ -543,7 +544,7 @@ fn real_submit_in_the_final_quiet_to_stop_gap_keeps_the_owned_actor_and_spends_n
 /// Control: a submit cancelled before admission records NO input — a
 /// cancelled-before-accept send must not veto a later legitimate stop.
 #[test]
-fn cancelled_before_admission_records_no_input() {
+fn memory_must3_cancelled_before_admission_records_no_input() {
     let f = opted_in_fixture();
     let cancelled = std::sync::atomic::AtomicBool::new(true);
     let accepted = super::super::super::actor_delivery::submit_terminal_text(
@@ -564,7 +565,7 @@ fn cancelled_before_admission_records_no_input() {
 /// record the stop-side recheck reads. GREEN today (terminal side): this is
 /// the contract the gap regression protects, stated independently of it.
 #[test]
-fn accepted_submit_records_input_before_it_returns() {
+fn memory_must3_accepted_submit_records_input_before_it_returns() {
     let f = opted_in_fixture();
     let accepted = super::super::super::actor_delivery::submit_terminal_text(
         &f.group.group_id,

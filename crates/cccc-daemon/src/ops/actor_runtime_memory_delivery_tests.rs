@@ -551,7 +551,7 @@ fn count_prompts(f: &Fixture) -> usize {
 /// record itself. GREEN today; the managed half of the accepted-submit
 /// contract, independent of the (unimplemented) input seq.
 #[test]
-fn accepted_managed_submit_reaches_the_provider() {
+fn memory_must3_accepted_managed_submit_reaches_the_provider() {
     let f = Fixture::new(false);
     let baseline = count_prompts(&f);
     f.materialize(); // asserts BatchSubmission::Accepted, then waits idle
@@ -566,7 +566,7 @@ fn accepted_managed_submit_reaches_the_provider() {
 /// provider traffic — rejected/cancel-before-accept MUST NOT count as input
 /// and must not veto a later legitimate stop.
 #[test]
-fn cancelled_before_managed_admission_defers_without_provider_traffic() {
+fn memory_must3_cancelled_before_managed_admission_defers_without_provider_traffic() {
     let f = Fixture::new(false);
     let cancelled = AtomicBool::new(true);
     assert_eq!(
@@ -602,7 +602,7 @@ fn cancelled_before_managed_admission_defers_without_provider_traffic() {
 /// asserted) with the control green first; any other shape is a fixture
 /// defect, not MUST3 evidence.
 #[test]
-fn real_accepted_managed_submit_before_native_maintenance_vetoes_the_restart() {
+fn memory_must3_real_accepted_managed_submit_before_native_maintenance_vetoes_the_restart() {
     let f = Fixture::new(false);
     f.materialize(); // accepted + completed (idle) — provider session established
 
