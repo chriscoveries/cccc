@@ -381,11 +381,17 @@ async fn large_mutating_send_succeeds_unreclassified() {
     // reclassified: success with no isError. (A 100 KiB send could never
     // exercise a 3 MiB exemption.) GREEN pin.
     let daemon = LiveDaemon::start().await;
+    // Self-only actor mail is deliberately rejected by audience policy.
+    // Use a second enabled actor so this control exercises a valid write.
+    let store = cccc_core::GroupStore::new(daemon.home.clone()).expect("store");
+    let mut group = store.load(&daemon.group_id).expect("group");
+    cccc_core::actors::add(&mut group, cccc_contracts::Actor::new("peer2")).expect("add recipient");
+    store.save(&group).expect("persist enabled recipient");
     let response = crate::handle_request_for_actor(
         &daemon.home,
         &json!({"id":5,"method":"tools/call","params":{"name":"cccc_message_send",
-            "arguments":{"to":[ACTOR],"insight":"envelope scope probe",
-                         "text":"y".repeat(2_000_000),"message_mode":"mail"}}}),
+            "arguments":{"to":["peer2"],"insight":"envelope scope probe",
+                         "text":"y".repeat(2_000_000),"mode":"mail"}}}),
         &daemon.group_id,
         ACTOR,
     )
@@ -396,7 +402,8 @@ async fn large_mutating_send_succeeds_unreclassified() {
     );
     assert!(
         response["result"].get("isError").is_none(),
-        "no failure reclassification"
+        "no failure reclassification: {}",
+        response["result"]["structuredContent"]["error"]
     );
     assert!(
         LiveDaemon::whole_bytes(&response) > ENVELOPE_BUDGET_BYTES,
