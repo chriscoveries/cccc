@@ -62,7 +62,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_response(401)
                 self.end_headers()
                 return
-            body = b"{}"
+            body = b'{"healthy":true}'
             self.send_response(200)
             self.send_header("content-length", str(len(body)))
             self.end_headers()
