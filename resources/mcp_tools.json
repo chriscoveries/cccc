@@ -2260,6 +2260,12 @@
           "type": "string",
           "description": "Working group ID (optional if CCCC_GROUP_ID is set)"
         },
+        "detail": {
+          "type": "string",
+          "enum": ["full", "summary", "overview"],
+          "default": "full",
+          "description": "Projection to read. Use overview or summary after context_too_large; fetch task data separately with cccc_task_list."
+        },
         "include_archived": {
           "type": "boolean",
           "default": false
