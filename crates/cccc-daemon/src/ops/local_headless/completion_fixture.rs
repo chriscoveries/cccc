@@ -23,7 +23,7 @@ impl Completion {
     }
 
     pub(crate) fn wait(mut self, delegation: &str) {
-        super::super::block_on_managed(async {
+        super::block_on_managed(async {
             tokio::time::timeout(Duration::from_secs(5), async {
                 let mut selected = None;
                 loop {
