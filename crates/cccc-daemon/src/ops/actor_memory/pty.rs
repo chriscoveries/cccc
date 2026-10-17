@@ -82,7 +82,7 @@ struct ActorDetectionMarks {
 #[serde(untagged)]
 enum StoredDetectionMark {
     Legacy(DetectionMark),
-    Classes(ActorDetectionMarks),
+    Classes(Box<ActorDetectionMarks>),
 }
 
 fn read_detection_marks(
@@ -97,7 +97,7 @@ fn read_detection_marks(
         .into_iter()
         .map(|(actor, mark)| {
             let classes = match mark {
-                StoredDetectionMark::Classes(classes) => classes,
+                StoredDetectionMark::Classes(classes) => *classes,
                 StoredDetectionMark::Legacy(mark) => {
                     if mark.pending.as_ref().is_some_and(|event| {
                         event.data["context"]["outcome"] == "detection_unavailable"
