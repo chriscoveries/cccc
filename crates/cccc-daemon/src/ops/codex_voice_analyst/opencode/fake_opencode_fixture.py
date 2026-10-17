@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""Isolated fake OpenCode/Kilo backend for the initial-model tests.
+"""Isolated fake OpenCode/Kilo backend for the initial-model tests (v2).
 
 Serves exactly what the real managed launch path touches, with no provider,
 no credentials and no network beyond loopback:
 
-  * `--version`            -> prints `opencode 1.18.31` (>= MIN_MANAGED_VERSION)
+  * `--version`            -> prints `opencode 1.18.31` and exits WITHOUT
+                              dumping: the env dump is an ACP-phase artifact
+                              only, so a version-only run cannot leave a
+                              stale oracle file behind
   * `acp --port <p> ...`   -> dumps the ACTUAL spawned process environment
-                              (OPENCODE_*/KILO_*/HOME) to env-dump.json in the
-                              cwd, starts an HTTP listener with REAL basic-auth
-                              enforcement on /global/health and an SSE stream
-                              on /event, then answers ACP over stdio:
+                              to env-dump.json in the cwd, STRICTLY
+                              allowlisted to keys ending `_CONFIG_CONTENT`
+                              plus the OC_FIXTURE_MARKER fixture marker --
+                              never HOME, never SERVER_* credentials, never
+                              other pass-through secrets. Starts an HTTP
+                              listener with REAL basic-auth enforcement on
+                              /global/health and an SSE stream on /event
+                              (real 0x0A newline bytes; AST-counted by the
+                              tests), then answers ACP over stdio:
                               initialize (protocol v1 + loadSession),
                               session/new (fixed id), session/set_config_option
                               (appended to config-options.jsonl).
@@ -22,12 +30,15 @@ import sys
 import threading
 import time
 
+DUMP_ALLOW_SUFFIX = "_CONFIG_CONTENT"
+DUMP_ALLOW_EXACT = ("OC_FIXTURE_MARKER",)
+
 
 def dump_env():
     keep = {
         key: value
         for key, value in os.environ.items()
-        if key == "HOME" or key.startswith(("OPENCODE_", "KILO_"))
+        if key.endswith(DUMP_ALLOW_SUFFIX) or key in DUMP_ALLOW_EXACT
     }
     with open("env-dump.json", "w", encoding="utf-8") as handle:
         json.dump(keep, handle)
@@ -62,6 +73,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 while True:
+                    # python source escape -> two REAL 0x0A bytes, never the
+                    # literal four characters backslash-n. The tests count
+                    # newline bytes via ast.parse of this file.
                     self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
                     time.sleep(30)
@@ -72,12 +86,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    dump_env()
     args = sys.argv[1:]
     if "--version" in args:
         print("opencode 1.18.31")
         sys.stdout.flush()
         return
+    dump_env()  # ACP phase only, after the version-probe early exit
     port = int(args[args.index("--port") + 1])
     user = os.environ.get("OPENCODE_SERVER_USERNAME") or os.environ.get(
         "KILO_SERVER_USERNAME", ""
