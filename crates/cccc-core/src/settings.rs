@@ -34,11 +34,14 @@ pub fn load(home: &HomeLayout) -> io::Result<GlobalSettings> {
 
 fn load_canonical(home: &HomeLayout) -> io::Result<GlobalSettings> {
     let path = home.root().join("settings.yaml");
+    // Cache the raw parse, not the migrated result: the migration below rewrites
+    // `observability` in memory, so caching the migrated document would return
+    // an already-migrated value to a caller expecting the file's shape.
     let mut settings = if path.exists() {
-        read_yaml(&path)
+        crate::parse_cache::read_yaml_atomic_cached(&path)?
     } else {
-        Ok(GlobalSettings::default())
-    }?;
+        GlobalSettings::default()
+    };
     migrate_flat_observability(&mut settings.observability);
     Ok(settings)
 }
@@ -53,13 +56,19 @@ pub fn update<T>(
     with_exclusive_lock(&home.root().join("settings.yaml.lock"), || {
         let mut settings = load_canonical(home)?;
         let result = change(&mut settings)?;
-        write_yaml(&home.root().join("settings.yaml"), &settings)?;
+        let path = home.root().join("settings.yaml");
+        write_yaml(&path, &settings)?;
+        // Invalidate after commit so a racing external writer remains visible.
+        crate::parse_cache::store_serialized(&path, &settings);
         Ok(result)
     })
 }
 
 pub fn save(home: &HomeLayout, settings: &GlobalSettings) -> io::Result<()> {
-    write_yaml(&home.root().join("settings.yaml"), settings)
+    let path = home.root().join("settings.yaml");
+    write_yaml(&path, settings)?;
+    crate::parse_cache::store_serialized(&path, settings);
+    Ok(())
 }
 
 fn migrate_legacy_json(home: &HomeLayout) -> io::Result<()> {

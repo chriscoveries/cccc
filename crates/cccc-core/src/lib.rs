@@ -48,6 +48,7 @@ pub mod mail_pending;
 pub mod membership;
 pub mod memory;
 pub mod nomcp;
+pub mod parse_cache;
 pub mod path_input;
 pub mod peer_insight;
 pub mod permissions;

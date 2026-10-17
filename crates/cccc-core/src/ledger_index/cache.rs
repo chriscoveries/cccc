@@ -2,14 +2,19 @@ use super::LedgerIndex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 const MAX_ENTRIES: usize = 32;
 const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
+/// An index not consulted for this long releases its retained events on the
+/// next cache operation, so a quiet group's ledger stops occupying memory.
+const IDLE: Duration = Duration::from_secs(300);
 
 struct CacheEntry {
     index: Arc<RwLock<LedgerIndex>>,
     source_bytes: u64,
     last_used: u64,
+    last_used_at: Instant,
 }
 
 struct IndexCache {
@@ -18,16 +23,18 @@ struct IndexCache {
     clock: u64,
     max_entries: usize,
     max_source_bytes: u64,
+    idle: Duration,
 }
 
 impl IndexCache {
-    fn new(max_entries: usize, max_source_bytes: u64) -> Self {
+    fn new(max_entries: usize, max_source_bytes: u64, idle: Duration) -> Self {
         Self {
             entries: HashMap::new(),
             source_bytes: 0,
             clock: 0,
             max_entries,
             max_source_bytes,
+            idle,
         }
     }
 
@@ -45,6 +52,7 @@ impl IndexCache {
                 .saturating_add(source_bytes);
             cached.source_bytes = source_bytes;
             cached.last_used = self.clock;
+            cached.last_used_at = Instant::now();
             Arc::clone(&cached.index)
         } else {
             let index = Arc::new(RwLock::new(LedgerIndex::default()));
@@ -54,6 +62,7 @@ impl IndexCache {
                     index: Arc::clone(&index),
                     source_bytes,
                     last_used: self.clock,
+                    last_used_at: Instant::now(),
                 },
             );
             self.source_bytes = self.source_bytes.saturating_add(source_bytes);
@@ -67,6 +76,7 @@ impl IndexCache {
         self.clock = self.clock.wrapping_add(1);
         let cached = self.entries.get_mut(path)?;
         cached.last_used = self.clock;
+        cached.last_used_at = Instant::now();
         Some(Arc::clone(&cached.index))
     }
 
@@ -89,6 +99,7 @@ impl IndexCache {
             .saturating_add(source_bytes);
         cached.source_bytes = source_bytes;
         cached.last_used = self.clock;
+        cached.last_used_at = Instant::now();
         self.evict(path)
     }
 
@@ -100,6 +111,22 @@ impl IndexCache {
 
     fn evict(&mut self, protected: &Path) -> Vec<CacheEntry> {
         let mut retired = Vec::new();
+        let idle = self.idle;
+        let stale: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|(path, cached)| {
+                path.as_path() != protected
+                    && cached.last_used_at.elapsed() > idle
+                    && Arc::strong_count(&cached.index) == 1
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in stale {
+            if let Some(removed) = self.remove(&path) {
+                retired.push(removed);
+            }
+        }
         while self.entries.len() > self.max_entries
             || (self.source_bytes > self.weight_limit() && self.entries.len() > 1)
         {
@@ -133,7 +160,7 @@ impl IndexCache {
 
 fn cache() -> &'static Mutex<IndexCache> {
     static CACHE: OnceLock<Mutex<IndexCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(IndexCache::new(MAX_ENTRIES, MAX_SOURCE_BYTES)))
+    CACHE.get_or_init(|| Mutex::new(IndexCache::new(MAX_ENTRIES, MAX_SOURCE_BYTES, IDLE)))
 }
 
 pub(super) fn entry(path: &Path, source_bytes: u64) -> Arc<RwLock<LedgerIndex>> {
@@ -175,8 +202,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_idle_index_is_evicted_on_the_next_cache_op() {
+        let mut cache = IndexCache::new(4, 10, Duration::from_millis(30));
+        let first = Path::new("first");
+        let second = Path::new("second");
+        cache.entry(first, 4);
+        std::thread::sleep(Duration::from_millis(60));
+        cache.entry(second, 4);
+        assert!(!cache.entries.contains_key(first));
+        assert!(cache.entries.contains_key(second));
+    }
+
+    #[test]
+    fn an_in_use_idle_entry_is_not_evicted() {
+        let mut cache = IndexCache::new(4, 10, Duration::from_millis(30));
+        let first = Path::new("first");
+        let second = Path::new("second");
+        let active = cache.entry(first, 4).0;
+        std::thread::sleep(Duration::from_millis(60));
+        cache.entry(second, 4);
+        assert!(cache.entries.contains_key(first));
+        assert!(cache.entries.contains_key(second));
+        assert_eq!(Arc::strong_count(&active), 2);
+    }
+
+    #[test]
     fn evicts_least_recently_used_entries_by_count_and_weight() {
-        let mut cache = IndexCache::new(2, 10);
+        let mut cache = IndexCache::new(2, 10, Duration::from_secs(3600));
         let first = Path::new("first");
         let second = Path::new("second");
         let third = Path::new("third");
@@ -192,7 +244,7 @@ mod tests {
 
     #[test]
     fn retains_one_oversized_entry_alongside_budgeted_smaller_entries() {
-        let mut cache = IndexCache::new(2, 10);
+        let mut cache = IndexCache::new(2, 10, Duration::from_secs(3600));
         let path = Path::new("oversized");
         let active = cache.entry(path, 20).0;
         cache.update_weight(path, 20, &active);
@@ -207,7 +259,7 @@ mod tests {
 
     #[test]
     fn replaces_the_older_oversized_entry() {
-        let mut cache = IndexCache::new(4, 10);
+        let mut cache = IndexCache::new(4, 10, Duration::from_secs(3600));
         cache.entry(Path::new("old-large"), 20);
         cache.entry(Path::new("small"), 2);
         cache.entry(Path::new("new-large"), 30);
@@ -220,7 +272,7 @@ mod tests {
 
     #[test]
     fn updates_weight_and_evicts_the_idle_lru_entry() {
-        let mut cache = IndexCache::new(2, 10);
+        let mut cache = IndexCache::new(2, 10, Duration::from_secs(3600));
         let first = Path::new("first");
         let second = Path::new("second");
         drop(cache.entry(first, 4));
@@ -236,7 +288,7 @@ mod tests {
 
     #[test]
     fn defers_eviction_while_an_entry_is_in_use() {
-        let mut cache = IndexCache::new(1, 10);
+        let mut cache = IndexCache::new(1, 10, Duration::from_secs(3600));
         let first = Path::new("first");
         let second = Path::new("second");
         let active = cache.entry(first, 4).0;

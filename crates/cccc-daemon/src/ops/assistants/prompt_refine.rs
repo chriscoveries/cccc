@@ -481,10 +481,11 @@ fn append_event(
             "{:x}",
             Sha256::digest(format!("secretary:{task_id}:{action}"))
         );
-        if let Some(previous) = ledger::read_all(&store.ledger_path(group_id).map_err(OpError::io)?)
-            .map_err(OpError::io)?
-            .into_iter()
-            .find(|item| item.id == event.id)
+        if let Some(previous) = ledger::inspect(
+            &store.ledger_path(group_id).map_err(OpError::io)?,
+            |events, _| events.iter().find(|item| item.id == event.id).cloned(),
+        )
+        .map_err(OpError::io)?
         {
             return Ok(previous);
         }

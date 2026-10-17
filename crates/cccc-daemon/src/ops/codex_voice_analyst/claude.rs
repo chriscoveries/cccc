@@ -1223,6 +1223,47 @@ struct TranscriptFollower {
     discovered_from_store: bool,
     stale_published_path: Option<PathBuf>,
     continuity: transcript_continuity::Continuity,
+    // An idle lane ticks every 50 ms, so re-reading and re-parsing state.json
+    // plus canonicalizing two paths on each tick dominated follower CPU
+    // (~20% of daemon cycles in a firestar profile of pid 2928924). These
+    // caches make an unchanged tick a single statx and no allocation at all.
+    // They are only ever populated after the full validation below has run
+    // for that exact state file, so every error path is unchanged.
+    state_stamp: Option<StateStamp>,
+    canonical_projects: Option<PathBuf>,
+    // Incremented once per actual state.json read+parse. Tests assert an
+    // unchanged state file does not advance it across repeated ticks.
+    state_parses: u64,
+    // Device/inode of the adopted transcript. Relocation recovery and
+    // same-path-replacement detection depend on the transcript, not on
+    // state.json, so the idle fast path re-stats this every tick.
+    transcript_stamp: Option<(u64, u64)>,
+}
+
+/// Identity of state.json as of the last successful discovery. A change in any
+/// field re-runs discovery; mtime is paired with len and inode because a
+/// same-second rewrite can keep mtime coarse on some filesystems.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StateStamp {
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+fn state_stamp(metadata: &std::fs::Metadata) -> StateStamp {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    StateStamp {
+        len: metadata.len(),
+        mtime: metadata.modified().ok(),
+        #[cfg(unix)]
+        dev: metadata.dev(),
+        #[cfg(unix)]
+        ino: metadata.ino(),
+    }
 }
 
 impl TranscriptFollower {
@@ -1245,6 +1286,10 @@ impl TranscriptFollower {
             discovered_from_store: false,
             stale_published_path: None,
             continuity: transcript_continuity::Continuity::default(),
+            state_stamp: None,
+            canonical_projects: None,
+            state_parses: 0,
+            transcript_stamp: None,
         }
     }
 
@@ -1350,7 +1395,29 @@ impl TranscriptFollower {
                 "Claude Agent View state file failed validation",
             ));
         }
+        // Fast path: state.json is unchanged since the last successful
+        // discovery, so the published path, its canonical form and the session
+        // store location cannot have changed either. Validation above still
+        // runs every tick, so a state file that stops being a regular file is
+        // still refused on the very next tick. Only the re-read, the re-parse
+        // and the two canonicalize calls are skipped.
+        //
+        // The transcript is re-stat'ed because relocation recovery and
+        // same-path-replacement detection depend on it, and a session that has
+        // ever relocated (stale_published_path) keeps taking the full path,
+        // because a stale pointer reappearing is only observable there. Both
+        // are rare, so the common idle lane still pays one statx and no
+        // allocation per tick.
+        let stamp = state_stamp(&metadata);
+        if self.path.is_some()
+            && self.state_stamp == Some(stamp)
+            && self.stale_published_path.is_none()
+            && self.transcript_unchanged().await
+        {
+            return Ok(());
+        }
         let bytes = tokio::fs::read(&self.state_path).await?;
+        self.state_parses += 1;
         let Ok(state) = serde_json::from_slice::<Value>(&bytes) else {
             // Agent View may replace this small file while it is being read;
             // retry on the next poll before declaring transcript corruption.
@@ -1403,7 +1470,14 @@ impl TranscriptFollower {
             ));
         }
         let canonical = tokio::fs::canonicalize(&path).await?;
-        let projects = tokio::fs::canonicalize(self.config_dir.join("projects")).await?;
+        let projects = match self.canonical_projects.clone() {
+            Some(projects) => projects,
+            None => {
+                let projects = tokio::fs::canonicalize(self.config_dir.join("projects")).await?;
+                self.canonical_projects = Some(projects.clone());
+                projects
+            }
+        };
         if !canonical.starts_with(&projects) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -1412,6 +1486,11 @@ impl TranscriptFollower {
         }
         let mut file = tokio::fs::File::open(&canonical).await?;
         let metadata = file.metadata().await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            self.transcript_stamp = Some((metadata.dev(), metadata.ino()));
+        }
         let identity = transcript_file_identity(&file).await?;
         if let Some(current) = self.path.as_ref() {
             if current != &canonical {
@@ -1443,6 +1522,7 @@ impl TranscriptFollower {
                 self.identity = Some(identity);
                 self.path = Some(canonical);
                 self.stale_published_path = None;
+                self.state_stamp = Some(stamp);
                 return Ok(());
             }
             if current != &canonical || self.identity.as_ref() != Some(&identity) {
@@ -1451,6 +1531,7 @@ impl TranscriptFollower {
                     "Claude Agent View rotated the transcript while the session was active",
                 ));
             }
+            self.state_stamp = Some(stamp);
             return Ok(());
         }
         self.offset = if self.skip_existing {
@@ -1462,7 +1543,36 @@ impl TranscriptFollower {
         self.continuity.initialize(&mut file, self.offset).await?;
         self.identity = Some(identity);
         self.path = Some(canonical);
+        self.state_stamp = Some(stamp);
         Ok(())
+    }
+}
+
+impl TranscriptFollower {
+    /// True when the adopted transcript is still the same regular file. This is
+    /// the one stat the idle fast path still pays, because relocation recovery
+    /// and same-path-replacement detection below depend on the transcript
+    /// rather than on state.json.
+    async fn transcript_unchanged(&self) -> bool {
+        let Some(path) = self.path.as_deref() else {
+            return false;
+        };
+        let Ok(metadata) = tokio::fs::symlink_metadata(path).await else {
+            return false;
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            self.transcript_stamp == Some((metadata.dev(), metadata.ino()))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            true
+        }
     }
 }
 
@@ -1845,6 +1955,65 @@ mod tests {
             .expect("materialized state");
 
         assert_eq!(follower.poll().await.expect("first records"), [first]);
+    }
+
+    #[tokio::test]
+    async fn unchanged_state_file_skips_reparse_and_reuses_canonical_projects() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        let projects_dir = config_dir.join("projects/workspace");
+        let job_dir = config_dir.join("jobs/1234abcd");
+        let session_id = "52b41c61-e23c-4b7c-8b60-809c347451b5";
+        std::fs::create_dir_all(&projects_dir).expect("projects");
+        std::fs::create_dir_all(&job_dir).expect("job");
+        let state_path = job_dir.join("state.json");
+        let transcript_path = projects_dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(&transcript_path, "").expect("transcript");
+        cccc_core::fs::write_json(&state_path, &json!({"linkScanPath":transcript_path}))
+            .expect("state");
+
+        let mut follower =
+            TranscriptFollower::new(state_path.clone(), config_dir, session_id.into(), false);
+        follower.poll().await.expect("first poll discovers");
+        let parses_after_discovery = follower.state_parses;
+        assert!(
+            parses_after_discovery >= 1,
+            "the first poll must parse state"
+        );
+        assert!(follower.path.is_some(), "the first poll must attach");
+
+        // 40 further ticks at the 50 ms cadence, with state.json untouched.
+        for _ in 0..40 {
+            follower.poll().await.expect("idle poll");
+        }
+        assert_eq!(
+            follower.state_parses, parses_after_discovery,
+            "an unchanged state.json must not be re-read or re-parsed on later ticks"
+        );
+        assert!(
+            follower.canonical_projects.is_some(),
+            "the canonical projects dir is cached after the first discovery"
+        );
+
+        // A real change to state.json must still be picked up.
+        let next = json!({
+            "type":"user",
+            "sessionId":session_id,
+            "promptId":"after-change",
+            "message":{"content":"new work"},
+        });
+        std::fs::write(&transcript_path, format!("{next}\n")).expect("append transcript");
+        cccc_core::fs::write_json(&state_path, &json!({"linkScanPath":transcript_path}))
+            .expect("rewritten state");
+        assert_eq!(
+            follower.poll().await.expect("poll after state change"),
+            [next],
+            "a changed state.json must re-run discovery and surface new records"
+        );
+        assert!(
+            follower.state_parses > parses_after_discovery,
+            "a changed state.json must be re-parsed"
+        );
     }
 
     #[tokio::test]

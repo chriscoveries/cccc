@@ -17,6 +17,7 @@ pub(crate) struct SourceRevision {
     pub(crate) path: PathBuf,
     pub(crate) len: u64,
     pub(crate) modified: Option<SystemTime>,
+    pub(crate) identity: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Default)]
@@ -343,10 +344,18 @@ pub(crate) fn revisions(path: &Path) -> io::Result<Vec<SourceRevision>> {
         .into_iter()
         .map(|source| {
             let metadata = source.metadata()?;
+            #[cfg(unix)]
+            let identity = {
+                use std::os::unix::fs::MetadataExt;
+                Some((metadata.dev(), metadata.ino()))
+            };
+            #[cfg(not(unix))]
+            let identity = None;
             Ok(SourceRevision {
                 path: source,
                 len: metadata.len(),
                 modified: metadata.modified().ok(),
+                identity,
             })
         })
         .collect()
@@ -363,7 +372,11 @@ fn read_source(path: &Path, group_id: &str) -> io::Result<Vec<Event>> {
     read_source_from(path, 0, group_id).map(|(events, _)| events)
 }
 
-fn read_source_from(path: &Path, offset: u64, group_id: &str) -> io::Result<(Vec<Event>, u64)> {
+pub(crate) fn read_source_from(
+    path: &Path,
+    offset: u64,
+    group_id: &str,
+) -> io::Result<(Vec<Event>, u64)> {
     if is_gzip(path) {
         return if offset == 0 {
             read_source(path, group_id)
@@ -446,7 +459,7 @@ fn decode_event_line(raw: &[u8], source: &Path, line_no: usize, _group_id: &str)
     }
 }
 
-fn ledger_group_id(path: &Path) -> String {
+pub(crate) fn ledger_group_id(path: &Path) -> String {
     path.parent()
         .and_then(Path::file_name)
         .and_then(|value| value.to_str())
@@ -462,7 +475,7 @@ fn is_ledger_segment(path: &Path) -> bool {
     name.ends_with(".jsonl") || name.ends_with(".jsonl.gz")
 }
 
-fn is_gzip(path: &Path) -> bool {
+pub(crate) fn is_gzip(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension == "gz")
 }
 

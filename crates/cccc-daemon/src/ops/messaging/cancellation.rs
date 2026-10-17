@@ -70,14 +70,17 @@ fn append_destination_cancel(
             "relayed request-reply source does not match the cancellation provenance",
         ));
     }
-    if let Some(existing) = ledger::read_all(&path)
-        .map_err(OpError::io)?
-        .into_iter()
-        .find(|event| {
-            event.kind == "chat.reply_request.cancelled"
-                && event.data.get("source_event_id").and_then(Value::as_str)
-                    == Some(remote_source_event_id)
-        })
+    if let Some(existing) = ledger::inspect(&path, |events, _| {
+        events
+            .iter()
+            .find(|event| {
+                event.kind == "chat.reply_request.cancelled"
+                    && event.data.get("source_event_id").and_then(Value::as_str)
+                        == Some(remote_source_event_id)
+            })
+            .cloned()
+    })
+    .map_err(OpError::io)?
     {
         return Ok(existing);
     }

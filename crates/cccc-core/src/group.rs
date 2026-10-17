@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use uuid::Uuid;
 
-use crate::fs::{read_yaml, with_exclusive_lock, write_yaml, write_yaml_committed};
+use crate::fs::{with_exclusive_lock, write_yaml, write_yaml_committed};
 use crate::home::HomeLayout;
 use crate::registry::{GroupMeta, Registry};
 
@@ -144,7 +144,13 @@ impl GroupStore {
     }
 
     pub fn load(&self, group_id: &str) -> io::Result<GroupDoc> {
-        let mut group: GroupDoc = read_yaml(&self.group_dir(group_id)?.join("group.yaml"))?;
+        let path = self.group_dir(group_id)?.join("group.yaml");
+        // The automation tick and the actor-activity publisher both reload
+        // every group on a short interval while group.yaml rarely changes.
+        // Gating the parse on file identity turns an unchanged load into one
+        // stat; every writer here lands through `fs::atomic_write`, whose
+        // rename gives the file a new inode and so reopens the gate.
+        let mut group: GroupDoc = crate::parse_cache::read_yaml_atomic_cached(&path)?;
         for actor in &mut group.actors {
             actor.normalize_runtime_constraints();
         }
@@ -165,15 +171,19 @@ impl GroupStore {
     fn save_unlocked_doc(&self, group: &GroupDoc) -> io::Result<GroupDoc> {
         let mut stored = group.clone();
         stored.updated_at = utc_now();
-        write_yaml_committed(
-            &self.group_dir(&stored.group_id)?.join("group.yaml"),
-            &stored,
-        )?;
+        let path = self.group_dir(&stored.group_id)?.join("group.yaml");
+        write_yaml_committed(&path, &stored)?;
+        // Invalidate after commit; a delayed hook must not associate this
+        // value with an external writer's later atomic replacement.
+        crate::parse_cache::store_serialized(&path, &stored);
         Ok(stored)
     }
 
     fn restore_unlocked(&self, group: &GroupDoc) -> io::Result<()> {
-        write_yaml_committed(&self.group_dir(&group.group_id)?.join("group.yaml"), group)
+        let path = self.group_dir(&group.group_id)?.join("group.yaml");
+        write_yaml_committed(&path, group)?;
+        crate::parse_cache::store_serialized(&path, group);
+        Ok(())
     }
 
     pub fn list(&self) -> io::Result<Vec<GroupMeta>> {

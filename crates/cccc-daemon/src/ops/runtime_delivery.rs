@@ -1,7 +1,7 @@
 use cccc_contracts::{Actor, Event};
 use cccc_core::fs::with_exclusive_lock;
 use cccc_core::{GroupDoc, GroupStore, HomeLayout, inbox, ledger};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -206,7 +206,10 @@ pub fn settle_stranded_claims(home: &HomeLayout, group: &GroupDoc) -> Result<usi
     let ledger_path = store.ledger_path(&group.group_id).map_err(OpError::io)?;
     with_exclusive_lock(&delivery_lock_path(&ledger_path), || {
         let latest = ledger::inspect(&ledger_path, |events, _| {
-            let mut latest = HashMap::<(String, String), (String, String)>::new();
+            // Only stranded claims leave the read lock. Borrow all historical
+            // keys and outcomes while scanning instead of allocating four
+            // strings for each receipt on every daemon recovery.
+            let mut latest = HashMap::<(&str, &str), (&str, &str)>::new();
             for event in events {
                 if event.kind == "actor.add" {
                     let actor_id = event
@@ -217,7 +220,7 @@ pub fn settle_stranded_claims(home: &HomeLayout, group: &GroupDoc) -> Result<usi
                         .and_then(Value::as_str)
                         .unwrap_or_default();
                     if !actor_id.is_empty() {
-                        latest.retain(|(existing, _), _| existing != actor_id);
+                        latest.retain(|(existing, _), _| *existing != actor_id);
                     }
                     continue;
                 }
@@ -238,33 +241,34 @@ pub fn settle_stranded_claims(home: &HomeLayout, group: &GroupDoc) -> Result<usi
                     continue;
                 }
                 latest.insert(
-                    (actor_id.into(), source_event_id.into()),
+                    (actor_id, source_event_id),
                     (
                         event
                             .data
                             .get("state")
                             .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .into(),
+                            .unwrap_or_default(),
                         event
                             .data
                             .get("transport")
                             .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .into(),
+                            .unwrap_or_default(),
                     ),
                 );
             }
             latest
+                .into_iter()
+                .filter(|(_, (state, _))| *state == "claimed")
+                .map(|((actor, source), (_, transport))| {
+                    (actor.to_owned(), source.to_owned(), transport.to_owned())
+                })
+                .collect::<Vec<_>>()
         })?;
         let mut settled = 0;
-        for ((actor_id, source_event_id), (state, transport)) in latest {
+        for (actor_id, source_event_id, transport) in latest {
             let Some(actor) = group.actors.iter().find(|actor| actor.id == actor_id) else {
                 continue;
             };
-            if state != "claimed" {
-                continue;
-            }
             append_state(
                 home,
                 &group.group_id,
@@ -348,7 +352,9 @@ pub fn pending_sources(
             .unwrap_or(0);
         let generation_events = &events[generation..];
         let legacy_read_watermark = LegacyReadWatermark::from_events(generation_events, &actor.id);
-        let mut latest = Map::<String, Value>::new();
+        // Every key and state already belongs to the retained Event. The
+        // polling path needs a lookup, not another tree of cloned JSON values.
+        let mut latest = HashMap::<&str, &str>::new();
         for event in generation_events {
             if event.kind != "runtime.delivery"
                 || event.data.get("actor_id").and_then(Value::as_str) != Some(actor.id.as_str())
@@ -359,7 +365,7 @@ pub fn pending_sources(
                 event.data.get("source_event_id").and_then(Value::as_str),
                 event.data.get("state").and_then(Value::as_str),
             ) {
-                latest.insert(source.to_owned(), Value::String(state.to_owned()));
+                latest.insert(source, state);
             }
         }
         let mut pending = Vec::new();
@@ -367,10 +373,7 @@ pub fn pending_sources(
             if event.by == actor.id {
                 continue;
             }
-            let state = latest
-                .get(&event.id)
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            let state = latest.get(event.id.as_str()).copied().unwrap_or_default();
             let addressed = if event.kind == "chat.message" {
                 let mode = event
                     .data
