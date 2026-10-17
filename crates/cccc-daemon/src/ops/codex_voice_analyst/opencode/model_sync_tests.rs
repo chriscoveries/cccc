@@ -35,6 +35,7 @@ async fn live_opencode_merged_default_and_later_choice_when_enabled() {
         return;
     }
     submitted_model_with_initial_default("opencode", "OPENCODE", Some("cccc-probe/second")).await;
+    eprintln!("CCCC_NATIVE_INITIAL_MODEL_AND_LATER_CHOICES_VERIFIED");
 }
 
 async fn submitted_model_reaches_acp(runtime: &'static str, prefix: &str) {
