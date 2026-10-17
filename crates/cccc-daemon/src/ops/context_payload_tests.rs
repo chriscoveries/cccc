@@ -442,8 +442,10 @@ fn summary_overview_errors_preserved() {
         super::get(&home, &request(&group_id, json!({"detail":"overview"}))).expect("overview");
     assert!(overview.get("board").is_none());
     assert!(overview["coordination"].get("tasks").is_none());
-    let bad = super::get(&home, &request(&group_id, json!({"detail":"bogus"}))).unwrap_err();
+    let bad = super::get(&home, &request(&group_id, json!({"detail":"bogus"})))
+        .expect_err("invalid detail must be rejected");
     assert_eq!(bad.code, "invalid_detail");
-    let missing = super::get(&home, &request("g_missing", json!({"detail":"full"}))).unwrap_err();
+    let missing = super::get(&home, &request("g_missing", json!({"detail":"full"})))
+        .expect_err("missing group must be rejected");
     assert_eq!(missing.code, "group_not_found");
 }
