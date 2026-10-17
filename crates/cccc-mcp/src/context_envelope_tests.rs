@@ -275,6 +275,44 @@ async fn nested_fitting_envelope_bounded_or_typed() {
 }
 
 #[tokio::test]
+async fn nested_small_envelope_intact_preserved() {
+    // GREEN now and after: small nested reads ship both envelopes unchanged,
+    // inner result present under tool_result.
+    let daemon = LiveDaemon::start().await;
+    daemon
+        .sync(vec![json!({"op":"task.create","title":"tiny"})])
+        .await;
+    let response = daemon.capability_context_full(json!(10)).await;
+    assert!(LiveDaemon::error_code(&response).is_none());
+    let inner = &response["result"]["structuredContent"]["tool_result"];
+    assert!(inner.is_object(), "inner result present under tool_result");
+    assert!(inner.to_string().contains("tiny"));
+}
+
+#[tokio::test]
+async fn nested_oversized_envelope_returns_typed_error() {
+    // Giant group through the wrapper: the inner typed error propagates
+    // without giant nested duplication. Likely GREEN on 655 — pins it.
+    let daemon = LiveDaemon::start().await;
+    daemon
+        .sync(vec![
+            json!({"op":"task.create","title":"giant","notes":"x".repeat(4_500_000)}),
+        ])
+        .await;
+    let response = daemon.capability_context_full(json!(11)).await;
+    let bytes = LiveDaemon::whole_bytes(&response);
+    assert_eq!(LiveDaemon::error_code(&response), Some("context_too_large"));
+    assert!(
+        bytes <= ERROR_BUDGET_BYTES,
+        "nested error {bytes} bytes over 4 KiB"
+    );
+    assert!(
+        !response.to_string().contains(&"x".repeat(1024)),
+        "no giant nested duplicate"
+    );
+}
+
+#[tokio::test]
 async fn normal_full_and_archived_filter_preserved() {
     // GREEN now and after. Canonical tasks in BOTH representations; archived
     // excluded by default.
