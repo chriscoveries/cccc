@@ -457,7 +457,16 @@ fn already_appended_pending_detection_is_offered_once_when_sampling_is_disabled(
         ledger.iter().filter(|record| record.id == event.id).count(),
         1
     );
-    assert!(marks.get("worker").expect("actor mark").pending.is_none());
+    assert!(
+        marks
+            .get("worker")
+            .expect("actor mark")
+            .over
+            .as_ref()
+            .expect("over mark retained")
+            .pending
+            .is_none()
+    );
     assert_eq!(f.status().pid, before_pid);
     assert!(
         !super::super::cooldown_path(&f.home, &f.group.group_id)
