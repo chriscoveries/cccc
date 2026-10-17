@@ -61,6 +61,52 @@ struct DetectionMark {
     pending: Option<Event>,
 }
 
+/// Last emitted UNAVAILABLE notice per actor, keyed by the stable
+/// (outcome, detail) pair — never the rendered message (which embeds the
+/// volatile limit). Stored in its own file so the over-class window stamp
+/// (`DetectionMark.at`) is never touched by unavailable traffic and vice
+/// versa: a repeat of the recorded pair stays silent forever with no clock
+/// refresh, while any change re-notifies. Recovery clears entries; nothing
+/// else writes them.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct UnavailableState {
+    outcome: String,
+    detail: String,
+}
+const UNAVAILABLE_FILE: &str = "actor_memory_unavailable.json";
+
+fn read_unavailable_states(
+    path: &std::path::Path,
+) -> io::Result<HashMap<String, UnavailableState>> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Clear a recorded unavailable state after genuinely healthy observation
+/// (attributable AND under limit). Silent: no event. Disabled and limit-zero
+/// actors are deliberately NOT cleared here — without an observation there is
+/// no recovery evidence, and a re-enabled actor failing identically is the
+/// same state (silence is correct, not a miss).
+fn clear_unavailable_state(home: &HomeLayout, group_id: &str, actor_id: &str) -> io::Result<()> {
+    let store = cccc_core::GroupStore::new(home.clone())?;
+    let path = store.state_dir(group_id)?.join(UNAVAILABLE_FILE);
+    // Fast path: no history file, nothing to clear — and no lock file or
+    // parent dirs are created for the common healthy case.
+    if !path.exists() {
+        return Ok(());
+    }
+    cccc_core::fs::with_exclusive_lock(&path.with_extension("lock"), || {
+        let mut states = read_unavailable_states(&path)?;
+        if states.remove(actor_id).is_some() {
+            cccc_core::fs::write_json_committed(&path, &states)?;
+        }
+        Ok(())
+    })
+}
+
 /// This file is deliberately separate from real restart-attempt cooldown.
 /// Pending event ID is persisted before append, then reconciled via ledger
 /// lookup after failure/crash. A committed append never gets a second event ID.
@@ -78,40 +124,104 @@ fn emit_detection(home: &HomeLayout, group: &GroupDoc, event: Event) -> io::Resu
             Err(e) if e.kind() == io::ErrorKind::NotFound => HashMap::new(),
             Err(e) => return Err(e),
         };
+        let unavailable_path = store.state_dir(&group.group_id)?.join(UNAVAILABLE_FILE);
+        let mut states = read_unavailable_states(&unavailable_path)?;
         let now = now_secs();
-        let (record, at) = match marks.get(&actor) {
-            Some(DetectionMark {
-                at,
-                pending: Some(record),
-            }) => (record.clone(), *at),
-            Some(mark) if now < mark.at.saturating_add(RESTART_COOLDOWN_SECS) => return Ok(None),
-            _ => {
-                if event.data["target_actor_id"]
-                    .as_str()
-                    .is_none_or(str::is_empty)
-                {
-                    return Err(io::Error::other(
-                        "Memory detection notice has no concrete durable foreman target",
-                    ));
-                }
-                marks.insert(
-                    actor.clone(),
-                    DetectionMark {
-                        at: now,
-                        pending: Some(event.clone()),
-                    },
-                );
-                cccc_core::fs::write_json_committed(&path, &marks)?;
-                (event, now)
+        // State-change key from the event's own context: a stable
+        // (outcome, detail) pair. The `detail` is a `&'static str` reason at
+        // every report() call site — never the rendered message.
+        let incoming_outcome = event.data["context"]["outcome"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let incoming_detail = event.data["context"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let incoming_unavailable = incoming_outcome == "detection_unavailable";
+        // Pending-event recovery first (existing semantics for both classes):
+        // a crash between persist and append re-offers the recorded event.
+        if let Some(record) = marks.get(&actor).and_then(|mark| mark.pending.clone()) {
+            if event.data["target_actor_id"]
+                .as_str()
+                .is_none_or(str::is_empty)
+            {
+                return Err(io::Error::other(
+                    "Memory detection notice has no concrete durable foreman target",
+                ));
             }
-        };
-        let appended = cccc_core::ledger::find_event(&ledger, &record.id)?.is_none();
-        if appended {
-            cccc_core::ledger::append(&ledger, &record)?;
+            let at = marks.get(&actor).map(|mark| mark.at).unwrap_or(now);
+            let appended = cccc_core::ledger::find_event(&ledger, &record.id)?.is_none();
+            if appended {
+                cccc_core::ledger::append(&ledger, &record)?;
+            }
+            // Only the pending flag clears; the over-class window stamp and
+            // any recorded unavailable state survive the rewrite untouched.
+            if let Some(mark) = marks.get_mut(&actor) {
+                mark.pending = None;
+            }
+            cccc_core::fs::write_json_committed(&path, &marks)?;
+            return Ok(appended.then_some(record));
         }
-        marks.insert(actor, DetectionMark { at, pending: None });
+        if incoming_unavailable {
+            let same = states.get(&actor).is_some_and(|state| {
+                state.outcome == incoming_outcome && state.detail == incoming_detail
+            });
+            if same {
+                // Repeat of the recorded unavailable state: silent forever,
+                // with no clock refresh (refreshing `at` would re-arm spam)
+                // and no state write.
+                return Ok(None);
+            }
+        } else if let Some(mark) = marks.get(&actor) {
+            // Over-class (and any other non-unavailable outcome): the
+            // pre-existing per-actor window on `at`, untouched.
+            if now < mark.at.saturating_add(RESTART_COOLDOWN_SECS) {
+                return Ok(None);
+            }
+        }
+        if event.data["target_actor_id"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        {
+            return Err(io::Error::other(
+                "Memory detection notice has no concrete durable foreman target",
+            ));
+        }
+        // Mint through the crash-safe pending flow. The over-class window
+        // stamp advances ONLY on over-class emits: unavailable traffic
+        // preserves the existing stamp (or zero when there never was one),
+        // so an unavailable streak can never consume the over-limit window.
+        let at = if incoming_unavailable {
+            marks.get(&actor).map(|mark| mark.at).unwrap_or(0)
+        } else {
+            now
+        };
+        marks.insert(
+            actor.clone(),
+            DetectionMark {
+                at,
+                pending: Some(event.clone()),
+            },
+        );
         cccc_core::fs::write_json_committed(&path, &marks)?;
-        Ok(appended.then_some(record))
+        let appended = cccc_core::ledger::find_event(&ledger, &event.id)?.is_none();
+        if appended {
+            cccc_core::ledger::append(&ledger, &event)?;
+        }
+        marks.insert(actor.clone(), DetectionMark { at, pending: None });
+        cccc_core::fs::write_json_committed(&path, &marks)?;
+        if incoming_unavailable {
+            states.insert(
+                actor,
+                UnavailableState {
+                    outcome: incoming_outcome,
+                    detail: incoming_detail,
+                },
+            );
+            cccc_core::fs::write_json_committed(&unavailable_path, &states)?;
+        }
+        Ok(appended.then_some(event))
     })
 }
 
@@ -196,7 +306,7 @@ fn report(
     event.data = json!({"kind":"memory_restart","priority":"normal","title":"Actor memory ceiling",
         "message":message,"to":["@foreman"],"target_actor_id":foreman.id,"im_visibility":"internal",
         "context":{"actor_id":actor.id,"limit_mb":actor.memory_limit_mb,"memory_mb":memory_mb,
-            "outcome":outcome,"action":action,"measurement_roots":sample.map(|s|s.basis),
+            "outcome":outcome,"detail":detail,"action":action,"measurement_roots":sample.map(|s|s.basis),
             "sampled_processes":sample.map(|s|s.counted),
             "sampling_model":"non_atomic_observed_process_tree","sampling_budget_ms":Value::Null}})
     .as_object()
@@ -281,6 +391,11 @@ pub(super) fn tick_detection(home: &HomeLayout, group: &GroupDoc) -> io::Result<
             }
         };
         if sample.total_kib <= u64::from(actor.memory_limit_mb) * 1024 {
+            // Observed healthy (attributable AND under limit): silently clear
+            // any recorded unavailable state. The over-class window stamp is
+            // untouched, and disabled/limit-zero actors are deliberately not
+            // cleared (no observation, no recovery evidence).
+            clear_unavailable_state(home, &group.group_id, &actor.id)?;
             continue;
         }
         let required_block = if is_native_acp(&actor) {
