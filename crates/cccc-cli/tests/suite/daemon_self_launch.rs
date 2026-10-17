@@ -7,16 +7,16 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn installed_cli_starts_daemon_without_a_sibling_daemon_binary() {
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = installed_fixture_dir();
     let bin_dir = temp.path().join("bin");
     std::fs::create_dir(&bin_dir).expect("create bin dir");
 
     let installed = bin_dir.join(executable_name("cccc"));
-    std::fs::copy(env!("CARGO_BIN_EXE_cccc"), &installed).expect("copy cccc");
+    install_cli(&installed);
 
     // A decoy catches regressions to the old sibling `ccccd start` contract.
     let decoy = bin_dir.join(executable_name("ccccd"));
-    std::fs::copy(env!("CARGO_BIN_EXE_cccc"), decoy).expect("copy decoy ccccd");
+    install_cli(&decoy);
 
     let home = temp.path().join("home");
     let start = run(&installed, &home, &["daemon", "start"]);
@@ -43,9 +43,9 @@ fn installed_cli_starts_daemon_without_a_sibling_daemon_binary() {
 
 #[test]
 fn daemon_stop_waits_for_the_combined_web_process_to_exit() {
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = installed_fixture_dir();
     let installed = temp.path().join(executable_name("cccc"));
-    std::fs::copy(env!("CARGO_BIN_EXE_cccc"), &installed).expect("copy cccc");
+    install_cli(&installed);
     let home = temp.path().join("home");
     let mut web = Command::new(&installed)
         .args(["--host", "127.0.0.1", "--port", "0"])
@@ -88,9 +88,9 @@ fn daemon_stop_waits_for_the_combined_web_process_to_exit() {
 
 #[test]
 fn combined_web_bind_failure_stops_its_owned_daemon() {
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = installed_fixture_dir();
     let installed = temp.path().join(executable_name("cccc"));
-    std::fs::copy(env!("CARGO_BIN_EXE_cccc"), &installed).expect("copy cccc");
+    install_cli(&installed);
     let home = temp.path().join("home");
     let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("occupy Web port");
     let port = occupied.local_addr().expect("occupied address").port();
@@ -109,6 +109,41 @@ fn combined_web_bind_failure_stops_its_owned_daemon() {
     wait_for_daemon_exit(&home);
     assert_daemon_lock_released(&home);
     assert_web_lock_released(&home);
+}
+
+// Prefer the built executable's filesystem so relocation needs no writable
+// executable inode. A read-only/relocated target may not permit this directory;
+// preserve those callers' ordinary temporary-directory behavior explicitly.
+fn installed_fixture_dir() -> tempfile::TempDir {
+    let parent = Path::new(env!("CARGO_BIN_EXE_cccc"))
+        .parent()
+        .expect("Cargo executable parent");
+    tempfile::Builder::new()
+        .prefix("cccc-installed-")
+        .tempdir_in(parent)
+        .or_else(|_| tempfile::tempdir())
+        .expect("installed fixture directory")
+}
+
+fn install_cli(destination: &Path) {
+    let source = Path::new(env!("CARGO_BIN_EXE_cccc"));
+    if let Err(link_error) = std::fs::hard_link(source, destination) {
+        // Unsupported links, read-only stores and cross-filesystem fixtures
+        // retain copy compatibility. That fallback retains the original write-fd
+        // window; linking eliminates it only where this filesystem permits it.
+        assert_ne!(
+            link_error.kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "installed fixture already exists: {}",
+            destination.display()
+        );
+        std::fs::copy(source, destination).unwrap_or_else(|copy_error| {
+            panic!(
+                "install {}: link failed ({link_error}); copy fallback failed ({copy_error})",
+                destination.display()
+            )
+        });
+    }
 }
 
 fn assert_daemon_lock_released(home: &Path) {
