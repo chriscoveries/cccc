@@ -33,6 +33,7 @@ fn session(temp: &std::path::Path) -> (Session, super::control_fixture::ControlD
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(None),
         active_turn: Mutex::new(None),
+        input_sequence: std::sync::atomic::AtomicU64::new(0),
     };
     (session, directory)
 }

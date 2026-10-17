@@ -196,6 +196,7 @@ pub(super) fn attach_managed(
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
+        input_sequence: std::sync::atomic::AtomicU64::new(0),
     });
     let required =
         match super::super::actor_memory::required_resume(home, &group.group_id, &actor.id) {
@@ -622,6 +623,14 @@ fn submit_admitted(
                 }
             }) {
                 Ok(_) => {
+                    // StartGuard remains held until submit_batch returns, so
+                    // maintenance observes this accepted input before it can
+                    // take the same guard, even if the provider already settled.
+                    let _ = item.input_sequence.fetch_update(
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                        |sequence| Some(sequence.saturating_add(1)),
+                    );
                     outcome = BatchSubmission::Accepted;
                     true
                 }

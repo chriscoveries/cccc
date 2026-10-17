@@ -51,6 +51,7 @@ struct State {
     /// `(seconds since origin, bytes)`, oldest first.
     buckets: VecDeque<(u64, u64)>,
     output_bytes_since_input: u64,
+    input_sequence: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +65,7 @@ impl Default for ActivityTracker {
             last_input: None,
             buckets: VecDeque::new(),
             output_bytes_since_input: 0,
+            input_sequence: 0,
         })))
     }
 }
@@ -100,6 +102,11 @@ impl ActivityTracker {
         let mut state = self.lock();
         state.last_input = Some((Instant::now(), SystemTime::now()));
         state.output_bytes_since_input = 0;
+        state.input_sequence = state.input_sequence.saturating_add(1);
+    }
+
+    pub(crate) fn input_sequence(&self) -> u64 {
+        self.lock().input_sequence
     }
 
     pub(crate) fn snapshot(&self) -> ActivitySnapshot {

@@ -9,6 +9,7 @@ use std::io;
 pub(crate) struct MemoryCandidate {
     pub generation: String,
     pub provider_pid: u32,
+    pub input_sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,10 +23,50 @@ fn candidate(item: &Session) -> Option<MemoryCandidate> {
         return None;
     }
     item.running().then_some(())?;
+    let input_sequence = item
+        .input_sequence
+        .load(std::sync::atomic::Ordering::Acquire);
+    if input_sequence == u64::MAX {
+        return None;
+    }
     Some(MemoryCandidate {
         generation: item.managed.generation().to_owned(),
         provider_pid: item.managed.memory_provider_pid()?,
+        input_sequence,
     })
+}
+
+/// PTY-backed managed actor: serialize the provider lifecycle with controlled
+/// submissions, then retire only the generation whose terminal input is still
+/// unchanged. The runtime gate is released before stop_locked re-enters runtime
+/// cleanup; StartGuard keeps a new managed generation out throughout.
+pub(crate) fn stop_pty_if_input_unchanged(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    generation: &str,
+    checkpoint: &cccc_runtime::InputCheckpoint,
+    before_stop: impl FnOnce() -> io::Result<()>,
+) -> io::Result<bool> {
+    let key = (group_id.to_owned(), actor_id.to_owned());
+    let _start = supervisor::StartGuard::acquire(&key)?;
+    let Some(item) = supervisor::lookup(&key) else {
+        return Ok(false);
+    };
+    if item.home.root() != home.root()
+        || item.managed.generation() != generation
+        || !item.has_terminal()
+    {
+        return Ok(false);
+    }
+    if cccc_runtime::stop_if_input_unchanged(group_id, actor_id, checkpoint, before_stop)
+        .map_err(io::Error::other)?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    supervisor::stop_locked(&key)?;
+    Ok(true)
 }
 
 pub(crate) fn memory_candidate(group_id: &str, actor_id: &str) -> Option<MemoryCandidate> {

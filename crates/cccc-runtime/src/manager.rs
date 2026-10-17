@@ -134,6 +134,72 @@ pub fn stop_if_started_at(
     Ok(Some(status))
 }
 
+/// Generation-local completed-input marker. Raw writes and cancelled deliveries
+/// do not advance it. Saturation refuses maintenance instead of wrapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputCheckpoint {
+    pub started_at: String,
+    pub sequence: u64,
+}
+
+pub fn input_checkpoint(group_id: &str, actor_id: &str) -> Result<InputCheckpoint, RuntimeError> {
+    with_session(group_id, actor_id, |session| {
+        Ok(InputCheckpoint {
+            started_at: session.status().started_at,
+            sequence: session.activity_tracker().input_sequence(),
+        })
+    })
+}
+
+/// Hold the same gate as completed delivery through the final input comparison,
+/// durable admission callback and owned stop. Registry lookup releases its read
+/// lock before waiting for input_gate; gate -> session matches submit's order.
+/// The callback must not submit input, join a delivery worker or reenter this
+/// session. A refusal never invokes it and never spends a restart cooldown.
+pub fn stop_if_input_unchanged(
+    group_id: &str,
+    actor_id: &str,
+    expected: &InputCheckpoint,
+    before_stop: impl FnOnce() -> std::io::Result<()>,
+) -> Result<Option<SessionStatus>, RuntimeError> {
+    let key = (group_id.to_owned(), actor_id.to_owned());
+    let Ok(current) = lookup(group_id, actor_id) else {
+        return Ok(None);
+    };
+    let (gate, activity) = {
+        let session = current.lock().map_err(|_| RuntimeError::Poisoned)?;
+        (session.input_gate(), session.activity_tracker())
+    };
+    let _input = gate.lock().map_err(|_| RuntimeError::Poisoned)?;
+    let mut session = current.lock().map_err(|_| RuntimeError::Poisoned)?;
+    let status = session.status();
+    if !status.running
+        || status.started_at != expected.started_at
+        || expected.sequence == u64::MAX
+        || activity.input_sequence() != expected.sequence
+        || !sessions()
+            .read()
+            .map_err(|_| RuntimeError::Poisoned)?
+            .get(&key)
+            .is_some_and(|registered| Arc::ptr_eq(registered, &current))
+    {
+        return Ok(None);
+    }
+    before_stop()?;
+    let status = session.stop()?;
+    let history = session.history_handle();
+    drop(session);
+    let mut registry = sessions().write().map_err(|_| RuntimeError::Poisoned)?;
+    if registry
+        .get(&key)
+        .is_some_and(|registered| Arc::ptr_eq(registered, &current))
+    {
+        registry.remove(&key);
+        remember_history(key, history)?;
+    }
+    Ok(Some(status))
+}
+
 pub fn stop_all() -> Result<Vec<SessionStatus>, RuntimeError> {
     let drained = {
         let mut sessions = sessions().write().map_err(|_| RuntimeError::Poisoned)?;
