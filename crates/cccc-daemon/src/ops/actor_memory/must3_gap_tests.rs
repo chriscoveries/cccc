@@ -171,7 +171,7 @@ pub(crate) fn interpose_submit(home: &HomeLayout, group_id: &str, actor_id: &str
                 std::time::Instant::now() < deadline,
                 "the managed gap submit must complete, not merely be accepted"
             );
-            std::time::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     } else {
         // PTY path: the terminal submit (input_gate guard, `record_input` on
