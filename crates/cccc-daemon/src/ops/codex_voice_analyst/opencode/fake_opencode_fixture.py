@@ -10,12 +10,12 @@ no credentials and no network beyond loopback:
                               stale oracle file behind
   * `acp --port <p> ...`   -> dumps the ACTUAL spawned process environment
                               to env-dump.json in the cwd, STRICTLY
-                              allowlisted to keys ending `_CONFIG_CONTENT`
-                              plus the OC_FIXTURE_MARKER fixture marker --
-                              never HOME, never SERVER_* credentials, never
-                              other pass-through secrets. Starts an HTTP
-                              listener with REAL basic-auth enforcement on
-                              /global/health and an SSE stream on /event
+                              allowlisted to the EXACT keys
+                              OPENCODE_CONFIG_CONTENT, KILO_CONFIG_CONTENT,
+                              OC_FIXTURE_MARKER — never HOME, never
+                              SERVER_* credentials, never wildcard matches.
+                              Starts an HTTP listener with REAL basic-auth
+                              enforcement on /global/health and an SSE stream on /event
                               (real 0x0A newline bytes; AST-counted by the
                               tests), then answers ACP over stdio:
                               initialize (protocol v1 + loadSession),
@@ -30,15 +30,20 @@ import sys
 import threading
 import time
 
-DUMP_ALLOW_SUFFIX = "_CONFIG_CONTENT"
-DUMP_ALLOW_EXACT = ("OC_FIXTURE_MARKER",)
+# Exact allowlist (no wildcard patterns): the three keys the contract names,
+# and nothing else — never HOME, never SERVER_* credentials.
+DUMP_ALLOW_KEYS = (
+    "OPENCODE_CONFIG_CONTENT",
+    "KILO_CONFIG_CONTENT",
+    "OC_FIXTURE_MARKER",
+)
 
 
 def dump_env():
     keep = {
         key: value
         for key, value in os.environ.items()
-        if key.endswith(DUMP_ALLOW_SUFFIX) or key in DUMP_ALLOW_EXACT
+        if key in DUMP_ALLOW_KEYS
     }
     with open("env-dump.json", "w", encoding="utf-8") as handle:
         json.dump(keep, handle)
