@@ -1,327 +1,404 @@
-name: Release CCCC
+name: MACDAD minimal P1 artifact
 
-on:
-  push:
-    tags:
-      - "v*"
+"on":
   workflow_dispatch:
+    inputs:
+      build_sha:
+        description: Exact sol-b/macdad-p1-build-v2-20261017 commit (40 lowercase hex)
+        required: true
+        type: string
+      composition_sha:
+        description: Final composition commit; must be the sole direct parent
+        required: true
+        type: string
+      source_fingerprint:
+        description: Reviewed content fingerprint from core build_support/source.rs (64 lowercase hex)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: t620-darwin-artifact-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  web:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24.19.0"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: Verify shared release identity
-        shell: bash
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            python scripts/check_release_versions.py --tag "${GITHUB_REF_NAME}"
-          else
-            python scripts/check_release_versions.py
-          fi
-      - name: Build shared Web UI once
-        run: node scripts/prepare_rust_web_assets.mjs --install-deps
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-web-bundle
-          path: web/dist
-          if-no-files-found: error
-
-  build-linux:
-    needs: web
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    container: quay.io/pypa/manylinux_2_28_x86_64:latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: release-web-bundle
-          path: web/dist
-      - name: Install native build dependencies
-        run: dnf install -y cmake perl-core
-      - name: Select Python 3.14
-        run: echo "/opt/python/cp314-cp314/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: x86_64-unknown-linux-gnu-release
-      - name: Build the release executable once
-        run: |
-          touch web/dist/index.html
-          cargo build --release --locked --features standalone -p cccc --bin cccc
-          strip target/release/cccc
-          python scripts/check_release_versions.py --rust-binary target/release/cccc
-          python scripts/verify_standalone_binary.py --platform linux target/release/cccc
-      - name: Wrap the same executable for standalone and pip
-        run: |
-          python -m pip install -U pip "auditwheel==6.7.0" twine
-          python scripts/build_standalone_archive.py \
-            target/release/cccc \
-            --target x86_64-unknown-linux-gnu \
-            --output-dir dist
-          python scripts/build_native_wheel.py \
-            target/release/cccc \
-            --platform-tag manylinux_2_28_x86_64 \
-            --output-dir dist
-          wheel_path="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
-          python scripts/verify_native_wheel.py \
-            "$wheel_path" \
-            --platform-tag manylinux_2_28_x86_64 \
-            --binary target/release/cccc
-          auditwheel_output="$(auditwheel show "$wheel_path")"
-          printf '%s\n' "$auditwheel_output"
-          printf '%s\n' "$auditwheel_output" | \
-            grep -Fq 'platform tag: "manylinux_2_28_x86_64"'
-          python -m twine check "$wheel_path"
-      - name: Smoke the installed Rust-only wheel
-        timeout-minutes: 5
-        run: |
-          python scripts/tests/smoke_wheel_frontdoor.py \
-            dist/*.whl \
-            --binary target/release/cccc
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-target-x86_64-unknown-linux-gnu
-          path: |
-            dist/*.tar.gz
-            dist/*.whl
-          if-no-files-found: error
-
-  build-desktop:
-    needs: web
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-            target: aarch64-apple-darwin
-            binary: target/aarch64-apple-darwin/release/cccc
-            platform_tag: macosx_11_0_arm64
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
-            binary: target/x86_64-pc-windows-msvc/release/cccc.exe
-            platform_tag: win_amd64
-    runs-on: ${{ matrix.os }}
+  build-macos:
+    # Standard public-fork runner only. A skipped job is not build evidence.
+    if: ${{ github.event.repository.fork && !github.event.repository.private }}
+    runs-on: macos-latest
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash
+    env:
+      T620_BUILD_SHA: ${{ inputs.build_sha }}
+      T620_COMPOSITION_SHA: ${{ inputs.composition_sha }}
+      T620_SOURCE_FINGERPRINT: ${{ inputs.source_fingerprint }}
+      T620_ARTIFACT_DIR: ${{ runner.temp }}/t620-darwin-artifact
+      CARGO_TARGET_DIR: ${{ runner.temp }}/t620-darwin-target
+      CARGO_INCREMENTAL: "0"
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - name: Checkout the event commit exactly
+        uses: actions/checkout@v7
         with:
-          name: release-web-bundle
-          path: web/dist
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
+
+      - name: Require one workflow-only commit above the reviewed composition
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+          build = os.environ["T620_BUILD_SHA"]
+          composition = os.environ["T620_COMPOSITION_SHA"]
+          source = os.environ["T620_SOURCE_FINGERPRINT"]
+          assert re.fullmatch(r"[0-9a-f]{40}", build), "invalid build SHA"
+          assert re.fullmatch(r"[0-9a-f]{40}", composition), "invalid composition SHA"
+          assert re.fullmatch(r"[0-9a-f]{64}", source), "source fingerprint is not a Git SHA"
+          assert os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+          assert os.environ["GITHUB_REF"] == "refs/heads/sol-b/macdad-p1-build-v2-20261017"
+          assert git("rev-parse", "HEAD") == build == os.environ["GITHUB_SHA"]
+          assert git("show", "-s", "--format=%P", "HEAD").split() == [composition]
+          assert os.environ["GITHUB_WORKFLOW_SHA"] == build, "workflow was not loaded from build commit"
+          workflow_ref = os.environ["GITHUB_WORKFLOW_REF"]
+          assert workflow_ref.endswith("/.github/workflows/release.yml@refs/heads/sol-b/macdad-p1-build-v2-20261017")
+          changed = subprocess.check_output(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", composition, build])
+          assert changed.split(b"\0")[:-1] == [b".github/workflows/release.yml"], changed
+          assert not git("status", "--porcelain", "--untracked-files=all"), "checkout is not clean"
+          assert "CCCC_SOURCE_ID" not in os.environ, "do not override compiler-generated source identity"
+          out = pathlib.Path(os.environ["T620_ARTIFACT_DIR"])
+          out.mkdir()
+          workflow = pathlib.Path(".github/workflows/release.yml").read_bytes()
+          (out / "workflow.release.yml").write_bytes(workflow)
+          document = {
+              "schema": "t620-artifact-provenance-v1", "repository": os.environ["GITHUB_REPOSITORY"],
+              "build_branch": "sol-b/macdad-p1-build-v2-20261017", "build_branch_commit": build,
+              "parent_composition_commit": composition, "build_tree": git("rev-parse", "HEAD^{tree}"),
+              "composition_tree": git("rev-parse", composition + "^{tree}"),
+              "workflow_only_delta": [".github/workflows/release.yml"],
+              "workflow_ref": workflow_ref, "workflow_commit": os.environ["GITHUB_WORKFLOW_SHA"],
+              "workflow_sha256": hashlib.sha256(workflow).hexdigest(),
+              "source_fingerprint": source, "github_run_id": os.environ["GITHUB_RUN_ID"],
+              "github_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "run_url": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"] +
+                         "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
+              "target": "aarch64-apple-darwin", "cargo_features": ["standalone"],
+              "cargo_locked": True, "macos_deployment_target": "11.0",
+              "dependency_lock_sha256": {name: hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+                                         for name in ("Cargo.lock", "web/package-lock.json")},
+          }
+          (out / "provenance-base.json").write_text(json.dumps(document, indent=2) + "\n")
+          PY
+          cat > "$RUNNER_TEMP/t620-source-fingerprint.py" <<'PY'
+          #!/usr/bin/env python3
+          """Read-only mirror of the reviewed CCCC source fingerprint; never sets an env var.
+          
+          Writes only the explicitly selected JSON output (which must not already exist).
+          Generated Web assets have their own identity, separate from Rust source inputs.
+          """
+          import argparse
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import struct
+          
+          SOURCE_ALGORITHM_SHA256 = "57979224f66523ad8a5cdffe345fb3ec5bfa74fc9dc75dfd034ad8c700992cf7"
+          BUILD_SCRIPT_SHA256 = "f7f49bf1aa0a84b417b1af69cd1b5310fe9cdd92bcbda52d5bd268f965af2c67"
+          
+          
+          def sha256(data):
+              return hashlib.sha256(data).hexdigest()
+          
+          
+          def framed(hash_value, name, data):
+              encoded = name.encode("utf-8")
+              hash_value.update(struct.pack("<Q", len(encoded)))
+              hash_value.update(encoded)
+              hash_value.update(struct.pack("<Q", len(data)))
+              hash_value.update(data)
+          
+          
+          def fingerprint(root, web_dir=None):
+              algorithm = root / "crates/cccc-core/build_support/source.rs"
+              build_script = root / "crates/cccc-core/build.rs"
+              if sha256(algorithm.read_bytes()) != SOURCE_ALGORITHM_SHA256:
+                  raise ValueError("source.rs fingerprint algorithm changed; review the mirror before building")
+              if sha256(build_script.read_bytes()) != BUILD_SCRIPT_SHA256:
+                  raise ValueError("core build.rs changed; review compiled source identity before building")
+              files = [Path("Cargo.toml"), Path("Cargo.lock")]
+              resource_dirs = [Path("resources")]
+          
+              def walk(path, resources):
+                  with os.scandir(path) as entries:
+                      for entry in entries:
+                          item = Path(entry.path)
+                          if entry.is_dir(follow_symlinks=False):
+                              resource_dir = entry.name == "resources"
+                              if resources or resource_dir or entry.name not in {"target", "tests", "assets"}:
+                                  if resource_dir and not resources:
+                                      resource_dirs.append(item.relative_to(root))
+                                  walk(item, resources or resource_dir)
+                          elif resources or item.suffix in {".rs", ".toml"}:
+                              files.append(item.relative_to(root))
+          
+              walk(root / "crates", False)
+              walk(root / "resources", True)
+              # Rust PathBuf::Ord compares components, not raw slash-separated strings.
+              key = lambda path: tuple(os.fsencode(part) for part in path.parts)
+              files.sort(key=key)
+              resource_dirs.sort(key=key)
+              hash_value = hashlib.sha256()
+              inventory = []
+              for path in files:
+                  name = path.as_posix().replace("\\", "/")
+                  data = (root / path).read_bytes()
+                  framed(hash_value, name, data)
+                  inventory.append({"path": name, "bytes": len(data), "sha256": sha256(data)})
+              result = {"schema": "t620-source-fingerprint-v1", "source_fingerprint": hash_value.hexdigest(),
+                        "source_algorithm_sha256": SOURCE_ALGORITHM_SHA256,
+                        "core_build_script_sha256": BUILD_SCRIPT_SHA256,
+                        "resource_dirs": [path.as_posix() for path in resource_dirs], "source_inputs": inventory}
+              if web_dir is not None:
+                  if not (web_dir / "index.html").is_file():
+                      raise ValueError("built Web index.html missing")
+                  assets = sorted(path.relative_to(web_dir).as_posix() for path in web_dir.rglob("*") if path.is_file())
+                  web_hash = hashlib.sha256()
+                  web_inventory = []
+                  for name in assets:
+                      data = (web_dir / name).read_bytes()
+                      framed(web_hash, name, data)
+                      web_inventory.append({"path": name, "bytes": len(data), "sha256": sha256(data)})
+                  result.update(web_assets_id=web_hash.hexdigest(), web_inputs=web_inventory)
+              return result
+          
+          
+          def main():
+              parser = argparse.ArgumentParser(description=__doc__)
+              parser.add_argument("--root", required=True, type=Path)
+              parser.add_argument("--web-dir", type=Path)
+              parser.add_argument("--output", required=True, type=Path)
+              args = parser.parse_args()
+              result = fingerprint(args.root.resolve(strict=True),
+                                   args.web_dir.resolve(strict=True) if args.web_dir else None)
+              with args.output.open("x") as stream:
+                  json.dump(result, stream, indent=2, ensure_ascii=False)
+                  stream.write("\n")
+              print(result["source_fingerprint"])
+          
+          
+          if __name__ == "__main__":
+              main()
+          PY
+          python "$RUNNER_TEMP/t620-source-fingerprint.py" \
+            --root "$GITHUB_WORKSPACE" \
+            --output "$T620_ARTIFACT_DIR/source-inputs-before-web.json"
+          python - <<'PY'
+          import json, os, pathlib
+          value = json.loads((pathlib.Path(os.environ["T620_ARTIFACT_DIR"]) / "source-inputs-before-web.json").read_text())
+          assert value["source_fingerprint"] == os.environ["T620_SOURCE_FINGERPRINT"]
+          PY
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.19.0"
+
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}-release
-      - name: Build the release executable once
-        env:
-          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          targets: aarch64-apple-darwin
+
+      - name: Record toolchain and verify release identity
         run: |
+          set -euo pipefail
+          {
+            rustc -Vv
+            cargo -V
+            node --version
+            npm --version
+            python --version
+            uname -a
+            sw_vers
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+          } | tee "$T620_ARTIFACT_DIR/toolchain.txt"
+          python scripts/check_release_versions.py
+
+      - name: Build the locked Web assets as upstream release does
+        run: |
+          set -euo pipefail
+          node scripts/prepare_rust_web_assets.mjs --install-deps
           touch web/dist/index.html
+          python "$RUNNER_TEMP/t620-source-fingerprint.py" \
+            --root "$GITHUB_WORKSPACE" --web-dir "$GITHUB_WORKSPACE/web/dist" \
+            --output "$T620_ARTIFACT_DIR/source-inputs.json"
+          python - <<'PY'
+          import json, os, pathlib
+          out = pathlib.Path(os.environ["T620_ARTIFACT_DIR"])
+          before = json.loads((out / "source-inputs-before-web.json").read_text())
+          after = json.loads((out / "source-inputs.json").read_text())
+          assert after["source_fingerprint"] == before["source_fingerprint"] == os.environ["T620_SOURCE_FINGERPRINT"]
+          assert after["source_inputs"] == before["source_inputs"]
+          PY
+          git diff --exit-code
+          COPYFILE_DISABLE=1 tar -czf "$T620_ARTIFACT_DIR/web-assets.tar.gz" -C web/dist .
+
+      - name: Verify six fresh-identity cases on this macOS host
+        run: |
+          set -euo pipefail
+          cargo test --release --locked --features standalone -j2 \
+            -p cccc-pair-daemon --lib fresh_session_identity -- --test-threads=1 \
+            2>&1 | tee "$T620_ARTIFACT_DIR/fresh-identity-tests.log"
+          python - <<'PYTEST'
+          import os, pathlib, re
+          text = (pathlib.Path(os.environ["T620_ARTIFACT_DIR"]) / "fresh-identity-tests.log").read_text()
+          matches = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed", text)
+          assert matches == [("6", "0")], matches
+          PYTEST
+
+      - name: Build one standalone ARM64 executable
+        run: |
+          set -euo pipefail
           cargo build --release --locked --features standalone \
-            --target "${{ matrix.target }}" \
-            -p cccc --bin cccc
-          python scripts/check_release_versions.py --rust-binary "${{ matrix.binary }}"
-      - name: Strip and verify macOS executable
-        if: runner.os == 'macOS'
-        run: |
-          strip "${{ matrix.binary }}"
-          python scripts/verify_standalone_binary.py \
-            --platform macos \
-            "${{ matrix.binary }}"
-      - name: Smoke native executable
-        run: '"${{ matrix.binary }}" --version'
-      - name: Wrap the same executable for standalone and pip
-        run: |
-          python -m pip install -U pip twine
-          python scripts/build_standalone_archive.py \
-            "${{ matrix.binary }}" \
-            --target "${{ matrix.target }}" \
-            --output-dir dist
-          python scripts/build_native_wheel.py \
-            "${{ matrix.binary }}" \
-            --platform-tag "${{ matrix.platform_tag }}" \
-            --output-dir dist
-          wheel_path="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
-          python scripts/verify_native_wheel.py \
-            "$wheel_path" \
-            --platform-tag "${{ matrix.platform_tag }}" \
-            --binary "${{ matrix.binary }}"
-          python -m twine check "$wheel_path"
-      - name: Inspect Windows runtime dependencies
-        if: runner.os == 'Windows'
-        run: |
-          python -m pip install "delvewheel==1.13.0"
-          delvewheel show --analyze-existing-exes dist/*.whl
-      - name: Smoke the installed Rust-only wheel
-        timeout-minutes: 5
-        run: |
-          python scripts/tests/smoke_wheel_frontdoor.py \
-            dist/*.whl \
-            --binary "${{ matrix.binary }}"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-target-${{ matrix.target }}
-          path: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/*.whl
-          if-no-files-found: error
+            --target aarch64-apple-darwin -p cccc --bin cccc \
+            2>&1 | tee "$T620_ARTIFACT_DIR/cargo-build.log"
 
-  prepare:
-    needs:
-      - build-linux
-      - build-desktop
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: release-target-*
-          path: artifacts
-          merge-multiple: true
-      - name: Prepare and verify the atomic release set
-        shell: bash
+      - name: Strip and verify the Mach-O dependency and architecture boundary
         run: |
-          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
-          scripts/package_release_assets.sh artifacts "$version"
-          python scripts/verify_release_set.py artifacts
-          python -m pip install -U twine
-          python -m twine check artifacts/*.whl
-      - uses: actions/upload-artifact@v7
-        with:
-          name: cccc-release-candidate
-          path: artifacts/*
-          if-no-files-found: error
-
-  verify:
-    needs: prepare
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            verifier: unix
-          - os: macos-14
-            target: aarch64-apple-darwin
-            verifier: unix
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
-            verifier: windows
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: cccc-release-candidate
-          path: artifacts
-      - name: Verify Unix release candidate
-        if: matrix.verifier == 'unix'
-        shell: bash
-        run: bash scripts/tests/verify_release_unix.sh artifacts "${{ matrix.target }}"
-      - name: Verify Windows release candidate
-        if: matrix.verifier == 'windows'
-        shell: pwsh
-        run: ./scripts/tests/verify_release_windows.ps1 -ArtifactDir artifacts -Target "${{ matrix.target }}"
-
-  publish:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: verify
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-      - uses: actions/download-artifact@v8
-        with:
-          name: cccc-release-candidate
-          path: artifacts
-      - name: Verify final release identity
-        shell: bash
-        run: |
-          python scripts/check_release_versions.py --tag "${GITHUB_REF_NAME}"
-          python scripts/verify_release_set.py artifacts
-          version="${GITHUB_REF_NAME#v}"
-          notes_file="docs/release/v${version}_release_notes.md"
-          test -s "${notes_file}"
-      - name: Classify release channel
-        id: channel
-        shell: bash
-        run: |
-          case "${GITHUB_REF_NAME}" in
-            *-alpha*|*-beta*|*-rc*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
-            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
-          esac
-      - name: Upload prerelease wheels to TestPyPI
-        if: steps.channel.outputs.prerelease == 'true'
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
-        run: |
-          python -m pip install -U twine
-          python scripts/upload_wheel_release.py --repository testpypi artifacts/*.whl
-      - name: Upload stable wheels to PyPI
-        if: steps.channel.outputs.prerelease == 'false'
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          python -m pip install -U twine
-          python scripts/upload_wheel_release.py --repository pypi artifacts/*.whl
-      - name: Publish GitHub release assets
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          notes_file="docs/release/v${version}_release_notes.md"
-          test -f "${notes_file}"
-          prerelease=()
-          case "${GITHUB_REF_NAME}" in
-            *-alpha*|*-beta*|*-rc*) prerelease=(--prerelease) ;;
-          esac
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" artifacts/* --clobber
-            gh release edit "${GITHUB_REF_NAME}" --notes-file "${notes_file}"
+          set -euo pipefail
+          T620_BINARY="$CARGO_TARGET_DIR/aarch64-apple-darwin/release/cccc"
+          strip "$T620_BINARY"
+          test "$(lipo -archs "$T620_BINARY")" = arm64
+          file "$T620_BINARY" | tee "$T620_ARTIFACT_DIR/file.txt"
+          lipo -archs "$T620_BINARY" | tee "$T620_ARTIFACT_DIR/lipo.txt"
+          otool -hv "$T620_BINARY" > "$T620_ARTIFACT_DIR/macho-header.txt"
+          otool -L "$T620_BINARY" > "$T620_ARTIFACT_DIR/macho-libraries.txt"
+          vtool -show-build "$T620_BINARY" > "$T620_ARTIFACT_DIR/macho-build.txt"
+          python scripts/verify_standalone_binary.py --platform macos "$T620_BINARY"
+          if [ "$(uname -m)" = arm64 ]; then
+            python scripts/check_release_versions.py --rust-binary "$T620_BINARY"
+            "$T620_BINARY" --version | tee "$T620_ARTIFACT_DIR/native-version.txt"
           else
-            gh release create "${GITHUB_REF_NAME}" artifacts/* \
-              --verify-tag \
-              --title "CCCC ${version}" \
-              --notes-file "${notes_file}" \
-              "${prerelease[@]}"
+            printf '%s\n' 'Not executed: macos-latest host is not arm64; metadata verification only.' \
+              > "$T620_ARTIFACT_DIR/native-version.txt"
           fi
+          git diff --exit-code
+
+      - name: Bind final binary, compiled source fingerprint, Web assets and run provenance
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os, pathlib, re, shutil, struct, subprocess
+          out = pathlib.Path(os.environ["T620_ARTIFACT_DIR"])
+          target = pathlib.Path(os.environ["CARGO_TARGET_DIR"])
+          binary = target / "aarch64-apple-darwin/release/cccc"
+          data = binary.read_bytes()
+          assert data[:4] == bytes.fromhex("cffaedfe"), "not a thin little-endian 64-bit Mach-O"
+          assert struct.unpack_from("<I", data, 4)[0] == 0x0100000C, "not Mach-O ARM64"
+          assert struct.unpack_from("<I", data, 12)[0] == 2, "not MH_EXECUTE"
+          source = os.environ["T620_SOURCE_FINGERPRINT"]
+          assert source.encode() in data, "expected source fingerprint absent from stripped binary"
+          emitted = []
+          for output in sorted((target / "aarch64-apple-darwin/release/build").glob("cccc-pair-core-*/output")):
+              text = output.read_text()
+              for identity in re.findall(r"^cargo:rustc-env=CCCC_SOURCE_ID=([a-f0-9]{64})$", text, re.MULTILINE):
+                  emitted.append({"output": str(output.relative_to(target)), "source_fingerprint": identity,
+                                  "output_sha256": hashlib.sha256(output.read_bytes()).hexdigest()})
+          assert emitted and {item["source_fingerprint"] for item in emitted} == {source}, emitted
+          inventory = json.loads((out / "source-inputs.json").read_text())
+          assert inventory["source_fingerprint"] == source
+          manifest = json.loads((out / "provenance-base.json").read_text())
+          assert subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == manifest["build_branch_commit"]
+          name = "cccc-aarch64-apple-darwin"
+          shutil.copy2(binary, out / name)
+          manifest.update({
+              "binary": {"name": name, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
+                         "format": "Mach-O 64-bit executable", "architecture": "arm64", "thin": True},
+              "source_fingerprint_evidence": {"mirror_matches_build_script": True,
+                  "embedded_in_stripped_binary": True, "cargo_build_script_outputs": emitted,
+                  "algorithm_sha256": inventory["source_algorithm_sha256"],
+                  "core_build_script_sha256": inventory["core_build_script_sha256"]},
+              "web_assets_id": inventory["web_assets_id"],
+              "web_assets_evidence": "prepared content inventory and shared archive; runtime asset ID was not probed",
+              "web_assets_archive": {"name": "web-assets.tar.gz",
+                                     "sha256": hashlib.sha256((out / "web-assets.tar.gz").read_bytes()).hexdigest()},
+              "native_version_evidence": (out / "native-version.txt").read_text().strip(),
+              "toolchain_evidence": (out / "toolchain.txt").read_text(),
+              "publishing": "artifact-only; no release, tag, package registry, or service action",
+          })
+          (out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+          (out / "provenance-base.json").unlink()
+          with (out / "SHA256SUMS").open("x") as sums:
+              for path in sorted(out.iterdir()):
+                  if path.name != "SHA256SUMS":
+                      sums.write(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + path.name + "\n")
+          PY
+
+      - name: Enforce the owner upload ceiling before any artifact transfer
+        run: |
+          set -euo pipefail
+          python - <<'PYCAP'
+          import gzip, hashlib, json, os, pathlib
+          out = pathlib.Path(os.environ["T620_ARTIFACT_DIR"])
+          assert all(p.is_file() and not p.is_symlink() for p in out.iterdir()), "artifact directory must contain only regular files"
+          manifest_path = out / "manifest.json"
+          manifest = json.loads(manifest_path.read_text())
+          raw = out / manifest["binary"]["name"]
+          assert hashlib.sha256(raw.read_bytes()).hexdigest() == manifest["binary"]["sha256"]
+          payload = gzip.compress(raw.read_bytes(), compresslevel=9, mtime=0)
+          name = raw.name + ".gz"
+          manifest["binary"]["compressed"] = {"name": name, "bytes": len(payload),
+              "sha256": hashlib.sha256(payload).hexdigest(), "format": "gzip"}
+          raw.unlink()
+          omitted = {}
+          # Keep a conservative decimal4.8MB upload budget under the5MB owner limit.
+          if len(payload) <= 4_750_000:
+              (out / name).write_bytes(payload)
+          else:
+              omitted[name] = {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+                  "reason": "owner5MB GitHub object/artifact limit; binary not uploaded"}
+          # Fixed metadata is retained. Optional large logs/assets are explicitly omitted.
+          optional = [out / "web-assets.tar.gz", out / "cargo-build.log", out / "fresh-identity-tests.log"]
+          for file in optional:
+              total = sum(p.stat().st_size for p in out.iterdir() if p.is_file())
+              if total <= 4_750_000:
+                  break
+              if file.exists():
+                  data = file.read_bytes()
+                  omitted[file.name] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                      "reason": "owner upload ceiling; full file not uploaded"}
+                  file.unlink()
+          total = sum(p.stat().st_size for p in out.iterdir() if p.is_file())
+          if total > 4_750_000 and (out / name).exists():
+              omitted[name] = {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+                  "reason": "binary plus fixed provenance exceeds conservative upload budget"}
+              (out / name).unlink()
+          manifest["upload"] = {"budget_bytes": 4_800_000, "omitted": omitted,
+              "binary_transferred": name not in omitted,
+              "handoff_status": "ARTIFACT_READY" if name not in omitted else "BUILT_TRANSFER_BLOCKED_UPLOAD_BUDGET"}
+          manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+          files = sorted(p for p in out.iterdir() if p.is_file() and p.name != "SHA256SUMS")
+          (out / "SHA256SUMS").write_text("".join(hashlib.sha256(p.read_bytes()).hexdigest() + "  " + p.name + "\n" for p in files))
+          files = [p for p in out.iterdir() if p.is_file()]
+          assert len(files) <= 100
+          assert sum(p.stat().st_size for p in files) <= 4_800_000
+          print(json.dumps(manifest["upload"], sort_keys=True))
+          PYCAP
+
+      - name: Upload only the review artifact set
+        uses: actions/upload-artifact@v7
+        with:
+          name: t620-cccc-aarch64-apple-darwin-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/t620-darwin-artifact/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
