@@ -92,7 +92,10 @@ pub(crate) fn restart_for_memory_pty(
                 return Ok(FreshOutcome::Skipped);
             }
             cccc_runtime::stop_if_input_unchanged(group_id, actor_id, &input, before_stop)
-                .map_err(io::Error::other)?
+                .map_err(|error| match error {
+                    cccc_runtime::RuntimeError::Io(error) => error,
+                    error => io::Error::other(error),
+                })?
                 .is_some()
         }
         actor_memory::observation::Identity::Managed { generation, .. } => {

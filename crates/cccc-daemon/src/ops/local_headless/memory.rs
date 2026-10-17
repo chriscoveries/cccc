@@ -60,7 +60,10 @@ pub(crate) fn stop_pty_if_input_unchanged(
         return Ok(false);
     }
     if cccc_runtime::stop_if_input_unchanged(group_id, actor_id, checkpoint, before_stop)
-        .map_err(io::Error::other)?
+        .map_err(|error| match error {
+            cccc_runtime::RuntimeError::Io(error) => error,
+            error => io::Error::other(error),
+        })?
         .is_none()
     {
         return Ok(false);
