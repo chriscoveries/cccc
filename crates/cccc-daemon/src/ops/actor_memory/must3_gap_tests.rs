@@ -37,6 +37,18 @@ fn armed() -> &'static Mutex<Option<Target>> {
 /// `--test-threads=1`. Lock order: this serial gate is acquired FIRST and the
 /// armed-slot lock is only ever taken while it is held; no other code path
 /// takes them in the opposite order, so there is no inversion.
+///
+/// POISON RECOVERY (deliberate, serial gate ONLY): an intended-RED assertion
+/// panics while an ArmGuard is live, so this `std::sync::Mutex` becomes
+/// poisoned on every genuine failure — and a fixture that then failed the
+/// NEXT arm on `expect("must3 serial gate")` would convert one real MUST3
+/// finding into unrelated fixture failures. The gate protects no data, only
+/// ownership, so recovery via `PoisonError::into_inner` is sound: a poisoned
+/// serial gate means "an earlier test panicked", which is information the
+/// fixture must survive, not a fault. The armed-slot mutex stays fail-loud
+/// on purpose: its critical section is a bare `Option<Target>` touched under
+/// this gate, so a poison there would mean corruption we cannot prove
+/// harmless — keep it loud rather than paper over it.
 fn serialization() -> &'static Mutex<()> {
     static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
     SERIAL.get_or_init(|| Mutex::new(()))
@@ -47,6 +59,14 @@ fn serialization() -> &'static Mutex<()> {
 /// drop (including while a test unwinds from a panic) disarms only if the
 /// slot is still its own, so an early exit can never leave the one-shot
 /// armed for an unrelated maintenance call.
+///
+/// ORDER DEPENDENCE (load-bearing): the disarm runs in `Drop::drop`, which
+/// always executes BEFORE the fields drop, so the slot is cleared while the
+/// serial gate is still held — never after. Releasing the serial gate first
+/// would open a window where the next arm acquires serial, then trips the
+/// one-slot assert on the dying guard's still-armed slot. Field order here
+/// is therefore not cosmetic: keep the disarm in `Drop::drop` (as written)
+/// rather than relying on field-drop order.
 pub(crate) struct ArmGuard {
     _serial: std::sync::MutexGuard<'static, ()>,
     home: std::path::PathBuf,
@@ -72,7 +92,12 @@ impl Drop for ArmGuard {
 /// armed target at a time is asserted (a second arm now means a bug in the
 /// serialization, not a race, because the caller would be holding the gate).
 pub(crate) fn arm(home: std::path::PathBuf, group_id: String, actor_id: String) -> ArmGuard {
-    let serial = serialization().lock().expect("must3 serial gate");
+    // Serial gate: recover poison (see `serialization`) — an earlier intended
+    // RED panic must not cascade into fixture failures here.
+    let serial = serialization()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Armed slot: fail-loud on poison by design (see `serialization`).
     let mut slot = armed().lock().expect("must3 gap arm");
     assert!(slot.is_none(), "one armed gap submit at a time");
     *slot = Some((home.clone(), group_id.clone(), actor_id.clone()));
