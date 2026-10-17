@@ -46,7 +46,7 @@ struct LiveDaemon {
     home: cccc_core::HomeLayout,
     client: DaemonClient,
     group_id: String,
-    daemon: tokio::task::JoinHandle<()>,
+    daemon: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
 impl Drop for LiveDaemon {
