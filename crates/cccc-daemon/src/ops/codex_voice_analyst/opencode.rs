@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod command;
+mod initial_config;
+#[cfg(test)]
+mod initial_model_tests;
 #[cfg(test)]
 mod launch_tests;
 mod lifecycle;
@@ -76,7 +79,7 @@ pub(super) fn prepare(
 pub(super) async fn launch(
     prepared: PreparedOpenCode,
     cwd: &Path,
-    base_environment: BTreeMap<String, String>,
+    mut base_environment: BTreeMap<String, String>,
     generation: &str,
     purpose: SessionPurpose,
     resume_session_id: Option<&str>,
@@ -84,6 +87,7 @@ pub(super) async fn launch(
 ) -> io::Result<LaunchedOpenCode> {
     // Kilo shares this ACP/HTTP topology, not OpenCode's release numbering.
     if prepared.runtime == super::ActorRuntime::Opencode {
+        initial_config::apply(&mut base_environment, prepared.model.as_deref())?;
         require_supported_version(&prepared.launch_prefix[0], cwd, &base_environment).await?;
     }
     if purpose == SessionPurpose::VoiceAnalyst {
