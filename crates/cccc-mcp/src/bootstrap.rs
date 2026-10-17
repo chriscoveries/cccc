@@ -1169,3 +1169,7 @@ mod tests {
         assert!(payload.get("context").is_none());
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "bootstrap_recovery_tests.rs"]
+mod recovery_tests;
