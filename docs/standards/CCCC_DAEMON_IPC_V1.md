@@ -4808,6 +4808,16 @@ Notes:
   shapes and are not covered by this byte limit. `task_list` supports selecting
   a task or paging by count; that count is not a byte ceiling for large tasks.
   The full-result limit does not include transport or MCP envelope overhead.
+- MCP separately checks successful full `cccc_context_get` results, including
+  the explicit `cccc_capability_use` wrapper, after final tool-result assembly.
+  Both pretty text and structured content count against a 3 MiB serialized
+  envelope budget with fixed JSON-RPC framing. The caller-controlled RPC ID is
+  exempt and echoed unchanged. A result that cannot fit becomes a small typed
+  `context_too_large` refusal with summary/overview and task-list recovery
+  instructions; fitting results preserve both representations. Existing tool
+  errors propagate unchanged. This check does not cap mutating tools or
+  reclassify completed writes, and does not bound arbitrary code-mode
+  aggregation, other projections, or live heap allocations.
 - MCP bootstrap retries only `context_too_large` with one overview read. It
   preserves the overview's identity and coordination recovery data and marks
   `recovery.task_slice.full_context_unavailable=true` with

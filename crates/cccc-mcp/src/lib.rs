@@ -285,19 +285,77 @@ async fn handle(
             {
                 return protocol_error(id, -32602, &format!("Unknown tool: {name}"));
             }
-            return match router::call_with_context(home, client, name, arguments, context, false)
-                .await
+            let bounded_full_context = is_full_context_read(name, &arguments);
+            let result = match router::call_with_context(
+                home, client, name, arguments, context, false,
+            )
+            .await
             {
-                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-                Err(error) => {
-                    json!({"jsonrpc":"2.0","id":id,"result":tool_error_result(&error)})
+                Ok(result) if bounded_full_context && !full_context_envelope_fits(&result) => {
+                    tool_error_result(&ToolCallError::new(
+                        "context_too_large",
+                        "Full context exceeds the 3 MiB MCP response limit. Request detail=summary or overview; use task_list for task data.",
+                        Map::new(),
+                    ))
                 }
+                Ok(result) => result,
+                Err(error) => tool_error_result(&error),
             };
+            return json!({"jsonrpc":"2.0","id":id,"result":result});
         }
         notification if notification.starts_with("notifications/") => return json!({}),
         _ => return protocol_error(id, -32601, &format!("Method not found: {method}")),
     };
     json!({"jsonrpc":"2.0","id":id,"result":result})
+}
+
+fn is_full_context_read(name: &str, arguments: &Map<String, Value>) -> bool {
+    let arguments = match name {
+        "cccc_context_get" => Some(arguments),
+        "cccc_capability_use"
+            if arguments
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                == Some("cccc_context_get") =>
+        {
+            // Match capability_use's argument alias and default behavior.
+            arguments
+                .get("tool_arguments")
+                .or_else(|| arguments.get("arguments"))
+                .and_then(Value::as_object)
+        }
+        _ => return false,
+    };
+    arguments
+        .and_then(|arguments| arguments.get("detail"))
+        .and_then(Value::as_str)
+        .unwrap_or("full")
+        == "full"
+}
+
+fn full_context_envelope_fits(result: &Value) -> bool {
+    const LIMIT: usize = 3 * 1024 * 1024;
+    // Count the final tool result after all router additions, including both
+    // text and structuredContent. Only the caller-controlled ID is exempt;
+    // a null ID accounts for the fixed JSON-RPC framing without cloning it.
+    const FRAMING: usize = b"{\"jsonrpc\":\"2.0\",\"id\":null,\"result\":}".len();
+    serde_json::to_writer(FullContextEnvelopeBudget(LIMIT - FRAMING), result).is_ok()
+}
+
+struct FullContextEnvelopeBudget(usize);
+
+impl std::io::Write for FullContextEnvelopeBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.checked_sub(bytes.len()).ok_or_else(|| {
+            std::io::Error::other("serialized full-context MCP envelope exceeds its byte budget")
+        })?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn protocol_error(id: Value, code: i64, message: &str) -> Value {
