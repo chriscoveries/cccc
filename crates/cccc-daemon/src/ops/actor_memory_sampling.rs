@@ -91,9 +91,7 @@ enum MemberRead {
 /// outside the zombie state) are covered without fabricating `/proc`.
 #[cfg(target_os = "linux")]
 fn classify_status_body(body: &str) -> MemberRead {
-    let mut states = body
-        .lines()
-        .filter_map(|line| line.strip_prefix("State:"));
+    let mut states = body.lines().filter_map(|line| line.strip_prefix("State:"));
     let first = states.next();
     if states.next().is_some() {
         // Conflicting duplicate State fields are malformed evidence: the
