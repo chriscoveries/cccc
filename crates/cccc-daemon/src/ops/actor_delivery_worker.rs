@@ -21,7 +21,12 @@ mod respawn_tests;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BatchOutcome {
     Delivered,
+    /// Not ready yet: the actor is starting, busy with a turn, or the group is
+    /// paused. The batch is held as a queue position, not counted as a failure.
     Retry,
+    /// The runtime was asked to take this batch and refused it. Counted
+    /// against the bounded rejection budget (owner spec dd17cbba item 3).
+    Rejected(String),
     /// The job can never succeed in the current configuration (e.g. the group
     /// has no attached scope); the delivery must be settled Failed instead of
     /// retried.
@@ -118,7 +123,9 @@ pub fn process_batch(
                 &super::actor_delivery_preamble::render(&job.home, &current_group, &current_actor),
                 cancelled,
             ) {
-                return BatchOutcome::Retry;
+                return BatchOutcome::Rejected(
+                    "terminal did not accept the actor preamble".to_owned(),
+                );
             }
             preamble_session.clone_from(&status.started_at);
             if !interruptible_sleep(PREAMBLE_DELAY, cancelled) {
@@ -152,7 +159,10 @@ pub fn process_batch(
         finish_jobs(jobs);
         return BatchOutcome::Delivered;
     }
-    BatchOutcome::Retry
+    if cancelled.load(Ordering::Acquire) {
+        return BatchOutcome::Retry;
+    }
+    BatchOutcome::Rejected("terminal did not accept the message payload".to_owned())
 }
 
 /// Wait out the restart backoff before automatically starting an actor that keeps exiting.
@@ -207,10 +217,16 @@ fn process_deepseek_batch(
         }
     }
     for job in jobs {
-        if cancelled.load(Ordering::Acquire)
-            || !crate::ops::deepseek_runtime::deliver(home, group, actor, &job.event, cancelled)
-        {
+        if cancelled.load(Ordering::Acquire) {
             return BatchOutcome::Retry;
+        }
+        if !crate::ops::deepseek_runtime::deliver(home, group, actor, &job.event, cancelled) {
+            if cancelled.load(Ordering::Acquire) {
+                return BatchOutcome::Retry;
+            }
+            return BatchOutcome::Rejected(
+                "deepseek runtime did not accept the message".to_owned(),
+            );
         }
         complete_job(job);
     }

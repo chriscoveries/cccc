@@ -46,8 +46,8 @@ pub use command::{
     DEEPSEEK_MCP_CLIENT_VERSION, DEEPSEEK_NODE_RANGE, DEEPSEEK_NPM_BEFORE,
     DEEPSEEK_RELEASE_VERSION, DEEPSEEK_TURN_TIMEOUT_SECONDS, canonical_deepseek_runtime_manifest,
     deepseek_bootstrap_preflight, deepseek_external_preflight, deepseek_home,
-    deepseek_lockfile_is_pinned, deepseek_preflight, default_command, detect_runtimes,
-    is_canonical_deepseek_config, is_canonical_deepseek_profile_manifest,
+    deepseek_lockfile_is_pinned, deepseek_preflight, deepseek_profile_config, default_command,
+    detect_runtimes, is_canonical_deepseek_config, is_canonical_deepseek_profile_manifest,
     is_canonical_deepseek_runtime_manifest,
 };
 pub use command_output::{CapturedOutput, capture_command, capture_command_blocking};
