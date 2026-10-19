@@ -11,6 +11,8 @@ mod diagnostic;
 mod events;
 mod framing;
 mod interactions;
+#[cfg(all(test, unix))]
+mod maintenance_tests;
 mod pending;
 mod permissions;
 mod protocol_loop;
@@ -82,6 +84,9 @@ enum AcpCommand {
     },
     ExternalDisconnected {
         reason: String,
+    },
+    CloseIfIdle {
+        response: oneshot::Sender<io::Result<bool>>,
     },
     Close,
 }
@@ -421,13 +426,45 @@ impl AcpClient {
             .map_err(|_| closed_error())
     }
 
+    /// Retire this generation only when its serialized protocol state is idle.
+    /// A refusal leaves transport, approvals and auxiliary tasks untouched.
+    pub(super) async fn close_if_idle(&self) -> io::Result<bool> {
+        let (response, receiver) = oneshot::channel();
+        self.commands
+            .send(AcpCommand::CloseIfIdle { response })
+            .await
+            .map_err(|_| closed_error())?;
+        let closed = tokio::time::timeout(LIFECYCLE_REQUEST_TIMEOUT, receiver)
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "ACP idle close admission timed out",
+                )
+            })?
+            .map_err(|_| closed_error())??;
+        if closed {
+            self.finish_close().await;
+        }
+        Ok(closed)
+    }
+
     pub(super) async fn close(&self) {
+        self.abort_auxiliary_tasks();
+        let _ = self.commands.send(AcpCommand::Close).await;
+        self.finish_close().await;
+    }
+
+    fn abort_auxiliary_tasks(&self) {
         if let Ok(mut tasks) = self.auxiliary_tasks.lock() {
             for task in tasks.drain(..) {
                 task.abort();
             }
         }
-        let _ = self.commands.send(AcpCommand::Close).await;
+    }
+
+    async fn finish_close(&self) {
+        self.abort_auxiliary_tasks();
         let task = self.task.lock().ok().and_then(|mut task| task.take());
         if let Some(mut task) = task
             && tokio::time::timeout(STOP_TIMEOUT, &mut task).await.is_err()

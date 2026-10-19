@@ -234,6 +234,18 @@ pub struct Actor {
     pub generation: String,
     #[serde(default)]
     pub updated_at: String,
+    /// Per-actor memory ceiling in MiB, including resident and swapped pages.
+    /// Defaults to 4096 for every lane. Explicit zero disables the ceiling;
+    /// preserve it when serializing so a reload cannot re-enable enforcement.
+    /// Enforcement requires verified idle admission and exact session recovery.
+    /// Plain `u32` so negative, fractional, string and overflowing inputs are
+    /// rejected at deserialization.
+    #[serde(default = "default_memory_limit_mb")]
+    pub memory_limit_mb: u32,
+}
+
+const fn default_memory_limit_mb() -> u32 {
+    4096
 }
 
 impl Actor {
@@ -265,6 +277,7 @@ impl Actor {
             created_at: now.clone(),
             generation: String::new(),
             updated_at: now,
+            memory_limit_mb: default_memory_limit_mb(),
         }
     }
 
@@ -286,6 +299,10 @@ const fn enabled() -> bool {
 fn global_scope() -> String {
     "global".into()
 }
+
+#[cfg(test)]
+#[path = "actor_memory_policy_red.rs"]
+mod memory_policy_red;
 
 #[cfg(test)]
 mod tests {
