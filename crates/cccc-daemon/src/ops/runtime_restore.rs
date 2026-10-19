@@ -69,9 +69,30 @@ fn restore_group(home: &HomeLayout, store: &GroupStore, group_id: &str) -> Resul
             .map_err(OpError::io)?;
     }
     if !group.running || group.state == cccc_contracts::GroupState::Stopped {
+        for actor in &group.actors {
+            super::runtime_session::recovery_decision(
+                home,
+                &group.group_id,
+                &actor.id,
+                "skip",
+                "group_not_running",
+            )
+            .map_err(OpError::io)?;
+        }
         return Ok(());
     }
-    for stored_actor in group.actors.iter().filter(|actor| actor.enabled) {
+    for stored_actor in &group.actors {
+        if !stored_actor.enabled {
+            super::runtime_session::recovery_decision(
+                home,
+                &group.group_id,
+                &stored_actor.id,
+                "skip",
+                "actor_disabled",
+            )
+            .map_err(OpError::io)?;
+            continue;
+        }
         let actor = match super::actor_profile_runtime::resolve(home, stored_actor) {
             Ok(actor) => actor,
             Err(error) => {
@@ -81,13 +102,49 @@ fn restore_group(home: &HomeLayout, store: &GroupStore, group_id: &str) -> Resul
             }
         };
         if !should_restore_actor(group.state, &actor) {
+            super::runtime_session::recovery_decision(
+                home,
+                &group.group_id,
+                &actor.id,
+                "skip",
+                if !actor.enabled {
+                    "actor_disabled"
+                } else {
+                    "paused_headless_actor"
+                },
+            )
+            .map_err(OpError::io)?;
             continue;
         }
         if deepseek_restore_blocked(home, &group, &actor) {
+            super::runtime_session::recovery_decision(
+                home,
+                &group.group_id,
+                &actor.id,
+                "block",
+                "deepseek_explicit_restart_required",
+            )
+            .map_err(OpError::io)?;
             tracing::info!(
                 group_id = %group.group_id,
                 actor_id = %actor.id,
                 "skipped automatic DeepSeek restore until an explicit actor start"
+            );
+            continue;
+        }
+        // RS-3: a daemon restart is not an operator. Restoring a parked Actor here would relaunch
+        // exactly what the park exists to stop, and would erase the reason the next `actor_list`
+        // shows. A Waiting Actor is deferred instead: the next delivery or rule wakes it once the
+        // delay has elapsed, and an operator start clears a park.
+        if let Some(refusal) =
+            crate::ops::actor_restart_backoff::refusal(home, &group.group_id, &actor.id)
+        {
+            tracing::info!(
+                group_id = %group.group_id,
+                actor_id = %actor.id,
+                code = refusal.code(),
+                message = %refusal.message(),
+                "skipped boot restore for a backing-off or parked Actor"
             );
             continue;
         }

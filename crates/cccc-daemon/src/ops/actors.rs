@@ -19,6 +19,10 @@ const WEB_MODEL_TARGETS_KEY: &str = "web_model_browser_targets";
 const WEB_MODEL_DELIVERY_PREFERENCES_KEY: &str = "web_model_delivery_preferences";
 const RUNTIME_STATES_KEY: &str = "runtime_states";
 
+#[cfg(all(test, unix))]
+#[path = "actors_memory_lifecycle_tests.rs"]
+mod memory_lifecycle_tests;
+
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "actor_list" => Operation::new(Read, list),
@@ -37,6 +41,9 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         }),
         "actor_new_session" => Operation::new(Write, |home, request| {
             lifecycle(home, request, "actor.new_session")
+        }),
+        "actor_resume_session" => Operation::new(Write, |home, request| {
+            lifecycle(home, request, "actor.resume_session")
         }),
         "actor_env_private_keys" => Operation::new(Read, actor_secrets::keys),
         "actor_env_private_update" => Operation::new(Write, actor_secrets::update),
@@ -115,7 +122,7 @@ fn add(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             OpError::io(error),
         ));
     }
-    if let Err(error) = runtime_session::native_acp::retire_all(home, &group_id, &added.id) {
+    if let Err(error) = retire_native_session_state(home, &group_id, &added.id) {
         return Err(super::actor_saga::rollback_added(
             home,
             &group_id,
@@ -150,6 +157,17 @@ fn add(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         }
     };
     object(json!({"actor": added, "event": event}))
+}
+
+fn retire_native_session_state(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+) -> std::io::Result<()> {
+    // A failed receipt cleanup must retain its exact-resume fence. Addition
+    // rolls back on error; removal calls this only after its event commits.
+    runtime_session::native_acp::retire_all(home, group_id, actor_id)?;
+    super::actor_memory::clear_required_resume(home, group_id, actor_id, None)
 }
 
 fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
@@ -504,6 +522,7 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let original_secrets = actor_secrets::values(home, &group_id, &actor_id)?;
     let runtime_was_running = actor_process_running(&group, &original_actor);
     actor_delivery::shutdown_actor(&group_id, &actor_id);
+    super::actor_respawn_backoff::forget(&group_id, &actor_id);
     if let Err(error) = actor_runtime::apply(home, &group, &actor_id, "actor.stop") {
         actor_delivery::dispatch_group_unread(home, &group);
         return Err(error);
@@ -602,8 +621,8 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     if let Err(error) = runtime_session::antigravity::remove(home, &group_id, &actor_id) {
         tracing::warn!(%error,%group_id,%actor_id,"post-commit ACP receipt cleanup failed");
     }
-    if let Err(error) = runtime_session::native_acp::retire_all(home, &group_id, &actor_id) {
-        tracing::warn!(%error,%group_id,%actor_id,"post-commit native ACP receipt cleanup failed");
+    if let Err(error) = retire_native_session_state(home, &group_id, &actor_id) {
+        tracing::warn!(%error,%group_id,%actor_id,"post-commit native ACP receipt or memory requirement cleanup failed");
     }
     object(json!({"actor_id": actor_id, "event": event}))
 }
@@ -720,6 +739,17 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         .find(|actor| actor.id == actor_id)
         .cloned()
         .ok_or_else(|| OpError::new("actor_not_found", "actor not found"))?;
+    let retarget = if kind == "actor.resume_session" {
+        let session_id = required_arg(request, "session_id")?;
+        Some(actor_runtime::validate_claude_retarget(
+            home,
+            &group,
+            &original_actor,
+            &session_id,
+        )?)
+    } else {
+        None
+    };
     let runtime_was_running = actor_process_running(&group, &original_actor);
     let retry_runtime = if matches!(kind, "actor.start" | "actor.restart") {
         Some(actor_profile_runtime::resolve(home, &original_actor)?.runtime)
@@ -730,7 +760,9 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         && !super::local_headless::running(&group_id, &actor_id)
         && super::local_headless::waiting_for_workspace_trust(&group_id, &actor_id)
             .map_err(OpError::io)?;
-    let runtime_session_snapshot = if kind == "actor.new_session" {
+    let runtime_session_snapshot = if let Some(retarget) = &retarget {
+        Some(Some(retarget.rollback.clone()))
+    } else if kind == "actor.new_session" {
         Some(runtime_session::snapshot(home, &group_id, &actor_id).map_err(OpError::io)?)
     } else {
         None
@@ -742,6 +774,9 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         })
         .map_err(OpError::io)?;
     }
+    // Explicit lifecycle commands reset restart history. Destructive paths joined the
+    // worker above; healthy Start preserves it, including any pending automatic wait.
+    super::actor_respawn_backoff::forget(&group_id, &actor_id);
     let retried_claude_resume = if let Some(runtime) = retry_runtime
         .filter(|_| kind == "actor.restart" || !runtime_was_running || retry_claude_trust)
     {
@@ -757,14 +792,72 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
         false
     };
     let enabled = kind != "actor.stop";
+    if let Some(retarget) = &retarget {
+        // Join pending launch/trust cleanup before replacing its receipt. No
+        // foreign job is touched: preflight has already rejected live targets.
+        actor_runtime::apply(home, &group, &actor_id, "actor.stop")?;
+        if let Err(error) = write_retarget_receipt(home, &group_id, &actor_id, &retarget.target) {
+            // An atomic replace can report an error after the new receipt was
+            // installed. Restore the snapshot before returning either failure.
+            let effect = lifecycle_effect(
+                kind,
+                runtime_was_running,
+                actor_process_running(&group, &original_actor),
+            );
+            return Err(rollback_actor_lifecycle(
+                home,
+                &group,
+                &original_actor,
+                runtime_session_snapshot.as_ref(),
+                kind,
+                effect,
+                OpError::io(error),
+            ));
+        }
+    }
     // An old trust terminal is not a resumed managed session. An explicit retry
     // must retire that attachment before retrying the same durable conversation.
-    let apply_kind = if retry_claude_trust && retried_claude_resume && kind == "actor.start" {
+    let apply_kind = if retarget.is_some() {
+        "actor.start"
+    } else if retry_claude_trust && retried_claude_resume && kind == "actor.start" {
         "actor.restart"
     } else {
         kind
     };
-    let status = match actor_runtime::apply(home, &group, &actor_id, apply_kind) {
+    // RS-3: explicit starts clear a park only for a human operator. Scheduled rules are
+    // automation and must respect the durable restart gate just like message delivery.
+    let requester = string_arg(request, "by").unwrap_or_else(|| "user".into());
+    if enabled && kind != "actor.new_session" {
+        if is_automation_requester(&requester) {
+            if let Some(refusal) = super::actor_restart_backoff::refusal(home, &group_id, &actor_id)
+            {
+                return Err(OpError::new(refusal.code(), refusal.message()));
+            }
+        } else if let Err(error) =
+            super::actor_restart_backoff::clear_for_manual_start(home, &group_id, &actor_id)
+        {
+            tracing::warn!(
+                %group_id, %actor_id, %error,
+                "failed to clear the restart park before an explicit start"
+            );
+        }
+    }
+    let applied =
+        actor_runtime::apply_explicit(home, &group, &actor_id, apply_kind).and_then(|status| {
+            if let Some(retarget) = &retarget {
+                let session_id = retarget.target["provider_session_id"]
+                    .as_str()
+                    .unwrap_or_default();
+                if !super::local_headless::resumed_session_is(&group_id, &actor_id, session_id) {
+                    return Err(OpError::new(
+                        "claude_resume_session_failed",
+                        "Claude did not attach the requested managed session",
+                    ));
+                }
+            }
+            Ok(status)
+        });
+    let status = match applied {
         Ok(status) => status,
         Err(error) => {
             // A failed teardown has not launched a replacement. Do not turn
@@ -784,6 +877,7 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
                 &group,
                 &original_actor,
                 runtime_session_snapshot.as_ref(),
+                kind,
                 effect,
                 error,
             ));
@@ -803,6 +897,7 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
                     &group,
                     &original_actor,
                     runtime_session_snapshot.as_ref(),
+                    kind,
                     effect,
                     error,
                 ));
@@ -822,6 +917,7 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
                 &group,
                 &original_actor,
                 runtime_session_snapshot.as_ref(),
+                kind,
                 effect,
                 error,
             ));
@@ -840,7 +936,72 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
             ),
         }
     }
-    object(json!({"actor": actor, "event": event, "runtime": status}))
+    let model_application = retarget
+        .as_ref()
+        .map(|selection| &selection.target["model_application"]);
+    object(
+        json!({"actor": actor, "event": event, "runtime": status, "model_application": model_application}),
+    )
+}
+
+fn write_retarget_receipt(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    document: &serde_json::Map<String, Value>,
+) -> std::io::Result<()> {
+    #[cfg(test)]
+    let failure = RETARGET_WRITE_FAILURE.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        if pending
+            .as_ref()
+            .is_some_and(|(root, _)| root == home.root())
+        {
+            pending.take().map(|(_, failure)| failure)
+        } else {
+            None
+        }
+    });
+    #[cfg(test)]
+    if failure == Some(RetargetWriteFailure::BeforeReplace) {
+        return Err(std::io::Error::other(
+            "injected retarget receipt write failure before replacement",
+        ));
+    }
+    runtime_session::write_claude_retarget(home, group_id, actor_id, document)?;
+    #[cfg(test)]
+    if failure == Some(RetargetWriteFailure::AfterReplace) {
+        return Err(std::io::Error::other(
+            "injected retarget receipt write failure after replacement",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetargetWriteFailure {
+    BeforeReplace,
+    AfterReplace,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    // One-shot and Home-bound so unrelated fixtures cannot consume the failure.
+    static RETARGET_WRITE_FAILURE: std::cell::RefCell<Option<(std::path::PathBuf, RetargetWriteFailure)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_retarget_write(home: &HomeLayout, failure: RetargetWriteFailure) {
+    RETARGET_WRITE_FAILURE.with(|pending| {
+        assert!(
+            pending
+                .replace(Some((home.root().to_path_buf(), failure)))
+                .is_none(),
+            "retarget write failure is already armed on this test thread"
+        );
+    });
 }
 
 #[derive(Clone, Copy)]
@@ -851,13 +1012,26 @@ enum ActorLifecycleEffect {
     Replaced,
 }
 
+/// Whether a lifecycle request came from automation rather than from a person or an Agent acting
+/// on someone's behalf. `system` is the identity the automation runtime signs its calls with, and
+/// `automation` is accepted so a rule configured with that `by` cannot slip past the RS-3 gate.
+fn is_automation_requester(requester: &str) -> bool {
+    matches!(requester.trim(), "system" | "automation")
+}
+
 fn lifecycle_effect(kind: &str, was_running: bool, is_running: bool) -> ActorLifecycleEffect {
     match (kind, was_running, is_running) {
         ("actor.stop", true, false) => ActorLifecycleEffect::Stopped,
         ("actor.start", false, true) => ActorLifecycleEffect::Started,
-        ("actor.restart" | "actor.new_session", true, true) => ActorLifecycleEffect::Replaced,
-        ("actor.restart" | "actor.new_session", true, false) => ActorLifecycleEffect::Stopped,
-        ("actor.restart" | "actor.new_session", false, true) => ActorLifecycleEffect::Started,
+        ("actor.restart" | "actor.new_session" | "actor.resume_session", true, true) => {
+            ActorLifecycleEffect::Replaced
+        }
+        ("actor.restart" | "actor.new_session" | "actor.resume_session", true, false) => {
+            ActorLifecycleEffect::Stopped
+        }
+        ("actor.restart" | "actor.new_session" | "actor.resume_session", false, true) => {
+            ActorLifecycleEffect::Started
+        }
         _ => ActorLifecycleEffect::None,
     }
 }
@@ -867,14 +1041,17 @@ fn rollback_actor_lifecycle(
     original_group: &GroupDoc,
     original_actor: &Actor,
     runtime_session_snapshot: Option<&Option<serde_json::Map<String, Value>>>,
+    kind: &str,
     effect: ActorLifecycleEffect,
     original: OpError,
 ) -> OpError {
     let mut failures = Vec::new();
-    if matches!(
-        effect,
-        ActorLifecycleEffect::Started | ActorLifecycleEffect::Replaced
-    ) {
+    if kind == "actor.resume_session"
+        || matches!(
+            effect,
+            ActorLifecycleEffect::Started | ActorLifecycleEffect::Replaced
+        )
+    {
         actor_delivery::shutdown_actor(&original_group.group_id, &original_actor.id);
         if let Err(error) =
             actor_runtime::apply(home, original_group, &original_actor.id, "actor.stop")
@@ -910,19 +1087,31 @@ fn rollback_actor_lifecycle(
         Ok(()) => {}
         Err(error) => failures.push(format!("restore actor state: {}", error.message)),
     }
-    if matches!(
-        effect,
-        ActorLifecycleEffect::Stopped | ActorLifecycleEffect::Replaced
-    ) && let Err(error) =
-        actor_runtime::apply(home, original_group, &original_actor.id, "actor.start")
+    if kind != "actor.resume_session"
+        && matches!(
+            effect,
+            ActorLifecycleEffect::Stopped | ActorLifecycleEffect::Replaced
+        )
+        && let Err(error) =
+            actor_runtime::apply(home, original_group, &original_actor.id, "actor.start")
     {
         failures.push(format!("restore previous runtime: {}", error.message));
     }
-    if original_actor.enabled && original_group.running {
+    if kind != "actor.resume_session" && original_actor.enabled && original_group.running {
         actor_delivery::dispatch_unread(home, original_group, &original_actor.id);
     }
     if failures.is_empty() {
-        original
+        if kind == "actor.resume_session" {
+            OpError::new(
+                "claude_resume_session_failed",
+                format!(
+                    "Resume session failed; the previous receipt was restored and both targets were retained: {}",
+                    original.message
+                ),
+            )
+        } else {
+            original
+        }
     } else {
         OpError::new(
             "rollback_failed",

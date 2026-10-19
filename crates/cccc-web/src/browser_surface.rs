@@ -43,6 +43,31 @@ use tokio::task::JoinHandle;
 
 const BROWSER_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Retire a web-model browser process after this much CDP silence: nothing drives
+/// its pages, so the next use re-opens the surface on demand.
+pub(crate) const DEFAULT_BROWSER_IDLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15 * 60);
+
+/// Floor for CCCC_BROWSER_IDLE_SECS: below this, a sweep would retire surfaces that
+/// are still in use between two CDP messages.
+pub(crate) const MIN_BROWSER_IDLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// Clamp a raw CCCC_BROWSER_IDLE_SECS value. Unset, blank, unparseable and `0` all
+/// mean the default - a `0` must not become `Duration::ZERO`, which retires every
+/// surface on the next sweep - and any other value below the floor is raised to it.
+/// Pure, so the rule is tested without mutating the process environment.
+pub(crate) fn clamp_browser_idle_timeout(raw: Option<&str>) -> std::time::Duration {
+    match raw.and_then(|value| value.trim().parse::<u64>().ok()) {
+        None | Some(0) => DEFAULT_BROWSER_IDLE_TIMEOUT,
+        Some(secs) => std::time::Duration::from_secs(secs).max(MIN_BROWSER_IDLE_TIMEOUT),
+    }
+}
+
+pub(crate) fn browser_idle_timeout() -> std::time::Duration {
+    clamp_browser_idle_timeout(std::env::var("CCCC_BROWSER_IDLE_SECS").ok().as_deref())
+}
+
 pub(crate) fn system_browser_path() -> Option<PathBuf> {
     system_browser::find_system_browser().map(|(path, _)| path)
 }
@@ -188,6 +213,60 @@ impl BrowserSurfaces {
                 !self.sessions.lock().await.contains_key(&key)
                     && self.closed_pages.lock().await.get(&key) == Some(&generation)
             };
+            if same_owner {
+                closed += usize::from(self.close_key_locked(&key).await?);
+            }
+        }
+        Ok(closed)
+    }
+
+    /// Close surfaces whose web-model browser process has been CDP-idle for `ttl`.
+    /// The process is what costs memory while nothing drives it, and the next use
+    /// re-opens the surface, so retiring an idle one is safe. Only keys that name a
+    /// web-model Actor slot are swept: a presentation surface can sit silent while a
+    /// person is still watching it, so silence alone must not retire it.
+    pub async fn close_idle(&self, ttl: std::time::Duration) -> Result<usize> {
+        self.close_idle_at(ttl, std::time::Instant::now()).await
+    }
+
+    /// `close_idle` against an explicit clock, so the cutoff can be exercised with a
+    /// positive TTL instead of colliding with `Duration::ZERO`.
+    async fn close_idle_at(
+        &self,
+        ttl: std::time::Duration,
+        now: std::time::Instant,
+    ) -> Result<usize> {
+        let candidates = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .iter()
+                .filter(|(key, _)| session_actor(key).is_some())
+                .map(|(key, session)| {
+                    (
+                        key.clone(),
+                        Arc::clone(&session.owner),
+                        session.page.target_id().clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut stale = Vec::new();
+        for (key, owner, target) in candidates {
+            if owner.read().await.idle_for_at(now) >= ttl {
+                stale.push((key, target));
+            }
+        }
+        let mut closed = 0;
+        for (key, target) in stale {
+            let operation = self.key_operation(&key).await;
+            let _guard = operation.lock().await;
+            // A replacement opened after the snapshot owns its own lifecycle.
+            let same_owner = self
+                .sessions
+                .lock()
+                .await
+                .get(&key)
+                .is_some_and(|session| session.page.target_id() == &target);
             if same_owner {
                 closed += usize::from(self.close_key_locked(&key).await?);
             }
@@ -526,6 +605,9 @@ impl BrowserSurfaces {
             None
         };
         let new_owner = owner.is_none();
+        // The slot key names the owning Actor ("web-model::<group>::<actor>"), so
+        // the spawned process can carry that identity from the very first byte.
+        let actor_id = session_actor(key).map(|(_, actor_id)| actor_id);
         let owner = match owner {
             Some(owner) => owner,
             None => {
@@ -537,6 +619,7 @@ impl BrowserSurfaces {
                         mode,
                         shared_browser,
                         storage_state,
+                        actor_id,
                     )
                     .await?,
                 ));

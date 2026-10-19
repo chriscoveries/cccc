@@ -46,6 +46,10 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
         ActorAction::Start(target) => lifecycle(client, home, "actor_start", target).await?,
         ActorAction::Stop(target) => lifecycle(client, home, "actor_stop", target).await?,
         ActorAction::Restart(target) => lifecycle(client, home, "actor_restart", target).await?,
+        ActorAction::ResumeSession { target, session_id } => call(
+            client, "actor_resume_session",
+            json!({"group_id":group(home,target.group_id)?,"actor_id":target.actor_id,"session_id":session_id,"by":target.by}),
+        ).await?,
         ActorAction::Update {
             actor_id,
             group_id,
@@ -117,6 +121,9 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
                     updated
                 }
             }
+        }
+        ActorAction::NewSession(target) => {
+            lifecycle(client, home, "actor_new_session", target).await?
         }
     };
     print(response)
