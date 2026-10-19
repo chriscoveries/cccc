@@ -83,6 +83,15 @@ pub fn status(group_id: &str, actor_id: &str) -> Result<SessionStatus, RuntimeEr
     with_session(group_id, actor_id, |session| Ok(session.status()))
 }
 
+/// Observed terminal activity of a live session. A restart creates a new
+/// session, so counters never carry over from a previous process.
+pub fn activity(
+    group_id: &str,
+    actor_id: &str,
+) -> Result<crate::activity::ActivitySnapshot, RuntimeError> {
+    with_session(group_id, actor_id, |session| Ok(session.activity()))
+}
+
 pub fn stop(group_id: &str, actor_id: &str) -> Result<SessionStatus, RuntimeError> {
     let key = (group_id.to_owned(), actor_id.to_owned());
     let session = sessions()
@@ -271,17 +280,19 @@ fn write_locked(
     data: &[u8],
     cancelled: Option<&AtomicBool>,
 ) -> Result<bool, RuntimeError> {
-    let writer = session
-        .lock()
-        .map_err(|_| RuntimeError::Poisoned)?
-        .input_writer()?;
+    let (writer, activity) = {
+        let mut session = session.lock().map_err(|_| RuntimeError::Poisoned)?;
+        (session.input_writer()?, session.activity_tracker())
+    };
     // The input gate preserves ordering; blocking IO must not hold the Session
     // lock required by status, stop and process cleanup. Pin this generation.
     match cancelled {
-        Some(cancelled) => crate::pty_input::write_input_interruptibly(&writer, data, &|| {
-            cancelled.load(Ordering::Acquire)
-        }),
-        None => crate::pty_input::write_input(&writer, data).map(|()| true),
+        Some(cancelled) => {
+            crate::pty_input::write_input_interruptibly(&writer, data, &activity, &|| {
+                cancelled.load(Ordering::Acquire)
+            })
+        }
+        None => crate::pty_input::write_input(&writer, data, &activity).map(|()| true),
     }
 }
 
