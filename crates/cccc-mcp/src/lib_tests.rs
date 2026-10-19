@@ -559,3 +559,105 @@ async fn secretary_bootstrap_handles_sanitized_env_and_rejects_outside_paths() {
         assert_eq!(tools[0]["name"], "cccc_voice_secretary_task");
     }
 }
+
+#[tokio::test]
+async fn context_get_over_mcp_is_bounded_and_pages_to_the_whole_board() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+    let group = store.create("bounded mcp", "").expect("group");
+    let group_id = group.group_id.clone();
+
+    let daemon_home = home.clone();
+    let daemon_task = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
+    let client = cccc_client::DaemonClient::new(home.clone());
+    for _ in 0..100 {
+        if client
+            .call(&cccc_contracts::DaemonRequest {
+                v: 1,
+                op: "group_list".into(),
+                args: serde_json::Map::new(),
+            })
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    for index in 0..130 {
+        let response = client
+            .call(&cccc_contracts::DaemonRequest {
+                v: 1,
+                op: "context_sync".into(),
+                args: serde_json::from_value(json!({
+                    "group_id":group_id,
+                    "by":"user",
+                    "ops":[{"op":"task.create","title":format!("card-{index:03}")}]
+                }))
+                .expect("args"),
+            })
+            .await
+            .expect("create card");
+        assert!(response.ok, "{:?}", response.error);
+    }
+
+    let context_call = |arguments: serde_json::Value| {
+        let home = home.clone();
+        async move {
+            crate::handle_request(
+                &home,
+                &json!({
+                    "jsonrpc":"2.0",
+                    "id":1,
+                    "method":"tools/call",
+                    "params":{"name":"cccc_context_get","arguments":arguments}
+                }),
+            )
+            .await
+        }
+    };
+
+    let first = context_call(json!({"group_id":group_id})).await;
+    let first_body = &first["result"]["structuredContent"];
+    assert_eq!(
+        first["result"]["isError"], false,
+        "context_get failed: {first}"
+    );
+    let first_size = serde_json::to_vec(first_body).expect("serialize").len();
+    assert!(
+        first_size <= 256 * 1024,
+        "bounded MCP answer must fit the default cap, got {first_size} bytes"
+    );
+    assert_eq!(first_body["truncated"], json!(true));
+    assert_eq!(first_body["paging"]["task_total"], json!(130));
+    let mut seen: Vec<String> = first_body["coordination"]["tasks"]
+        .as_array()
+        .expect("page")
+        .iter()
+        .filter_map(|task| task["id"].as_str().map(str::to_owned))
+        .collect();
+    assert!(seen.len() <= 100, "page carried {} cards", seen.len());
+    let mut cursor = first_body["next_cursor"].as_str().map(str::to_owned);
+    let mut pages = 1;
+    while let Some(next) = cursor {
+        let page = context_call(json!({"group_id":group_id,"cursor":next})).await;
+        let body = &page["result"]["structuredContent"];
+        assert_eq!(page["result"]["isError"], false, "paging failed: {page}");
+        seen.extend(
+            body["coordination"]["tasks"]
+                .as_array()
+                .expect("page")
+                .iter()
+                .filter_map(|task| task["id"].as_str().map(str::to_owned)),
+        );
+        cursor = body["next_cursor"].as_str().map(str::to_owned);
+        pages += 1;
+        assert!(pages < 20, "paging must terminate");
+    }
+    assert!(pages > 1, "130 cards must not fit one default page");
+    let unique: std::collections::BTreeSet<&String> = seen.iter().collect();
+    assert_eq!(unique.len(), 130, "every card once, saw {}", unique.len());
+
+    daemon_task.abort();
+}

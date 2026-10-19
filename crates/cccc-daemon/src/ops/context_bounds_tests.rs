@@ -247,3 +247,27 @@ fn cursor_resumes_after_the_last_returned_item() {
     assert_eq!(next_cursor(40, 3), "v1.40.3");
     assert_eq!(parse_cursor("v1.40.3").expect("parses"), (40, 3));
 }
+
+#[test]
+fn bounded_attention_is_counts_while_the_legacy_full_answer_keeps_entries() {
+    let document = real_document();
+    // Legacy `detail=full` returns the attention entries, which is a second
+    // copy of the live tasks and a large part of the multi-megabyte answer.
+    let legacy =
+        super::super::context_projection::project(document.clone(), "ctxv:17189".into(), "full");
+    assert!(legacy["attention"]["blocked"].is_array());
+
+    let bounded = project(
+        &document,
+        "ctxv:17189",
+        "full",
+        &bounds(json!({"limit": 1000}), json!({})),
+    );
+    for key in ["blocked", "waiting_user", "pending_handoffs"] {
+        assert!(
+            bounded["attention"][key].is_u64(),
+            "bounded attention.{key} must be a count, got {}",
+            bounded["attention"][key]
+        );
+    }
+}
