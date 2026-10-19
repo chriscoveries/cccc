@@ -159,6 +159,10 @@ fn profile_paths_escape_yaml_apostrophes() {
         cccc_contracts::DEEPSEEK_MAX_OUTPUT_TOKENS
     )));
     assert!(cccc_runtime::is_canonical_deepseek_config(&config));
+    assert!(
+        !config.contains("!!"),
+        "the managed profile must carry plain values only:\n{config}"
+    );
 }
 
 #[test]

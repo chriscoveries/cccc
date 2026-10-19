@@ -1,8 +1,7 @@
 use cccc_contracts::{
     DEEPSEEK_ACP_APP_PACKAGE, DEEPSEEK_ACP_APP_VERSION, DEEPSEEK_ACP_PACKAGE, DEEPSEEK_ACP_VERSION,
-    DEEPSEEK_LLM_ADAPTER_PACKAGE, DEEPSEEK_LLM_ADAPTER_VERSION, DEEPSEEK_MAX_OUTPUT_TOKENS,
-    DEEPSEEK_MCP_CLIENT_PACKAGE, DEEPSEEK_MCP_CLIENT_VERSION, DEEPSEEK_NPM_BEFORE,
-    DEEPSEEK_RELEASE_VERSION,
+    DEEPSEEK_LLM_ADAPTER_PACKAGE, DEEPSEEK_LLM_ADAPTER_VERSION, DEEPSEEK_MCP_CLIENT_PACKAGE,
+    DEEPSEEK_MCP_CLIENT_VERSION, DEEPSEEK_NPM_BEFORE, DEEPSEEK_RELEASE_VERSION,
 };
 use cccc_core::HomeLayout;
 use serde::Serialize;
@@ -255,12 +254,11 @@ fn write_profile_files(profile: &Path, executable: &Path) -> std::io::Result<()>
             }
         }),
     )?;
-    // YAML single-quoted scalars escape apostrophes by doubling them. A
-    // backslash is literal in this scalar style and must not be doubled.
-    let cccc_path = executable.to_string_lossy().replace('\'', "''");
-    let config = format!(
-        "- id: llm-deepseek\n  name: '@deepseek-ai/dsh-llm-deepseek'\n  config:\n    maxTokens: {DEEPSEEK_MAX_OUTPUT_TOKENS}\n- id: acp-demo\n  name: '@deepseek-ai/dsh-acp-demo'\n  config:\n    provider: deepseek-official\n    model: deepseek-v4-flash\n    workspaceContext: false\n    persistenceRoot: !!js process.env.CCCC_DEEPSEEK_SESSION_ROOT\n- id: cccc-mcp\n  name: '@deepseek-ai/dsh-mcp-client'\n  config:\n    transport: stdio\n    serverName: cccc\n    command: '{cccc_path}'\n    args: [mcp]\n    env:\n      CCCC_HOME: !!js process.env.CCCC_HOME\n      CCCC_GROUP_ID: !!js process.env.CCCC_GROUP_ID\n      CCCC_ACTOR_ID: !!js process.env.CCCC_ACTOR_ID\n    failOnStartupError: true\n"
-    );
+    // One generator owns the profile text (cccc_runtime::deepseek_profile_config)
+    // so the writer and the validator cannot drift. It carries plain values
+    // only; the tag check below holds that rule if the template ever regresses.
+    let config = cccc_runtime::deepseek_profile_config(executable);
+    cccc_core::fs::validate_yaml_tags(&profile.join("cordis.yml").display().to_string(), &config)?;
     cccc_core::fs::atomic_write(&profile.join("cordis.yml"), config.as_bytes())?;
     match fs::remove_file(profile.join("cordis.patch.yml")) {
         Ok(()) => {}

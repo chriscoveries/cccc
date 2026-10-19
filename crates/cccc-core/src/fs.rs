@@ -130,7 +130,90 @@ pub fn write_secret_yaml<T: Serialize>(path: &Path, value: &T) -> io::Result<()>
 }
 
 pub fn read_yaml<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
-    serde_yaml::from_reader(File::open(path)?).map_err(io::Error::other)
+    let value: serde_yaml::Value =
+        serde_yaml::from_reader(File::open(path)?).map_err(io::Error::other)?;
+    reject_yaml_tags(path, &value)?;
+    serde_yaml::from_value(value).map_err(io::Error::other)
+}
+
+/// CCCC never evaluates YAML tags. The parser hands an unknown tag such as
+/// `!!js` through as an opaque node, and every downstream consumer reads that
+/// node as an empty value — firestar's `mcp-cccc` entry loaded as `{}` for
+/// exactly this reason and failed plugin load with no useful message. Name the
+/// tag and its key path instead of silently degrading.
+fn yaml_tag_error(context: &str, value: &serde_yaml::Value) -> Option<String> {
+    let (tag, at) = tagged_yaml_node(value, "")?;
+    Some(format!(
+        "{context}: unknown YAML tag `{tag}` at `{at}`: CCCC does not evaluate YAML tags; use a plain value (YAML scalars are passed through verbatim)"
+    ))
+}
+
+fn tagged_yaml_node(value: &serde_yaml::Value, at: &str) -> Option<(String, String)> {
+    let here = || {
+        if at.is_empty() {
+            "<root>".to_owned()
+        } else {
+            at.to_owned()
+        }
+    };
+    match value {
+        serde_yaml::Value::Tagged(tagged) => Some((tagged.tag.to_string(), here())),
+        serde_yaml::Value::Mapping(map) => {
+            for (key, item) in map {
+                let key = match key {
+                    serde_yaml::Value::String(name) => name.clone(),
+                    other => format!("{other:?}"),
+                };
+                let child = if at.is_empty() {
+                    key
+                } else {
+                    format!("{at}.{key}")
+                };
+                if let Some(found) = tagged_yaml_node(item, &child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        serde_yaml::Value::Sequence(items) => {
+            for (index, item) in items.iter().enumerate() {
+                let child = if at.is_empty() {
+                    format!("[{index}]")
+                } else {
+                    format!("{at}[{index}]")
+                };
+                if let Some(found) = tagged_yaml_node(item, &child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn reject_yaml_tags(path: &Path, value: &serde_yaml::Value) -> io::Result<()> {
+    match yaml_tag_error(&path.display().to_string(), value) {
+        Some(message) => Err(io::Error::new(io::ErrorKind::InvalidData, message)),
+        None => Ok(()),
+    }
+}
+
+/// Reject YAML tags in a document CCCC is about to write, such as the runtime
+/// MCP profile. Generated config is held to the same rule as config CCCC
+/// reads: plain values only, so a tag can never reach a runtime loader that
+/// silently degrades it to `{}`.
+pub fn validate_yaml_tags(context: &str, text: &str) -> io::Result<()> {
+    let value: serde_yaml::Value = serde_yaml::from_str(text).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{context}: invalid YAML: {error}"),
+        )
+    })?;
+    match yaml_tag_error(context, &value) {
+        Some(message) => Err(io::Error::new(io::ErrorKind::InvalidData, message)),
+        None => Ok(()),
+    }
 }
 
 pub fn with_exclusive_lock<T>(
@@ -178,7 +261,7 @@ fn sync_dir(_path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::quote_rfc3339_yaml_scalars;
+    use super::{quote_rfc3339_yaml_scalars, read_yaml};
 
     #[test]
     fn python_yaml_loaders_keep_rfc3339_values_as_strings() {
@@ -189,5 +272,64 @@ mod tests {
             output,
             "created_at: \"2026-07-31T01:02:03.456789Z\"\nitems:\n- \"2026-07-31T01:02:03Z\"\n"
         );
+    }
+
+    /// The captured entry from the firestar `mcp-cccc` incident: the tag
+    /// evaluated to `{}` and the plugin failed to load with no hint about why.
+    #[test]
+    fn unknown_yaml_tag_is_rejected_with_the_tag_and_key_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "mcp_servers:\n  cccc:\n    command: /usr/local/bin/cccc\n    args: [mcp]\n    env:\n      CCCC_HOME: !!js process.env.CCCC_HOME\n",
+        )
+        .expect("write config");
+        let error = read_yaml::<serde_yaml::Value>(&path).expect_err("tag must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        let message = error.to_string();
+        assert!(message.contains("!!js"), "{message}");
+        assert!(
+            message.contains("mcp_servers.cccc.env.CCCC_HOME"),
+            "{message}"
+        );
+        assert!(message.contains("use a plain value"), "{message}");
+    }
+
+    #[test]
+    fn plain_yaml_still_loads() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "mcp_servers:\n  cccc:\n    env:\n      CCCC_HOME: /var/lib/cccc\n",
+        )
+        .expect("write config");
+        let value = read_yaml::<serde_yaml::Value>(&path).expect("plain yaml loads");
+        assert_eq!(
+            value["mcp_servers"]["cccc"]["env"]["CCCC_HOME"],
+            serde_yaml::Value::String("/var/lib/cccc".into())
+        );
+    }
+
+    /// A document CCCC is about to write is held to the same rule as one it
+    /// reads: the generated runtime profile must never carry `!!js`.
+    #[test]
+    fn generated_config_with_a_tag_is_rejected_before_it_is_written() {
+        let error = super::validate_yaml_tags(
+            "runtimes/deepseek/profiles/cccc-acp/cordis.yml",
+            "- id: cccc-mcp\n  config:\n    env:\n      CCCC_HOME: !!js process.env.CCCC_HOME\n",
+        )
+        .expect_err("a tagged generated config must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        let message = error.to_string();
+        assert!(message.contains("cordis.yml"), "{message}");
+        assert!(message.contains("!!js"), "{message}");
+        assert!(message.contains("[0].config.env.CCCC_HOME"), "{message}");
+        super::validate_yaml_tags(
+            "cordis.yml",
+            "- id: cccc-mcp\n  config:\n    command: '/usr/local/bin/cccc'\n",
+        )
+        .expect("plain generated config is accepted");
     }
 }

@@ -1,10 +1,12 @@
 use cccc_contracts::{Actor, ActorRuntime, ActorSubmit, Event, GroupState};
-use cccc_core::{GroupDoc, HomeLayout, inbox};
+use cccc_core::{GroupDoc, GroupStore, HomeLayout, inbox};
 use serde::Serialize;
+use serde_json::{Map, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use crate::ops::actor_delivery_worker;
 
@@ -17,6 +19,32 @@ const QUEUE_CAPACITY: usize = 256;
 const COMPLETION_CAPACITY: usize = 4096;
 const BATCH_CAPACITY: usize = 64;
 const DEFERRED_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(4);
+/// Attempts inside one round before the batch returns to the deferred queue.
+const DELIVERY_ATTEMPTS_PER_ROUND: u64 = 3;
+/// Owner spec dd17cbba item 3: a batch the runtime *refuses* is retried a
+/// bounded number of times, then settled Failed with one surfaced error event.
+/// Without a bound, a job the runtime can never accept (an oversize or
+/// timed-out turn) is re-offered for ever and keeps re-breaking the session it
+/// is aimed at.
+///
+/// Refusal is distinguished from not-ready on purpose. An actor that is still
+/// booting, or busy with a turn, has not refused anything: holding its message
+/// is a queue position, and expiring it would drop mail during normal work.
+/// Only a runtime that was asked and said no counts against this budget.
+const DELIVERY_REJECTION_ATTEMPTS: u32 = 3;
+
+fn rejection_backoff(attempts: u32) -> std::time::Duration {
+    let exponent = attempts.saturating_sub(1).min(3);
+    std::time::Duration::from_millis(250 * (1_u64 << exponent))
+}
+
+/// Consecutive failed batches after which the per-actor breaker opens. The
+/// breaker is the second level of the same guard: three separate messages
+/// failing in a row means the actor, not the message, is the fault.
+const DELIVERY_BREAKER_FAILURES: u32 = 3;
+/// How long an open breaker refuses new work before it half-opens (the next
+/// batch is attempted again, and a success closes it).
+const DELIVERY_BREAKER_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
 const TERMINAL_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(1_500);
 const TERMINAL_REPEAT_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -274,6 +302,50 @@ pub(super) fn fail_jobs(jobs: &[DeliveryJob], reason: &str) {
     for job in jobs {
         fail_job(job, reason);
     }
+}
+
+/// Settle a batch the runtime refused `attempts` times: every job Failed, one
+/// error event for the message, and (if this batch exhausted the breaker)
+/// one circuit-open event. Returns whether the breaker opened.
+fn settle_rejected_batch(batch: &[DeliveryJob], reason: &str, attempts: u32) -> bool {
+    fail_jobs(batch, reason);
+    let Some(head) = batch.first() else {
+        return false;
+    };
+    surface_delivery_error(
+        &head.home,
+        &head.group,
+        &head.actor,
+        &format!(
+            "delivery-failed:{}:{}:{}",
+            head.group.group_id, head.actor.id, head.event.id
+        ),
+        "Message could not be delivered",
+        &format!(
+            "Gave up on message {} after {} rejected attempts ({reason}). It is recorded as failed and will not be retried.",
+            head.event.id, attempts
+        ),
+    );
+    let key = (head.group.group_id.clone(), head.actor.id.clone());
+    let opened = breaker_failed(&key);
+    if opened {
+        surface_delivery_error(
+            &head.home,
+            &head.group,
+            &head.actor,
+            &format!(
+                "delivery-circuit-open:{}:{}",
+                head.group.group_id, head.actor.id
+            ),
+            "Delivery paused for this actor",
+            &format!(
+                "{} messages in a row could not be delivered; new deliveries are refused for {} seconds before one more attempt is made.",
+                DELIVERY_BREAKER_FAILURES,
+                DELIVERY_BREAKER_COOLDOWN.as_secs()
+            ),
+        );
+    }
+    opened
 }
 
 pub fn dispatch(home: &HomeLayout, group: &GroupDoc, event: &Event) -> DispatchReport {
@@ -617,14 +689,17 @@ fn enqueue(job: DeliveryJob) -> bool {
 }
 
 fn spawn_worker(key: &Key) -> DeliveryWorker {
+    let rejection_attempts = DELIVERY_REJECTION_ATTEMPTS;
     let (sender, receiver) = mpsc::sync_channel::<DeliveryJob>(QUEUE_CAPACITY);
     let name = format!("cccc-delivery:{}:{}", key.0, key.1);
     let cancelled = Arc::new(AtomicBool::new(false));
     let thread_cancelled = Arc::clone(&cancelled);
+    let key = (*key).clone();
     let thread = std::thread::Builder::new().name(name).spawn(move || {
         let mut preamble_session = String::new();
         let mut deferred = Vec::new();
         let mut deferred_failures: u32 = 0;
+        let mut rejected_attempts: u32 = 0;
         while !thread_cancelled.load(Ordering::Acquire) {
             let mut batch = if deferred.is_empty() {
                 let Ok(job) = receiver.recv() else {
@@ -664,9 +739,26 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                     }
                 }
             }
+            if batch.is_empty() {
+                continue;
+            }
+            // An open breaker refuses work before any runtime call: the actor
+            // is the fault, so re-offering the same broken session only
+            // multiplies the damage the retry cap just stopped.
+            if breaker_blocks(&key) {
+                let reason = format!(
+                    "delivery circuit open for {} after {} consecutive failed messages",
+                    key.1, DELIVERY_BREAKER_FAILURES
+                );
+                fail_jobs(&batch, &reason);
+                deferred.clear();
+                deferred_failures = 0;
+                continue;
+            }
             let mut delivered = false;
             let mut terminal_reason = None;
-            for attempt in 0..3 {
+            let mut rejection: Option<String> = None;
+            for attempt in 0..DELIVERY_ATTEMPTS_PER_ROUND {
                 match actor_delivery_worker::process_batch(
                     &mut batch,
                     &mut preamble_session,
@@ -680,7 +772,15 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                         terminal_reason = Some(reason);
                         break;
                     }
-                    actor_delivery_worker::BatchOutcome::Retry => {}
+                    // The runtime was asked and refused this batch. That is a
+                    // fault, not a queue position, so it is counted, and the
+                    // inner transient-retry loop stops here: the rejection
+                    // budget counts real submissions, not probes.
+                    actor_delivery_worker::BatchOutcome::Rejected(reason) => {
+                        rejection = Some(reason);
+                        break;
+                    }
+                    actor_delivery_worker::BatchOutcome::Retry => rejection = None,
                 }
                 if thread_cancelled.load(Ordering::Acquire) {
                     break;
@@ -695,11 +795,46 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
             if let Some(reason) = terminal_reason {
                 fail_jobs(&batch, &reason);
                 deferred_failures = 0;
-            } else if !delivered {
-                deferred = batch;
-                deferred_failures = deferred_failures.saturating_add(1);
-            } else {
+                rejected_attempts = 0;
+            } else if delivered {
+                breaker_delivered(&key);
                 deferred_failures = 0;
+                rejected_attempts = 0;
+            } else if let Some(reason) = rejection {
+                rejected_attempts = rejected_attempts.saturating_add(1);
+                if rejected_attempts >= rejection_attempts {
+                    // Owner spec (dd17cbba item 3): a batch the runtime keeps
+                    // refusing is retried a bounded number of times, then
+                    // settled Failed with exactly one surfaced error. The old
+                    // behaviour re-offered it for ever.
+                    if batch.is_empty() {
+                        rejected_attempts = 0;
+                        continue;
+                    }
+                    let reason = format!(
+                        "runtime rejected delivery {} times: {reason}",
+                        rejected_attempts
+                    );
+                    settle_rejected_batch(&batch, &reason, rejected_attempts);
+                    deferred.clear();
+                    deferred_failures = 0;
+                    rejected_attempts = 0;
+                } else {
+                    if !actor_delivery_worker::interruptible_sleep(
+                        rejection_backoff(rejected_attempts),
+                        &thread_cancelled,
+                    ) {
+                        break;
+                    }
+                    deferred = batch;
+                }
+            } else {
+                // Not ready yet (actor starting, turn in flight, group paused):
+                // this is a queue position, not a retry of a failing call, so it
+                // is held with the existing bounded deferred delay.
+                deferred_failures = deferred_failures.saturating_add(1);
+                rejected_attempts = 0;
+                deferred = batch;
             }
         }
         fail_jobs(
@@ -728,6 +863,111 @@ fn deferred_retry_delay(failures: u32) -> std::time::Duration {
     let exponent = failures.saturating_sub(1).min(4);
     let delay = std::time::Duration::from_millis(250 * (1_u64 << exponent));
     delay.min(DEFERRED_RETRY_MAX)
+}
+
+/// Per-actor delivery breaker state. `failures` counts consecutive batches
+/// that exhausted their retry budget; `open_until` is set while the breaker
+/// refuses new work.
+#[derive(Default)]
+struct DeliveryBreaker {
+    failures: u32,
+    open_until: Option<Instant>,
+}
+
+fn breakers() -> &'static Mutex<HashMap<Key, DeliveryBreaker>> {
+    static BREAKERS: OnceLock<Mutex<HashMap<Key, DeliveryBreaker>>> = OnceLock::new();
+    BREAKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// True while the actor's breaker refuses new work. A breaker whose cooldown
+/// has elapsed half-opens: the next batch is attempted, and a delivery closes
+/// it again.
+fn breaker_blocks(key: &Key) -> bool {
+    let Ok(mut map) = breakers().lock() else {
+        return false;
+    };
+    let Some(state) = map.get_mut(key) else {
+        return false;
+    };
+    match state.open_until {
+        Some(until) if until > Instant::now() => true,
+        Some(_) => {
+            state.open_until = None;
+            false
+        }
+        None => false,
+    }
+}
+
+/// Record one batch that exhausted its retries. Returns true when this
+/// failure opened the breaker, so the caller surfaces exactly one event per
+/// open window.
+fn breaker_failed(key: &Key) -> bool {
+    let Ok(mut map) = breakers().lock() else {
+        return false;
+    };
+    let state = map.entry(key.clone()).or_default();
+    if state.open_until.is_some() {
+        return false;
+    }
+    state.failures = state.failures.saturating_add(1);
+    if state.failures < DELIVERY_BREAKER_FAILURES {
+        return false;
+    }
+    state.failures = 0;
+    state.open_until = Some(Instant::now() + DELIVERY_BREAKER_COOLDOWN);
+    true
+}
+
+fn breaker_delivered(key: &Key) {
+    if let Ok(mut map) = breakers().lock() {
+        map.remove(key);
+    }
+}
+
+/// Record one human-visible delivery failure in the Group ledger as the single
+/// event the owner asked for ("deliver one error event to the actor and
+/// stop"). `client_id` makes the notice idempotent, so a replayed worker never
+/// duplicates it.
+fn surface_delivery_error(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    client_id: &str,
+    title: &str,
+    message: &str,
+) {
+    let Ok(store) = GroupStore::new(home.clone()) else {
+        return;
+    };
+    let Ok(path) = store.ledger_path(&group.group_id) else {
+        return;
+    };
+    if matches!(
+        cccc_core::ledger::find_idempotent(&path, "system.notify", "system", client_id),
+        Ok(Some(_))
+    ) {
+        return;
+    }
+    let mut notice = Event::new("system.notify", &group.group_id);
+    notice.by = "system".into();
+    notice.scope_key = group.active_scope_key.clone();
+    notice.data = Map::from_iter([
+        ("client_id".to_owned(), json!(client_id)),
+        ("kind".to_owned(), json!("error")),
+        ("target_actor_id".to_owned(), json!(actor.id)),
+        ("im_visibility".to_owned(), json!("internal")),
+        ("title".to_owned(), json!(title)),
+        ("message".to_owned(), json!(message)),
+    ]);
+    if let Err(error) = cccc_core::ledger::append(&path, &notice) {
+        tracing::warn!(
+            %error,
+            group_id = %group.group_id,
+            actor_id = %actor.id,
+            "failed to surface delivery error"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1000,6 +1240,130 @@ mod tests {
                 .expect("in flight")
                 .iter()
                 .any(|item| item.0 == group.group_id)
+        );
+    }
+
+    /// Owner acceptance test for spec dd17cbba item 3, driven on a real
+    /// captured cwflab message instead of synthetic text: a refused batch is
+    /// settled Failed with exactly one surfaced error, and settling twice does
+    /// not double the record or the notice.
+    #[test]
+    fn refused_message_settles_with_one_surfaced_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("retry budget", "").expect("group");
+        let actor = Actor::new("peer1");
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save group");
+
+        let captured: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/real_cwflab_delivery_event.json"
+        ))
+        .expect("fixture json");
+        let mut event: Event =
+            serde_json::from_value(captured["event"].clone()).expect("captured event");
+        event.group_id = group.group_id.clone();
+
+        let job = DeliveryJob {
+            home: home.clone(),
+            group: group.clone(),
+            actor: actor.clone(),
+            event: event.clone(),
+        };
+        let key = (group.group_id.clone(), actor.id.clone(), event.id.clone());
+        in_flight().lock().expect("claims").insert(key.clone());
+        crate::ops::runtime_delivery::append_state(
+            &home,
+            &group.group_id,
+            &actor.id,
+            &actor.created_at,
+            &event.id,
+            delivery_transport(&home, &group, &actor),
+            crate::ops::runtime_delivery::DeliveryOutcome::Claimed,
+        )
+        .expect("claim");
+
+        settle_rejected_batch(
+            std::slice::from_ref(&job),
+            "runtime rejected delivery 3 times: refused by runtime",
+            DELIVERY_REJECTION_ATTEMPTS,
+        );
+        assert!(!in_flight().lock().expect("claims").contains(&key));
+
+        let path = store.ledger_path(&group.group_id).expect("ledger");
+        let events = ledger::read_all(&path).expect("events");
+        let failed_event = events
+            .iter()
+            .find(|event| {
+                event.kind == "runtime.delivery" && event.data["state"] == json!("failed")
+            })
+            .expect("failed delivery record");
+        let reason = failed_event.data["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("rejected") && reason.contains("refused by runtime"),
+            "the refusal must be recorded as the reason: {reason}"
+        );
+        let notices: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "system.notify")
+            .collect();
+        assert_eq!(notices.len(), 1, "exactly one surfaced error event");
+        assert_eq!(notices[0].data["kind"], json!("error"));
+        assert_eq!(notices[0].data["target_actor_id"], json!(actor.id));
+        let failed = events
+            .iter()
+            .filter(|event| event.kind == "runtime.delivery")
+            .filter(|event| event.data["state"] == json!("failed"))
+            .count();
+        assert_eq!(failed, 1, "the message is settled Failed once");
+
+        // Re-settling the same message re-records the failure but never
+        // surfaces a second error: the notice key is idempotent.
+        settle_rejected_batch(
+            std::slice::from_ref(&job),
+            "runtime rejected delivery 3 times: refused by runtime",
+            DELIVERY_REJECTION_ATTEMPTS,
+        );
+        let after = ledger::read_all(&path).expect("events after settle");
+        assert_eq!(
+            after
+                .iter()
+                .filter(|event| event.kind == "system.notify")
+                .count(),
+            1,
+            "a settled message must not surface a second error"
+        );
+    }
+
+    #[test]
+    fn breaker_opens_after_three_failed_batches_and_a_delivery_closes_it() {
+        let key = ("g_breaker".to_owned(), "peer".to_owned());
+        assert!(!breaker_blocks(&key));
+        assert!(!breaker_failed(&key));
+        assert!(!breaker_failed(&key));
+        assert!(
+            breaker_failed(&key),
+            "the third consecutive failed batch opens the breaker"
+        );
+        assert!(breaker_blocks(&key));
+        breaker_delivered(&key);
+        assert!(!breaker_blocks(&key), "a delivery closes the breaker");
+    }
+
+    /// Owner spec item 3: three attempts, exponential backoff, then stop.
+    #[test]
+    fn rejection_backoff_is_exponential_and_bounded() {
+        assert_eq!(DELIVERY_REJECTION_ATTEMPTS, 3);
+        assert_eq!(rejection_backoff(1), std::time::Duration::from_millis(250));
+        assert_eq!(rejection_backoff(2), std::time::Duration::from_millis(500));
+        assert_eq!(
+            rejection_backoff(3),
+            std::time::Duration::from_millis(1_000)
+        );
+        assert_eq!(
+            rejection_backoff(u32::MAX),
+            std::time::Duration::from_millis(2_000)
         );
     }
 }
