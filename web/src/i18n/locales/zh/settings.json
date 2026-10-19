@@ -673,6 +673,8 @@
     "notebookSectionLockedConnecting": "完成当前 Google 登录后，这里会显示工作 / 记忆笔记本的查看、绑定与管理。"
   },
   "automation": {
+    "foremanSweep": "每小时提醒主管检查任务卡",
+    "foremanSweepHelp": "通知 @foreman 检查任务卡。保留现有的自定义时间表和消息。",
     "title": "自动化",
     "description": "配置内建自动化和定时规则。设置存储在",
     "configPathFallback": "CCCC_HOME/…/group.yaml",

@@ -681,6 +681,8 @@
     "notebookSectionLockedConnecting": "現在の Google サインインが完了すると、ここに作業 / メモリノートブックの表示・バインド・管理が現れます。"
   },
   "automation": {
+    "foremanSweep": "担当管理者による毎時のカード確認",
+    "foremanSweepHelp": "@foreman にカードの確認を通知します。既存のカスタムスケジュールとメッセージは保持されます。",
     "title": "自動化",
     "description": "組み込み自動化とスケジュール済みルールを構成します。設定は次の場所に保存されます",
     "configPathFallback": "CCCC_HOME/.../group.yaml",
