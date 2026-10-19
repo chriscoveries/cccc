@@ -18,6 +18,10 @@ interface DeliveryTabProps {
   setMailNoticeIdleAfterSeconds: (v: number) => void;
   replyNoticeAfterSeconds: number;
   setReplyNoticeAfterSeconds: (v: number) => void;
+  taskWakeOnIdle: boolean;
+  setTaskWakeOnIdle: (v: boolean) => void;
+  taskWakeIntervalSeconds: number;
+  setTaskWakeIntervalSeconds: (v: number) => void;
   onSave: () => void;
 }
 
@@ -46,6 +50,13 @@ export function DeliveryTab(props: DeliveryTabProps) {
       value: props.replyNoticeAfterSeconds,
       onChange: props.setReplyNoticeAfterSeconds,
     },
+    {
+      id: "delivery-task-wake-interval",
+      label: t("delivery.taskWakeInterval"),
+      help: t("delivery.taskWakeIntervalHelp"),
+      value: props.taskWakeIntervalSeconds,
+      onChange: props.setTaskWakeIntervalSeconds,
+    },
   ];
 
   return (
@@ -65,6 +76,19 @@ export function DeliveryTab(props: DeliveryTabProps) {
             />
           </SettingsRow>
         ))}
+
+        <SettingsRow
+          label={t("delivery.taskWakeOnIdle")}
+          help={t("delivery.taskWakeOnIdleHelp")}
+          htmlFor="delivery-task-wake-on-idle"
+        >
+          <input
+            id="delivery-task-wake-on-idle"
+            type="checkbox"
+            checked={props.taskWakeOnIdle}
+            onChange={(e) => props.setTaskWakeOnIdle(e.target.checked)}
+          />
+        </SettingsRow>
       </SettingsCard>
     </SettingsPage>
   );
