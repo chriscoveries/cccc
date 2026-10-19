@@ -53,6 +53,9 @@ async fn context_get(
             "group_id":group_id,
             "detail":detail,
             "fresh":strict_bool(query.fresh.as_deref(), "fresh")?,
+            // The dashboard renders the whole board; it is served to a local
+            // browser, not to an actor transport, so it keeps the full answer.
+            "unbounded":true,
         })),
     )
     .await

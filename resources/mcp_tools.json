@@ -2246,7 +2246,7 @@
   },
   {
     "name": "cccc_context_get",
-    "description": "Get the context control-plane snapshot (coordination, agent states, attention, board).",
+    "description": "Get the context control-plane snapshot (coordination, agent states, attention, board). Bounded by default: one answer carries at most `limit` board/task items and actor states, and the serialized answer stays under the group's state_max_bytes cap. When items remain, the answer reports `truncated: true` and a `next_cursor` to pass back in `cursor`; the cursor always advances, so paging terminates. Bounded answers report `attention` as counts; `tasks_summary` always covers the whole board. `detail=overview` (brief plus agent states) is bounded the same way.",
     "annotations": {
       "readOnlyHint": true,
       "destructiveHint": false,
@@ -2263,6 +2263,34 @@
         "include_archived": {
           "type": "boolean",
           "default": false
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 100,
+          "description": "Maximum board/task items and actor states in this answer. The serialized answer also stays under the group's state_max_bytes cap; an item too large to fit arrives as {\"id\", \"oversized\": true} and its id is listed in paging.oversized."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "A next_cursor from a previous bounded answer; resumes after the last item returned."
+        },
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "coordination",
+              "board",
+              "actors"
+            ]
+          },
+          "description": "Sections to return (default: all three)."
+        },
+        "summary": {
+          "type": "boolean",
+          "default": false,
+          "description": "Return counts and the coordination brief only, without task item lists."
         }
       },
       "required": []
