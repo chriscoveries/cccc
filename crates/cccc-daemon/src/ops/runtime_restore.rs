@@ -168,11 +168,6 @@ mod tests {
     use crate::ops::actor_runtime;
     use cccc_contracts::{Actor, ActorRuntime, GroupState, RunnerKind};
     use cccc_core::{GroupDoc, GroupStore, HomeLayout, Scope, ledger};
-    use serde_json::json;
-
-    fn running(group_id: &str, actor_id: &str) -> bool {
-        cccc_runtime::status(group_id, actor_id).is_ok_and(|status| status.running)
-    }
 
     #[test]
     fn paused_groups_restore_terminal_runtimes_but_not_non_terminal_runtimes() {

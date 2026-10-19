@@ -79,22 +79,11 @@ fn reconcile_one(store: &GroupStore, status: SessionStatus) -> Result<(), OpErro
                 "failed to record the fast failure for restart backoff"
             );
         }
-        // RS-1's exit half: this launch never returned to a launcher, so nothing invalidated the
-        // provider binding it was resuming. Without this the next launch would resume the same dead
-        // session and only fall back to fresh after failing again.
-        if let Err(error) = super::super::runtime_session::invalidate_current_receipt(
-            store.home(),
-            &status.group_id,
-            &status.actor_id,
-            &stderr,
-        ) {
-            tracing::warn!(
-                group_id = %status.group_id,
-                actor_id = %status.actor_id,
-                %error,
-                "failed to invalidate the managed session after a fast failure"
-            );
-        }
+        // RS-1's exit half (invalidate the provider binding so the next launch
+        // does not resume the same dead session) is NOT ported: v0.4.43 replaced
+        // the one-fresh-fallback policy with resume blocking in
+        // runtime_session::resume_failure, which the base's finish_launch path
+        // already applies. Adding the old invalidation here would fight it.
     } else if let Err(error) = super::super::actor_restart_backoff::record_first_turn(
         store.home(),
         &status.group_id,
@@ -295,6 +284,7 @@ mod tests {
                 pid: Some(43),
                 started_at: just_started,
                 exit_code: Some(3),
+                exit_detail: Some("Exited with code 3".into()),
             }],
         )
         .expect("reconcile fast exit");
@@ -342,6 +332,7 @@ mod tests {
                 pid: Some(44),
                 started_at: long_running,
                 exit_code: Some(0),
+                exit_detail: Some("Exited with code 0".into()),
             }],
         )
         .expect("reconcile established exit");

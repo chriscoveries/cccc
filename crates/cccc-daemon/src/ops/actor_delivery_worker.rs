@@ -163,7 +163,7 @@ fn process_deepseek_batch(
             return BatchOutcome::Retry;
         }
         if !automation_may_launch(home, &group.group_id, &actor.id) {
-            return false;
+            return BatchOutcome::Retry;
         }
         match actor_runtime::apply(home, group, &actor.id, "actor.start") {
             Ok(_) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
@@ -196,7 +196,7 @@ fn process_managed_batch(
 ) -> BatchOutcome {
     if !crate::ops::local_headless::running(&group.group_id, &actor.id) {
         if !automation_may_launch(home, &group.group_id, &actor.id) {
-            return false;
+            return BatchOutcome::Retry;
         }
         match actor_runtime::apply(home, group, &actor.id, "actor.start") {
             Ok(None) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {}
@@ -328,7 +328,7 @@ fn ensure_running(
         return Ok(Some(status));
     }
     if !automation_may_launch(home, &group.group_id, &actor.id) {
-        return None;
+        return Ok(None);
     }
     let status = match actor_runtime::apply(home, group, &actor.id, "actor.start") {
         Ok(Some(status)) if status.running => status,
