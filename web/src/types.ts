@@ -790,6 +790,7 @@ export type AgentsMdInfo = {
 };
 
 export type GroupSettings = {
+  opencode_snapshot?: boolean;
   default_send_to: "foreman" | "broadcast";
   actor_idle_timeout_seconds: number;
   keepalive_delay_seconds: number;
