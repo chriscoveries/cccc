@@ -307,6 +307,7 @@ pub fn default_command(runtime: ActorRuntime) -> Vec<String> {
         ActorRuntime::Grok => "grok --always-approve",
         ActorRuntime::Hermes => "hermes --tui --yolo",
         ActorRuntime::Kimi => "kimi --yolo",
+        ActorRuntime::Muse => "muse --yolo",
         ActorRuntime::Opencode => "opencode --auto",
         ActorRuntime::Pi => "pi",
         ActorRuntime::WebModel
@@ -336,6 +337,7 @@ pub fn detect_runtimes() -> Vec<RuntimeProbe> {
         "grok",
         "hermes",
         "kimi",
+        "muse",
         "opencode",
         "pi",
         "web_model",
@@ -413,6 +415,7 @@ const fn runtime_name(runtime: ActorRuntime) -> &'static str {
         ActorRuntime::Grok => "grok",
         ActorRuntime::Hermes => "hermes",
         ActorRuntime::Kimi => "kimi",
+        ActorRuntime::Muse => "muse",
         ActorRuntime::Opencode => "opencode",
         ActorRuntime::Pi => "pi",
         ActorRuntime::WebModel => "web_model",
@@ -440,6 +443,7 @@ const fn display_name(runtime: ActorRuntime) -> &'static str {
         ActorRuntime::Grok => "Grok",
         ActorRuntime::Hermes => "Hermes",
         ActorRuntime::Kimi => "Kimi Code",
+        ActorRuntime::Muse => "Muse Code",
         ActorRuntime::Opencode => "OpenCode",
         ActorRuntime::Pi => "Pi",
         ActorRuntime::WebModel => "ChatGPT Web Model",
@@ -483,6 +487,21 @@ mod tests {
     use super::{deepseek_home, default_command, detect_runtimes};
     use cccc_contracts::ActorRuntime;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn muse_default_command_and_catalog_entry() {
+        assert_eq!(
+            default_command(ActorRuntime::Muse),
+            vec!["muse".to_owned(), "--yolo".to_owned()]
+        );
+        let probe = detect_runtimes()
+            .into_iter()
+            .find(|probe| probe.name == "muse")
+            .expect("muse catalog entry");
+        assert_eq!(probe.display_name, "Muse Code");
+        assert_eq!(probe.recommended_command, "muse --yolo");
+        assert_eq!(probe.command, "muse");
+    }
 
     #[test]
     fn codex_default_disables_startup_update_checks() {
