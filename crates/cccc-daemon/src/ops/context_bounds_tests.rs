@@ -102,7 +102,8 @@ fn default_answer_is_truncated_under_the_byte_cap() {
         size(&answer)
     );
     assert_eq!(answer["truncated"], json!(true));
-    assert_eq!(answer["paging"]["task_total"], json!(775));
+    // 775 captured cards, 142 archived: a default page counts the 633 live ones.
+    assert_eq!(answer["paging"]["task_total"], json!(633));
     assert!(task_ids(&answer).len() <= DEFAULT_LIMIT);
     assert!(answer["next_cursor"].as_str().is_some());
 }
@@ -110,36 +111,44 @@ fn default_answer_is_truncated_under_the_byte_cap() {
 #[test]
 fn paging_walks_every_real_task_and_actor_exactly_once() {
     let document = real_document();
-    let mut cursor: Option<String> = None;
-    let mut seen_tasks: Vec<String> = Vec::new();
-    let mut seen_actors: Vec<String> = Vec::new();
-    let mut pages = 0;
-    loop {
-        let mut args = json!({"limit": 40});
-        if let Some(cursor) = &cursor {
-            args["cursor"] = json!(cursor);
+    for include_archived in [false, true] {
+        let mut cursor: Option<String> = None;
+        let mut seen_tasks: Vec<String> = Vec::new();
+        let mut seen_actors: Vec<String> = Vec::new();
+        let mut pages = 0;
+        loop {
+            let mut args = json!({"limit": 40, "include_archived": include_archived});
+            if let Some(cursor) = &cursor {
+                args["cursor"] = json!(cursor);
+            }
+            let answer = project(&document, "ctxv:17189", "full", &bounds(args, json!({})));
+            assert!(size(&answer) <= DEFAULT_STATE_MAX_BYTES);
+            seen_tasks.extend(task_ids(&answer));
+            seen_actors.extend(actor_ids(&answer));
+            pages += 1;
+            match answer["next_cursor"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => break,
+            }
+            assert!(pages < 1000, "paging must terminate");
         }
-        let answer = project(&document, "ctxv:17189", "full", &bounds(args, json!({})));
-        assert!(size(&answer) <= DEFAULT_STATE_MAX_BYTES);
-        seen_tasks.extend(task_ids(&answer));
-        seen_actors.extend(actor_ids(&answer));
-        pages += 1;
-        match answer["next_cursor"].as_str() {
-            Some(next) => cursor = Some(next.to_owned()),
-            None => break,
-        }
-        assert!(pages < 1000, "paging must terminate");
+        assert!(pages > 1);
+        let expected_tasks: Vec<String> = document
+            .tasks
+            .iter()
+            .filter(|task| {
+                include_archived || task.get("status").and_then(Value::as_str) != Some("archived")
+            })
+            .filter_map(|task| task.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        assert_eq!(
+            seen_tasks, expected_tasks,
+            "include_archived={include_archived}"
+        );
+        // agent_states is a BTreeMap, so the document order is already sorted.
+        let expected_actors: Vec<String> = document.agent_states.keys().cloned().collect();
+        assert_eq!(seen_actors, expected_actors);
     }
-    assert!(pages > 1);
-    let expected_tasks: Vec<String> = document
-        .tasks
-        .iter()
-        .filter_map(|task| task.get("id").and_then(Value::as_str).map(str::to_owned))
-        .collect();
-    assert_eq!(seen_tasks, expected_tasks);
-    // agent_states is a BTreeMap, so the document order is already sorted.
-    let expected_actors: Vec<String> = document.agent_states.keys().cloned().collect();
-    assert_eq!(seen_actors, expected_actors);
 }
 
 #[test]
@@ -171,7 +180,7 @@ fn include_selects_real_sections() {
     );
     assert!(board_only.get("coordination").is_none());
     assert!(board_only.get("agent_states").is_none());
-    assert_eq!(board_only["paging"]["task_total"], json!(775));
+    assert_eq!(board_only["paging"]["task_total"], json!(633));
 
     let actors_only = project(
         &document,

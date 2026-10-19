@@ -39,6 +39,7 @@ pub(super) struct Bounds {
     pub include_coordination: bool,
     pub include_board: bool,
     pub include_actors: bool,
+    pub include_archived: bool,
     pub summary: bool,
     pub task_offset: usize,
     pub actor_offset: usize,
@@ -86,6 +87,10 @@ impl Bounds {
             include_coordination,
             include_board,
             include_actors,
+            // Archived cards are hidden from a page by default, the same way
+            // the MCP layer hides them: filtering here keeps the page full and
+            // makes `paging.task_total` describe the cards the caller can see.
+            include_archived: bool_arg(request, "include_archived", false),
             summary: bool_arg(request, "summary", false),
             task_offset,
             actor_offset,
@@ -199,7 +204,12 @@ pub(super) fn project(
     detail: &str,
     bounds: &Bounds,
 ) -> Value {
-    let total_tasks = document.tasks.len();
+    let tasks: Vec<&Map<String, Value>> = document
+        .tasks
+        .iter()
+        .filter(|task| bounds.include_archived || status(task) != "archived")
+        .collect();
+    let total_tasks = tasks.len();
     let actors: Vec<(&String, &Map<String, Value>)> = document.agent_states.iter().collect();
     let total_actors = actors.len();
     let page_size = bounds.page_size();
@@ -215,7 +225,7 @@ pub(super) fn project(
         let mut used = serialized_len(&envelope(document, version, detail, bounds));
         if bounds.include_coordination || bounds.include_board {
             while page.len() < page_size && task_end < total_tasks {
-                let rendered = render_task(&document.tasks[task_end], detail == "full");
+                let rendered = render_task(tasks[task_end], detail == "full");
                 let size = serialized_len(&rendered) + 1;
                 if !page.is_empty() && used.saturating_add(size) > budget {
                     break;
