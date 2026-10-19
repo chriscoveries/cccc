@@ -392,7 +392,10 @@ pub fn pending_sources(
                     event.data.get("target_actor_id").and_then(Value::as_str)
                         == Some(actor.id.as_str())
                 } else {
-                    inbox::is_for_actor(group, event, &actor.id)
+                    (notice_kind == "memory_restart"
+                        && event.data.get("target_actor_id").and_then(Value::as_str)
+                            == Some(actor.id.as_str()))
+                        || inbox::is_for_actor(group, event, &actor.id)
                 }
             } else {
                 false
