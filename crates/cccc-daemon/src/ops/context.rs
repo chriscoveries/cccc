@@ -21,7 +21,7 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
 
 fn get(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group_id = required_arg(request, "group_id")?;
-    load_group(home, &group_id)?;
+    let group = load_group(home, &group_id)?;
     let contexts = ContextStore::new(home.clone()).map_err(OpError::io)?;
     let detail = string_arg(request, "detail").unwrap_or_else(|| "full".into());
     if !matches!(detail.as_str(), "overview" | "summary" | "full") {
@@ -37,8 +37,20 @@ fn get(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     }
     .map_err(OpError::io)?;
     let version = contexts.version(&document).map_err(OpError::io)?;
-    object(super::context_projection::project(
-        document, version, &detail,
+    // A whole-board answer from a large group is megabytes; the overview is
+    // small by construction, so only the two task-bearing details are bounded.
+    let bounds = if detail == "overview" {
+        None
+    } else {
+        super::context_bounds::Bounds::from_request(request, &group)?
+    };
+    let Some(bounds) = bounds else {
+        return object(super::context_projection::project(
+            document, version, &detail,
+        ));
+    };
+    object(super::context_bounds::project(
+        &document, &version, &detail, &bounds,
     ))
 }
 
