@@ -10,6 +10,7 @@ use super::*;
 use cccc_contracts::DaemonRequest;
 use cccc_core::GroupDoc;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
 use std::io::Read;
 
 const FIXTURE: &[u8] =
@@ -46,7 +47,13 @@ fn group_with(extra: Value) -> GroupDoc {
 }
 
 fn bounds(args: Value, extra: Value) -> Bounds {
-    Bounds::from_request(&request(args), &group_with(extra))
+    Bounds::from_request(&request(args), &group_with(extra), "full")
+        .expect("valid bounds")
+        .expect("bounded")
+}
+
+fn bounds_for(detail: &str, args: Value, extra: Value) -> Bounds {
+    Bounds::from_request(&request(args), &group_with(extra), detail)
         .expect("valid bounds")
         .expect("bounded")
 }
@@ -220,15 +227,20 @@ fn group_caps_shrink_the_real_answer_instead_of_failing() {
 }
 
 #[test]
-fn limit_zero_and_unbounded_keep_the_legacy_answer() {
+fn limit_zero_is_rejected_and_unbounded_is_the_only_bypass() {
     let group = group_with(json!({}));
+    // `limit: 0` used to return the whole 4 MB snapshot: the exact answer this
+    // op exists to prevent. It must be an argument error, not a bypass.
+    let error = Bounds::from_request(&request(json!({"limit": 0})), &group, "full")
+        .expect_err("limit 0 must be rejected");
+    assert_eq!(error.code, "invalid_args");
     assert!(
-        Bounds::from_request(&request(json!({"limit": 0})), &group)
-            .expect("valid")
-            .is_none()
+        error.message.contains("unbounded=true"),
+        "the error must name the explicit bypass: {}",
+        error.message
     );
     assert!(
-        Bounds::from_request(&request(json!({"unbounded": true})), &group)
+        Bounds::from_request(&request(json!({"unbounded": true})), &group, "full")
             .expect("valid")
             .is_none()
     );
@@ -245,7 +257,7 @@ fn malformed_bounds_are_rejected_with_one_clear_error() {
         json!({"limit": -1}),
         json!({"limit": "100"}),
     ] {
-        let error = Bounds::from_request(&request(args.clone()), &group)
+        let error = Bounds::from_request(&request(args.clone()), &group, "full")
             .expect_err(&format!("must reject {args}"));
         assert_eq!(error.code, "invalid_args");
     }
@@ -279,4 +291,205 @@ fn bounded_attention_is_counts_while_the_legacy_full_answer_keeps_entries() {
             bounded["attention"][key]
         );
     }
+}
+
+// ----------------------------------------------------------------------
+// Cap and progress guarantees (T771 integration review, 2026-10-19)
+// ----------------------------------------------------------------------
+
+/// The review's failure case: one real task larger than the byte cap. The old
+/// fill loop admitted it, the verify loop dropped it back to the same offset,
+/// and `next_cursor` repeated forever. Now the card arrives as a stub, the cap
+/// holds, and the cursor advances past it.
+#[test]
+fn a_task_bigger_than_the_cap_is_a_stub_and_the_walk_still_advances() {
+    let mut document = real_document();
+    let target = document.tasks[3]
+        .get("id")
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_owned();
+    document.tasks[3].insert("notes".into(), Value::String("x".repeat(40_000)));
+
+    let cap = 8_192;
+    let extra = json!({"state_max_bytes": cap});
+    let mut cursor: Option<String> = None;
+    let mut seen: Vec<String> = Vec::new();
+    let mut stubbed = false;
+    let mut pages = 0;
+    loop {
+        let mut args = json!({"include": ["coordination"], "include_archived": true});
+        if let Some(cursor) = &cursor {
+            args["cursor"] = json!(cursor);
+        }
+        let answer = project(
+            &document,
+            "ctxv:17189",
+            "full",
+            &bounds(args, extra.clone()),
+        );
+        assert!(
+            size(&answer) <= cap,
+            "page {pages} is {} bytes for a {cap}-byte cap",
+            size(&answer)
+        );
+        assert_eq!(answer["paging"]["stalled"], json!(false));
+        for task in answer["coordination"]["tasks"]
+            .as_array()
+            .expect("task page")
+        {
+            let id = task["id"].as_str().expect("id").to_owned();
+            if task
+                .get("oversized")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                assert_eq!(id, target, "only the inflated card is oversized");
+                stubbed = true;
+            }
+            seen.push(id);
+        }
+        pages += 1;
+        match answer["next_cursor"].as_str() {
+            Some(next) => {
+                assert_ne!(Some(next), cursor.as_deref(), "the cursor must advance");
+                cursor = Some(next.to_owned());
+            }
+            None => break,
+        }
+        assert!(pages < 2_000, "the walk must terminate");
+    }
+    assert!(stubbed, "the oversized card must arrive as a stub");
+    let unique: BTreeSet<&String> = seen.iter().collect();
+    assert_eq!(seen.len(), unique.len(), "no card may be returned twice");
+    assert_eq!(
+        unique.len(),
+        document.tasks.len(),
+        "every card exactly once"
+    );
+}
+
+/// A cap far below the fixture's default: every page of the real capture must
+/// fit, and the walk must still cover the whole visible board and every actor.
+#[test]
+fn every_page_stays_under_a_small_byte_cap_on_the_real_capture() {
+    let document = real_document();
+    let cap = 8_192;
+    let extra = json!({"state_max_bytes": cap});
+    let mut cursor: Option<String> = None;
+    let mut tasks = 0;
+    let mut actors = 0;
+    let mut pages = 0;
+    loop {
+        let mut args = json!({"limit": 40});
+        if let Some(cursor) = &cursor {
+            args["cursor"] = json!(cursor);
+        }
+        let answer = project(
+            &document,
+            "ctxv:17189",
+            "full",
+            &bounds(args, extra.clone()),
+        );
+        assert!(
+            size(&answer) <= cap,
+            "page {pages} is {} bytes for a {cap}-byte cap",
+            size(&answer)
+        );
+        assert_eq!(answer["paging"]["stalled"], json!(false));
+        tasks += task_ids(&answer).len();
+        actors += actor_ids(&answer).len();
+        pages += 1;
+        match answer["next_cursor"].as_str() {
+            Some(next) => {
+                assert_ne!(Some(next), cursor.as_deref(), "the cursor must advance");
+                cursor = Some(next.to_owned());
+            }
+            None => break,
+        }
+        assert!(pages < 2_000, "the walk must terminate");
+    }
+    assert_eq!(tasks, 633, "every live card exactly once");
+    assert_eq!(actors, 43, "every actor state exactly once");
+}
+
+/// `detail=overview` used to bypass the caps entirely. It now pages actor
+/// states with the same cursor, and reports no board counts it did not load.
+#[test]
+fn overview_is_bounded_and_pages_every_real_actor() {
+    let mut document = real_document();
+    document.tasks.clear(); // what `load_overview` returns
+    let cap = 4_096;
+    let extra = json!({"state_max_bytes": cap, "max_board_items": 1000});
+    let head = bounds_for("overview", json!({"limit": 1000}), extra.clone());
+    assert!(head.include_coordination && head.include_actors && !head.include_board);
+
+    let mut cursor: Option<String> = None;
+    let mut seen: Vec<String> = Vec::new();
+    let mut pages = 0;
+    loop {
+        let mut args = json!({"limit": 1000});
+        if let Some(cursor) = &cursor {
+            args["cursor"] = json!(cursor);
+        }
+        let answer = project(
+            &document,
+            "ctxv:17189",
+            "overview",
+            &bounds_for("overview", args, extra.clone()),
+        );
+        assert!(
+            size(&answer) <= cap,
+            "page {pages} is {} bytes for a {cap}-byte cap",
+            size(&answer)
+        );
+        assert!(
+            answer.get("tasks_summary").is_none() && answer.get("attention").is_none(),
+            "an overview must not report board counts it never loaded"
+        );
+        assert!(
+            !answer["coordination"]["recent_decisions"]
+                .as_array()
+                .expect("recent decisions")
+                .is_empty(),
+            "the overview keeps the recent-decision log"
+        );
+        assert_eq!(answer["paging"]["stalled"], json!(false));
+        seen.extend(actor_ids(&answer));
+        pages += 1;
+        match answer["next_cursor"].as_str() {
+            Some(next) => {
+                assert_ne!(Some(next), cursor.as_deref(), "the cursor must advance");
+                cursor = Some(next.to_owned());
+            }
+            None => break,
+        }
+        assert!(pages < 500, "the walk must terminate");
+    }
+    let unique: BTreeSet<&String> = seen.iter().collect();
+    assert_eq!(unique.len(), 43, "every actor state exactly once");
+    assert_eq!(seen.len(), unique.len(), "no actor may be returned twice");
+}
+
+/// The recent-decision and recent-handoff logs are cut to a fixed window and
+/// the answer says so, instead of being unbounded content inside a bounded one.
+#[test]
+fn recent_logs_are_capped_and_flagged() {
+    let mut document = real_document();
+    document.coordination.insert(
+        "recent_decisions".into(),
+        json!((0..40).collect::<Vec<_>>()),
+    );
+    let answer = project(
+        &document,
+        "ctxv:17189",
+        "full",
+        &bounds(json!({"limit": 10}), json!({})),
+    );
+    assert_eq!(answer["paging"]["recent_capped"], json!(true));
+    let kept = answer["coordination"]["recent_decisions"]
+        .as_array()
+        .expect("decisions")
+        .len();
+    assert_eq!(kept, RECENT_MAX);
 }

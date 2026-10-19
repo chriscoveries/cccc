@@ -5,7 +5,8 @@
 //! retries until the session corrupts (owner spec dd17cbba, items 1-2). The
 //! daemon therefore bounds every projection by default:
 //!
-//! * `limit` caps how many board/task items one answer carries (default 100),
+//! * `limit` caps how many board/task items one answer carries (default 100;
+//!   `0` is rejected, `unbounded: true` is the only bypass),
 //! * `max_board_items` (group config) caps the same collection server-side,
 //! * `state_max_bytes` (group config, default 256 KiB) caps the serialized
 //!   answer, shrinking the page until it fits,
@@ -16,6 +17,11 @@
 //! Truncation is reported with `truncated: true` plus `next_cursor`; the op
 //! never fails because an answer is large. Callers that genuinely need the
 //! whole snapshot (the web UI's full-board views) pass `unbounded: true`.
+//!
+//! The cap is enforced, not estimated: a page that would overflow is shrunk,
+//! an item that cannot fit is delivered as an `oversized` stub so the cursor
+//! still advances, and the envelope itself is trimmed (`envelope_trimmed`)
+//! before the walk can stall.
 
 use cccc_contracts::DaemonRequest;
 use cccc_core::GroupDoc;
@@ -28,6 +34,14 @@ pub(super) const DEFAULT_LIMIT: usize = 100;
 pub(super) const MAX_LIMIT: usize = 1_000;
 pub(super) const DEFAULT_MAX_BOARD_ITEMS: usize = 100;
 pub(super) const DEFAULT_STATE_MAX_BYTES: usize = 256 * 1024;
+/// Reserve kept free of the byte cap so at least one item (a stub, at worst)
+/// always fits on a page.
+const ITEM_RESERVE: usize = 256;
+/// Below this the mandatory envelope cannot be made to fit, so the cap is not
+/// enforceable and the answer reports `paging.stalled` instead.
+const MIN_ENVELOPE_BYTES: usize = 1024;
+/// `recent_decisions`/`recent_handoffs` entries kept on a bounded answer.
+const RECENT_MAX: usize = 20;
 
 const CURSOR_PREFIX: &str = "v1";
 
@@ -50,6 +64,7 @@ impl Bounds {
     pub(super) fn from_request(
         request: &DaemonRequest,
         group: &GroupDoc,
+        detail: &str,
     ) -> Result<Option<Self>, OpError> {
         if bool_arg(request, "unbounded", false) {
             return Ok(None);
@@ -64,7 +79,13 @@ impl Bounds {
                     ));
                 };
                 if raw == 0 {
-                    return Ok(None);
+                    // `limit: 0` used to mean "the whole snapshot", which is
+                    // the multi-megabyte answer this op exists to prevent.
+                    // The bypass is `unbounded: true`, and it is explicit.
+                    return Err(OpError::new(
+                        "invalid_args",
+                        "limit must be at least 1; pass unbounded=true for the complete snapshot",
+                    ));
                 }
                 usize::try_from(raw).unwrap_or(MAX_LIMIT).min(MAX_LIMIT)
             }
@@ -72,10 +93,12 @@ impl Bounds {
         let max_board_items = config_usize(group, "max_board_items")
             .unwrap_or(DEFAULT_MAX_BOARD_ITEMS)
             .clamp(1, MAX_LIMIT);
+        // The floor is the size below which no envelope can be made to fit:
+        // a smaller cap could not be honoured, only reported as stalled.
         let max_bytes = config_usize(group, "state_max_bytes")
             .unwrap_or(DEFAULT_STATE_MAX_BYTES)
-            .max(1024);
-        let (include_coordination, include_board, include_actors) = include_set(request)?;
+            .max(MIN_ENVELOPE_BYTES);
+        let (include_coordination, include_board, include_actors) = include_set(request, detail)?;
         let (task_offset, actor_offset) = match string_arg(request, "cursor") {
             Some(cursor) if !cursor.trim().is_empty() => parse_cursor(cursor.trim())?,
             _ => (0, 0),
@@ -102,12 +125,19 @@ impl Bounds {
     }
 }
 
-fn include_set(request: &DaemonRequest) -> Result<(bool, bool, bool), OpError> {
+fn include_set(request: &DaemonRequest, detail: &str) -> Result<(bool, bool, bool), OpError> {
+    // An overview has no board to page; asking for actors and coordination is
+    // what its consumers read. Everything else defaults to all three.
+    let default = if detail == "overview" {
+        (true, false, true)
+    } else {
+        (true, true, true)
+    };
     let Some(value) = request.args.get("include") else {
-        return Ok((true, true, true));
+        return Ok(default);
     };
     if value.is_null() {
-        return Ok((true, true, true));
+        return Ok(default);
     }
     let entries: Vec<String> = match value {
         Value::String(text) => text
@@ -198,37 +228,115 @@ pub(super) fn next_cursor(task_offset: usize, actor_offset: usize) -> String {
     format!("{CURSOR_PREFIX}.{task_offset}.{actor_offset}")
 }
 
+/// One page of the bounded projection.
+///
+/// Invariants fixed after the T771 integration review (2026-10-19):
+///
+/// * the serialized answer never exceeds `max_bytes`: the mandatory envelope
+///   is trimmed first (named in `paging.envelope_trimmed`) and keeps a reserve
+///   for one item, so a page never comes back empty while items remain;
+/// * an item too large for what is left of the budget is delivered as a stub
+///   (`{"id": ..., "oversized": true}`, id also in `paging.oversized`) rather
+///   than admitted and then dropped back to the same offset;
+/// * a truncated answer always advances the cursor, so every walk terminates.
+///   If nothing can advance (unreachable while `max_bytes` is at least
+///   [`MIN_ENVELOPE_BYTES`]) the answer reports `paging.stalled` and a null
+///   cursor instead of repeating itself forever.
 pub(super) fn project(
     document: &ContextDoc,
     version: &str,
     detail: &str,
     bounds: &Bounds,
 ) -> Value {
-    let tasks: Vec<&Map<String, Value>> = document
-        .tasks
-        .iter()
-        .filter(|task| bounds.include_archived || status(task) != "archived")
-        .collect();
+    // `overview` is the same bounded machinery without the task lists: the
+    // overview document is loaded without tasks, and its consumers want the
+    // coordination brief plus actor states, not board counts.
+    let overview = detail == "overview";
+    let tasks: Vec<&Map<String, Value>> = if overview {
+        Vec::new()
+    } else {
+        document
+            .tasks
+            .iter()
+            .filter(|task| bounds.include_archived || status(task) != "archived")
+            .collect()
+    };
     let total_tasks = tasks.len();
     let actors: Vec<(&String, &Map<String, Value>)> = document.agent_states.iter().collect();
     let total_actors = actors.len();
     let page_size = bounds.page_size();
+    let budget = bounds.max_bytes;
 
-    // Render the candidate page once, keeping each item's own size so the byte
-    // cap can be applied without re-serializing the whole answer per item.
+    // The envelope is mandatory, so it is trimmed before any item is placed:
+    // optional sections go in order of least loss, and the reserve keeps room
+    // for one stub.
+    let mut envelope = envelope(document, version, detail, bounds);
+    let mut trimmed: Vec<&'static str> = Vec::new();
+    for part in ["attention", "tasks_summary", "meta"] {
+        if serialized_len(&Value::Object(envelope.clone())) + ITEM_RESERVE <= budget {
+            break;
+        }
+        if envelope.remove(part).is_some() {
+            trimmed.push(part);
+        }
+    }
+    for (part, name) in [
+        ("recent_handoffs", "coordination.recent_handoffs"),
+        ("recent_decisions", "coordination.recent_decisions"),
+        ("brief", "coordination.brief"),
+    ] {
+        if serialized_len(&Value::Object(envelope.clone())) + ITEM_RESERVE <= budget {
+            break;
+        }
+        let removed = envelope
+            .get_mut("coordination")
+            .and_then(Value::as_object_mut)
+            .and_then(|coordination| coordination.remove(part))
+            .is_some();
+        if removed {
+            trimmed.push(name);
+        }
+    }
+
+    let mut used = serialized_len(&Value::Object(envelope.clone()));
     let mut task_end = bounds.task_offset.min(total_tasks);
     let mut page: Vec<Value> = Vec::new();
     let mut actor_end = bounds.actor_offset.min(total_actors);
     let mut actor_page: Vec<Value> = Vec::new();
+    let mut oversized: Vec<String> = Vec::new();
+    let mut detail_reduced = false;
+
     if !bounds.summary {
-        let budget = bounds.max_bytes;
-        let mut used = serialized_len(&envelope(document, version, detail, bounds));
-        if bounds.include_coordination || bounds.include_board {
+        if !overview && (bounds.include_coordination || bounds.include_board) {
             while page.len() < page_size && task_end < total_tasks {
-                let rendered = render_task(tasks[task_end], detail == "full");
-                let size = serialized_len(&rendered) + 1;
-                if !page.is_empty() && used.saturating_add(size) > budget {
-                    break;
+                let task = tasks[task_end];
+                let id = task_id(task);
+                let mut rendered = render_task(task, detail == "full");
+                let mut size = serialized_len(&rendered) + 1;
+                if used.saturating_add(size) > budget {
+                    if !page.is_empty() {
+                        break;
+                    }
+                    // The head of the page does not fit: shrink the item, not
+                    // the progress. Lean first; a stub last.
+                    if detail == "full" {
+                        let lean = render_task(task, false);
+                        let lean_size = serialized_len(&lean) + 1;
+                        if used.saturating_add(lean_size) <= budget {
+                            rendered = lean;
+                            size = lean_size;
+                            detail_reduced = true;
+                        }
+                    }
+                    if used.saturating_add(size) > budget {
+                        // A stub, not a silent overshoot: the id travels both
+                        // in the page (so the caller knows the card exists) and
+                        // in `paging.oversized` (so it knows the card's body was
+                        // withheld).
+                        rendered = json!({"id": &id, "oversized": true});
+                        size = serialized_len(&rendered) + 1;
+                        oversized.push(id);
+                    }
                 }
                 used = used.saturating_add(size);
                 page.push(rendered);
@@ -242,10 +350,15 @@ pub(super) fn project(
                 state
                     .entry("id")
                     .or_insert_with(|| Value::String(actor_id.clone()));
-                let rendered = Value::Object(state);
-                let size = serialized_len(&rendered) + 1;
-                if !actor_page.is_empty() && used.saturating_add(size) > budget {
-                    break;
+                let mut rendered = Value::Object(state);
+                let mut size = serialized_len(&rendered) + 1;
+                if used.saturating_add(size) > budget {
+                    if !actor_page.is_empty() {
+                        break;
+                    }
+                    rendered = json!({"id": actor_id, "oversized": true});
+                    size = serialized_len(&rendered) + 1;
+                    oversized.push(actor_id.clone());
                 }
                 used = used.saturating_add(size);
                 actor_page.push(rendered);
@@ -259,8 +372,7 @@ pub(super) fn project(
     // answer genuinely fits the cap.
     loop {
         let value = assemble(
-            document,
-            version,
+            envelope.clone(),
             detail,
             bounds,
             &page,
@@ -269,8 +381,12 @@ pub(super) fn project(
             actor_end,
             total_tasks,
             total_actors,
+            &trimmed,
+            &oversized,
+            detail_reduced,
+            recent_capped(document, detail),
         );
-        if serialized_len(&value) <= bounds.max_bytes {
+        if serialized_len(&value) <= budget {
             return value;
         }
         if !page.is_empty() {
@@ -281,16 +397,35 @@ pub(super) fn project(
             actor_end -= 1;
         } else {
             // Nothing left to drop: the envelope alone is over the cap. Return
-            // it rather than failing; the op never errors on size.
+            // it (the op never errors on size) with `paging.stalled` set so the
+            // caller is not left looping on a repeated cursor.
             return value;
         }
     }
 }
 
+fn task_id(task: &Map<String, Value>) -> String {
+    task.get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// True when `recent_decisions`/`recent_handoffs` were cut to [`RECENT_MAX`].
+fn recent_capped(document: &ContextDoc, detail: &str) -> bool {
+    detail != "summary"
+        && ["recent_decisions", "recent_handoffs"].iter().any(|key| {
+            document
+                .coordination
+                .get(*key)
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.len() > RECENT_MAX)
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assemble(
-    document: &ContextDoc,
-    version: &str,
+    mut value: Map<String, Value>,
     detail: &str,
     bounds: &Bounds,
     page: &[Value],
@@ -299,9 +434,13 @@ fn assemble(
     actor_end: usize,
     total_tasks: usize,
     total_actors: usize,
+    trimmed: &[&str],
+    oversized: &[String],
+    detail_reduced: bool,
+    recent_capped: bool,
 ) -> Value {
-    let mut value = envelope(document, version, detail, bounds);
-    if bounds.include_coordination && !bounds.summary {
+    let overview = detail == "overview";
+    if bounds.include_coordination && !bounds.summary && !overview {
         if let Some(coordination) = value.get_mut("coordination").and_then(Value::as_object_mut) {
             coordination.insert("tasks".into(), Value::Array(page.to_vec()));
             coordination.insert(
@@ -314,7 +453,7 @@ fn assemble(
             );
         }
     }
-    if bounds.include_board && !bounds.summary {
+    if bounds.include_board && !bounds.summary && !overview {
         value.insert("board".into(), board(page));
     }
     if bounds.include_actors {
@@ -322,34 +461,44 @@ fn assemble(
     }
     // A section the caller did not ask for is complete by definition: it must
     // not keep the cursor alive, or an actors-only page would never terminate.
-    let tasks_requested = bounds.include_coordination || bounds.include_board;
+    let tasks_requested = !overview && (bounds.include_coordination || bounds.include_board);
     let tasks_done = bounds.summary || !tasks_requested || task_end >= total_tasks;
     let actors_done = bounds.summary || !bounds.include_actors || actor_end >= total_actors;
-    value.insert(
-        "truncated".into(),
-        Value::Bool(!(tasks_done && actors_done)),
-    );
+    let truncated = !(tasks_done && actors_done);
+    let task_offset = bounds.task_offset.min(total_tasks);
+    let actor_offset = bounds.actor_offset.min(total_actors);
+    // Forward progress is the cursor's contract: it is only handed back when
+    // this answer actually moved past something.
+    let advanced = task_end > task_offset || actor_end > actor_offset;
+    value.insert("truncated".into(), Value::Bool(truncated));
     value.insert(
         "next_cursor".into(),
-        if tasks_done && actors_done {
+        if !truncated || !advanced {
             Value::Null
         } else {
             Value::String(next_cursor(task_end, actor_end))
         },
     );
-    value.insert(
-        "paging".into(),
-        json!({
-            "limit": bounds.page_size(),
-            "task_offset": bounds.task_offset.min(total_tasks),
-            "task_count": page.len(),
-            "task_total": total_tasks,
-            "actor_offset": bounds.actor_offset.min(total_actors),
-            "actor_count": actor_page.len(),
-            "actor_total": total_actors,
-            "max_bytes": bounds.max_bytes,
-        }),
-    );
+    // An overview has no tasks: reporting `task_total: 0` there would read as
+    // an empty board instead of "not loaded", so task counts are omitted.
+    let mut paging = json!({
+        "limit": bounds.page_size(),
+        "actor_offset": actor_offset,
+        "actor_count": actor_page.len(),
+        "actor_total": total_actors,
+        "max_bytes": bounds.max_bytes,
+        "oversized": oversized,
+        "detail_reduced": detail_reduced,
+        "recent_capped": recent_capped,
+        "envelope_trimmed": trimmed,
+        "stalled": truncated && !advanced,
+    });
+    if !overview {
+        paging["task_offset"] = json!(task_offset);
+        paging["task_count"] = json!(page.len());
+        paging["task_total"] = json!(total_tasks);
+    }
+    value.insert("paging".into(), paging);
     Value::Object(value)
 }
 
@@ -365,8 +514,12 @@ fn envelope(
         "tasks_version".into(),
         Value::String(format!("tasksv:{}", document.tasks_revision)),
     );
-    value.insert("tasks_summary".into(), task_summary(&document.tasks));
-    value.insert("attention".into(), attention(&document.tasks));
+    // An overview document carries no tasks: board counts there would read as
+    // an empty board rather than as "not loaded".
+    if detail != "overview" {
+        value.insert("tasks_summary".into(), task_summary(&document.tasks));
+        value.insert("attention".into(), attention(&document.tasks));
+    }
     if bounds.include_coordination {
         let mut coordination = Map::new();
         coordination.insert(
@@ -377,16 +530,19 @@ fn envelope(
                 .cloned()
                 .unwrap_or_else(|| json!({})),
         );
-        if detail == "full" {
+        if detail != "summary" {
             for key in ["recent_decisions", "recent_handoffs"] {
-                coordination.insert(
-                    key.into(),
-                    document
-                        .coordination
-                        .get(key)
-                        .cloned()
-                        .unwrap_or_else(|| json!([])),
-                );
+                let mut items = document
+                    .coordination
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let total = items.len();
+                if total > RECENT_MAX {
+                    items.drain(..total - RECENT_MAX);
+                }
+                coordination.insert(key.into(), Value::Array(items));
             }
         }
         if bounds.summary {
@@ -394,7 +550,7 @@ fn envelope(
         }
         value.insert("coordination".into(), Value::Object(coordination));
     }
-    if bounds.include_board && !bounds.summary {
+    if bounds.include_board && !bounds.summary && detail != "overview" {
         value.insert("board".into(), board(&[]));
     }
     value.insert("actors_runtime".into(), Value::Array(Vec::new()));

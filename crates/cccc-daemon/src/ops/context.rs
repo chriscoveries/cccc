@@ -37,14 +37,13 @@ fn get(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     }
     .map_err(OpError::io)?;
     let version = contexts.version(&document).map_err(OpError::io)?;
-    // A whole-board answer from a large group is megabytes; the overview is
-    // small by construction, so only the two task-bearing details are bounded.
-    let bounds = if detail == "overview" {
-        None
-    } else {
-        super::context_bounds::Bounds::from_request(request, &group)?
-    };
-    let Some(bounds) = bounds else {
+    // A whole-board answer from a large group is megabytes, and an overview is
+    // not small by construction either: it carries every agent state plus the
+    // recent-decision log. Both go through the same caps; only the explicit
+    // `unbounded: true` (bootstrap, dashboard full views) keeps the legacy
+    // answer.
+    let Some(bounds) = super::context_bounds::Bounds::from_request(request, &group, &detail)?
+    else {
         return object(super::context_projection::project(
             document, version, &detail,
         ));
