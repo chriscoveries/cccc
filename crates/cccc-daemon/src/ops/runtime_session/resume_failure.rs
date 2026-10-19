@@ -76,30 +76,32 @@ pub fn failed(
     actor: &str,
     attempt: &ResumeAttempt,
 ) -> io::Result<io::Error> {
-    let mut document = read(home, group, actor)?;
-    let id = if string(&document, "runtime") == "codex" {
-        string(&document, "provider_thread_id")
-    } else {
-        string(&document, "provider_session_id")
-    };
-    let diagnostic = "The saved Runtime conversation could not be resumed. Its identity and history have been retained.";
-    if supported(&document)
-        && id == attempt.session_id
-        && string(&document, "last_resume_attempt_id") == attempt.attempt_id
-    {
-        let failures = document
-            .get("failure_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        document.insert("status".into(), json!("resume_failed"));
-        document.insert("resume_eligible".into(), json!(false));
-        document.insert("last_resume_error".into(), json!(diagnostic));
-        document.insert("failure_count".into(), json!(failures.saturating_add(1)));
-        document.insert("last_resume_attempt_id".into(), json!(""));
-        document.insert("updated_at".into(), json!(utc_now()));
-        write(home, group, actor, &document)?;
-    }
-    Ok(io::Error::other(ResumeBlocked(diagnostic.into())))
+    super::with_receipt_lock(home, group, actor, || {
+        let mut document = read(home, group, actor)?;
+        let id = if string(&document, "runtime") == "codex" {
+            string(&document, "provider_thread_id")
+        } else {
+            string(&document, "provider_session_id")
+        };
+        let diagnostic = "The saved Runtime conversation could not be resumed. Its identity and history have been retained.";
+        if supported(&document)
+            && id == attempt.session_id
+            && string(&document, "last_resume_attempt_id") == attempt.attempt_id
+        {
+            let failures = document
+                .get("failure_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            document.insert("status".into(), json!("resume_failed"));
+            document.insert("resume_eligible".into(), json!(false));
+            document.insert("last_resume_error".into(), json!(diagnostic));
+            document.insert("failure_count".into(), json!(failures.saturating_add(1)));
+            document.insert("last_resume_attempt_id".into(), json!(""));
+            document.insert("updated_at".into(), json!(utc_now()));
+            write(home, group, actor, &document)?;
+        }
+        Ok(io::Error::other(ResumeBlocked(diagnostic.into())))
+    })
 }
 
 pub fn finish_launch<T>(
@@ -144,22 +146,24 @@ pub fn retry(
         ActorRuntime::Kilo => "kilo",
         _ => return Ok(false),
     };
-    let mut document = match read(home, group, actor) {
-        Ok(document) => document,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    if string(&document, "runtime") != expected_runtime
-        || !supported(&document)
-        || string(&document, "status") != "resume_failed"
-    {
-        return Ok(false);
-    }
-    document.insert("status".into(), json!("usable"));
-    document.insert("resume_eligible".into(), json!(true));
-    document.insert("updated_at".into(), json!(utc_now()));
-    write(home, group, actor, &document)?;
-    Ok(true)
+    super::with_receipt_lock(home, group, actor, || {
+        let mut document = match read(home, group, actor) {
+            Ok(document) => document,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if string(&document, "runtime") != expected_runtime
+            || !supported(&document)
+            || string(&document, "status") != "resume_failed"
+        {
+            return Ok(false);
+        }
+        document.insert("status".into(), json!("usable"));
+        document.insert("resume_eligible".into(), json!(true));
+        document.insert("updated_at".into(), json!(utc_now()));
+        write(home, group, actor, &document)?;
+        Ok(true)
+    })
 }
 
 #[cfg(test)]
