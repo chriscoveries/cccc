@@ -620,8 +620,8 @@ async fn context_get_over_mcp_is_bounded_and_pages_to_the_whole_board() {
 
     let first = context_call(json!({"group_id":group_id})).await;
     let first_body = &first["result"]["structuredContent"];
-    assert_eq!(
-        first["result"]["isError"], false,
+    assert!(
+        first["result"].get("isError").is_none(),
         "context_get failed: {first}"
     );
     let first_size = serde_json::to_vec(first_body).expect("serialize").len();
@@ -643,7 +643,10 @@ async fn context_get_over_mcp_is_bounded_and_pages_to_the_whole_board() {
     while let Some(next) = cursor {
         let page = context_call(json!({"group_id":group_id,"cursor":next})).await;
         let body = &page["result"]["structuredContent"];
-        assert_eq!(page["result"]["isError"], false, "paging failed: {page}");
+        assert!(
+            page["result"].get("isError").is_none(),
+            "paging failed: {page}"
+        );
         seen.extend(
             body["coordination"]["tasks"]
                 .as_array()
