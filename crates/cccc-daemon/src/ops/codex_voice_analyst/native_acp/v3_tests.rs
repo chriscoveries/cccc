@@ -701,3 +701,82 @@ async fn v3_hermes_session_discovery_has_one_total_deadline() {
             .any(|r| r["method"] == "session/load" || r["method"] == "session/new")
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hermes_resume_diagnostic_bounds_full_ascii_and_unicode_session_ids() {
+    // Both IDs occupy the full accepted 512 bytes, but the Unicode ID has
+    // fewer characters. Provider diagnostics exercise both encodings too.
+    for (id, padding) in [
+        ("A".repeat(512), "x"),
+        (format!("{}ab", "界".repeat(170)), "界"),
+    ] {
+        assert_eq!(id.len(), 512);
+        let (temp, home, mut config) = fixture(ActorRuntime::Hermes);
+        config.environment.insert(
+            "CCCC_TEST_DIAGNOSTIC_PRIVATE".into(),
+            DIAGNOSTIC_PRIVATE_VALUE.into(),
+        );
+        std::fs::write(temp.path().join("v3_new_session_id"), &id).expect("provider session ID");
+        let session = AnalystSession::launch_actor(&home, config.clone())
+            .await
+            .expect("accepted maximum-byte session ID");
+        assert_eq!(session.thread_id(), id);
+        materialize(&session).await;
+        session.stop(session.generation()).await.expect("stop");
+        let receipt = crate::ops::runtime_session::native_acp::receipt_path(
+            &home,
+            &config.group_id,
+            &config.actor_id,
+            ActorRuntime::Hermes,
+        )
+        .expect("receipt path");
+        let retained = std::fs::read(&receipt).expect("attempted receipt");
+        reject_rpc(
+            temp.path(),
+            "session/load",
+            json!(format!(
+                "Refresh request denied; {DIAGNOSTIC_PROVIDER_TOKEN}; {}",
+                padding.repeat(1700),
+            )),
+        );
+        let error = AnalystSession::launch_actor(&home, config)
+            .await
+            .err()
+            .expect("rejected saved session");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        let message = error.to_string();
+        assert_safe_rpc_diagnostic(&message, "session/load");
+        assert_eq!(
+            message.chars().count(),
+            1800,
+            "oversized provider detail must fit the complete startup envelope"
+        );
+        assert!(
+            message.contains(&id),
+            "the attempted identity was shortened"
+        );
+        assert!(message.contains(RESUME_RECOVERY_HINT));
+        assert!(message.ends_with("Recover with `cccc actor new-session <actor>`"));
+        assert!(message.contains('…'), "truncated detail must be visible");
+        assert!(!message.contains("initialization failed"));
+        assert!(!message.contains("check native CLI login"));
+        assert_eq!(std::fs::read(&receipt).expect("retained receipt"), retained);
+        let records = frames(temp.path());
+        let loads: Vec<_> = records
+            .iter()
+            .filter(|frame| frame["method"] == "session/load")
+            .collect();
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0]["params"]["sessionId"], id);
+        for method in ["session/new", "session/prompt"] {
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|frame| frame["method"] == method)
+                    .count(),
+                1,
+                "a rejected resume must not create or prompt replacement work"
+            );
+        }
+    }
+}

@@ -45,6 +45,7 @@ fn project_coordination(result: &mut Map<String, Value>, arguments: &Map<String,
 }
 
 fn hide_archived_tasks(snapshot: &mut Map<String, Value>) {
+    let mut visible_tasks = None;
     if let Some(coordination) = snapshot
         .get_mut("coordination")
         .and_then(Value::as_object_mut)
@@ -60,6 +61,16 @@ fn hide_archived_tasks(snapshot: &mut Map<String, Value>) {
                     .eq_ignore_ascii_case("archived")
             })
         });
+        visible_tasks = Some(tasks.len() as u64);
+    }
+    // A bounded answer reports how many items it carried; dropping the
+    // archived ones here must not leave the count describing items the caller
+    // cannot see.
+    if let (Some(seen), Some(paging)) = (
+        visible_tasks,
+        snapshot.get_mut("paging").and_then(Value::as_object_mut),
+    ) {
+        paging.insert("task_count".into(), json!(seen));
     }
     if let Some(board) = snapshot.get_mut("board").and_then(Value::as_object_mut)
         && !board.is_empty()
@@ -267,6 +278,29 @@ mod tests {
         assert_eq!(result["agent_state"]["updated_at"], json!("later"));
         assert!(result["agent_state"].get("warm").is_none());
         assert!(!result.contains_key("coordination"));
+    }
+
+    #[test]
+    fn bounded_paging_count_shrinks_with_hidden_archived_tasks() {
+        let mut result = object(json!({
+            "version": "v4",
+            "coordination": {"tasks": [
+                {"id": "live", "status": "active"},
+                {"id": "old", "status": "archived"}
+            ]},
+            "board": {"active": [{"id": "live"}], "archived": [{"id": "old"}]},
+            "paging": {"limit": 2, "task_count": 2, "task_total": 40}
+        }));
+
+        apply("cccc_context_get", &mut result, &Map::new());
+
+        assert_eq!(
+            result["coordination"]["tasks"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(result["paging"]["task_count"], json!(1));
+        assert_eq!(result["paging"]["task_total"], json!(40));
+        assert_eq!(result["board"]["archived"], json!([]));
     }
 
     #[test]

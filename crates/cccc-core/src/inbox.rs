@@ -285,8 +285,11 @@ pub fn is_for_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
     if event.kind == "system.notify" {
         if matches!(
             event.data.get("kind").and_then(Value::as_str),
-            Some("mail_notice" | "reply_notice")
+            Some("mail_notice" | "reply_notice" | "memory_restart")
         ) {
+            return false;
+        }
+        if event.data.get("kind").and_then(Value::as_str) == Some("task_notice") {
             return false;
         }
         let direct_target = ["target_actor_id", "actor_id"].iter().find_map(|key| {

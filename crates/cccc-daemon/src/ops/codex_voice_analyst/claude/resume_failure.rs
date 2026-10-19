@@ -78,6 +78,82 @@ pub(in crate::ops::codex_voice_analyst) fn diagnostic(
             true,
         ));
     }
+    for (prefix, diagnostic) in [
+        (
+            "Claude model switch could not be confirmed: resumed UI is not exclusively owned",
+            "Claude resume guard failed: model_ownership.",
+        ),
+        (
+            "Claude model switch could not be confirmed: native screen exceeded limit",
+            "Claude resume guard failed: model_screen.",
+        ),
+        (
+            "Claude model switch could not be confirmed: invalid model identifier",
+            "Claude resume guard failed: model_input.",
+        ),
+        (
+            "Claude model switch could not be confirmed: native prompt readiness is unsupported",
+            "Claude resume guard failed: model_prompt_capability.",
+        ),
+        (
+            "Claude model switch could not be confirmed: worker did not become ready",
+            "Claude resume guard failed: model_prompt_ready.",
+        ),
+        (
+            "Claude model switch could not be confirmed: persisted model did not change",
+            "Claude resume guard failed: model_flags.",
+        ),
+        (
+            "Claude model switch could not be confirmed: resume identity changed",
+            "Claude resume guard failed: model_resume_identity.",
+        ),
+        (
+            "Claude model switch could not be confirmed: workspace",
+            "Claude resume guard failed: model_workspace.",
+        ),
+    ] {
+        if error.to_string().starts_with(prefix) {
+            return Some((diagnostic, true));
+        }
+    }
+    // Recognize the existing rejection sites (including the detailed transcript
+    // diagnostic supplied by the separate transcript-identity patch). Persist
+    // a fixed guard name, never provider text, paths, or credentials.
+    let text = error.to_string();
+    for (prefix, guard) in [
+        (
+            "Claude Agent View state identity does not match the control record",
+            "state_identity",
+        ),
+        (
+            "Claude Agent View session is bound to a different working directory",
+            "workspace_path",
+        ),
+        (
+            "Claude Agent View state referenced a different transcript identity",
+            "transcript_identity",
+        ),
+        (
+            "Claude Agent View state file failed validation",
+            "state_file",
+        ),
+        ("Claude Agent View state is invalid:", "state_json"),
+        ("Claude model switch could not be confirmed", "model_switch"),
+    ] {
+        if text.starts_with(prefix) {
+            return Some((
+                match guard {
+                    "state_identity" => "Claude resume guard failed: state_identity.",
+                    "workspace_path" => "Claude resume guard failed: workspace_path.",
+                    "transcript_identity" => "Claude resume guard failed: transcript_identity.",
+                    "state_file" => "Claude resume guard failed: state_file.",
+                    "state_json" => "Claude resume guard failed: state_json.",
+                    _ => "Claude resume guard failed: model_switch.",
+                },
+                true,
+            ));
+        }
+    }
     let diagnostic = match error.kind() {
         io::ErrorKind::TimedOut
         | io::ErrorKind::WouldBlock
@@ -111,6 +187,38 @@ pub(in crate::ops::codex_voice_analyst) fn diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_rejections_name_the_guard_without_copying_details() {
+        for (prefix, guard) in [
+            (
+                "Claude Agent View state identity does not match the control record",
+                "state_identity",
+            ),
+            (
+                "Claude Agent View session is bound to a different working directory",
+                "workspace_path",
+            ),
+            (
+                "Claude Agent View state referenced a different transcript identity",
+                "transcript_identity",
+            ),
+            (
+                "Claude Agent View state file failed validation",
+                "state_file",
+            ),
+            ("Claude Agent View state is invalid:", "state_json"),
+        ] {
+            let error = io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{prefix}: synthetic-secret"),
+            );
+            let (message, blocked) = diagnostic(&error).expect("fixture operation");
+            assert!(message.contains(guard));
+            assert!(!message.contains("synthetic-secret"));
+            assert!(blocked);
+        }
+    }
 
     #[test]
     fn resume_diagnostics_do_not_copy_provider_errors_or_credential_values() {

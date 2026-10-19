@@ -443,3 +443,4 @@ impl AnalystSession {
         session
     }
 }
+pub(crate) use claude::validate_retarget as validate_claude_retarget;

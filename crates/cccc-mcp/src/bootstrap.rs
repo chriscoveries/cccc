@@ -42,7 +42,13 @@ pub(crate) async fn build(
         .map(Vec::as_slice)
         .unwrap_or_default();
 
-    let context = daemon(client, "context_get", request_args(&group_id, &actor_id)).await?;
+    // Bootstrap keeps the complete task list: it derives this actor's own
+    // assigned/attention slice from it, and a bounded page would silently drop
+    // a lane's card. The bounded default applies to the agent-facing
+    // cccc_context_get tool, which is where the transport overflow happened.
+    let mut context_args = request_args(&group_id, &actor_id);
+    context_args.insert("unbounded".into(), Value::Bool(true));
+    let context = daemon(client, "context_get", context_args).await?;
 
     let mut inbox_args = request_args(&group_id, &actor_id);
     inbox_args.insert(

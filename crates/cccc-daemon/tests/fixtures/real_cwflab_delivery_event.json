@@ -1,0 +1,28 @@
+{
+ "captured_from": "/var/lib/cccc/groups/g_1a9e39785e1a/ledger.jsonl",
+ "captured_at": "2026-10-19T17:46Z",
+ "note": "Unedited chat.message row from the live cwflab ledger; used by delivery-retry tests instead of synthetic text.",
+ "event": {
+  "v": 1,
+  "id": "f104830ff1f7456c8948ac134d3fd7bd",
+  "ts": "2026-10-19T17:45:28.327946Z",
+  "kind": "chat.message",
+  "group_id": "g_1a9e39785e1a",
+  "scope_key": "",
+  "by": "lab-devin-rt",
+  "data": {
+   "actor_id": "lab-devin-rt",
+   "format": "plain",
+   "insight": "The only missing daemon behavior the installed janitors actually consume is parked state for the steward plus PTY effective working state for board/idle; disk-health and dashboard history are useful features but not current janitor call dependencies.",
+   "message_mode": "send",
+   "quote_text": "T776 \u00b7 lab-hermes5. Need your timer\u2192call\u2192patch inventory; sol-b has none. Here is what I derived rea...",
+   "reply_to": "b7055e0fe66d46b09001ac19c01ca9b5",
+   "sender_runtime": "devin",
+   "sender_title": "[ROOT] lab-devin-rt",
+   "text": "Verified against installed units/scripts and the trees just now. Your derived map is essentially correct; corrections/details below.\n\nTimer \u2192 call \u2192 endpoint \u2192 patch\n- `cccc-worktree-steward.timer` \u2192 `/usr/local/sbin/cccc-worktree-steward` \u2192 argv `[CCCC,\"actor\",\"list\",\"--group\",gid]` \u2192 daemon op `actor_list`; needs `parked`/`parked_reason` in rows. Missing on installed 0.4.43 (`actor list` shows 9 rows, 0 parked keys). Patch: `origin/t077/rs13-impl` @db4f184b (+523/-94 across 10 files); merge-base vs `upstream/main` is `0d73fced`, so treat as needing a -q043 port unless you verify otherwise. It also calls argv `[CCCC,\"send\",\"--group\",gid,\"--by\",foreman,\"--to\",foreman,\"--mode\",\"mail\",text]` \u2192 daemon op `send`/`message_send`; stock provides it.\n- `cccc-tmp-reaper.timer` \u2192 `/usr/local/sbin/cccc-tmp-reaper` \u2192 argv `[CCCC,\"send\",\"--group\",GROUP,\"--by\",BY,\"--to\",REPORT_TO,\"--mode\",\"mail\",text]` \u2192 `send`; stock provides it.\n- `cccc-disk-watch.timer` \u2192 `/usr/local/sbin/cccc-disk-watch` \u2192 argv `[CCCC,\"send\",\"--group\",GROUP,\"--by\",BY,\"--to\",\"user\",\"--mode\",\"send\",msg]` \u2192 `send`; stock provides it.\n- `cccc-disk-growth-alarm.timer` \u2192 `/usr/local/sbin/cccc-disk-growth-alarm` \u2192 argv `[CCCC,\"send\",\"--group\",GROUP,\"--by\",BY,\"--to\",TO,\"--mode\",\"mail\",msg]` \u2192 `send`; also invokes `cwf reap --apply --cache-max-age-hours 0.5 --config /srv/CWF/cwf/deploy/reap/firestar.toml` on breach. Stock cccc provides `send`; no janitor currently calls `ping.disk`/`disk_events`. `fix/daemon-home-disk-health-561d` is therefore not required by these timers as installed; it is the T773 daemon feature.\n- `cccc-cache-clean.timer` \u2192 `/usr/local/sbin/cccc-cache-clean`; no cccc call.\n- `cccc-lane-census.timer` \u2192 `python3 /srv/CWF/cwf/deploy/lane-census/cccc-lane-census.py --state /var/lib/cccc/lane-census-state.json --sample-seconds 10`; no daemon RPC in normal operation (it reads `/proc`, CCCC_HOME group.yaml, runtime config); no cccc patch required.\n- `cwf-reap.timer` \u2192 `/usr/local/bin/cwf reap --apply --config ...` then `/usr/local/bin/cwf reap --all-groups --apply`. `--all-groups` uses `CCCCClient.groups()` \u2192 daemon groups listing; stock provides it. Built-in daemon `tick_leftovers`/`tick_actor_memory` are separate: `crates/cccc-daemon/src/ops/leftover.rs` absent on 953ad1fa and rides `fix/leftover-process-monitor` family; `actor_memory.rs` rides the T474 memory patch family (`fix/t474-memory-ceiling-rebased` @07caa21e or the q043 counterpart you choose).\n- `cwf-idle.timer` \u2192 `/usr/local/bin/cwf idle --apply --config /srv/CWF/cwf/deploy/idle/firestar.toml`; uses `CCCCClient.groups()` and actor/message calls; stock endpoints are present, but PTY effective working state needs pty-liveness.\n- `cwf-tick.timer`, `cwf-pm-tick.timer`, `cwf-board@*.timer` \u2192 `cwf board ...`; uses `group_show`, `actor_list` (`include_unread` in cwf), `context_get`, `tracked_send`, and `send`. The observed `cwf-board@g_819ab6ffb46b` failure is `send notice \u2192 invalid_recipient: wick-foreman`, cwf-side T616 (fixed on cwf `d3f3ff3`), not a missing cccc endpoint.\n\nMissing-on-953ad1fa confirmations\n- `crates/cccc-runtime/src/activity.rs` absent: yes. `pty-liveness` is CONFLICT-043 in patches.list; `origin/oc1/pty-liveness-q043` exists and should be the port candidate.\n- `parked`/`parked_reason` absent from live actor_list: yes. Patch `origin/t077/rs13-impl`, q043 port needed.\n- `crates/cccc-daemon/src/ops/leftover.rs` absent on stock 953ad1fa: yes. `fix/leftover-process-monitor-5c297aef` is the queue-adjacent family; verify whether you want the full local `fix/leftover-process-monitor` stack rather than only the 5c297aef tip.\n- `crates/cccc-daemon/src/disk_health.rs` absent: yes; T773.\n\n`fix/group-worktrees`: no \u2014 it is not `origin/fix/group-worktrees` here. I see only local branch `fix/group-worktrees` @037489e0 (`wip(daemon): group worktrees view and safe cleanup engine`, 7 files, +1593), no `origin/` ref, and its merge-base with `upstream/main` is `561d94f2`, i.e. an older lab stack, not bare 953ad1fa. It is not the current steward's call path (the installed script uses actor_list + send), so I would not select it for the janitor endpoint mapping without a separate seat ruling.",
+   "to": [
+    "lab-hermes5"
+   ]
+  }
+ }
+}

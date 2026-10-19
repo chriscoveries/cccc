@@ -23,9 +23,7 @@ mod tracked_send;
 
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
-        "send" | "message_send" => {
-            Operation::new(Write, |home, request| send(home, request, "chat.message"))
-        }
+        "send" | "message_send" => Operation::new(Write, send_as_caller),
         "send_files" => Operation::new(Write, send_files),
         "send_cross_group" => Operation::new(Write, send_cross_group),
         "tracked_send" => Operation::new(Write, tracked_send::handle),
@@ -50,6 +48,72 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         "message_history" => Operation::new(Read, messaging_inbox::history),
         _ => return None,
     })
+}
+
+/// Names the daemon itself writes through the caller-facing `send` op.
+/// `connect:*` is the inbound Connect leg (connect_messages.rs) and
+/// `nomcp-advisory` is the web UI's no-MCP reply sender
+/// (cccc-web/src/routes/nomcp_send.rs). Neither is, or can be, a group member,
+/// so they are allowlisted rather than registered as actors.
+const SEND_OP_ALLOWLIST: [&str; 1] = ["nomcp-advisory"];
+
+/// The `send` / `message_send` op is the one caller-facing hop that stamps an
+/// arbitrary `by` into the ledger: every other writer is the daemon's own hand
+/// (`system_notify`, `tracked_send`, `reply`, `send_files`,
+/// `send_cross_group`'s destination leg, inbound Connect), and those already
+/// passed a check upstream or are writing a synthetic name on purpose. Gate
+/// the first hop only, mirroring the source check `send_cross_group` already
+/// does at its own boundary, so cross-group relays and Connect deliveries keep
+/// working unchanged.
+pub(super) fn send_as_caller(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let group = load(home, request)?;
+    require_send_identity(&group, request)?;
+    // Validate and record must agree on the same string. require_send_identity
+    // trims, and send_with_audience_policy re-reads `by` from the request to
+    // stamp the event, so a caller sending " peer1 " would otherwise pass the
+    // member check and then land in the ledger as " peer1 " — a name no later
+    // actors::find matches, which is exactly the forged-identity shape this
+    // gate exists to prevent. Canonicalise once, here, so the recorded
+    // identity is the identity that was validated. This mirrors
+    // send_cross_group, which trims the same way at its own boundary.
+    let mut request = request.clone();
+    canonicalize_send_identity(&mut request);
+    send(home, &request, "chat.message")
+}
+
+/// Records the same trimmed `by` that `require_send_identity` validated.
+fn canonicalize_send_identity(request: &mut DaemonRequest) {
+    let Some(by) = request.args.get("by").and_then(Value::as_str) else {
+        return;
+    };
+    let trimmed = by.trim();
+    if trimmed.is_empty() {
+        // An absent identity defaults to "user" downstream; dropping the empty
+        // string keeps that default instead of recording "".
+        request.args.remove("by");
+    } else if trimmed != by {
+        request.args.insert("by".into(), Value::String(trimmed.to_owned()));
+    }
+}
+
+fn require_send_identity(group: &GroupDoc, request: &DaemonRequest) -> Result<(), OpError> {
+    let who = string_arg(request, "by").unwrap_or_default();
+    let who = who.trim();
+    if who.is_empty() || who == "user" || who == "system" {
+        return Ok(());
+    }
+    if who.starts_with("connect:") || SEND_OP_ALLOWLIST.contains(&who) {
+        return Ok(());
+    }
+    if cccc_core::actors::find(group, who).is_some() {
+        return Ok(());
+    }
+    // Same shape as send_cross_group's source check, so clients that already
+    // handle that error see the familiar message.
+    Err(OpError::new(
+        "permission_denied",
+        format!("unknown actor: {who}"),
+    ))
 }
 
 fn send_files(home: &HomeLayout, request: &DaemonRequest) -> OpResult {

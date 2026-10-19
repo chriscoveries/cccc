@@ -223,57 +223,42 @@ fn deepseek_dependency_map() -> serde_json::Map<String, Value> {
     .collect()
 }
 
+/// The one managed DeepSeek profile composition. `deepseek_setup` writes it and
+/// `is_canonical_deepseek_config` checks it, so both read this generator — two
+/// hand-maintained copies of the same document is how the `!!js` template
+/// survived in one place after it was fixed in the other.
+///
+/// PLAIN VALUES ONLY. CCCC never evaluates YAML tags: a loader that does not
+/// implement `!!js` hands the node through as `{}`, which is exactly how
+/// firestar's `mcp-cccc` entry failed plugin load with no useful message. The
+/// MCP child therefore gets no `env:` map — it inherits `CCCC_HOME`,
+/// `CCCC_GROUP_ID` and `CCCC_ACTOR_ID` from the runtime process environment,
+/// where `launch_env` already sets them per actor — and `persistenceRoot` is
+/// left to the runtime default instead of a tag that never resolved to a path.
+pub fn deepseek_profile_config(executable: &std::path::Path) -> String {
+    // YAML single-quoted scalars escape apostrophes by doubling them. A
+    // backslash is literal in this scalar style and must not be doubled.
+    let cccc_path = executable.to_string_lossy().replace('\'', "''");
+    format!(
+        "- id: llm-deepseek\n  name: '@deepseek-ai/dsh-llm-deepseek'\n  config:\n    maxTokens: {DEEPSEEK_MAX_OUTPUT_TOKENS}\n- id: acp-demo\n  name: '@deepseek-ai/dsh-acp-demo'\n  config:\n    provider: deepseek-official\n    model: deepseek-v4-flash\n    workspaceContext: false\n- id: cccc-mcp\n  name: '@deepseek-ai/dsh-mcp-client'\n  config:\n    transport: stdio\n    serverName: cccc\n    command: '{cccc_path}'\n    args: [mcp]\n    failOnStartupError: true\n"
+    )
+}
+
 /// Validate the dedicated ACP app composition. The old `dsh --profile
 /// cccc-acp` command booted the one-shot headless bundle and exited before ACP
 /// could accept initialize; the app composition is intentionally small and
 /// must not contain the headless CLI runner.
 pub fn is_canonical_deepseek_config(config: &str) -> bool {
-    let lines = config.lines().collect::<Vec<_>>();
-    let max_tokens = format!("    maxTokens: {DEEPSEEK_MAX_OUTPUT_TOKENS}");
-    let expected = [
-        Some("- id: llm-deepseek"),
-        Some("  name: '@deepseek-ai/dsh-llm-deepseek'"),
-        Some("  config:"),
-        Some(max_tokens.as_str()),
-        Some("- id: acp-demo"),
-        Some("  name: '@deepseek-ai/dsh-acp-demo'"),
-        Some("  config:"),
-        Some("    provider: deepseek-official"),
-        Some("    model: deepseek-v4-flash"),
-        Some("    workspaceContext: false"),
-        Some("    persistenceRoot: !!js process.env.CCCC_DEEPSEEK_SESSION_ROOT"),
-        Some("- id: cccc-mcp"),
-        Some("  name: '@deepseek-ai/dsh-mcp-client'"),
-        Some("  config:"),
-        Some("    transport: stdio"),
-        Some("    serverName: cccc"),
-        None,
-        Some("    args: [mcp]"),
-        Some("    env:"),
-        Some("      CCCC_HOME: !!js process.env.CCCC_HOME"),
-        Some("      CCCC_GROUP_ID: !!js process.env.CCCC_GROUP_ID"),
-        Some("      CCCC_ACTOR_ID: !!js process.env.CCCC_ACTOR_ID"),
-        Some("    failOnStartupError: true"),
-    ];
-    if lines.len() != expected.len()
-        || lines
-            .iter()
-            .zip(expected)
-            .any(|(actual, wanted)| wanted.is_some_and(|wanted| actual != &wanted))
-    {
-        return false;
-    }
-    let Some(command_index) = expected.iter().position(Option::is_none) else {
-        return false;
-    };
-    let Some(path) = lines[command_index]
-        .strip_prefix("    command: '")
+    let Some(path) = config
+        .lines()
+        .find_map(|line| line.strip_prefix("    command: '"))
         .and_then(|value| value.strip_suffix('\''))
     else {
         return false;
     };
     let path = path.replace("''", "'");
-    is_executable_file(std::path::Path::new(&path))
+    config == deepseek_profile_config(std::path::Path::new(&path))
+        && is_executable_file(std::path::Path::new(&path))
 }
 
 fn node_supported(raw: &str) -> bool {
@@ -483,6 +468,27 @@ mod tests {
     use super::{deepseek_home, default_command, detect_runtimes};
     use cccc_contracts::ActorRuntime;
     use std::collections::BTreeMap;
+
+    /// Owner spec dd17cbba item 5: the managed profile must reach the runtime
+    /// loader as plain values. `!!js` never evaluated, so DSH read `{}` and
+    /// failed plugin load with no useful message.
+    #[test]
+    fn managed_profile_config_carries_no_yaml_tags() {
+        let config = super::deepseek_profile_config(std::path::Path::new("/usr/local/bin/cccc"));
+        assert!(
+            !config.contains("!!"),
+            "profile config must use plain values, found a YAML tag:\n{config}"
+        );
+        assert!(
+            !config.contains("persistenceRoot") && !config.contains("    env:"),
+            "tagged knobs are gone rather than re-spelled as empty values:\n{config}"
+        );
+        assert!(
+            config.contains("    command: '/usr/local/bin/cccc'"),
+            "{config}"
+        );
+        assert!(config.contains("    failOnStartupError: true"), "{config}");
+    }
 
     #[test]
     fn codex_default_disables_startup_update_checks() {
@@ -755,11 +761,7 @@ mod tests {
             .expect("profile manifest");
         std::fs::write(
             profile.join("cordis.yml"),
-            format!(
-                "- id: llm-deepseek\n  name: '@deepseek-ai/dsh-llm-deepseek'\n  config:\n    maxTokens: {}\n- id: acp-demo\n  name: '@deepseek-ai/dsh-acp-demo'\n  config:\n    provider: deepseek-official\n    model: deepseek-v4-flash\n    workspaceContext: false\n    persistenceRoot: !!js process.env.CCCC_DEEPSEEK_SESSION_ROOT\n- id: cccc-mcp\n  name: '@deepseek-ai/dsh-mcp-client'\n  config:\n    transport: stdio\n    serverName: cccc\n    command: '{}'\n    args: [mcp]\n    env:\n      CCCC_HOME: !!js process.env.CCCC_HOME\n      CCCC_GROUP_ID: !!js process.env.CCCC_GROUP_ID\n      CCCC_ACTOR_ID: !!js process.env.CCCC_ACTOR_ID\n    failOnStartupError: true\n",
-                super::DEEPSEEK_MAX_OUTPUT_TOKENS,
-                dsh.display()
-            ),
+            super::deepseek_profile_config(&dsh),
         )
         .expect("profile config");
         let mut env = BTreeMap::new();

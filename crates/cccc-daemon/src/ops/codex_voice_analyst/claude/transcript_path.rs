@@ -144,6 +144,48 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn fresh_publication_waits_for_the_first_transcript_without_losing_input() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let project = temp.path().join("projects/workspace");
+        std::fs::create_dir_all(&project).expect("project");
+        let path = project.join(format!("{ID}.jsonl"));
+        let state = temp.path().join("state.json");
+        std::fs::write(&state, json!({"linkScanPath":path}).to_string()).expect("state");
+        let mut follower = TranscriptFollower::new(state, temp.path().into(), ID.into(), false);
+        follower
+            .initialize()
+            .await
+            .expect("publication may precede creation");
+        assert!(
+            follower
+                .poll()
+                .await
+                .expect("bounded publication wait")
+                .is_empty()
+        );
+        let record = json!({"type":"user","sessionId":ID,"promptId":"first", "message":{"content":"first input"}});
+        std::fs::write(&path, format!("{record}\n")).expect("transcript");
+        assert_eq!(follower.poll().await.expect("first input"), vec![record]);
+        assert!(follower.poll().await.expect("no replay").is_empty());
+    }
+
+    #[tokio::test]
+    async fn first_transcript_publication_wait_is_bounded() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let state = temp.path().join("state.json");
+        let path = temp
+            .path()
+            .join("projects/workspace")
+            .join(format!("{ID}.jsonl"));
+        std::fs::write(&state, json!({"linkScanPath":path}).to_string()).expect("state");
+        let mut follower = TranscriptFollower::new(state, temp.path().into(), ID.into(), false);
+        follower.initialize().await.expect("start publication wait");
+        tokio::time::sleep(super::super::transcript_continuity::RELOCATION_TIMEOUT).await;
+        let error = follower.poll().await.expect_err("permanent absence fails");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
     #[test]
     fn refuses_ambiguous_sessions_and_does_not_select_other_sessions() {
         let temp = tempfile::tempdir().expect("create test directory");
@@ -162,6 +204,39 @@ mod tests {
             find(temp.path(), "62b41c61-e23c-4b7c-8b60-809c347451b5")
                 .expect("complete find in fixture")
                 .is_none()
+        );
+    }
+    #[tokio::test]
+    async fn mismatched_transcript_diagnostic_identifies_the_job_and_both_sessions() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let job = temp.path().join("jobs/abcdef12");
+        std::fs::create_dir_all(&job).expect("job");
+        let state = job.join("state.json");
+        let observed = "62b41c61-e23c-4b7c-8b60-809c347451b5.jsonl";
+        let path = temp.path().join("projects/workspace").join(observed);
+        std::fs::write(&state, json!({"linkScanPath":path}).to_string()).expect("state");
+        let mut follower = TranscriptFollower::new(state, temp.path().into(), ID.into(), false);
+        let error = follower
+            .initialize()
+            .await
+            .expect_err("foreign identity remains rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let detail = error.to_string();
+        assert!(
+            detail.contains(ID),
+            "expected session is attributable: {detail}"
+        );
+        assert!(
+            detail.contains(observed),
+            "observed filename is attributable: {detail}"
+        );
+        assert!(
+            detail.contains("abcdef12"),
+            "managed job is attributable: {detail}"
+        );
+        assert!(
+            follower.path.is_none(),
+            "foreign transcript was not adopted"
         );
     }
 }

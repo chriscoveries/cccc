@@ -11,9 +11,13 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+mod cache_confirmation;
 mod command;
 mod control;
+mod model_switch;
 mod resume_failure;
+mod retarget;
+pub(crate) use retarget::validate_retarget;
 mod transcript;
 mod transcript_ack;
 #[cfg(all(test, unix))]
@@ -53,6 +57,7 @@ const TRANSCRIPT_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PROMPT_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 const PROMPT_SETTLED_CORRELATION_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const GONE_CONFIRM: Duration = Duration::from_secs(2);
 const LIVENESS_FAILURE_TIMEOUT: Duration = Duration::from_secs(10);
 const PARTIAL_TAIL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LAUNCH_OUTPUT_BYTES: usize = 64 * 1024;
@@ -101,6 +106,12 @@ pub(super) fn settings_path(home: &cccc_core::HomeLayout, owner: &str) -> PathBu
     command::settings_path(home, owner)
 }
 
+/// Only a direct pre-input compatibility outcome permits a fresh launch.
+/// CleanupFailure deliberately hides this outcome until the owner has stopped.
+pub(super) fn model_change_requires_fresh(error: &io::Error) -> bool {
+    model_switch::is_requires_fresh(error)
+}
+
 pub(super) async fn launch(
     prepared: command::PreparedClaude,
     cwd: &Path,
@@ -108,18 +119,97 @@ pub(super) async fn launch(
     purpose: SessionPurpose,
     requested_session_id: Option<&str>,
 ) -> io::Result<LaunchedClaude> {
-    launch_inner(prepared, cwd, generation, purpose, requested_session_id).await
+    Box::pin(launch_inner(
+        prepared,
+        cwd,
+        generation,
+        purpose,
+        requested_session_id,
+        None,
+        false,
+    ))
+    .await
 }
 
+pub(super) async fn launch_with_model(
+    prepared: command::PreparedClaude,
+    cwd: &Path,
+    generation: &str,
+    purpose: SessionPurpose,
+    requested_session_id: Option<&str>,
+    model: Option<&str>,
+) -> io::Result<LaunchedClaude> {
+    if model.is_none() {
+        return Box::pin(launch(
+            prepared,
+            cwd,
+            generation,
+            purpose,
+            requested_session_id,
+        ))
+        .await;
+    }
+    Box::pin(launch_inner(
+        prepared,
+        cwd,
+        generation,
+        purpose,
+        requested_session_id,
+        model,
+        false,
+    ))
+    .await
+}
+
+/// Explicit selection restores the conversation without applying actor model settings.
+pub(super) async fn launch_with_retarget_guard(
+    prepared: command::PreparedClaude,
+    cwd: &Path,
+    generation: &str,
+    purpose: SessionPurpose,
+    requested_session_id: Option<&str>,
+    model: Option<&str>,
+    exclusive: bool,
+) -> io::Result<LaunchedClaude> {
+    if !exclusive {
+        return Box::pin(launch_with_model(
+            prepared,
+            cwd,
+            generation,
+            purpose,
+            requested_session_id,
+            model,
+        ))
+        .await;
+    }
+    let id = requested_session_id
+        .ok_or_else(|| io::Error::other("Explicit Claude resume requires a session ID"))?;
+    retarget::ensure_available(&prepared.config_dir, id).await?;
+    Box::pin(launch_inner(
+        prepared,
+        cwd,
+        generation,
+        purpose,
+        Some(id),
+        None,
+        true,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn launch_inner(
     prepared: command::PreparedClaude,
     cwd: &Path,
     generation: &str,
     purpose: SessionPurpose,
     requested_session_id: Option<&str>,
+    model: Option<&str>,
+    exclusive: bool,
 ) -> io::Result<LaunchedClaude> {
-    command::require_supported_version(&prepared.executable, cwd, &prepared.launch_environment)
-        .await?;
+    let launcher_version =
+        command::require_supported_version(&prepared.executable, cwd, &prepared.launch_environment)
+            .await?;
     // Inspect durable job metadata BEFORE respawn can replace it. A receipt
     // alone does not imply that this session ever received its first prompt.
     let skip_existing_transcript = match requested_session_id {
@@ -130,6 +220,15 @@ async fn launch_inner(
     if let Some(session_id) = requested_session_id {
         validate_session_id(session_id)?;
         if let Some((endpoint, job)) = find_live_job(&prepared.config_dir, session_id).await? {
+            if exclusive {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "Claude session {session_id} became live in job {}; no foreign process was attached or stopped",
+                        job.short
+                    ),
+                ));
+            }
             validate_worker_version(&job)?;
             await_settled(&prepared.config_dir, &job, cwd).await?;
             return connect_launched(
@@ -140,9 +239,20 @@ async fn launch_inner(
                 true,
                 skip_existing_transcript,
                 false,
+                model,
             )
             .await;
         }
+    }
+
+    if requested_session_id.is_some()
+        && let Some(model) = model
+    {
+        // A cold resume will preserve its prior native model. Without a proven
+        // adapter, choose ordinary fresh configuration before spawning it.
+        // The live-job path above first checks its actual persisted model and
+        // can reattach without any model input even on another supported CLI.
+        model_switch::require_adapter(model, launcher_version)?;
     }
 
     let name = format!(
@@ -259,6 +369,7 @@ async fn launch_inner(
         resumed,
         skip_existing_transcript,
         true,
+        model,
     )
     .await
 }
@@ -341,7 +452,24 @@ async fn connect_launched(
     resumed: bool,
     skip_existing_transcript: bool,
     rollback_on_failure: bool,
+    model: Option<&str>,
 ) -> io::Result<LaunchedClaude> {
+    if let Some(model) = model
+        && let Err(error) = Box::pin(model_switch::apply(
+            &prepared.config_dir,
+            &endpoint,
+            &job,
+            model,
+            rollback_on_failure,
+        ))
+        .await
+    {
+        if rollback_on_failure {
+            let rollback = kill_and_confirm(&endpoint, &job.short).await;
+            return Err(with_optional_cleanup_error(error, rollback.err()));
+        }
+        return Err(error);
+    }
     let state_path = prepared
         .config_dir
         .join("jobs")
@@ -507,6 +635,11 @@ async fn kill_and_confirm(endpoint: &control::Endpoint, short: &str) -> io::Resu
     }
     let deadline = tokio::time::Instant::now() + STOP_TIMEOUT;
     let mut last_error: Option<io::Error>;
+    // A control endpoint that stays NotFound is gone for good: the task and its
+    // harness are already dead, so that counts as stopped. Agent View jobs can
+    // outlive a brief harness restart, so only a NotFound sustained past the
+    // confirmation window counts — anything shorter is a restart race.
+    let mut gone_since: Option<tokio::time::Instant> = None;
     loop {
         match control::list(endpoint).await {
             Ok(jobs)
@@ -516,8 +649,21 @@ async fn kill_and_confirm(endpoint: &control::Endpoint, short: &str) -> io::Resu
             {
                 return Ok(());
             }
-            Ok(_) => last_error = None,
-            Err(error) if retryable_control_error(&error) => last_error = Some(error),
+            Ok(_) => {
+                last_error = None;
+                gone_since = None;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                last_error = Some(error);
+                let since = gone_since.get_or_insert_with(tokio::time::Instant::now);
+                if since.elapsed() >= GONE_CONFIRM {
+                    return Ok(());
+                }
+            }
+            Err(error) if retryable_control_error(&error) => {
+                last_error = Some(error);
+                gone_since = None;
+            }
             Err(error) => return Err(error),
         }
         if tokio::time::Instant::now() >= deadline {
@@ -1223,6 +1369,47 @@ struct TranscriptFollower {
     discovered_from_store: bool,
     stale_published_path: Option<PathBuf>,
     continuity: transcript_continuity::Continuity,
+    // An idle lane ticks every 50 ms, so re-reading and re-parsing state.json
+    // plus canonicalizing two paths on each tick dominated follower CPU
+    // (~20% of daemon cycles in a firestar profile of pid 2928924). These
+    // caches make an unchanged tick a single statx and no allocation at all.
+    // They are only ever populated after the full validation below has run
+    // for that exact state file, so every error path is unchanged.
+    state_stamp: Option<StateStamp>,
+    canonical_projects: Option<PathBuf>,
+    // Incremented once per actual state.json read+parse. Tests assert an
+    // unchanged state file does not advance it across repeated ticks.
+    state_parses: u64,
+    // Device/inode of the adopted transcript. Relocation recovery and
+    // same-path-replacement detection depend on the transcript, not on
+    // state.json, so the idle fast path re-stats this every tick.
+    transcript_stamp: Option<(u64, u64)>,
+}
+
+/// Identity of state.json as of the last successful discovery. A change in any
+/// field re-runs discovery; mtime is paired with len and inode because a
+/// same-second rewrite can keep mtime coarse on some filesystems.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StateStamp {
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+fn state_stamp(metadata: &std::fs::Metadata) -> StateStamp {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    StateStamp {
+        len: metadata.len(),
+        mtime: metadata.modified().ok(),
+        #[cfg(unix)]
+        dev: metadata.dev(),
+        #[cfg(unix)]
+        ino: metadata.ino(),
+    }
 }
 
 impl TranscriptFollower {
@@ -1245,6 +1432,10 @@ impl TranscriptFollower {
             discovered_from_store: false,
             stale_published_path: None,
             continuity: transcript_continuity::Continuity::default(),
+            state_stamp: None,
+            canonical_projects: None,
+            state_parses: 0,
+            transcript_stamp: None,
         }
     }
 
@@ -1253,7 +1444,10 @@ impl TranscriptFollower {
         // until the first prompt. Validate an already-published path now, but
         // let poll() discover a fresh transcript after control admission.
         if !self.skip_existing {
-            return self.discover_path().await;
+            // Publication can precede file creation. Use the same bounded grace
+            // as an active transcript move, without admitting a different identity.
+            let result = self.discover_path().await;
+            return self.continuity.settle(result);
         }
         let deadline = tokio::time::Instant::now() + TRANSCRIPT_READY_TIMEOUT;
         loop {
@@ -1275,13 +1469,8 @@ impl TranscriptFollower {
     }
 
     async fn poll(&mut self) -> io::Result<Vec<Value>> {
-        let active = self.path.is_some();
         let result = self.poll_inner().await;
-        if active {
-            self.continuity.settle(result)
-        } else {
-            result
-        }
+        self.continuity.settle(result)
     }
 
     async fn poll_inner(&mut self) -> io::Result<Vec<Value>> {
@@ -1350,7 +1539,29 @@ impl TranscriptFollower {
                 "Claude Agent View state file failed validation",
             ));
         }
+        // Fast path: state.json is unchanged since the last successful
+        // discovery, so the published path, its canonical form and the session
+        // store location cannot have changed either. Validation above still
+        // runs every tick, so a state file that stops being a regular file is
+        // still refused on the very next tick. Only the re-read, the re-parse
+        // and the two canonicalize calls are skipped.
+        //
+        // The transcript is re-stat'ed because relocation recovery and
+        // same-path-replacement detection depend on it, and a session that has
+        // ever relocated (stale_published_path) keeps taking the full path,
+        // because a stale pointer reappearing is only observable there. Both
+        // are rare, so the common idle lane still pays one statx and no
+        // allocation per tick.
+        let stamp = state_stamp(&metadata);
+        if self.path.is_some()
+            && self.state_stamp == Some(stamp)
+            && self.stale_published_path.is_none()
+            && self.transcript_unchanged().await
+        {
+            return Ok(());
+        }
         let bytes = tokio::fs::read(&self.state_path).await?;
+        self.state_parses += 1;
         let Ok(state) = serde_json::from_slice::<Value>(&bytes) else {
             // Agent View may replace this small file while it is being read;
             // retry on the next poll before declaring transcript corruption.
@@ -1383,7 +1594,17 @@ impl TranscriptFollower {
         if filename != format!("{}.jsonl", self.session_id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Claude Agent View state referenced a different transcript identity",
+                format!(
+                    "Claude Agent View state referenced a different transcript identity: \
+                     expected session {:?}, observed transcript {:?}, job {:?}",
+                    self.session_id,
+                    filename,
+                    self.state_path
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("unknown"),
+                ),
             ));
         }
         let path = transcript_path::recover_missing(
@@ -1403,7 +1624,14 @@ impl TranscriptFollower {
             ));
         }
         let canonical = tokio::fs::canonicalize(&path).await?;
-        let projects = tokio::fs::canonicalize(self.config_dir.join("projects")).await?;
+        let projects = match self.canonical_projects.clone() {
+            Some(projects) => projects,
+            None => {
+                let projects = tokio::fs::canonicalize(self.config_dir.join("projects")).await?;
+                self.canonical_projects = Some(projects.clone());
+                projects
+            }
+        };
         if !canonical.starts_with(&projects) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -1412,6 +1640,11 @@ impl TranscriptFollower {
         }
         let mut file = tokio::fs::File::open(&canonical).await?;
         let metadata = file.metadata().await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            self.transcript_stamp = Some((metadata.dev(), metadata.ino()));
+        }
         let identity = transcript_file_identity(&file).await?;
         if let Some(current) = self.path.as_ref() {
             if current != &canonical {
@@ -1443,6 +1676,7 @@ impl TranscriptFollower {
                 self.identity = Some(identity);
                 self.path = Some(canonical);
                 self.stale_published_path = None;
+                self.state_stamp = Some(stamp);
                 return Ok(());
             }
             if current != &canonical || self.identity.as_ref() != Some(&identity) {
@@ -1451,6 +1685,7 @@ impl TranscriptFollower {
                     "Claude Agent View rotated the transcript while the session was active",
                 ));
             }
+            self.state_stamp = Some(stamp);
             return Ok(());
         }
         self.offset = if self.skip_existing {
@@ -1462,7 +1697,36 @@ impl TranscriptFollower {
         self.continuity.initialize(&mut file, self.offset).await?;
         self.identity = Some(identity);
         self.path = Some(canonical);
+        self.state_stamp = Some(stamp);
         Ok(())
+    }
+}
+
+impl TranscriptFollower {
+    /// True when the adopted transcript is still the same regular file. This is
+    /// the one stat the idle fast path still pays, because relocation recovery
+    /// and same-path-replacement detection below depend on the transcript
+    /// rather than on state.json.
+    async fn transcript_unchanged(&self) -> bool {
+        let Some(path) = self.path.as_deref() else {
+            return false;
+        };
+        let Ok(metadata) = tokio::fs::symlink_metadata(path).await else {
+            return false;
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            self.transcript_stamp == Some((metadata.dev(), metadata.ino()))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            true
+        }
     }
 }
 
@@ -1845,6 +2109,62 @@ mod tests {
             .expect("materialized state");
 
         assert_eq!(follower.poll().await.expect("first records"), [first]);
+    }
+
+    #[tokio::test]
+    async fn unchanged_state_file_skips_reparse_and_reuses_canonical_projects() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        let projects_dir = config_dir.join("projects/workspace");
+        let job_dir = config_dir.join("jobs/1234abcd");
+        let session_id = "52b41c61-e23c-4b7c-8b60-809c347451b5";
+        std::fs::create_dir_all(&projects_dir).expect("projects");
+        std::fs::create_dir_all(&job_dir).expect("job");
+        let state_path = job_dir.join("state.json");
+        let transcript_path = projects_dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(&transcript_path, "").expect("transcript");
+        cccc_core::fs::write_json(&state_path, &json!({"linkScanPath":transcript_path}))
+            .expect("state");
+
+        let mut follower =
+            TranscriptFollower::new(state_path.clone(), config_dir, session_id.into(), false);
+        follower.poll().await.expect("first poll discovers");
+        let parses_after_discovery = follower.state_parses;
+        assert!(parses_after_discovery >= 1, "the first poll must parse state");
+        assert!(follower.path.is_some(), "the first poll must attach");
+
+        // 40 further ticks at the 50 ms cadence, with state.json untouched.
+        for _ in 0..40 {
+            follower.poll().await.expect("idle poll");
+        }
+        assert_eq!(
+            follower.state_parses, parses_after_discovery,
+            "an unchanged state.json must not be re-read or re-parsed on later ticks"
+        );
+        assert!(
+            follower.canonical_projects.is_some(),
+            "the canonical projects dir is cached after the first discovery"
+        );
+
+        // A real change to state.json must still be picked up.
+        let next = json!({
+            "type":"user",
+            "sessionId":session_id,
+            "promptId":"after-change",
+            "message":{"content":"new work"},
+        });
+        std::fs::write(&transcript_path, format!("{next}\n")).expect("append transcript");
+        cccc_core::fs::write_json(&state_path, &json!({"linkScanPath":transcript_path}))
+            .expect("rewritten state");
+        assert_eq!(
+            follower.poll().await.expect("poll after state change"),
+            [next],
+            "a changed state.json must re-run discovery and surface new records"
+        );
+        assert!(
+            follower.state_parses > parses_after_discovery,
+            "a changed state.json must be re-parsed"
+        );
     }
 
     #[tokio::test]
@@ -2499,6 +2819,99 @@ mod tests {
             "{:?}",
             fixture.operations()
         );
+    }
+
+    /// A control endpoint whose socket file never existed (task and harness
+    /// already gone) counts as stopped after a short confirmation window
+    /// instead of burning the full stop timeout and failing the shutdown.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_treats_a_persistently_missing_endpoint_as_stopped() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(config_dir.join("daemon")).expect("daemon config");
+        let control_key = config_dir.join("daemon/control.key");
+        std::fs::write(&control_key, "0123456789abcdef0123456789abcdef\n").expect("key");
+        std::fs::set_permissions(&control_key, std::fs::Permissions::from_mode(0o600))
+            .expect("key permissions");
+        let config_dir = config_dir.canonicalize().expect("canonical config");
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(config_dir.to_string_lossy().as_bytes())
+        );
+        let control_dir = Path::new("/tmp")
+            .join(format!(
+                "cc-daemon-{}",
+                config_dir.metadata().expect("metadata").uid()
+            ))
+            .join(&digest[..8]);
+        std::fs::create_dir_all(&control_dir).expect("control directory");
+        std::fs::set_permissions(&control_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("control directory permissions");
+        let _guard = ControlDirectory(control_dir); // no control.sock is bound
+
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint resolves");
+        let started = std::time::Instant::now();
+        kill_and_confirm(&endpoint, "deadbeef")
+            .await
+            .expect("a missing endpoint is already stopped");
+        assert!(
+            started.elapsed() >= GONE_CONFIRM,
+            "a missing endpoint must be confirmed gone first: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            started.elapsed() < STOP_TIMEOUT,
+            "missing endpoint must not wait out the stop timeout: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A task that stays listed keeps the full timeout: a stuck Agent View
+    /// job must still fail the stop, not masquerade as gone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_still_times_out_when_the_task_stays_listed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        let (config_dir, listener, _guard) = bind_fake_control(&config_dir);
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut line = Vec::new();
+                let mut byte = [0u8; 1];
+                while tokio::io::AsyncReadExt::read(&mut stream, &mut byte)
+                    .await
+                    .expect("read")
+                    > 0
+                {
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    line.push(byte[0]);
+                }
+                let request: Value = serde_json::from_slice(&line).expect("request json");
+                let op = request.get("op").and_then(Value::as_str).unwrap_or("");
+                let response = match op {
+                    "list" => json!({"ok":true,"op":"list","jobs":[{"short":"deadbeef"}]}),
+                    "kill" => json!({"ok":true,"op":"kill"}),
+                    _ => json!({"ok":false,"op":op,"code":"EPROTO","error":"unexpected op"}),
+                };
+                let mut bytes = serde_json::to_vec(&response).expect("response");
+                bytes.push(b'\n');
+                tokio::io::AsyncWriteExt::write_all(&mut stream, &bytes)
+                    .await
+                    .expect("write");
+            }
+        });
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint resolves");
+        let error = kill_and_confirm(&endpoint, "deadbeef")
+            .await
+            .expect_err("a stuck task still fails the stop");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        server.abort();
     }
 }
 

@@ -93,10 +93,23 @@ fn failed_resume_preserves_identity_and_pauses_automatic_launch_without_new_sess
             .expect("automatic launch is blocked, not fresh");
         assert!(is_resume_blocked(&error));
     }
+    let mut after = f.receipt();
+    let timestamp = after["updated_at"].as_str().expect("diagnostic timestamp");
+    chrono::DateTime::parse_from_rfc3339(timestamp).expect("valid diagnostic timestamp");
     assert_eq!(
-        f.receipt(),
-        failed,
-        "blocked reads must not manufacture attempts"
+        after["last_recovery_decision"],
+        json!({"action":"block", "reason":"previous_resume_failure",
+            "session_id":SESSION, "at":timestamp}),
+        "blocked polling must describe the retained conversation without another attempt"
+    );
+    let mut before = failed.clone();
+    for document in [&mut after, &mut before] {
+        document.remove("updated_at");
+        document.remove("last_recovery_decision");
+    }
+    assert_eq!(
+        after, before,
+        "blocked decisions must not manufacture attempts"
     );
     assert!(retry_failed_resume(&f.home, &f.group, "worker").expect("explicit retry"));
     let retry = f.prepare().expect("retry").expect("same saved identity");

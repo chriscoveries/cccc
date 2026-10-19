@@ -44,6 +44,15 @@ pub(super) struct StartGuard {
 }
 
 impl StartGuard {
+    pub(super) fn try_acquire(key: &Key) -> io::Result<Option<Self>> {
+        let mut active = starts().0.lock().map_err(|_| poisoned())?;
+        if active.contains(key) {
+            return Ok(None);
+        }
+        active.insert(key.clone());
+        Ok(Some(Self { key: key.clone() }))
+    }
+
     pub(super) fn acquire(key: &Key) -> io::Result<Self> {
         let (active, changed) = starts();
         let mut active = active.lock().map_err(|_| poisoned())?;
@@ -87,9 +96,10 @@ fn start_managed_agent(
     group: &GroupDoc,
     actor: &Actor,
     key: Key,
+    explicit: bool,
 ) -> io::Result<()> {
     let cwd = working_directory(group, actor)?;
-    match launch_managed(home, group, actor, &cwd) {
+    match launch_managed_with_policy(home, group, actor, &cwd, explicit) {
         Ok(app) => attach_managed(home, group, actor, key, cwd, app),
         Err(refusal) if super::workspace_trust::refused(actor, &refusal) => {
             super::workspace_trust::prompt(home, group, actor, key, cwd, refusal)
@@ -103,6 +113,16 @@ pub(super) fn launch_managed(
     group: &GroupDoc,
     actor: &Actor,
     cwd: &std::path::Path,
+) -> io::Result<AnalystSession> {
+    launch_managed_with_policy(home, group, actor, cwd, false)
+}
+
+fn launch_managed_with_policy(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    cwd: &std::path::Path,
+    explicit: bool,
 ) -> io::Result<AnalystSession> {
     let mut env = actor.env.clone();
     env.insert(
@@ -123,11 +143,21 @@ pub(super) fn launch_managed(
     };
     let launch_home = home.clone();
     run_managed_launch(
-        async move { AnalystSession::launch_actor(&launch_home, config).await }.instrument(
-            tracing::info_span!(
-                "actor_runtime_start", group_id = %group.group_id, actor_id = %actor.id
-            ),
-        ),
+        async move {
+            if explicit {
+                Box::pin(AnalystSession::launch_actor_with_policy(
+                    &launch_home,
+                    config,
+                    true,
+                ))
+                .await
+            } else {
+                AnalystSession::launch_actor(&launch_home, config).await
+            }
+        }
+        .instrument(tracing::info_span!(
+            "actor_runtime_start", group_id = %group.group_id, actor_id = %actor.id
+        )),
     )
 }
 
@@ -164,6 +194,28 @@ pub(super) fn attach_managed(
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
     });
+    let required =
+        match super::super::actor_memory::required_resume(home, &group.group_id, &actor.id) {
+            Ok(required) => required,
+            Err(_) => {
+                return Err(cleanup_failed_start(
+                    &item,
+                    super::super::actor_memory::blocked_resume(
+                        "Could not verify the memory-maintenance resume requirement at attachment",
+                    ),
+                ));
+            }
+        };
+    if let Some(required) = &required
+        && !app.resumed_native_session_is(required.runtime, &required.session_id)
+    {
+        return Err(cleanup_failed_start(
+            &item,
+            super::super::actor_memory::blocked_resume(
+                "Managed attachment did not load the required native ACP session",
+            ),
+        ));
+    }
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
     }
@@ -208,7 +260,38 @@ pub(super) fn attach_managed(
     {
         return Err(cleanup_failed_start(&item, error));
     }
+    if let Some(required) = &required {
+        clear_attached_requirement(home, group, actor, &key, required)?;
+    }
     super::output::emit(&item, "headless.session.started", Map::new());
+    Ok(())
+}
+
+fn clear_attached_requirement(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    key: &Key,
+    required: &super::super::actor_memory::RequiredResume,
+) -> io::Result<()> {
+    if super::super::actor_memory::clear_required_resume(
+        home,
+        &group.group_id,
+        &actor.id,
+        Some(required),
+    )
+    .is_err()
+    {
+        let primary = super::super::actor_memory::blocked_resume(
+            "Could not retire the memory-maintenance resume requirement after attachment",
+        );
+        return Err(match stop_locked(key) {
+            Ok(()) => primary,
+            Err(cleanup) => {
+                io::Error::other(format!("{primary}; attachment cleanup failed: {cleanup}"))
+            }
+        });
+    }
     Ok(())
 }
 
@@ -223,10 +306,24 @@ fn cleanup_failed_start(item: &Session, primary: io::Error) -> io::Error {
 }
 
 pub fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Result<()> {
-    start_session(home, group, actor)
+    start_with_policy(home, group, actor, false)
 }
 
-fn start_session(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Result<()> {
+pub fn start_with_policy(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    explicit: bool,
+) -> io::Result<()> {
+    start_session(home, group, actor, explicit)
+}
+
+fn start_session(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    explicit: bool,
+) -> io::Result<()> {
     if !supports(actor) {
         return Ok(());
     }
@@ -236,8 +333,42 @@ fn start_session(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Resu
         return Ok(());
     }
     stop_locked(&key)?;
-
-    start_managed_agent(home, group, actor, key)
+    super::super::runtime_session::recovery_decision(
+        home,
+        &group.group_id,
+        &actor.id,
+        "attempt",
+        if explicit {
+            "explicit_start"
+        } else {
+            "automatic_start"
+        },
+    )?;
+    let result = start_managed_agent(home, group, actor, key.clone(), explicit);
+    let (action, reason) = match &result {
+        Ok(()) if lookup(&key).is_some_and(|item| item.running()) => {
+            ("started", "managed_session_attached".to_owned())
+        }
+        Ok(()) => ("block", "waiting_for_workspace_trust".to_owned()),
+        Err(error) if super::super::runtime_session::is_claude_resume_blocked(error) => {
+            ("block", error.to_string())
+        }
+        Err(error) => (
+            "failure",
+            format!(
+                "managed startup did not yield a started session ({:?})",
+                error.kind()
+            ),
+        ),
+    };
+    super::super::runtime_session::recovery_decision(
+        home,
+        &group.group_id,
+        &actor.id,
+        action,
+        &reason,
+    )?;
+    result
 }
 
 pub fn stop(group_id: &str, actor_id: &str) -> io::Result<()> {
@@ -278,7 +409,7 @@ pub fn ensure_viewer(group_id: &str, actor_id: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn stop_locked(key: &Key) -> io::Result<()> {
+pub(super) fn stop_locked(key: &Key) -> io::Result<()> {
     // A prompt may have been registered while stop was waiting for its start.
     super::workspace_trust_recovery::cancel(key)?;
     let Some(item) = lookup(key) else {
@@ -385,6 +516,12 @@ pub fn running(group_id: &str, actor_id: &str) -> bool {
     registered_running(group_id, actor_id).unwrap_or(false)
 }
 
+/// Confirm explicit retargeting attached the managed provider, not a trust PTY.
+pub(crate) fn resumed_session_is(group_id: &str, actor_id: &str, session_id: &str) -> bool {
+    lookup(&(group_id.to_owned(), actor_id.to_owned()))
+        .is_some_and(|item| item.running() && item.managed.thread_id() == session_id)
+}
+
 /// A failed managed session still owns its attached terminal until cleanup
 /// succeeds. Preserve that distinction from an independent PTY session.
 pub(crate) fn registered_running(group_id: &str, actor_id: &str) -> Option<bool> {
@@ -411,7 +548,11 @@ pub fn submit_batch(
     source_events: &[Event],
     cancelled: &AtomicBool,
 ) -> BatchSubmission {
-    let Some(item) = lookup(&(group.group_id.clone(), actor.id.clone())) else {
+    let key = (group.group_id.clone(), actor.id.clone());
+    let Ok(Some(_start)) = StartGuard::try_acquire(&key) else {
+        return BatchSubmission::Deferred;
+    };
+    let Some(item) = lookup(&key) else {
         return BatchSubmission::Deferred;
     };
     if !item.running() {
@@ -581,7 +722,7 @@ fn render_turn(event: &Event) -> Option<(String, String)> {
     })
 }
 
-fn lookup(key: &Key) -> Option<Arc<Session>> {
+pub(super) fn lookup(key: &Key) -> Option<Arc<Session>> {
     sessions().read().ok()?.get(key).cloned()
 }
 
@@ -631,7 +772,7 @@ pub(crate) fn cancel_turn(group: &str, actor: &str, generation: &str) -> io::Res
     Ok(true)
 }
 
-fn working_directory(group: &GroupDoc, actor: &Actor) -> io::Result<std::path::PathBuf> {
+pub(super) fn working_directory(group: &GroupDoc, actor: &Actor) -> io::Result<std::path::PathBuf> {
     let wanted = if actor.default_scope_key.is_empty() {
         &group.active_scope_key
     } else {

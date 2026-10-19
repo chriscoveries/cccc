@@ -1,3 +1,4 @@
+mod activity;
 mod cancellation;
 mod command;
 mod command_output;
@@ -37,6 +38,7 @@ mod transcript_archive;
 mod transcript_files;
 mod transcript_reader;
 
+pub use activity::{ACTIVITY_RETENTION, ActivityInstant, ActivitySnapshot};
 pub use command::{
     DEEPSEEK_ACP_APP_PACKAGE, DEEPSEEK_ACP_APP_VERSION, DEEPSEEK_ACP_PACKAGE,
     DEEPSEEK_ACP_SDK_VERSION, DEEPSEEK_ACP_VERSION, DEEPSEEK_LLM_ADAPTER_PACKAGE,
@@ -44,8 +46,8 @@ pub use command::{
     DEEPSEEK_MCP_CLIENT_VERSION, DEEPSEEK_NODE_RANGE, DEEPSEEK_NPM_BEFORE,
     DEEPSEEK_RELEASE_VERSION, DEEPSEEK_TURN_TIMEOUT_SECONDS, canonical_deepseek_runtime_manifest,
     deepseek_bootstrap_preflight, deepseek_external_preflight, deepseek_home,
-    deepseek_lockfile_is_pinned, deepseek_preflight, default_command, detect_runtimes,
-    is_canonical_deepseek_config, is_canonical_deepseek_profile_manifest,
+    deepseek_lockfile_is_pinned, deepseek_preflight, deepseek_profile_config, default_command,
+    detect_runtimes, is_canonical_deepseek_config, is_canonical_deepseek_profile_manifest,
     is_canonical_deepseek_runtime_manifest,
 };
 pub use command_output::{CapturedOutput, capture_command, capture_command_blocking};
@@ -56,8 +58,8 @@ pub use history_access::{
     history_since, retained_history, retained_history_tail,
 };
 pub use manager::{
-    reap, resize, start, start_with_history, status, stop, stop_all, stop_if_started_at, submit,
-    submit_interruptible, submit_sequence_interruptible, wait_for_input_ready, write,
+    activity, reap, resize, start, start_with_history, status, stop, stop_all, stop_if_started_at,
+    submit, submit_interruptible, submit_sequence_interruptible, wait_for_input_ready, write,
 };
 pub use output::HistoryPage;
 #[cfg(unix)]
