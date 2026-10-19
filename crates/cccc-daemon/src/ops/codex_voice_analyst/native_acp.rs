@@ -5,6 +5,12 @@ use serde_json::{Value, json};
 use std::{io, path::Path, time::Duration};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(40);
+const RESUME_DIAGNOSTIC_LIMIT: usize = 1800;
+
+/// Marks a failed `session/load` so the launch wrapper passes that
+/// diagnosis through instead of relabelling it an initialization failure.
+/// It names the failure, never a recovery command.
+pub(super) const RESUME_RECOVERY_HINT: &str = "could not resume ACP session";
 
 pub(super) struct Options {
     pub command: Vec<String>,
@@ -311,7 +317,45 @@ pub(super) async fn initialize(
     } else {
         "session/new"
     };
-    let result = protocol.request(method, params, HANDSHAKE_TIMEOUT).await?;
+    // Port semantic merge (T631): BOTH halves are needed. The v0.4.43
+    // session-identity check (a resumed session must come back with the
+    // identity that was attempted) and the resume-failure relabel (a failed
+    // session/load is not an initialization or login failure) guard
+    // different outcomes: the first fires when the server answers with a
+    // different session, the second when there is no answer at all. Keeping
+    // only one leaves either a mislabelled outage or a silent identity swap.
+    let result = match protocol.request(method, params, HANDSHAKE_TIMEOUT).await {
+        Ok(result) => result,
+        Err(error) if resume.is_some() => {
+            // A failed session/load is not an initialization or login failure.
+            // Naming it as one sends the operator to re-authenticate a CLI that
+            // is working fine, while the actual recovery -- starting a fresh
+            // session -- is never tried, because attempted sessions are never
+            // replaced automatically.
+            //
+            // The RPC reason is already sanitized and bounded to 1600
+            // characters. Reserve space for the full accepted session ID
+            // (up to 512 bytes) and recovery before fitting that reason into
+            // the complete 1800-character startup diagnostic envelope.
+            let prefix = format!("{RESUME_RECOVERY_HINT} {} (", resume.unwrap_or_default());
+            let suffix =
+                "). Not an initialization failure. Recover with `cccc actor new-session <actor>`";
+            let reason_limit = RESUME_DIAGNOSTIC_LIMIT
+                .saturating_sub(prefix.chars().count() + suffix.chars().count());
+            let reason = error.to_string();
+            let mut characters = reason.chars();
+            let mut reason: String = characters.by_ref().take(reason_limit).collect();
+            if characters.next().is_some() && !reason.is_empty() {
+                reason.pop();
+                reason.push('…');
+            }
+            return Err(io::Error::new(
+                error.kind(),
+                format!("{prefix}{reason}{suffix}"),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     if !result.is_object() {
         return Err(io::Error::other(
             "Official ACP server returned an invalid session response",
