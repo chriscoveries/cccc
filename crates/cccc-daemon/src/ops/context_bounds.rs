@@ -272,8 +272,11 @@ pub(super) fn project(
     // for one stub.
     let mut envelope = envelope(document, version, detail, bounds);
     let mut trimmed: Vec<&'static str> = Vec::new();
+    // The envelope may not eat the page: it is trimmed until at least a
+    // quarter of the cap (never less than one item reserve) is left for items.
+    let item_reserve = ITEM_RESERVE.max(budget / 4);
     for part in ["attention", "tasks_summary", "meta"] {
-        if serialized_len(&Value::Object(envelope.clone())) + ITEM_RESERVE <= budget {
+        if serialized_len(&Value::Object(envelope.clone())) + item_reserve <= budget {
             break;
         }
         if envelope.remove(part).is_some() {
@@ -285,7 +288,7 @@ pub(super) fn project(
         ("recent_decisions", "coordination.recent_decisions"),
         ("brief", "coordination.brief"),
     ] {
-        if serialized_len(&Value::Object(envelope.clone())) + ITEM_RESERVE <= budget {
+        if serialized_len(&Value::Object(envelope.clone())) + item_reserve <= budget {
             break;
         }
         let removed = envelope
@@ -305,6 +308,10 @@ pub(super) fn project(
     let mut actor_page: Vec<Value> = Vec::new();
     let mut oversized: Vec<String> = Vec::new();
     let mut detail_reduced = false;
+    // `include_board` renders the same page a second time inside `board`, so an
+    // item is charged twice; without this the verify loop would have to drop
+    // every item of a full page just to fit the duplicate.
+    let copies = 1 + usize::from(bounds.include_board && !overview);
 
     if !bounds.summary {
         if !overview && (bounds.include_coordination || bounds.include_board) {
@@ -312,7 +319,7 @@ pub(super) fn project(
                 let task = tasks[task_end];
                 let id = task_id(task);
                 let mut rendered = render_task(task, detail == "full");
-                let mut size = serialized_len(&rendered) + 1;
+                let mut size = (serialized_len(&rendered) + 1) * copies;
                 if used.saturating_add(size) > budget {
                     if !page.is_empty() {
                         break;
@@ -321,7 +328,7 @@ pub(super) fn project(
                     // the progress. Lean first; a stub last.
                     if detail == "full" {
                         let lean = render_task(task, false);
-                        let lean_size = serialized_len(&lean) + 1;
+                        let lean_size = (serialized_len(&lean) + 1) * copies;
                         if used.saturating_add(lean_size) <= budget {
                             rendered = lean;
                             size = lean_size;
@@ -334,7 +341,7 @@ pub(super) fn project(
                         // in `paging.oversized` (so it knows the card's body was
                         // withheld).
                         rendered = json!({"id": &id, "oversized": true});
-                        size = serialized_len(&rendered) + 1;
+                        size = (serialized_len(&rendered) + 1) * copies;
                         oversized.push(id);
                     }
                 }
@@ -351,7 +358,7 @@ pub(super) fn project(
                     .entry("id")
                     .or_insert_with(|| Value::String(actor_id.clone()));
                 let mut rendered = Value::Object(state);
-                let mut size = serialized_len(&rendered) + 1;
+                let mut size = (serialized_len(&rendered) + 1) * copies;
                 if used.saturating_add(size) > budget {
                     if !actor_page.is_empty() {
                         break;
@@ -370,6 +377,11 @@ pub(super) fn project(
     // The estimate above ignores separators and the closing braces of the
     // lists, so verify the real serialization and drop trailing items until the
     // answer genuinely fits the cap.
+    // If dropping items empties the page while items remain, the answer must
+    // still advance: one stub is always affordable inside ITEM_RESERVE.
+    let mut stubbed_out = false;
+    let start_task = bounds.task_offset.min(total_tasks);
+    let start_actor = bounds.actor_offset.min(total_actors);
     loop {
         let value = assemble(
             envelope.clone(),
@@ -386,7 +398,12 @@ pub(super) fn project(
             detail_reduced,
             recent_capped(document, detail),
         );
-        if serialized_len(&value) <= budget {
+        // A fitting answer that advanced nothing while items remain is the
+        // stall this loop exists to prevent: fall through to the stub instead
+        // of returning it.
+        let progressed = task_end > start_task || actor_end > start_actor;
+        let remaining = task_end < total_tasks || actor_end < total_actors;
+        if serialized_len(&value) <= budget && (progressed || !remaining) {
             return value;
         }
         if !page.is_empty() {
@@ -395,6 +412,18 @@ pub(super) fn project(
         } else if !actor_page.is_empty() {
             actor_page.pop();
             actor_end -= 1;
+        } else if !stubbed_out && task_end < total_tasks {
+            stubbed_out = true;
+            let id = task_id(tasks[task_end]);
+            page.push(json!({"id": &id, "oversized": true}));
+            oversized.push(id);
+            task_end += 1;
+        } else if !stubbed_out && actor_end < total_actors {
+            stubbed_out = true;
+            let (id, _) = actors[actor_end];
+            actor_page.push(json!({"id": id, "oversized": true}));
+            oversized.push(id.clone());
+            actor_end += 1;
         } else {
             // Nothing left to drop: the envelope alone is over the cap. Return
             // it (the op never errors on size) with `paging.stalled` set so the

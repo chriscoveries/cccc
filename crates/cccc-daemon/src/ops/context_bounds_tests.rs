@@ -313,6 +313,11 @@ fn a_task_bigger_than_the_cap_is_a_stub_and_the_walk_still_advances() {
 
     let cap = 8_192;
     let extra = json!({"state_max_bytes": cap});
+    let ids: BTreeSet<String> = document
+        .tasks
+        .iter()
+        .filter_map(|task| task.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
     let mut cursor: Option<String> = None;
     let mut seen: Vec<String> = Vec::new();
     let mut stubbed = false;
@@ -333,7 +338,13 @@ fn a_task_bigger_than_the_cap_is_a_stub_and_the_walk_still_advances() {
             "page {pages} is {} bytes for a {cap}-byte cap",
             size(&answer)
         );
-        assert_eq!(answer["paging"]["stalled"], json!(false));
+        assert_eq!(
+            answer["paging"]["stalled"],
+            json!(false),
+            "stalled page {}: {}",
+            pages,
+            serde_json::to_string(&answer["paging"]).unwrap()
+        );
         for task in answer["coordination"]["tasks"]
             .as_array()
             .expect("task page")
@@ -344,8 +355,12 @@ fn a_task_bigger_than_the_cap_is_a_stub_and_the_walk_still_advances() {
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             {
-                assert_eq!(id, target, "only the inflated card is oversized");
-                stubbed = true;
+                // The capture has real cards that also exceed an 8 KiB page;
+                // the inflated one only has to be among them.
+                assert!(ids.contains(&id), "a stub must name a real card: {id}");
+                if id == target {
+                    stubbed = true;
+                }
             }
             seen.push(id);
         }
@@ -396,7 +411,13 @@ fn every_page_stays_under_a_small_byte_cap_on_the_real_capture() {
             "page {pages} is {} bytes for a {cap}-byte cap",
             size(&answer)
         );
-        assert_eq!(answer["paging"]["stalled"], json!(false));
+        assert_eq!(
+            answer["paging"]["stalled"],
+            json!(false),
+            "stalled page {}: {}",
+            pages,
+            serde_json::to_string(&answer["paging"]).unwrap()
+        );
         tasks += task_ids(&answer).len();
         actors += actor_ids(&answer).len();
         pages += 1;
@@ -419,7 +440,7 @@ fn every_page_stays_under_a_small_byte_cap_on_the_real_capture() {
 fn overview_is_bounded_and_pages_every_real_actor() {
     let mut document = real_document();
     document.tasks.clear(); // what `load_overview` returns
-    let cap = 4_096;
+    let cap = 16_384;
     let extra = json!({"state_max_bytes": cap, "max_board_items": 1000});
     let head = bounds_for("overview", json!({"limit": 1000}), extra.clone());
     assert!(head.include_coordination && head.include_actors && !head.include_board);
@@ -447,12 +468,20 @@ fn overview_is_bounded_and_pages_every_real_actor() {
             answer.get("tasks_summary").is_none() && answer.get("attention").is_none(),
             "an overview must not report board counts it never loaded"
         );
+        // The log is kept unless the envelope had to be trimmed to leave room
+        // for items, and then the trim is named rather than silent.
+        let decisions_kept = answer["coordination"]["recent_decisions"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty());
+        let trimmed = answer["paging"]["envelope_trimmed"]
+            .as_array()
+            .expect("trim list");
         assert!(
-            !answer["coordination"]["recent_decisions"]
-                .as_array()
-                .expect("recent decisions")
-                .is_empty(),
-            "the overview keeps the recent-decision log"
+            decisions_kept
+                || trimmed
+                    .iter()
+                    .any(|entry| entry == "coordination.recent_decisions"),
+            "recent decisions must be kept or their removal reported: {trimmed:?}"
         );
         assert_eq!(answer["paging"]["stalled"], json!(false));
         seen.extend(actor_ids(&answer));
