@@ -73,7 +73,15 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
         &delivery_actor_ids,
         &idle_actor_ids,
     ) {
-        Ok(result) => apply(home, result, cancelled),
+        Ok(result) => {
+            apply(home, result, cancelled);
+            // The memory-ceiling pass rides the same cadence as unread
+            // notices: a host scan every tick would be wasteful, and the
+            // foreman notice wants the same at-most-once treatment.
+            if include_unread && !cancelled.load(Ordering::Acquire) {
+                tick_actor_memory(home, group_id, cancelled);
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => tracing::warn!(%error, %group_id, "automation group tick failed"),
     }
@@ -371,6 +379,30 @@ fn call(home: &HomeLayout, op: &str, value: serde_json::Value) -> bool {
         tracing::warn!(%op, "scheduled automation action failed");
     }
     response.ok
+}
+
+/// One memory-ceiling pass for a group: sample capped actors, restart what is
+/// over limit while idle (at most one restart per actor per 30 minutes).
+/// Returned restart/failure notices are dispatched like any other tick
+/// notification.
+fn tick_actor_memory(home: &HomeLayout, group_id: &str, cancelled: &AtomicBool) {
+    let Ok(store) = GroupStore::new(home.clone()) else {
+        return;
+    };
+    let Ok(group) = store.load(group_id) else {
+        return;
+    };
+    match super::actor_memory::tick(home, &group) {
+        Ok(events) => {
+            for event in events {
+                if cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                super::actor_delivery::dispatch(home, &group, &event);
+            }
+        }
+        Err(error) => tracing::warn!(%error, %group_id, "actor memory tick failed"),
+    }
 }
 
 #[cfg(test)]

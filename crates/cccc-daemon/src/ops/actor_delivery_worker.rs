@@ -189,10 +189,10 @@ fn process_deepseek_batch(
             return BatchOutcome::Retry;
         }
         if !crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) {
-            let started = actor_runtime::apply(home, group, &actor.id, "actor.start");
+            let started = actor_runtime::start_for_delivery(home, group, &actor.id, cancelled);
             super::actor_respawn_backoff::end_restart(&group.group_id, &actor.id);
             match started {
-                Ok(_) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
+                Ok(true) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
                 Ok(_) => return BatchOutcome::Retry,
                 Err(error) => {
                     return match terminal_reason(&error) {
@@ -226,10 +226,10 @@ fn process_managed_batch(
             return BatchOutcome::Retry;
         }
         if !crate::ops::local_headless::running(&group.group_id, &actor.id) {
-            let started = actor_runtime::apply(home, group, &actor.id, "actor.start");
+            let started = actor_runtime::start_for_delivery(home, group, &actor.id, cancelled);
             super::actor_respawn_backoff::end_restart(&group.group_id, &actor.id);
             match started {
-                Ok(None) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {}
+                Ok(true) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {}
                 Ok(_) => return BatchOutcome::Retry,
                 Err(error) => {
                     if let Some(reason) = terminal_reason(&error) {
@@ -350,10 +350,13 @@ fn ensure_running(
     {
         return Ok(Some(status));
     }
-    let started = actor_runtime::apply(home, group, &actor.id, "actor.start");
+    let started = actor_runtime::start_for_delivery(home, group, &actor.id, cancelled);
     super::actor_respawn_backoff::end_restart(&group.group_id, &actor.id);
     let status = match started {
-        Ok(Some(status)) if status.running => status,
+        Ok(true) => match actor_runtime::status(&group.group_id, &actor.id) {
+            Some(status) if status.running => status,
+            _ => return Ok(None),
+        },
         Ok(_) => return Ok(None),
         Err(error) => {
             if let Ok(status) = cccc_runtime::status(&group.group_id, &actor.id)
