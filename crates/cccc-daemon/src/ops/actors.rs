@@ -824,6 +824,24 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
     } else {
         kind
     };
+    // RS-3: explicit starts clear a park only for a human operator. Scheduled rules are
+    // automation and must respect the durable restart gate just like message delivery.
+    let requester = string_arg(request, "by").unwrap_or_else(|| "user".into());
+    if enabled && kind != "actor.new_session" {
+        if is_automation_requester(&requester) {
+            if let Some(refusal) = super::actor_restart_backoff::refusal(home, &group_id, &actor_id)
+            {
+                return Err(OpError::new(refusal.code(), refusal.message()));
+            }
+        } else if let Err(error) =
+            super::actor_restart_backoff::clear_for_manual_start(home, &group_id, &actor_id)
+        {
+            tracing::warn!(
+                %group_id, %actor_id, %error,
+                "failed to clear the restart park before an explicit start"
+            );
+        }
+    }
     let applied =
         actor_runtime::apply_explicit(home, &group, &actor_id, apply_kind).and_then(|status| {
             if let Some(retarget) = &retarget {
@@ -992,6 +1010,13 @@ enum ActorLifecycleEffect {
     Started,
     Stopped,
     Replaced,
+}
+
+/// Whether a lifecycle request came from automation rather than from a person or an Agent acting
+/// on someone's behalf. `system` is the identity the automation runtime signs its calls with, and
+/// `automation` is accepted so a rule configured with that `by` cannot slip past the RS-3 gate.
+fn is_automation_requester(requester: &str) -> bool {
+    matches!(requester.trim(), "system" | "automation")
 }
 
 fn lifecycle_effect(kind: &str, was_running: bool, is_running: bool) -> ActorLifecycleEffect {

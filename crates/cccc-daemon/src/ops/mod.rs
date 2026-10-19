@@ -3,10 +3,13 @@ pub(crate) mod actor_delivery;
 mod actor_delivery_preamble;
 mod actor_delivery_render;
 mod actor_delivery_worker;
+#[cfg(test)]
+mod actor_lifecycle_backoff_tests;
 mod actor_listing;
 mod actor_memory;
 mod actor_memory_sampling;
 mod actor_profile_runtime;
+pub(crate) mod actor_restart_backoff;
 pub(crate) mod actor_respawn_backoff;
 pub(crate) mod actor_runtime;
 mod actor_runtime_status;

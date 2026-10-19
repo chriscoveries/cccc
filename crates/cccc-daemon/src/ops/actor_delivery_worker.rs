@@ -185,6 +185,9 @@ fn process_deepseek_batch(
         if crate::ops::deepseek_runtime::manual_restart_required(home, group, actor) {
             return BatchOutcome::Retry;
         }
+        if !automation_may_launch(home, &group.group_id, &actor.id) {
+            return BatchOutcome::Retry;
+        }
         if !respawn_backoff(group, actor, cancelled) {
             return BatchOutcome::Retry;
         }
@@ -222,6 +225,9 @@ fn process_managed_batch(
     cancelled: &AtomicBool,
 ) -> BatchOutcome {
     if !crate::ops::local_headless::running(&group.group_id, &actor.id) {
+        if !automation_may_launch(home, &group.group_id, &actor.id) {
+            return BatchOutcome::Retry;
+        }
         if !respawn_backoff(group, actor, cancelled) {
             return BatchOutcome::Retry;
         }
@@ -323,6 +329,25 @@ fn settle_managed_batch(
     BatchOutcome::Delivered
 }
 
+/// RS-3: message delivery is automation, not an operator, so it may not relaunch an Actor that
+/// is backing off or parked — that is exactly the hot loop the backoff exists to stop. A manual
+/// start goes through `actor_runtime::apply` and is never gated here; it clears the park instead.
+fn automation_may_launch(home: &cccc_core::HomeLayout, group_id: &str, actor_id: &str) -> bool {
+    match crate::ops::actor_restart_backoff::refusal(home, group_id, actor_id) {
+        None => true,
+        Some(refusal) => {
+            tracing::debug!(
+                %group_id,
+                %actor_id,
+                code = refusal.code(),
+                message = %refusal.message(),
+                "holding the automatic relaunch"
+            );
+            false
+        }
+    }
+}
+
 fn finish_jobs(jobs: &[DeliveryJob]) {
     for job in jobs {
         complete_job(job);
@@ -339,6 +364,9 @@ fn ensure_running(
         && status.running
     {
         return Ok(Some(status));
+    }
+    if !automation_may_launch(home, &group.group_id, &actor.id) {
+        return Ok(None);
     }
     if !respawn_backoff(group, actor, cancelled) {
         return Ok(None);

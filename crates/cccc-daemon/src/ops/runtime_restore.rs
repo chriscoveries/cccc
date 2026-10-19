@@ -132,6 +132,22 @@ fn restore_group(home: &HomeLayout, store: &GroupStore, group_id: &str) -> Resul
             );
             continue;
         }
+        // RS-3: a daemon restart is not an operator. Restoring a parked Actor here would relaunch
+        // exactly what the park exists to stop, and would erase the reason the next `actor_list`
+        // shows. A Waiting Actor is deferred instead: the next delivery or rule wakes it once the
+        // delay has elapsed, and an operator start clears a park.
+        if let Some(refusal) =
+            crate::ops::actor_restart_backoff::refusal(home, &group.group_id, &actor.id)
+        {
+            tracing::info!(
+                group_id = %group.group_id,
+                actor_id = %actor.id,
+                code = refusal.code(),
+                message = %refusal.message(),
+                "skipped boot restore for a backing-off or parked Actor"
+            );
+            continue;
+        }
         let was_running = actor_runtime::actor_is_running(&group, &actor);
         match actor_runtime::apply_resolved(home, &group, &actor, "actor.restore") {
             Ok(_) => {
