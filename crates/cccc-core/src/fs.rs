@@ -261,32 +261,47 @@ mod tests {
         );
     }
 
-    /// The captured entry from the firestar `mcp-cccc` incident. `serde_yaml`
-    /// does not preserve an unknown tag: parsing this file yields the plain
-    /// string `process.env.CCCC_HOME`, which is exactly the silent degradation
-    /// the check exists to stop. The reader must refuse it, not load it.
+    /// The managed profile the pre-fix daemon actually wrote on firestar. This
+    /// is the incident input, not a hand-written approximation: four `!!js`
+    /// tags (lines 11 and 20-22). `serde_yaml` keeps no trace of them - it
+    /// hands back the inner scalar - which is exactly the silent degradation
+    /// the check exists to stop. The reader must refuse the file, not load it.
     #[test]
-    fn unknown_yaml_tag_is_rejected_before_the_parser_drops_it() {
-        let text = "mcp_servers:\n  cccc:\n    command: /usr/local/bin/cccc\n    args: [mcp]\n    env:\n      CCCC_HOME: !!js process.env.CCCC_HOME\n";
-        // Pin the reason this check reads source text instead of a value:
-        // the parser keeps no trace of the tag.
+    fn real_tagged_profile_is_rejected_before_the_parser_drops_the_tag() {
+        // Byte-exact capture: /var/lib/cccc/runtimes/deepseek/0.1.0-rc.6/
+        // profiles/cccc-acp/cordis.yml on firestar, mtime 2026-10-19
+        // 16:39:28 UTC, 647 bytes, sha256
+        // d5acf7b985c068462093f52ec52ed541d8cf1dc6d743f106f647743b052cfed9.
+        let text = include_str!("../tests/fixtures/real_deepseek_acp_cordis_tagged.yml");
+        assert_eq!(text.len(), 647, "fixture must stay a byte-exact capture");
+
+        // Pin the reason the check reads source text instead of a value.
         let parsed: serde_yaml::Value = serde_yaml::from_str(text).expect("parses");
+        let entries = parsed.as_sequence().expect("app composition is a list");
         assert_eq!(
-            parsed["mcp_servers"]["cccc"]["env"]["CCCC_HOME"],
-            serde_yaml::Value::String("process.env.CCCC_HOME".into()),
+            entries[1]["config"]["persistenceRoot"],
+            serde_yaml::Value::String("process.env.CCCC_DEEPSEEK_SESSION_ROOT".into()),
             "serde_yaml drops the unknown tag and keeps the scalar"
+        );
+        assert_eq!(
+            entries[2]["config"]["env"]["CCCC_HOME"],
+            serde_yaml::Value::String("process.env.CCCC_HOME".into()),
+            "the MCP child env is the tag that made cccc fail to start"
         );
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("config.yaml");
+        let path = temp
+            .path()
+            .join("runtimes/deepseek/0.1.0-rc.6/profiles/cccc-acp/cordis.yml");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("profile home");
         std::fs::write(&path, text).expect("write config");
         let error = read_yaml::<serde_yaml::Value>(&path).expect_err("tag must be rejected");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         let message = error.to_string();
-        assert!(message.contains("config.yaml"), "{message}");
+        assert!(message.contains("cordis.yml"), "{message}");
         assert!(message.contains("!!js"), "{message}");
-        assert!(message.contains("line 6"), "{message}");
-        assert!(message.contains("CCCC_HOME"), "{message}");
+        assert!(message.contains("line 11"), "{message}");
+        assert!(message.contains("persistenceRoot"), "{message}");
         assert!(message.contains("use a plain value"), "{message}");
     }
 

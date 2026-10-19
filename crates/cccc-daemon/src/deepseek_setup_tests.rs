@@ -163,6 +163,20 @@ fn profile_paths_escape_yaml_apostrophes() {
         !config.contains("!!"),
         "the managed profile must carry plain values only:\n{config}"
     );
+    // The writer's own guard must accept what the writer wrote. The incident
+    // file was the same composition with `!!js` on lines 11 and 20-22; here the
+    // same document goes back through the very check that refuses that capture.
+    cccc_core::fs::validate_yaml_tags(&profile.join("cordis.yml").display().to_string(), &config)
+        .expect("the writer's output must satisfy the writer's own guard");
+    let written: serde_yaml::Value =
+        serde_yaml::from_str(&config).expect("written profile parses as YAML");
+    let entries = written.as_sequence().expect("app composition is a list");
+    assert_eq!(entries.len(), 3, "same three plugins as the incident file");
+    assert_eq!(
+        entries[2]["config"]["env"]["CCCC_HOME"],
+        serde_yaml::Value::Null,
+        "the MCP child no longer carries env keys; it inherits them"
+    );
 }
 
 #[test]
