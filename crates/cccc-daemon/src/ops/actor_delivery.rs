@@ -363,9 +363,16 @@ fn settle_rejected_batch(batch: &[DeliveryJob], reason: &str, attempts: u32) -> 
 }
 
 pub fn dispatch(home: &HomeLayout, group: &GroupDoc, event: &Event) -> DispatchReport {
-    if !matches!(event.kind.as_str(), "chat.message" | "system.notify")
-        || matches!(group.state, GroupState::Paused | GroupState::Stopped)
-    {
+    if !matches!(event.kind.as_str(), "chat.message" | "system.notify") {
+        return report(0, 0, 0);
+    }
+
+    // A memory-restart notice remains addressed to its foreman while the group
+    // is stopped. Let dispatch select that target; dispatch_to_inner reports it
+    // without enqueueing work for a paused or stopped group.
+    let is_memory_restart = event.kind == "system.notify"
+        && event.data.get("kind").and_then(serde_json::Value::as_str) == Some("memory_restart");
+    if matches!(group.state, GroupState::Paused | GroupState::Stopped) && !is_memory_restart {
         return report(0, 0, 0);
     }
 

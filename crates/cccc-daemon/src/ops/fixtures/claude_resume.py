@@ -123,6 +123,13 @@ else:
         write_json(root / "jobs" / short / "state.json", state)
         (root / active).touch()
         print(f"started · {short}")
+        if mode == "held_active":
+            # Receipt-rollback tests need a provider process that remains alive
+            # until actor_stop tears it down, rather than this fixture exiting
+            # immediately after it writes the Agent View state.
+            sys.stdout.flush()
+            while True:
+                time.sleep(0.05)
     else:
         # Native attach or the temporary trust prompt. No model task is executed.
         tty.setraw(0)

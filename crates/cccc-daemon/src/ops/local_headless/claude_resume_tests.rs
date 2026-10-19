@@ -875,7 +875,7 @@ fn resume_session_launch_failure_rolls_back_and_keeps_both_records() {
 fn assert_retarget_receipt_write_failure_rolls_back(
     failure: super::super::actors::RetargetWriteFailure,
 ) {
-    let f = Fixture::new("healthy");
+    let f = Fixture::new("held_active");
     let cwd = super::super::actor_runtime::working_directory(&f.group, &f.actor).expect("cwd");
     f.retarget_history(cwd.to_str().expect("cwd string"));
     let started = f.lifecycle("actor_new_session");
