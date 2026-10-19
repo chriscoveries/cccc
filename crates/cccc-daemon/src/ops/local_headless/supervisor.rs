@@ -98,15 +98,7 @@ fn start_managed_agent(
     key: Key,
     explicit: bool,
 ) -> io::Result<()> {
-    let saved = if explicit && actor.runtime == ActorRuntime::Claude {
-        super::super::runtime_session::claude_explicit_workspace(home, &group.group_id, &actor.id)?
-    } else {
-        None
-    };
-    let cwd = match saved {
-        Some(path) => path,
-        None => working_directory(group, actor)?,
-    };
+    let cwd = working_directory(group, actor)?;
     match launch_managed_with_policy(home, group, actor, &cwd, explicit) {
         Ok(app) => attach_managed(home, group, actor, key, cwd, app),
         Err(refusal) if super::workspace_trust::refused(actor, &refusal) => {
@@ -153,7 +145,12 @@ fn launch_managed_with_policy(
     run_managed_launch(
         async move {
             if explicit {
-                AnalystSession::launch_actor_with_policy(&launch_home, config, true).await
+                Box::pin(AnalystSession::launch_actor_with_policy(
+                    &launch_home,
+                    config,
+                    true,
+                ))
+                .await
             } else {
                 AnalystSession::launch_actor(&launch_home, config).await
             }

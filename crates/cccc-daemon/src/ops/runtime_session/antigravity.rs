@@ -61,17 +61,16 @@ pub(crate) fn record(
     if !resume_enabled() {
         return Ok(());
     }
-    let (id, resumed) = session;
-    cccc_core::fs::write_json(
-        &receipt_path(home, group, actor)?,
-        &json!({"v":1,"identity":identity(cwd,command,env),"provider_session_id":id,"resumed":resumed,"updated_at":utc_now()}),
-    )
+    with_receipt_path_lock(&receipt_path(home, group, actor)?, || {
+        let (id, resumed) = session;
+        cccc_core::fs::write_json(
+            &receipt_path(home, group, actor)?,
+            &json!({"v":1,"identity":identity(cwd,command,env),"provider_session_id":id,"resumed":resumed,"updated_at":utc_now()}),
+        )
+    })
 }
 
 pub(crate) fn remove(home: &HomeLayout, group: &str, actor: &str) -> std::io::Result<()> {
-    match std::fs::remove_file(receipt_path(home, group, actor)?) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
+    let receipt = receipt_path(home, group, actor)?;
+    with_receipt_path_lock(&receipt, || remove_unlocked(&receipt))
 }

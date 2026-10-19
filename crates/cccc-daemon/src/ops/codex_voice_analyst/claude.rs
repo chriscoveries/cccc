@@ -106,6 +106,12 @@ pub(super) fn settings_path(home: &cccc_core::HomeLayout, owner: &str) -> PathBu
     command::settings_path(home, owner)
 }
 
+/// Only a direct pre-input compatibility outcome permits a fresh launch.
+/// CleanupFailure deliberately hides this outcome until the owner has stopped.
+pub(super) fn model_change_requires_fresh(error: &io::Error) -> bool {
+    model_switch::is_requires_fresh(error)
+}
+
 pub(super) async fn launch(
     prepared: command::PreparedClaude,
     cwd: &Path,
@@ -201,8 +207,9 @@ async fn launch_inner(
     model: Option<&str>,
     exclusive: bool,
 ) -> io::Result<LaunchedClaude> {
-    command::require_supported_version(&prepared.executable, cwd, &prepared.launch_environment)
-        .await?;
+    let launcher_version =
+        command::require_supported_version(&prepared.executable, cwd, &prepared.launch_environment)
+            .await?;
     // Inspect durable job metadata BEFORE respawn can replace it. A receipt
     // alone does not imply that this session ever received its first prompt.
     let skip_existing_transcript = match requested_session_id {
@@ -236,6 +243,16 @@ async fn launch_inner(
             )
             .await;
         }
+    }
+
+    if requested_session_id.is_some()
+        && let Some(model) = model
+    {
+        // A cold resume will preserve its prior native model. Without a proven
+        // adapter, choose ordinary fresh configuration before spawning it.
+        // The live-job path above first checks its actual persisted model and
+        // can reattach without any model input even on another supported CLI.
+        model_switch::require_adapter(model, launcher_version)?;
     }
 
     let name = format!(

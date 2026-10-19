@@ -373,6 +373,85 @@ mod tests {
         assert!(!actor_runtime::actor_is_running(&group, &group.actors[0]));
         assert!(respawn_events(&store, &group).is_empty());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostic_io_failure_does_not_fail_idempotent_start() {
+        let (_temp, home, _store, group) = restore_fixture(ActorRuntime::Custom);
+        let _cleanup = OwnedRuntime(group.group_id.clone());
+        actor_runtime::apply(&home, &group, "peer1", "actor.start").expect("first Start");
+        let first = actor_runtime::status(&group.group_id, "peer1").expect("first owner");
+        assert!(first.running && first.pid.is_some());
+        // Directory-at-file injection fails deterministically even when tests run as root.
+        let receipt = home
+            .groups_dir()
+            .join(&group.group_id)
+            .join("state/runtime_sessions/peer1.json");
+        std::fs::create_dir_all(&receipt).expect("inject diagnostic I/O failure");
+
+        actor_runtime::apply(&home, &group, "peer1", "actor.start")
+            .expect("optional diagnostic failure must not fail idempotent Start");
+        let next = actor_runtime::status(&group.group_id, "peer1").expect("same owner");
+        assert!(next.running);
+        assert_eq!(next.pid, first.pid, "no replacement process");
+        assert_eq!(next.started_at, first.started_at);
+        assert!(
+            receipt.is_dir(),
+            "do not replace the injected corrupt receipt path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostic_io_failure_in_an_earlier_group_does_not_abort_later_restore() {
+        for stopped_group in [true, false] {
+            let (_temp, home, store, template) = restore_fixture(ActorRuntime::Custom);
+            let mut other = store
+                .create("later restore fixture", "")
+                .expect("other group");
+            other.scopes = template.scopes.clone();
+            other.active_scope_key = template.active_scope_key.clone();
+            other.actors = template.actors.clone();
+            other.running = true;
+            other.state = GroupState::Active;
+            store.save(&other).expect("save second runnable group");
+            let _cleanup_template = OwnedRuntime(template.group_id.clone());
+            let _cleanup_other = OwnedRuntime(other.group_id.clone());
+
+            // Registry iteration is ordered by group_id, not by creation time.
+            let order = store.list().expect("actual restore order");
+            assert_eq!(order.len(), 2);
+            let broken_id = &order[0].group_id;
+            let healthy_id = &order[1].group_id;
+            store
+                .mutate(broken_id, |group| {
+                    if stopped_group {
+                        group.running = false;
+                        group.state = GroupState::Stopped;
+                    } else {
+                        group.actors[0].enabled = false;
+                    }
+                    Ok(())
+                })
+                .expect("configure first diagnostic-only actor");
+            let receipt = home
+                .groups_dir()
+                .join(broken_id)
+                .join("state/runtime_sessions/peer1.json");
+            std::fs::create_dir_all(&receipt).expect("inject EISDIR on diagnostic receipt read");
+            assert_eq!(store.list().expect("same order")[0].group_id, *broken_id);
+
+            super::restore_running_serialized(&home, &super::DispatchLocks::default())
+                .expect("diagnostic failure must not abort later Groups");
+            let healthy = store.load(healthy_id).expect("healthy group");
+            let owner = actor_runtime::status(healthy_id, "peer1").expect("later Group owner");
+            assert!(owner.running && owner.pid.is_some());
+            assert_eq!(respawn_events(&store, &healthy).len(), 1);
+            let broken = store.load(broken_id).expect("diagnostic-only group");
+            assert!(!actor_runtime::actor_is_running(&broken, &broken.actors[0]));
+            assert!(respawn_events(&store, &broken).is_empty());
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

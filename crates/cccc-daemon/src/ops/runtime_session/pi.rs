@@ -130,10 +130,12 @@ pub(crate) fn record(
     file: &Path,
     attempted: bool,
 ) -> io::Result<()> {
-    cccc_core::fs::write_json(
-        path,
-        &json!({"v":MANAGED_RECORD_VERSION,"kind":"runtime_session","runtime":"pi","transport":"pi_rpc","identity":identity,"workspace_path":identity["workspace_path"],"provider_session_id":id,"provider_thread_id":id,"session_file":file,"attempted":attempted,"status":"usable","resume_eligible":true,"updated_at":utc_now()}),
-    )
+    with_receipt_path_lock(path, || {
+        cccc_core::fs::write_json(
+            path,
+            &json!({"v":MANAGED_RECORD_VERSION,"kind":"runtime_session","runtime":"pi","transport":"pi_rpc","identity":identity,"workspace_path":identity["workspace_path"],"provider_session_id":id,"provider_thread_id":id,"session_file":file,"attempted":attempted,"status":"usable","resume_eligible":true,"updated_at":utc_now()}),
+        )
+    })
 }
 
 #[cfg(test)]

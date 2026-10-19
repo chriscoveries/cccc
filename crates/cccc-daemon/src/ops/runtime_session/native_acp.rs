@@ -39,17 +39,22 @@ impl PromptReceipt {
         if self.resumable() {
             return Ok(());
         }
-        let mut value: Value = cccc_core::fs::read_json(&self.path)?;
-        if value[self.id_field].as_str() != Some(self.id.as_str()) {
-            return Err(std::io::Error::other(
-                "ACP prompt receipt belongs to a different session",
-            ));
-        }
-        value[self.attempted_field] = json!(true);
-        value["updated_at"] = json!(utc_now());
-        cccc_core::fs::write_json(&self.path, &value)?;
-        self.attempted.store(true, Ordering::Release);
-        Ok(())
+        with_receipt_path_lock(&self.path, || {
+            if self.resumable() {
+                return Ok(());
+            }
+            let mut value: Value = cccc_core::fs::read_json(&self.path)?;
+            if value[self.id_field].as_str() != Some(self.id.as_str()) {
+                return Err(std::io::Error::other(
+                    "ACP prompt receipt belongs to a different session",
+                ));
+            }
+            value[self.attempted_field] = json!(true);
+            value["updated_at"] = json!(utc_now());
+            cccc_core::fs::write_json(&self.path, &value)?;
+            self.attempted.store(true, Ordering::Release);
+            Ok(())
+        })
     }
 }
 
@@ -101,10 +106,12 @@ pub(crate) fn record(
     id: &str,
     resumed: bool,
 ) -> std::io::Result<()> {
-    cccc_core::fs::write_json(
-        path,
-        &json!({"v":1,"identity":identity,"provider_session_id":id,"attempted":resumed,"updated_at":utc_now()}),
-    )
+    with_receipt_path_lock(path, || {
+        cccc_core::fs::write_json(
+            path,
+            &json!({"v":1,"identity":identity,"provider_session_id":id,"attempted":resumed,"updated_at":utc_now()}),
+        )
+    })
 }
 
 pub(crate) fn retire_all(home: &HomeLayout, group: &str, actor: &str) -> std::io::Result<()> {
@@ -118,11 +125,8 @@ pub(crate) fn retire_all(home: &HomeLayout, group: &str, actor: &str) -> std::io
         ActorRuntime::Hermes,
         ActorRuntime::Droid,
     ] {
-        match std::fs::remove_file(receipt_path(home, group, actor, runtime)?) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
+        let receipt = receipt_path(home, group, actor, runtime)?;
+        with_receipt_path_lock(&receipt, || remove_unlocked(&receipt))?;
     }
     Ok(())
 }

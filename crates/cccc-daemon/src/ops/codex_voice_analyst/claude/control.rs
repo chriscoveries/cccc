@@ -248,10 +248,13 @@ pub(super) async fn model_input(
             )
         })??;
     require_ok(response.clone(), "attach")?;
-    let nonce = response.get("imarkNonce").and_then(Value::as_str)
+    let nonce = response
+        .get("imarkNonce")
+        .and_then(Value::as_str)
         .filter(|nonce| nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported,
-            "Claude model switch could not be confirmed: native prompt readiness is unsupported"))?;
+        .ok_or_else(|| {
+            super::model_switch::requires_fresh("native prompt readiness is unsupported")
+        })?;
     let mut marks = NativePromptMarks::default();
     let mut screen = super::cache_confirmation::Screen::default();
     // Attach acknowledges the supervisor connection before a resumed worker is

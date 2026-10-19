@@ -175,16 +175,7 @@ fn start_local_headless(
     explicit: bool,
 ) -> Result<(), OpError> {
     let mut actor = environment::resolve_launch_actor(home, group, actor)?;
-    let saved = if explicit && actor.runtime == cccc_contracts::ActorRuntime::Claude {
-        super::runtime_session::claude_explicit_workspace(home, &group.group_id, &actor.id)
-            .map_err(launch_error)?
-    } else {
-        None
-    };
-    let cwd = match saved {
-        Some(path) => path,
-        None => working_directory(group, &actor)?,
-    };
+    let cwd = working_directory(group, &actor)?;
     let mut env = environment::launch_env(home, group, &actor);
     if super::local_headless::uses_managed_provider_cli(&actor) {
         super::runtime_mcp::prepare(home, actor.runtime, &actor.command, &cwd, &mut env)?;

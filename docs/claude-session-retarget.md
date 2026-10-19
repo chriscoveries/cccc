@@ -43,9 +43,12 @@ continuity model-change prompt: it restores the conversation with its retained
 model. The operation result and receipt include `model_application`, reporting
 `configured_model_applied: false`, the configured model, and the latest assistant
 model recorded in the selected transcript (or null when unknown). The receipt's
-`model` describes that retained model, and is empty when unknown. Apply actor model
-settings separately through ordinary Start/Restart; the continuity foundation
-uses its owned-session model prompt and confirms persisted provider state.
+`model` describes that retained model, and is empty when unknown. The explicit
+selection keeps this model through later Stop/Start and daemon restore cycles.
+Choose New Session to clear that preference and apply the configured model to a
+fresh conversation. The guard against adopting a newly live foreign job applies
+to the initial retarget transaction; it does not prevent later reattachment to
+the actor's own surviving job.
 
 On success, the replaced target is retained in the receipt's optional
 `previous_sessions` array. Each entry contains `session_id`, `workspace_path`,
@@ -53,6 +56,14 @@ On success, the replaced target is retained in the receipt's optional
 repeating the same selection does not duplicate an archive entry. Older receipts
 without the field remain usable. Successful ordinary Stop/Start cycles preserve
 this archive.
+
+Ordinary launches always use the actor's current workdir. Disabling automatic
+resume, or changing the command, account identity or workdir before an implicit
+resume attempt, starts a fresh conversation. A changed identity for an explicitly
+selected target is refused instead of silently changing that target. A failed
+attempt to resume an unchanged conversation remains blocked until an explicit
+retry or New Session. Recovery observations are best-effort diagnostics; they do
+not prevent an otherwise valid Start or stop restoration of later groups.
 
 If launch or lifecycle persistence fails, CCCC stops the replacement, restores the
 previous receipt fields, retains both targets in the archive, and reports the
