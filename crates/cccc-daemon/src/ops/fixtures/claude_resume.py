@@ -122,14 +122,9 @@ else:
             state.update({"resumeSessionId": session, "respawnFlags": ["--model", model]})
         write_json(root / "jobs" / short / "state.json", state)
         (root / active).touch()
+        # Agent View's --bg launcher returns after publishing its job. The
+        # control server above keeps that job live until an explicit kill.
         print(f"started · {short}")
-        if mode == "held_active":
-            # Receipt-rollback tests need a provider process that remains alive
-            # until actor_stop tears it down, rather than this fixture exiting
-            # immediately after it writes the Agent View state.
-            sys.stdout.flush()
-            while True:
-                time.sleep(0.05)
     else:
         # Native attach or the temporary trust prompt. No model task is executed.
         tty.setraw(0)
