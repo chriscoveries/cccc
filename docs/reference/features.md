@@ -259,6 +259,7 @@ Notes:
 | Behavior | Config | Default | Description |
 |----------|--------|---------|-------------|
 | Mail notice | `delivery.mail_notice_after_seconds` | 1800s | One content-free Inbox reminder for a concrete pending Mail batch; no repeat or escalation |
+| Card wake on idle | `delivery.task_wake_on_idle` / `delivery.task_wake_interval_seconds` | off / 1800s | Opt-in: a managed session that reports idle, holds active unblocked cards as assignee, and has been quiet for the interval gets one reminder naming the card IDs only |
 | Reply notice | `delivery.reply_notice_after_seconds` | 900s | One content-free reminder after an accepted `request_reply` remains unanswered |
 | Actor idle | `actor_idle_timeout_seconds` | 0s | Optional actor idle notification to foreman; `0` disables it by default |
 | Keepalive | `keepalive_delay_seconds` | 0s | Optional follow-up after an actor declares a next step and then goes quiet |

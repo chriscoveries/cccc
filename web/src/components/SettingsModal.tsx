@@ -152,6 +152,8 @@ export function SettingsModal({
   const [mailNoticeAfterSeconds, setMailNoticeAfterSeconds] = useState(1800);
   const [mailNoticeIdleAfterSeconds, setMailNoticeIdleAfterSeconds] = useState(60);
   const [replyNoticeAfterSeconds, setReplyNoticeAfterSeconds] = useState(900);
+  const [taskWakeOnIdle, setTaskWakeOnIdle] = useState(false);
+  const [taskWakeIntervalSeconds, setTaskWakeIntervalSeconds] = useState(1800);
   const [idleSeconds, setIdleSeconds] = useState(0);
   const [keepaliveSeconds, setKeepaliveSeconds] = useState(120);
   const [keepaliveMax, setKeepaliveMax] = useState(3);
@@ -342,6 +344,16 @@ export function SettingsModal({
         current,
         previous?.reply_notice_after_seconds ?? 900,
         settings.reply_notice_after_seconds ?? 900,
+      ),
+    );
+    setTaskWakeOnIdle((current) =>
+      sync(current, previous?.task_wake_on_idle ?? false, settings.task_wake_on_idle ?? false),
+    );
+    setTaskWakeIntervalSeconds((current) =>
+      sync(
+        current,
+        previous?.task_wake_interval_seconds ?? 1800,
+        settings.task_wake_interval_seconds ?? 1800,
       ),
     );
     setIdleSeconds((current) =>
@@ -786,6 +798,8 @@ export function SettingsModal({
     mailNoticeAfterSeconds,
     mailNoticeIdleAfterSeconds,
     replyNoticeAfterSeconds,
+    taskWakeOnIdle,
+    taskWakeIntervalSeconds,
     idleSeconds,
     keepaliveSeconds,
     keepaliveMax,
@@ -833,6 +847,8 @@ export function SettingsModal({
       mail_notice_after_seconds: mailNoticeAfterSeconds,
       mail_notice_idle_after_seconds: mailNoticeIdleAfterSeconds,
       reply_notice_after_seconds: replyNoticeAfterSeconds,
+      task_wake_on_idle: taskWakeOnIdle,
+      task_wake_interval_seconds: taskWakeIntervalSeconds,
     });
   };
 
@@ -1741,6 +1757,10 @@ export function SettingsModal({
                     setMailNoticeIdleAfterSeconds={setMailNoticeIdleAfterSeconds}
                     replyNoticeAfterSeconds={replyNoticeAfterSeconds}
                     setReplyNoticeAfterSeconds={setReplyNoticeAfterSeconds}
+                    taskWakeOnIdle={taskWakeOnIdle}
+                    setTaskWakeOnIdle={setTaskWakeOnIdle}
+                    taskWakeIntervalSeconds={taskWakeIntervalSeconds}
+                    setTaskWakeIntervalSeconds={setTaskWakeIntervalSeconds}
                     onSave={handleSaveDeliverySettings}
                   />
                 )}
