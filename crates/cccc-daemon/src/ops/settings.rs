@@ -69,6 +69,15 @@ fn group_settings(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     authorize(&group, request)?;
     let mut patch = patch(request)?;
     patch.remove("by");
+    if let Some(value) = patch.get("opencode_snapshot")
+        && !value.is_null()
+        && !value.is_boolean()
+    {
+        return Err(OpError::new(
+            "invalid_args",
+            "opencode_snapshot must be a boolean or null to restore the default",
+        ));
+    }
     let settings_value = store(home)?
         .mutate(&group.group_id, |doc| {
             let mut flat = match doc.extra.remove("settings") {
@@ -159,6 +168,8 @@ fn promote_legacy_group_settings(doc: &mut GroupDoc, flat: &mut Map<String, Valu
 }
 
 fn effective_group_settings(doc: &GroupDoc, mut flat: Map<String, Value>) -> Map<String, Value> {
+    flat.entry("opencode_snapshot")
+        .or_insert(Value::Bool(false));
     for key in AUTOMATION_TIMING_KEYS {
         if let Some(value) = doc.automation.get(*key) {
             flat.insert((*key).into(), value.clone());
@@ -262,6 +273,56 @@ fn append(
 mod tests {
     use super::*;
     use cccc_core::GroupStore;
+
+    #[test]
+    fn opencode_snapshot_setting_round_trips_and_null_restores_off() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("snapshot setting", "").expect("group");
+        for value in [json!(true), json!(false), Value::Null] {
+            let request = DaemonRequest {
+                v: 1,
+                op: "group_settings_update".into(),
+                args: json!({"group_id":group.group_id,"by":"user",
+                    "patch":{"opencode_snapshot":value}})
+                .as_object()
+                .cloned()
+                .expect("args"),
+            };
+            let response = group_settings(&home, &request).expect("settings update");
+            let stored = store.load(&group.group_id).expect("stored group");
+            assert_eq!(
+                response["settings"]["opencode_snapshot"],
+                value.as_bool().unwrap_or(false)
+            );
+            if value.is_null() {
+                assert!(
+                    stored
+                        .extra
+                        .get("settings")
+                        .is_none_or(|settings| settings.get("opencode_snapshot").is_none())
+                );
+            } else {
+                assert_eq!(stored.extra["settings"]["opencode_snapshot"], value);
+            }
+        }
+        for value in [json!("true"), json!(1), json!({})] {
+            let request = DaemonRequest {
+                v: 1,
+                op: "group_settings_update".into(),
+                args: json!({"group_id":group.group_id,"by":"user",
+                    "patch":{"opencode_snapshot":value,"unrelated":"unchanged"}})
+                .as_object()
+                .cloned()
+                .expect("args"),
+            };
+            let before = store.load(&group.group_id).expect("before");
+            let error = group_settings(&home, &request).expect_err("invalid snapshot setting");
+            assert_eq!(error.code, "invalid_args");
+            assert_eq!(store.load(&group.group_id).expect("after"), before);
+        }
+    }
 
     #[test]
     fn idle_mail_delay_is_stored_where_the_unread_tick_reads_it() {

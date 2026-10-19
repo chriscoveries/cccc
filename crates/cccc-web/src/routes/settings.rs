@@ -112,7 +112,8 @@ fn projected_settings(group: &Value) -> Value {
         "terminal_transcript_visibility":"foreman",
         "terminal_transcript_notify_tail":true,
         "terminal_transcript_notify_lines":20,
-        "panorama_enabled":false
+        "panorama_enabled":false,
+        "opencode_snapshot":false
     });
     if let (Some(target), Some(source)) = (settings.as_object_mut(), stored.as_object()) {
         cccc_core::settings::merge(target, source);
