@@ -110,6 +110,7 @@ impl AnalystSession {
                     config.resume_thread_id,
                     SessionPurpose::VoiceAnalyst,
                     None,
+                    false,
                 )
                 .await
             }
@@ -159,6 +160,14 @@ impl AnalystSession {
     pub(crate) async fn launch_actor(
         home: &HomeLayout,
         config: ActorLaunchConfig,
+    ) -> io::Result<Self> {
+        Box::pin(Self::launch_actor_with_policy(home, config, false)).await
+    }
+
+    pub(crate) async fn launch_actor_with_policy(
+        home: &HomeLayout,
+        config: ActorLaunchConfig,
+        explicit: bool,
     ) -> io::Result<Self> {
         let binding = bind_workspace(&config.workdir)?;
         config
@@ -211,6 +220,7 @@ impl AnalystSession {
                 None,
                 SessionPurpose::Actor,
                 Some((&config.group_id, &config.actor_id)),
+                explicit,
             )
             .await;
         }
