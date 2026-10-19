@@ -316,9 +316,23 @@ fn spawn_group_resource_reaper(
                     tracing::warn!(%error,"failed to close stale actor browser surfaces");
                     0
                 });
-            let closed = closed_groups + closed_actors;
+            // An idle web-model window keeps a Chromium process alive for nothing.
+            // Retire it on CDP silence; the next delivery re-opens the surface.
+            let closed_idle = browser_surfaces
+                .close_idle(browser_surface::browser_idle_timeout())
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "failed to close idle browser surfaces");
+                    0
+                });
+            let closed = closed_groups + closed_actors + closed_idle;
             if stopped > 0 || closed > 0 {
-                tracing::info!(stopped, closed, "cleaned resources for deleted groups");
+                tracing::info!(
+                    stopped,
+                    closed,
+                    closed_idle,
+                    "cleaned resources for deleted groups and idle surfaces"
+                );
             }
         }
     });
