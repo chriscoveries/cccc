@@ -91,6 +91,9 @@ fn pty(root: &Path) -> Result<(), Box<dyn Error>> {
     );
     let group = "g_1a9e39785e1a";
     let actor = "lab-luna-b";
+    // Attribute the Rust host, not the Python byte-replay child.
+    let mut env = BTreeMap::new();
+    env.insert("LD_PRELOAD".into(), String::new());
     sample(
         "before-pty",
         json!({"recorded_bytes": expected, "actors": 1, "hot_bytes": 2_000_000, "cols": 80, "rows": 24}),
@@ -102,7 +105,7 @@ fn pty(root: &Path) -> Result<(), Box<dyn Error>> {
             runner: RunnerKind::Pty,
             command,
             cwd: std::env::current_dir()?,
-            env: BTreeMap::new(),
+            env,
             cols: 80,
             rows: 24,
         },
