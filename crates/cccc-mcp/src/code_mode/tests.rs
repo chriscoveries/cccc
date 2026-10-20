@@ -406,7 +406,7 @@ async fn nested_management_preserves_target_and_authenticated_caller() {
     .expect("daemon ready");
 
     let result = super::call_nested(&home, &client, &owner, "cccc_capability_use", Some(&json!({
-        "tool_name":"cccc_actor", "tool_arguments":{"action":"stop", "actor_id":"beta", "by":"user"}
+        "tool_name":"cccc_actor", "tool_arguments":{"action":"stop", "actor_id":"beta", "by":"alpha"}
     }))).await;
     let saved = store.load(&group.group_id).expect("saved actors");
     // Also ensure nested arguments cannot elevate a peer to user authority.
@@ -416,7 +416,7 @@ async fn nested_management_preserves_target_and_authenticated_caller() {
         ..owner
     };
     let denied = super::call_nested(&home, &client, &peer, "cccc_capability_use", Some(&json!({
-        "tool_name":"cccc_actor", "tool_arguments":{"action":"stop", "actor_id":"alpha", "by":"user"}
+        "tool_name":"cccc_actor", "tool_arguments":{"action":"stop", "actor_id":"alpha", "by":"beta"}
     }))).await;
     daemon.abort();
     let _ = daemon.await;

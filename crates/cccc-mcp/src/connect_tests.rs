@@ -140,7 +140,12 @@ async fn connect_tools_use_local_actor_context_and_canonical_queue_through_ipc()
             false,
         )
     };
-    let directory = call("cccc_connect", json!({"by":"user","group_id":"forged"}))
+    // A caller may repeat its own identity but not claim another sender (T806).
+    let refused = call("cccc_connect", json!({"by":"user"}))
+        .await
+        .expect_err("forged sender");
+    assert_eq!(refused.error_value()["code"], "permission_denied");
+    let directory = call("cccc_connect", json!({"by":"worker","group_id":"forged"}))
         .await
         .expect("directory");
     assert_eq!(
@@ -176,7 +181,7 @@ async fn connect_tools_use_local_actor_context_and_canonical_queue_through_ipc()
             .is_empty(),
         "discovery must not enqueue work"
     );
-    let arguments = json!({"by":"user","dst_instance_id":remote.peer_id,"dst_group_id":group.group_id,"text":"Remote task","mode":"send","insight":"This task belongs to the other instance.","idempotency_key":"stable-send"});
+    let arguments = json!({"by":"worker","dst_instance_id":remote.peer_id,"dst_group_id":group.group_id,"text":"Remote task","mode":"send","insight":"This task belongs to the other instance.","idempotency_key":"stable-send"});
     let sent = call("cccc_message_send", arguments.clone())
         .await
         .expect("send");

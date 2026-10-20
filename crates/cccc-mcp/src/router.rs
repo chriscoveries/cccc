@@ -47,7 +47,7 @@ pub(crate) async fn call_with_context(
         return Err("This tool requires a host-issued secretary task grant".into());
     }
     crate::tools::apply_default_action(name, &mut arguments);
-    add_runtime_context(home, &mut arguments);
+    add_runtime_context(home, &mut arguments)?;
     arguments.remove("_cccc_web_binding");
     if let Some(context) = context {
         if let Some(binding) = context.binding {
@@ -55,7 +55,7 @@ pub(crate) async fn call_with_context(
                 .map_err(|e| e.to_string())?;
             arguments.insert("_cccc_web_binding".into(), binding.clone());
         }
-        apply_request_context(name, &mut arguments, context);
+        apply_request_context(name, &mut arguments, context)?;
     }
     if name == "cccc_task" {
         prepare_task_arguments(home, &mut arguments)?;
@@ -750,7 +750,10 @@ pub(crate) async fn daemon(
     ))
 }
 
-fn add_runtime_context(home: &HomeLayout, args: &mut Map<String, Value>) {
+fn add_runtime_context(
+    home: &HomeLayout,
+    args: &mut Map<String, Value>,
+) -> Result<(), ToolCallError> {
     if !args.contains_key("group_id") {
         let group = runtime_group_id(home, std::env::var("CCCC_GROUP_ID").ok());
         if let Some(group) = group {
@@ -760,7 +763,7 @@ fn add_runtime_context(home: &HomeLayout, args: &mut Map<String, Value>) {
     let actor = std::env::var("CCCC_ACTOR_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    apply_actor_context(args, actor.as_deref());
+    apply_actor_context(args, actor.as_deref())
 }
 
 fn runtime_group_id(home: &HomeLayout, configured: Option<String>) -> Option<String> {
@@ -770,35 +773,76 @@ fn runtime_group_id(home: &HomeLayout, configured: Option<String>) -> Option<Str
     }
 }
 
-fn apply_actor_context(args: &mut Map<String, Value>, actor: Option<&str>) {
-    if let Some(actor) = actor.map(str::trim).filter(|actor| !actor.is_empty()) {
-        args.entry("actor_id")
-            .or_insert_with(|| Value::String(actor.to_owned()));
-        // The process environment is set by the runtime and is authoritative.
-        // Tool arguments are model-controlled and must not be able to impersonate user.
-        args.insert("by".into(), Value::String(actor.to_owned()));
-    }
+fn apply_actor_context(
+    args: &mut Map<String, Value>,
+    actor: Option<&str>,
+) -> Result<(), ToolCallError> {
+    let Some(actor) = actor.map(str::trim).filter(|actor| !actor.is_empty()) else {
+        return Ok(());
+    };
+    // The process environment is set by the runtime and is authoritative: an
+    // explicit `by` may repeat it, and an omitted one is filled from it, but a
+    // `by` naming somebody else is impersonation and is refused rather than
+    // rewritten. `actor_id` keeps its target meaning on this path, so it is
+    // only defaulted, never checked.
+    refuse_mismatched_identity(args, "by", actor)?;
+    args.entry("actor_id")
+        .or_insert_with(|| Value::String(actor.to_owned()));
+    args.insert("by".into(), Value::String(actor.to_owned()));
+    Ok(())
 }
 
-fn apply_request_context(name: &str, args: &mut Map<String, Value>, context: RequestContext<'_>) {
+/// An explicit sender may repeat the connected identity; it may not name
+/// somebody else. Normalising a mismatch to the caller would silently rewrite
+/// who the model asked to send as, so the call is refused with
+/// `permission_denied` (seat ruling, T806) and nothing is appended.
+fn refuse_mismatched_identity(
+    args: &Map<String, Value>,
+    key: &str,
+    actor: &str,
+) -> Result<(), ToolCallError> {
+    let Some(value) = args.get(key).and_then(Value::as_str) else {
+        return Ok(());
+    };
+    // An unbound request (the web connector passes an empty actor) has no
+    // identity to compare against; it keeps the previous behaviour of an
+    // empty sender, which the daemon records as the human operator.
+    if actor.is_empty() {
+        return Ok(());
+    }
+    let value = value.trim();
+    if value.is_empty() || value == actor {
+        return Ok(());
+    }
+    Err(format!("permission_denied: {key} {value:?} is not the connected actor {actor:?}").into())
+}
+
+fn apply_request_context(
+    name: &str,
+    args: &mut Map<String, Value>,
+    context: RequestContext<'_>,
+) -> Result<(), ToolCallError> {
     // A remote connector is bound to exactly one actor and group. Its request
     // arguments are model-controlled, so the request-scoped binding is authoritative.
+    let actor = context.actor_id.trim();
     args.insert(
         "group_id".into(),
         Value::String(context.group_id.to_owned()),
     );
+    // The bound actor may be repeated but not contradicted: a caller that names
+    // another sender is refused (seat ruling, T806), not quietly normalised.
+    refuse_mismatched_identity(args, "by", actor)?;
     // Actor management addresses a target; `by` remains the authenticated caller.
     // Identity-bearing tools must still use the bound Actor, including nested calls.
     if name == "cccc_actor" {
         args.entry("actor_id")
-            .or_insert_with(|| Value::String(context.actor_id.to_owned()));
+            .or_insert_with(|| Value::String(actor.to_owned()));
     } else {
-        args.insert(
-            "actor_id".into(),
-            Value::String(context.actor_id.to_owned()),
-        );
+        refuse_mismatched_identity(args, "actor_id", actor)?;
+        args.insert("actor_id".into(), Value::String(actor.to_owned()));
     }
-    args.insert("by".into(), Value::String(context.actor_id.to_owned()));
+    args.insert("by".into(), Value::String(actor.to_owned()));
+    Ok(())
 }
 
 pub(crate) fn tool_result(payload: Value) -> Value {
@@ -1093,12 +1137,12 @@ mod tests {
             "action":"info",
             "group_id":target.group_id,
             "actor_id":"user",
-            "by":"intruder"
+            "by":"user"
         })
         .as_object()
         .cloned()
         .expect("arguments");
-        apply_actor_context(&mut arguments, Some("user"));
+        apply_actor_context(&mut arguments, Some("user")).expect("actor context");
         let result = super::call(&home, &client, "cccc_group", arguments)
             .await
             .expect("explicit cross-group query");
@@ -1115,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_actor_is_authoritative_without_replacing_explicit_targets() {
+    fn runtime_actor_refuses_an_explicit_other_sender_and_leaves_the_target_alone() {
         let mut args = json!({
             "group_id":"g_explicit",
             "actor_id":"target-peer",
@@ -1125,26 +1169,40 @@ mod tests {
         .cloned()
         .expect("args");
 
-        apply_actor_context(&mut args, Some("user"));
+        let error = apply_actor_context(&mut args, Some("user")).expect_err("mismatched sender");
 
+        assert_eq!(error.error_value()["code"], "permission_denied");
         assert_eq!(args["group_id"], "g_explicit");
-        assert_eq!(args["actor_id"], "target-peer");
-        assert_eq!(args["by"], "user");
+        assert_eq!(
+            args["actor_id"], "target-peer",
+            "a refused call rewrites nothing"
+        );
+        assert_eq!(args["by"], "intruder", "a refused call rewrites nothing");
     }
 
     #[test]
     fn runtime_actor_populates_missing_self_context() {
         let mut args = serde_json::Map::new();
 
-        apply_actor_context(&mut args, Some("backend"));
+        apply_actor_context(&mut args, Some("backend")).expect("actor context");
 
         assert_eq!(args["actor_id"], "backend");
         assert_eq!(args["by"], "backend");
     }
 
     #[test]
-    fn request_scoped_actor_binding_overrides_model_controlled_identity() {
-        let mut args = json!({"group_id":"other","actor_id":"other","by":"user"})
+    fn runtime_actor_accepts_an_explicit_repeat_of_its_own_identity() {
+        let mut args = json!({"by":"backend"}).as_object().cloned().expect("args");
+
+        apply_actor_context(&mut args, Some("backend")).expect("own identity");
+
+        assert_eq!(args["by"], "backend");
+        assert_eq!(args["actor_id"], "backend");
+    }
+
+    #[test]
+    fn request_scoped_actor_binding_fills_an_omitted_identity() {
+        let mut args = json!({"group_id":"other"})
             .as_object()
             .cloned()
             .expect("args");
@@ -1157,7 +1215,8 @@ mod tests {
                 group_id: "bound-group",
                 actor_id: "bound-actor",
             },
-        );
+        )
+        .expect("bound identity");
 
         assert_eq!(args["group_id"], "bound-group");
         assert_eq!(args["actor_id"], "bound-actor");
@@ -1165,18 +1224,66 @@ mod tests {
     }
 
     #[test]
+    fn request_scoped_actor_binding_refuses_a_mismatched_sender() {
+        for (key, value) in [("by", "user"), ("actor_id", "other")] {
+            let mut args = json!({"group_id":"other","by":"bound-actor","actor_id":"bound-actor"})
+                .as_object()
+                .cloned()
+                .expect("args");
+            args.insert(key.into(), value.into());
+
+            let error = apply_request_context(
+                "cccc_message_send",
+                &mut args,
+                RequestContext {
+                    binding: None,
+                    group_id: "bound-group",
+                    actor_id: "bound-actor",
+                },
+            )
+            .expect_err("mismatched identity");
+
+            assert_eq!(
+                error.error_value()["code"],
+                "permission_denied",
+                "{key} must be refused, not normalised"
+            );
+            assert_eq!(args[key], value, "a refused call rewrites nothing");
+        }
+    }
+
+    #[test]
     fn request_context_separates_management_targets_from_identity() {
-        for name in [
+        let mut target = json!({"group_id":"other","actor_id":"beta","by":"alpha"})
+            .as_object()
+            .cloned()
+            .expect("arguments");
+        apply_request_context(
             "cccc_actor",
+            &mut target,
+            RequestContext {
+                group_id: "bound-group",
+                actor_id: "alpha",
+                binding: None,
+            },
+        )
+        .expect("actor management keeps its target");
+        assert_eq!(
+            target["actor_id"], "beta",
+            "cccc_actor still addresses a target"
+        );
+        assert_eq!(target["by"], "alpha");
+
+        for name in [
             "cccc_message_send",
             "cccc_runtime_complete_turn",
             "cccc_capability_use",
             "cccc_inbox_read",
         ] {
-            let mut args = json!({"group_id":"other","actor_id":"beta","by":"user"})
+            let mut args = json!({"group_id":"other","actor_id":"alpha","by":"alpha"})
                 .as_object()
-                .expect("arguments")
-                .clone();
+                .cloned()
+                .expect("arguments");
             apply_request_context(
                 name,
                 &mut args,
@@ -1185,18 +1292,11 @@ mod tests {
                     actor_id: "alpha",
                     binding: None,
                 },
-            );
+            )
+            .expect("matching identity");
             assert_eq!(args["group_id"], "bound-group");
-            assert_eq!(args["by"], "alpha", "{name} cannot elevate the caller");
-            assert_eq!(
-                args["actor_id"],
-                if name == "cccc_actor" {
-                    "beta"
-                } else {
-                    "alpha"
-                },
-                "{name}"
-            );
+            assert_eq!(args["by"], "alpha", "{name} keeps the bound sender");
+            assert_eq!(args["actor_id"], "alpha", "{name} keeps the bound actor");
         }
     }
 
