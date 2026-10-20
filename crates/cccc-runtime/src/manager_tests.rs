@@ -731,3 +731,67 @@ fn activity_tracks_output_and_delivery_and_resets_on_restart() {
     stop(group, actor).expect("cleanup");
     assert!(super::activity(group, actor).is_err());
 }
+
+/// A terminal launched for one actor must not accept another actor's delivery.
+/// The launcher pins CCCC_ACTOR_ID last, so a process that re-execs under a
+/// different id (the shape of the JAMES incident, where a lane ran for two
+/// hours as the peer it was never launched for) is detectable before the write
+/// and must be refused rather than silently accepted.
+#[test]
+#[cfg(target_os = "linux")]
+fn terminal_that_runs_as_another_actor_refuses_the_delivery() {
+    let _guard = test_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let group = "g_identity_guard";
+    let actor = "guarded";
+    start(spec(
+        &temp,
+        group,
+        actor,
+        "exec env CCCC_ACTOR_ID=impostor cat >/dev/null",
+    ))
+    .expect("terminal");
+    // Wait for the re-exec: /proc shows the new environment only after exec.
+    let pid = status(group, actor).expect("status").pid.expect("pid");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut seen = String::new();
+    while std::time::Instant::now() < deadline {
+        if let Ok(bytes) = std::fs::read(format!("/proc/{pid}/environ")) {
+            seen = String::from_utf8_lossy(&bytes).into_owned();
+            if seen.contains("CCCC_ACTOR_ID=impostor") {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        seen.contains("CCCC_ACTOR_ID=impostor"),
+        "fixture env: {seen}"
+    );
+    let refused = write(group, actor, b"task for the wrong lane\n");
+    match refused {
+        Err(RuntimeError::IdentityMismatch {
+            actor_id,
+            found_actor_id,
+            ..
+        }) => {
+            assert_eq!(actor_id, actor);
+            assert_eq!(found_actor_id, "impostor");
+        }
+        other => panic!("expected IdentityMismatch, got {other:?}"),
+    }
+    stop(group, actor).expect("cleanup");
+}
+
+/// The same terminal, launched under its own id, still accepts the delivery.
+#[test]
+#[cfg(target_os = "linux")]
+fn terminal_running_as_its_own_actor_accepts_the_delivery() {
+    let _guard = test_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let group = "g_identity_guard_ok";
+    let actor = "faithful";
+    start(spec(&temp, group, actor, "cat >/dev/null")).expect("terminal");
+    write(group, actor, b"task\n").expect("write");
+    stop(group, actor).expect("cleanup");
+}
