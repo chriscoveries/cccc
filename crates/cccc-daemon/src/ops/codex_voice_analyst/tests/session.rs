@@ -59,6 +59,7 @@ async fn actor_resume_rejection_never_starts_a_replacement_codex_thread() {
         process: None,
         delegations: HashMap::new(),
         purpose: SessionPurpose::Actor,
+        model: String::new(),
     })
     .await;
     assert!(result.is_err(), "a failed resume must remain explicit");
@@ -168,6 +169,7 @@ async fn one_delegation_maps_to_one_turn_and_supports_steer_interrupt_and_tui() 
         process: None,
         delegations: HashMap::new(),
         purpose: SessionPurpose::VoiceAnalyst,
+        model: String::new(),
     })
     .await
     .expect("connect");
@@ -326,6 +328,7 @@ async fn disconnected_start_is_reported_and_the_ambiguous_delegation_is_not_repl
         process: None,
         delegations: HashMap::new(),
         purpose: SessionPurpose::VoiceAnalyst,
+        model: String::new(),
     })
     .await
     .expect("connect");

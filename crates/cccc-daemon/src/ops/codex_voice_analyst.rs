@@ -179,6 +179,9 @@ pub(crate) struct AnalystSession {
     native_tui_command: Option<Vec<String>>,
     cleanup_paths: Vec<PathBuf>,
     thread_resumed: bool,
+    /// The model this session asked Codex for; empty when the actor declared
+    /// none. Kept so a reconnect asks for the same thread settings.
+    model: String,
     delegations: tokio::sync::Mutex<HashMap<String, DelegationState>>,
 }
 
@@ -410,6 +413,7 @@ struct ConnectConfig {
     process: Option<Arc<ChildOwner>>,
     delegations: HashMap<String, DelegationState>,
     purpose: SessionPurpose,
+    model: String,
 }
 
 fn required_value<'a>(value: &'a str, name: &str) -> io::Result<&'a str> {

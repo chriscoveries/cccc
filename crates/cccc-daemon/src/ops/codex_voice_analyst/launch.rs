@@ -96,6 +96,7 @@ impl AnalystSession {
                     env,
                     config.resume_thread_id,
                     SessionPurpose::VoiceAnalyst,
+                    prepared.model,
                 )
                 .await
             }
@@ -313,6 +314,7 @@ impl AnalystSession {
                 .as_ref()
                 .map(|attempt| attempt.session_id.clone()),
             SessionPurpose::Actor,
+            prepared.model,
         )
         .await;
         let session = super::super::runtime_session::resume_failure::finish_launch(

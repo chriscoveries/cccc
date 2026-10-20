@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ impl AnalystSession {
         env: BTreeMap<String, String>,
         resume_thread_id: Option<String>,
         purpose: SessionPurpose,
+        model: String,
     ) -> io::Result<Self> {
         Self::launch_prepared_with_cancel(
             binding,
@@ -21,6 +22,7 @@ impl AnalystSession {
             env,
             resume_thread_id,
             purpose,
+            model,
             None,
         )
         .await
@@ -33,6 +35,7 @@ impl AnalystSession {
         env: BTreeMap<String, String>,
         resume_thread_id: Option<String>,
         purpose: SessionPurpose,
+        model: String,
         mut cancellation: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> io::Result<Self> {
         let (process, lines) = lifecycle_timing::run_sync("codex.spawn", || {
@@ -53,6 +56,7 @@ impl AnalystSession {
                 process: Some(Arc::clone(&process)),
                 delegations: HashMap::new(),
                 purpose,
+                model,
             })
             .await
         };
@@ -96,6 +100,7 @@ impl AnalystSession {
             process,
             delegations,
             purpose,
+            model,
         } = config;
         process::validate_loopback_endpoint(&endpoint)?;
         let socket =
@@ -207,6 +212,14 @@ impl AnalystSession {
                 params["config"] = json!(overrides);
             }
         }
+        // The app-server opens a thread on whatever model the host's
+        // config.toml names unless the request carries one; the CLI's -m is
+        // parsed out of the command (launch_command strips it before spawning)
+        // and, without this, was never applied. A long-lived actor then ran as
+        // the host default while every config and card said otherwise.
+        if !model.is_empty() {
+            params["model"] = Value::String(model.clone());
+        }
         let requested_thread_id = resume_thread_id
             .as_deref()
             .map(str::trim)
@@ -295,6 +308,40 @@ impl AnalystSession {
                 ));
             }
         }
+        // A resumed thread keeps the model recorded in its rollout: the resume
+        // request's model is ignored for an already-loaded thread (probed
+        // against codex 0.159.1 - start model-alpha, resume model-beta, thread
+        // stays model-alpha). Ask for the declared model explicitly and read
+        // the thread back, so an actor that was once started under the wrong
+        // model stops running as it instead of carrying it for its whole life.
+        if !model.is_empty() {
+            let reported = started["thread"]["model"].as_str();
+            if reported.is_some_and(|running| running != model.as_str()) {
+                protocol
+                    .request(
+                        "thread/settings/update",
+                        json!({"threadId":thread_id,"model":model.as_str()}),
+                        Duration::from_secs(20),
+                    )
+                    .await?;
+                let applied = protocol
+                    .request(
+                        "thread/read",
+                        json!({"threadId":thread_id,"includeTurns":false}),
+                        Duration::from_secs(20),
+                    )
+                    .await?;
+                if applied["thread"]["model"].as_str() != Some(model.as_str()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!(
+                            "Codex thread runs model {} but the actor declares {model}",
+                            applied["thread"]["model"]
+                        ),
+                    ));
+                }
+            }
+        }
         Ok(Self {
             #[cfg(test)]
             binding,
@@ -310,6 +357,7 @@ impl AnalystSession {
             cleanup_paths: Vec::new(),
             runtime: cccc_contracts::ActorRuntime::Codex,
             thread_resumed,
+            model,
             delegations: tokio::sync::Mutex::new(delegations),
         })
     }
@@ -331,6 +379,7 @@ impl AnalystSession {
             process: None,
             delegations: HashMap::new(),
             purpose: SessionPurpose::VoiceAnalyst,
+            model: String::new(),
         })
         .await
     }

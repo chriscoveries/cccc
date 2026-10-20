@@ -262,6 +262,7 @@ impl AnalystSession {
             config.environment,
             config.resume_thread_id,
             SessionPurpose::VoiceSecretary,
+            String::new(),
             Some(cancellation),
         )
         .await

@@ -19,6 +19,7 @@ impl AnalystSession {
             auxiliary_processes,
             native_tui_command,
             cleanup_paths,
+            model,
             delegations,
             ..
         } = self;
@@ -43,6 +44,7 @@ impl AnalystSession {
             process,
             delegations: delegations.into_inner(),
             purpose: SessionPurpose::VoiceAnalyst,
+            model,
         })
         .await
     }

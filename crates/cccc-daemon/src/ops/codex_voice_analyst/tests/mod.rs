@@ -15,4 +15,5 @@ mod native_acp_session;
 mod session;
 mod startup_readiness;
 mod support;
+mod thread_model;
 mod unit;
