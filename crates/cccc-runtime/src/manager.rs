@@ -7,6 +7,7 @@ use crate::registry::{
 use crate::session::{LaunchSpec, Session, SessionStatus};
 use crate::session_history::SessionHistory;
 use crate::transcript_archive::HistoryConfig;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -81,6 +82,75 @@ fn remove_exited_before_start(key: &Key) -> Result<(), RuntimeError> {
 
 pub fn status(group_id: &str, actor_id: &str) -> Result<SessionStatus, RuntimeError> {
     with_session(group_id, actor_id, |session| Ok(session.status()))
+}
+
+/// The identity a live session's process actually carries, as read from its own
+/// environment. `None` means the environment was unreadable or did not carry
+/// both CCCC_GROUP_ID and CCCC_ACTOR_ID — a runtime that clears its environment
+/// is not a mismatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeIdentity {
+    pub group_id: String,
+    pub actor_id: String,
+}
+
+/// One registered runtime session as the daemon can see it: the key it was
+/// registered under, what its process reports, and whether that process still
+/// exists. `cccc doctor` uses this to name a crossed terminal instead of only
+/// refusing writes into it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSessionProbe {
+    pub group_id: String,
+    pub actor_id: String,
+    pub pid: Option<u32>,
+    pub started_at: String,
+    pub running: bool,
+    /// True while the registered process still exists. A session reported as
+    /// running with no process behind it is a stale registration.
+    pub process_alive: bool,
+    pub identity: Option<ProbeIdentity>,
+}
+
+fn registered_process_alive(pid: Option<u32>) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        pid.is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        pid.is_some()
+    }
+}
+
+/// Snapshot every registered PTY session. Sorted by (group, actor) so a report
+/// is stable across runs.
+pub fn probe_sessions() -> Vec<RuntimeSessionProbe> {
+    let Ok(registry) = sessions().read() else {
+        return Vec::new();
+    };
+    let mut probes = registry
+        .iter()
+        .filter_map(|((group_id, actor_id), shared)| {
+            let mut session = shared.lock().ok()?;
+            let status = session.status();
+            let identity = session
+                .process_identity()
+                .map(|(group_id, actor_id)| ProbeIdentity { group_id, actor_id });
+            Some(RuntimeSessionProbe {
+                group_id: group_id.clone(),
+                actor_id: actor_id.clone(),
+                process_alive: registered_process_alive(status.pid),
+                pid: status.pid,
+                started_at: status.started_at,
+                running: status.running,
+                identity,
+            })
+        })
+        .collect::<Vec<_>>();
+    probes.sort_by(|left, right| {
+        (&left.group_id, &left.actor_id).cmp(&(&right.group_id, &right.actor_id))
+    });
+    probes
 }
 
 /// Observed terminal activity of a live session. A restart creates a new

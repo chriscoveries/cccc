@@ -40,6 +40,11 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         "home_get" => Operation::new(Policy::Read, |home, _request| {
             object(json!({"home": home.root(), "environment": "CCCC_HOME"}))
         }),
+        // Registered PTY sessions with the identity their process reports, so a
+        // crossed terminal can be named instead of only being refused a write.
+        "runtime_sessions" => Operation::new(Policy::Read, |_home, _request| {
+            object(json!({"sessions": cccc_runtime::probe_sessions()}))
+        }),
         "shutdown" => Operation::new(Policy::GlobalWrite, |_home, request| shutdown(request)),
         _ => return ops::resolve_operation(request),
     })
@@ -67,6 +72,7 @@ fn ping(home: &HomeLayout, _request: &DaemonRequest) -> OpResult {
             "web_model_browser_vnc_attach": false,
             "term_attachment_status": true,
             "term_attach_snapshot_v1": true,
+            "runtime_sessions": true,
             "assistant_state": true,
             "assistant_voice_recording_lease": true,
             "assistant_voice_model_install": false,

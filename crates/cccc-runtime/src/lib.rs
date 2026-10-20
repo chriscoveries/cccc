@@ -58,8 +58,9 @@ pub use history_access::{
     history_since, retained_history, retained_history_tail,
 };
 pub use manager::{
-    activity, reap, resize, start, start_with_history, status, stop, stop_all, stop_if_started_at,
-    submit, submit_interruptible, submit_sequence_interruptible, wait_for_input_ready, write,
+    ProbeIdentity, RuntimeSessionProbe, activity, probe_sessions, reap, resize, start,
+    start_with_history, status, stop, stop_all, stop_if_started_at, submit, submit_interruptible,
+    submit_sequence_interruptible, wait_for_input_ready, write,
 };
 pub use output::HistoryPage;
 #[cfg(unix)]
