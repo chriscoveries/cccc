@@ -99,7 +99,20 @@ pub(super) fn submit_terminal_text(
         TERMINAL_REPEAT_SUBMIT_DELAY,
         cancelled,
     )
-    .unwrap_or(false)
+    .map_or_else(
+        |error| {
+            if matches!(error, cccc_runtime::RuntimeError::IdentityMismatch { .. }) {
+                tracing::error!(
+                    group_id = %group_id,
+                    actor_id = %actor.id,
+                    error = %error,
+                    "refusing delivery: the terminal for this actor runs as a different identity"
+                );
+            }
+            false
+        },
+        |accepted| accepted,
+    )
 }
 
 pub(super) fn terminal_submit_sequence(actor: &Actor) -> &'static [&'static [u8]] {

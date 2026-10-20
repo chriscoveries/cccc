@@ -163,6 +163,55 @@ impl Session {
         self.status.clone()
     }
 
+    /// The identity the running process actually carries, read from its own
+    /// environment. `start_with_history` pins CCCC_GROUP_ID and CCCC_ACTOR_ID
+    /// last, after any spec env, so the pair a process reports is the pair it
+    /// was launched for. A process reporting a different pair was started for
+    /// another actor, and writing this actor's delivery into it would run the
+    /// work under the wrong identity.
+    ///
+    /// Returns None when the environment cannot be read or does not carry both
+    /// variables: runtimes that clear their environment stay deliverable.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn process_identity(&self) -> Option<(String, String)> {
+        let pid = self.status.pid?;
+        let bytes = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+        let mut group_id = None;
+        let mut actor_id = None;
+        for entry in bytes.split(|byte| *byte == 0) {
+            if let Some(value) = entry.strip_prefix(b"CCCC_GROUP_ID=") {
+                group_id = Some(String::from_utf8_lossy(value).into_owned());
+            } else if let Some(value) = entry.strip_prefix(b"CCCC_ACTOR_ID=") {
+                actor_id = Some(String::from_utf8_lossy(value).into_owned());
+            }
+        }
+        Some((group_id?, actor_id?))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn process_identity(&self) -> Option<(String, String)> {
+        None
+    }
+
+    /// Refuse to write to a terminal whose process believes it is a different
+    /// actor. A misrouted delivery is silent otherwise: the write succeeds,
+    /// the daemon records the delivery as accepted, and the lane works as
+    /// whatever identity it was launched with.
+    pub(crate) fn verify_process_identity(&self) -> Result<(), RuntimeError> {
+        let Some((found_group_id, found_actor_id)) = self.process_identity() else {
+            return Ok(());
+        };
+        if found_group_id == self.status.group_id && found_actor_id == self.status.actor_id {
+            return Ok(());
+        }
+        Err(RuntimeError::IdentityMismatch {
+            group_id: self.status.group_id.clone(),
+            actor_id: self.status.actor_id.clone(),
+            found_group_id,
+            found_actor_id,
+        })
+    }
+
     pub fn stop(&mut self) -> Result<SessionStatus, RuntimeError> {
         self.process_tree.terminate()?;
         if self.status.running {

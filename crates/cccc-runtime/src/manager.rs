@@ -283,10 +283,15 @@ fn write_locked(
     data: &[u8],
     cancelled: Option<&AtomicBool>,
 ) -> Result<bool, RuntimeError> {
-    let writer = session
-        .lock()
-        .map_err(|_| RuntimeError::Poisoned)?
-        .input_writer()?;
+    let writer = {
+        let mut session = session.lock().map_err(|_| RuntimeError::Poisoned)?;
+        // The registry key is set at launch and never revisited, so a terminal
+        // started for another actor is indistinguishable from this one unless
+        // the process itself is asked. Refuse the write instead of delivering
+        // this actor's work into a lane running under a different identity.
+        session.verify_process_identity()?;
+        session.input_writer()?
+    };
     // The input gate preserves ordering; blocking IO must not hold the Session
     // lock required by status, stop and process cleanup. Pin this generation.
     match cancelled {
