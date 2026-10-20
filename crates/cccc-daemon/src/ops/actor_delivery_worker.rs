@@ -98,6 +98,38 @@ pub fn process_batch(
         Ok(None) => return BatchOutcome::Retry,
         Err(reason) => return BatchOutcome::Terminal(reason),
     };
+    // Name the process that receives this batch before anything is written to
+    // the terminal. A misroute is silent otherwise: the write succeeds and the
+    // ledger records only that some delivery was accepted. The record is
+    // idempotent per process, so a retry on the same session writes nothing and
+    // a relaunch writes its own line.
+    let handover = crate::ops::runtime_delivery::LaunchIdentity::new(
+        &current_group.group_id,
+        &current_actor.id,
+        status.pid,
+        &status.started_at,
+        runner_name(status.runner),
+    );
+    let transport = super::actor_delivery::delivery_transport(&job.home, &current_group, &current_actor);
+    for job in jobs {
+        if let Err(error) = crate::ops::runtime_delivery::record_launch(
+            &job.home,
+            &current_group.group_id,
+            &current_actor.id,
+            &current_actor.created_at,
+            &job.event.id,
+            transport,
+            &handover,
+        ) {
+            tracing::warn!(
+                message = %error.message,
+                event_id = %job.event.id,
+                "failed to record the terminal handover"
+            );
+            // An unrecorded handover is exactly the case this record exists for.
+            return BatchOutcome::Retry;
+        }
+    }
     let first_delivery = *preamble_session != status.started_at;
     if first_delivery {
         if current_actor.runtime != ActorRuntime::Custom
@@ -425,6 +457,15 @@ fn ensure_running(
 
 fn submit_text(group_id: &str, actor: &Actor, text: &str, cancelled: &AtomicBool) -> bool {
     super::actor_delivery::submit_terminal_text(group_id, actor, text, cancelled)
+}
+
+/// The runner the ledger records for a handover: the runtime key's second half
+/// stays stable, and this names the transport shape the process was launched as.
+fn runner_name(runner: cccc_contracts::RunnerKind) -> &'static str {
+    match runner {
+        cccc_contracts::RunnerKind::Pty => "pty",
+        cccc_contracts::RunnerKind::Headless => "headless",
+    }
 }
 
 #[cfg(test)]

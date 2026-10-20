@@ -80,6 +80,159 @@ pub fn append_state(
     Ok(event)
 }
 
+/// Ledger event naming the process a delivery was handed to. Written before the
+/// payload reaches the terminal so a misroute stays reconstructible afterwards.
+pub const LAUNCH_EVENT: &str = "runtime.delivery.launch";
+
+/// Where a delivery was handed over: the process that received it.
+///
+/// The daemon keeps no launch record of its own, so after a misroute the ledger
+/// could not distinguish "the launch spec carried another actor's id" from "the
+/// lane was started outside the daemon with that env exported". One record per
+/// distinct process closes that gap without relying on the journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchIdentity {
+    /// None only when the runtime cannot report a pid; the line is still
+    /// written, because the started_at and session key still identify the
+    /// handover.
+    pub pid: Option<u32>,
+    pub started_at: String,
+    pub session_key: String,
+    pub runner: &'static str,
+}
+
+impl LaunchIdentity {
+    pub fn new(
+        group_id: &str,
+        actor_id: &str,
+        pid: Option<u32>,
+        started_at: &str,
+        runner: &'static str,
+    ) -> Self {
+        Self {
+            pid,
+            started_at: started_at.to_owned(),
+            session_key: runtime_session_key(group_id, actor_id),
+            runner,
+        }
+    }
+}
+
+/// Sessions are keyed by (group, actor) in the runtime registry; record that
+/// pair, so that two sessions of one actor are told apart by `started_at`.
+pub fn runtime_session_key(group_id: &str, actor_id: &str) -> String {
+    format!("{group_id}:{actor_id}")
+}
+
+fn launch_data(
+    group_id: &str,
+    actor_id: &str,
+    actor_created_at: &str,
+    source_event_id: &str,
+    transport: &str,
+    identity: &LaunchIdentity,
+) -> Map<String, Value> {
+    json!({
+        "actor_id": actor_id,
+        "source_event_id": source_event_id,
+        "delivery_id": delivery_id(group_id, actor_id, actor_created_at, source_event_id),
+        "pid": identity.pid,
+        "started_at": identity.started_at,
+        "session_key": identity.session_key,
+        "runner": identity.runner,
+        "state": "launched",
+        "transport": transport,
+    })
+    .as_object()
+    .cloned()
+    .expect("runtime delivery launch data")
+}
+
+/// Record the process a delivery is about to reach.
+///
+/// Idempotent per distinct process: a retry that lands on the same pid and
+/// started_at writes nothing, while a relaunch writes its own line, so every
+/// attempt stays visible. The line is read back inside the same exclusive lock
+/// that guards the claim, and the caller must not write to the terminal unless
+/// this returns a recorded event.
+pub fn record_launch(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    actor_created_at: &str,
+    source_event_id: &str,
+    transport: &str,
+    identity: &LaunchIdentity,
+) -> Result<Event, OpError> {
+    let store = GroupStore::new(home.clone()).map_err(OpError::io)?;
+    let ledger_path = store.ledger_path(group_id).map_err(OpError::io)?;
+    let data = launch_data(
+        group_id,
+        actor_id,
+        actor_created_at,
+        source_event_id,
+        transport,
+        identity,
+    );
+    with_exclusive_lock(&delivery_lock_path(&ledger_path), || {
+        let already = ledger::inspect(&ledger_path, |events, _| {
+            events.iter().any(|event| {
+                event.kind == LAUNCH_EVENT
+                    && event.data.get("delivery_id") == data.get("delivery_id")
+                    && event.data.get("pid") == data.get("pid")
+                    && event.data.get("started_at") == data.get("started_at")
+            })
+        })?;
+        if already {
+            let mut event = Event::new(LAUNCH_EVENT, group_id);
+            event.by = "system".into();
+            event.data = data.clone();
+            return Ok(event);
+        }
+        let mut event = Event::new(LAUNCH_EVENT, group_id);
+        event.by = "system".into();
+        event.data = data;
+        ledger::append(&ledger_path, &event)?;
+        let recorded = ledger::inspect(&ledger_path, |events, _| {
+            events.iter().any(|appended| appended.id == event.id)
+        })?;
+        if !recorded {
+            // The payload must not be written on an unrecorded handover.
+            return Err(std::io::Error::other(
+                "launch record was not readable after it was appended",
+            ));
+        }
+        Ok(event)
+    })
+    .map_err(OpError::io)
+}
+
+/// The most recent recorded handover of a delivery, or None for deliveries that
+/// were never handed to a process.
+pub fn launch_record(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    actor_created_at: &str,
+    source_event_id: &str,
+) -> Result<Option<Map<String, Value>>, OpError> {
+    let store = GroupStore::new(home.clone()).map_err(OpError::io)?;
+    let ledger_path = store.ledger_path(group_id).map_err(OpError::io)?;
+    let wanted = delivery_id(group_id, actor_id, actor_created_at, source_event_id);
+    ledger::inspect(&ledger_path, |events, _| {
+        events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.kind == LAUNCH_EVENT
+                    && event.data.get("delivery_id").and_then(Value::as_str)
+                        == Some(wanted.as_str())
+            })
+            .map(|event| event.data.clone())
+    })
+    .map_err(OpError::io)
+}
+
 pub fn latest_state(
     home: &HomeLayout,
     group_id: &str,
@@ -574,6 +727,155 @@ mod tests {
                 .map(|event| event.id.as_str())
                 .collect::<Vec<_>>(),
             [current_notice.id.as_str(), current.id.as_str()]
+        );
+    }
+
+    #[test]
+    fn the_handover_is_recorded_while_the_delivery_is_still_only_claimed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("handover ordering", "").expect("group");
+        let actor = Actor::new("peer1");
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save actor");
+
+        assert_eq!(
+            claim(&home, &group, &actor, "source-1", "pty", false).expect("claim"),
+            ClaimResult::Claimed
+        );
+        assert!(
+            launch_record(&home, &group.group_id, &actor.id, &actor.created_at, "source-1")
+                .expect("launch record")
+                .is_none(),
+            "a claimed delivery has not been handed to a process yet"
+        );
+
+        let handover = LaunchIdentity::new(
+            &group.group_id,
+            &actor.id,
+            Some(4242),
+            "2026-10-20T10:00:00Z",
+            "pty",
+        );
+        record_launch(
+            &home,
+            &group.group_id,
+            &actor.id,
+            &actor.created_at,
+            "source-1",
+            "pty",
+            &handover,
+        )
+        .expect("record handover");
+
+        // The record exists before the terminal accepts anything: the delivery
+        // is still only claimed, so an incident replay cannot wait for "accepted".
+        assert_eq!(
+            latest_state(&home, &group.group_id, &actor.id, "source-1")
+                .expect("latest")
+                .expect("state")
+                .0,
+            "claimed"
+        );
+        let record = launch_record(
+            &home,
+            &group.group_id,
+            &actor.id,
+            &actor.created_at,
+            "source-1",
+        )
+        .expect("launch record")
+        .expect("recorded");
+        assert_eq!(record.get("pid").and_then(Value::as_u64), Some(4242));
+        assert_eq!(
+            record.get("started_at").and_then(Value::as_str),
+            Some("2026-10-20T10:00:00Z")
+        );
+        assert_eq!(
+            record.get("session_key").and_then(Value::as_str),
+            Some(format!("{}:peer1", group.group_id).as_str())
+        );
+        assert_eq!(record.get("transport").and_then(Value::as_str), Some("pty"));
+    }
+
+    #[test]
+    fn one_line_per_process_and_the_record_survives_a_daemon_restart() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("handover restart", "").expect("group");
+        let actor = Actor::new("peer1");
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save actor");
+        let ledger_path = store.ledger_path(&group.group_id).expect("ledger");
+        assert_eq!(
+            claim(&home, &group, &actor, "source-1", "pty", false).expect("claim"),
+            ClaimResult::Claimed
+        );
+
+        let first =
+            LaunchIdentity::new(&group.group_id, &actor.id, Some(111), "2026-10-20T10:00:00Z", "pty");
+        for _ in 0..2 {
+            record_launch(
+                &home,
+                &group.group_id,
+                &actor.id,
+                &actor.created_at,
+                "source-1",
+                "pty",
+                &first,
+            )
+            .expect("record handover");
+        }
+        let launches = |path: &std::path::Path| {
+            ledger::read_all(path)
+                .expect("ledger")
+                .into_iter()
+                .filter(|event| event.kind == LAUNCH_EVENT)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            launches(&ledger_path).len(),
+            1,
+            "a retry onto the same process must not duplicate the line"
+        );
+
+        // A relaunch is its own handover and stays visible too.
+        let second =
+            LaunchIdentity::new(&group.group_id, &actor.id, Some(222), "2026-10-20T10:05:00Z", "pty");
+        record_launch(
+            &home,
+            &group.group_id,
+            &actor.id,
+            &actor.created_at,
+            "source-1",
+            "pty",
+            &second,
+        )
+        .expect("record relaunch");
+        assert_eq!(launches(&ledger_path).len(), 2);
+
+        // Restart: a fresh home handle replays the same ledger, and the claim the
+        // restart settles does not drop the handover it belonged to.
+        let reopened = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        settle_stranded_claims(&reopened, &group).expect("settle");
+        let record = launch_record(
+            &reopened,
+            &group.group_id,
+            &actor.id,
+            &actor.created_at,
+            "source-1",
+        )
+        .expect("launch record")
+        .expect("recorded");
+        assert_eq!(record.get("pid").and_then(Value::as_u64), Some(222));
+        assert_eq!(
+            latest_state(&reopened, &group.group_id, &actor.id, "source-1")
+                .expect("latest")
+                .expect("state")
+                .0,
+            "ambiguous"
         );
     }
 
