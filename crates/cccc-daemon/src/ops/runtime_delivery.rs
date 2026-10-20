@@ -193,9 +193,12 @@ pub fn record_launch(
         event.by = "system".into();
         event.data = data;
         ledger::append(&ledger_path, &event)?;
-        let recorded = ledger::inspect(&ledger_path, |events, _| {
-            events.iter().any(|appended| appended.id == event.id)
-        })?;
+        let recorded = launch_record(home, group_id, actor_id, actor_created_at, source_event_id)
+            .map_err(|error| std::io::Error::other(error.message))?
+            .is_some_and(|record| {
+                record.get("pid") == Some(&json!(identity.pid))
+                    && record.get("started_at") == Some(&json!(identity.started_at))
+            });
         if !recorded {
             // The payload must not be written on an unrecorded handover.
             return Err(std::io::Error::other(
