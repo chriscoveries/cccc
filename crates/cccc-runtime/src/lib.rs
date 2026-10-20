@@ -86,6 +86,15 @@ pub enum RuntimeError {
     #[error("runtime session is not running: {0}/{1}")]
     NotRunning(String, String),
     #[error(
+        "terminal identity mismatch: {group_id}/{actor_id} resolved to a process running as {found_group_id}/{found_actor_id}"
+    )]
+    IdentityMismatch {
+        group_id: String,
+        actor_id: String,
+        found_group_id: String,
+        found_actor_id: String,
+    },
+    #[error(
         "terminal output cursor {requested} expired; retained output starts at {retained_start}"
     )]
     OutputLagged { requested: u64, retained_start: u64 },
