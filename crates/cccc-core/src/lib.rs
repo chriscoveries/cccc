@@ -48,6 +48,8 @@ pub mod mail_pending;
 pub mod membership;
 pub mod memory;
 pub mod nomcp;
+#[cfg(test)]
+mod notice_allocation_probe;
 pub mod path_input;
 pub mod peer_insight;
 pub mod permissions;

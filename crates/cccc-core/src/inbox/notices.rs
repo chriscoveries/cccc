@@ -57,9 +57,13 @@ impl NoticeState {
         Vec::new()
     }
     pub fn remember_references(&mut self, event: &Event) {
+        #[cfg(test)]
+        let _allocation_scope = crate::notice_allocation_probe::scope();
         self.references.extend(Self::reference_ids(event));
     }
     pub fn remember_cursor(&mut self, id: &str) {
+        #[cfg(test)]
+        let _allocation_scope = crate::notice_allocation_probe::scope();
         self.references.insert(id.to_owned());
     }
     pub fn can_append(&self, event: &Event) -> bool {
@@ -68,6 +72,8 @@ impl NoticeState {
             .all(|id| self.positions.contains_key(id) || self.references.contains(id))
     }
     pub fn note(&mut self, group: &GroupDoc, event: &Event) {
+        #[cfg(test)]
+        let _allocation_scope = crate::notice_allocation_probe::scope();
         let position = self.next_position;
         self.next_position += 1;
         let mode = event
@@ -368,5 +374,52 @@ impl NoticeState {
             }
         }
         notices
+    }
+}
+
+#[cfg(test)]
+mod allocation_measurement {
+    use super::*;
+
+    #[test]
+    #[ignore = "operator-supplied copied real groups only"]
+    fn real_group_notice_retained_allocations() {
+        let root = std::env::var_os("CCCC_REAL_REPLAY_HOME").expect("real copied home required");
+        let home = HomeLayout::from_path(root).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        for meta in store.list().expect("groups") {
+            let group = store.load(&meta.group_id).expect("group");
+            let actors = group
+                .actors
+                .iter()
+                .map(|actor| actor.id.clone())
+                .collect::<Vec<_>>();
+            let snapshot = crate::ledger::snapshot::Snapshot::open(
+                &store.ledger_path(&group.group_id).expect("ledger"),
+            )
+            .expect("snapshot");
+            let mut mail = 0usize;
+            snapshot
+                .visit(&[], |event, _| {
+                    if event.kind == "chat.message"
+                        && event.data.get("message_mode").and_then(Value::as_str) == Some("mail")
+                    {
+                        mail += 1;
+                    }
+                    ControlFlow::Continue(())
+                })
+                .expect("count real Mail");
+            let counter = crate::notice_allocation_probe::begin();
+            crate::inbox::projection::counts(&home, &group, &actors, 1000)
+                .expect("cold projection");
+            let heap = counter.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(heap >= 0, "allocation ownership accounting underflow");
+            let inline = std::mem::size_of::<NoticeState>();
+            let total = heap as usize + inline;
+            println!(
+                "{}",
+                json!({"group_id":group.group_id,"mail_events":mail,"heap_requested_bytes":heap,"inline_bytes":inline,"total_requested_bytes":total,"bytes_per_mail":total as f64 / mail as f64})
+            );
+        }
     }
 }
