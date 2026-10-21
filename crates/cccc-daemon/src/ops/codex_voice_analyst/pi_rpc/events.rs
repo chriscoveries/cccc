@@ -219,9 +219,157 @@ pub(super) fn publish(
     });
 }
 
+/// Replays a real Pi 1.3.0 RPC session through one controlled turn and returns
+/// the normalized events, in order. Captured 2026-10-21 from `pi --mode rpc`
+/// against an OpenAI-compatible provider: one prompt that ran `bash` and `read`
+/// in a scratch directory, then answered. Every line is as captured; only the
+/// two system-prompt records and the closing `agent_end` transcript echo, which
+/// carry local paths, were left out.
+#[cfg(test)]
+pub(crate) fn replay_captured_tool_turn(thread_id: &str) -> Vec<Value> {
+    let records = include_str!("captured_tool_turn.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("captured Pi RPC record"))
+        .collect::<Vec<_>>();
+    let prompt = records
+        .iter()
+        .find(|record| record["type"] == "message_start" && record["message"]["role"] == "user")
+        .map(|record| message_text(&record["message"]))
+        .expect("captured prompt");
+    let (sender, mut receiver) = broadcast::channel(records.len() * 4);
+    let (admission, _) = oneshot::channel();
+    let mut turn = Turn::new("captured".into(), prompt, admission);
+    let mut settled = false;
+    for record in &records {
+        settled |= turn
+            .observe(record, &sender, "generation", thread_id)
+            .expect("captured record is accepted");
+    }
+    assert!(settled, "the captured session settles its turn");
+    std::iter::from_fn(|| receiver.try_recv().ok())
+        .map(|event| event.message)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_tool_calls_are_published_as_started_then_finished() {
+        let calls = replay_captured_tool_turn("s")
+            .into_iter()
+            .filter(|message| {
+                message["method"] == "cccc/toolActivity" && message["params"]["phase"].is_string()
+            })
+            .map(|message| {
+                let params = &message["params"];
+                [
+                    params["phase"].clone(),
+                    params["title"].clone(),
+                    params["itemType"].clone(),
+                    params["detail"].clone(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            [
+                ["started", "bash", "commandExecution", "ls"],
+                ["started", "read", "toolCall", "notes.txt"],
+                ["completed", "bash", "commandExecution", "ls"],
+                ["completed", "read", "toolCall", "notes.txt"],
+            ]
+            .map(|call| call.map(Value::from))
+        );
+    }
+
+    /// A constructed privacy test, not a capture: a credential-like token and a
+    /// private directory in every place a call can carry them. Only a program
+    /// or a file name comes through.
+    #[test]
+    fn a_call_shows_only_its_program_or_file_name() {
+        const TOKEN: &str = "secret-token-0123456789abcdef";
+        const PRIVATE: &str = "/home/someone/private-dir";
+        let calls = [
+            (
+                "bash",
+                json!({"command": format!("curl -H 'Authorization: Bearer {TOKEN}' https://user:{TOKEN}@example.com{PRIVATE}")}),
+                "curl",
+            ),
+            (
+                "bash",
+                json!({"command": format!("API_KEY={TOKEN} cargo test --locked -p private-crate")}),
+                "cargo test",
+            ),
+            (
+                "bash",
+                json!({"command": format!("{PRIVATE}/bin/deploy --token {TOKEN}")}),
+                "deploy",
+            ),
+            (
+                "read",
+                json!({"path": format!("{PRIVATE}/notes.txt")}),
+                "notes.txt",
+            ),
+            (
+                "write",
+                json!({"path": format!("{PRIVATE}/report.md"), "content": TOKEN}),
+                "report.md",
+            ),
+            (
+                "edit",
+                json!({"path": format!("{PRIVATE}/main.rs"), "edits": [{"oldText": TOKEN, "newText": "x"}]}),
+                "main.rs",
+            ),
+            ("grep", json!({"pattern": TOKEN, "path": PRIVATE}), ""),
+            ("find", json!({"pattern": "*.key", "path": PRIVATE}), ""),
+            ("ls", json!({"path": PRIVATE}), ""),
+            (
+                "mcp__cccc__cccc_message_send",
+                json!({"text": TOKEN, "to": "peer"}),
+                "",
+            ),
+            ("mcp__search__web_search", json!({"query": TOKEN}), ""),
+            (
+                "web_fetch",
+                json!({"url": format!("https://example.com{PRIVATE}?token={TOKEN}")}),
+                "",
+            ),
+        ];
+        let (sender, mut receiver) = broadcast::channel(32);
+        let (admission, _) = oneshot::channel();
+        let mut turn = Turn::new("d".into(), "exact".into(), admission);
+        turn.observe(
+            &json!({"type":"message_start","message":{"role":"user","content":"exact"}}),
+            &sender,
+            "g",
+            "s",
+        )
+        .expect("admitted");
+        for (index, (tool, args, _)) in calls.iter().enumerate() {
+            let record = json!({
+                "type": "tool_execution_start",
+                "toolCallId": format!("call-{index}"),
+                "toolName": tool,
+                "args": args,
+            });
+            turn.observe(&record, &sender, "g", "s").expect("accepted");
+        }
+        let published = std::iter::from_fn(|| receiver.try_recv().ok())
+            .map(|event| event.message)
+            .filter(|message| message["method"] == "cccc/toolActivity")
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), calls.len());
+        for (message, (tool, _, shown)) in published.iter().zip(&calls) {
+            assert_eq!(message["params"]["title"], *tool);
+            assert_eq!(message["params"]["detail"], *shown, "{message}");
+            let text = message.to_string();
+            assert!(!text.contains(TOKEN), "{text}");
+            assert!(!text.contains("private"), "{text}");
+        }
+    }
+
     #[test]
     fn only_settled_completes_and_authoritative_message_replaces_deltas() {
         let (sender, mut receiver) = broadcast::channel(32);
