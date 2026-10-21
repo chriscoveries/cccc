@@ -803,6 +803,221 @@ mod tests {
         assert_eq!(states, ["claimed", "failed"]);
     }
 
+    /// The provider answers every turn with the error a DeepSeek actor got
+    /// for each of its turns while its API key was rejected, copied from that
+    /// actor's runtime journal with the key suffix and request id redacted.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_the_provider_keeps_failing_is_retried_three_times_then_failed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("failing provider", "").expect("group");
+        let script = r#"while IFS= read -r line; do
+if printf '%s' "$line" | grep -q '"method":"initialize"'; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"fake"}}}'
+elif printf '%s' "$line" | grep -q '"method":"session/new"'; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"fake-session"}}'
+else
+  rid=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  echo "$rid" >> "$PROMPT_LOG"
+  printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"Internal error: turn failed: Authentication Fails, Your api key: ****[redacted] is invalid (request_id: [redacted])"}}\n' "$rid"
+fi
+done"#;
+        let prompt_log = temp.path().join("prompts");
+        let mut actor = Actor::new("deepseek");
+        actor.runtime = ActorRuntime::Deepseek;
+        actor.command = vec!["sh".into(), "-c".into(), script.into()];
+        actor.env.insert(
+            "PROMPT_LOG".into(),
+            prompt_log.to_string_lossy().into_owned(),
+        );
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save group");
+        crate::ops::deepseek_runtime::start(&home, &group, &actor, temp.path()).expect("start");
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "user".into();
+        event.data = json!({"to":["deepseek"],"text":"work","message_mode":"send"})
+            .as_object()
+            .expect("data")
+            .clone();
+        let key = (group.group_id.clone(), actor.id.clone(), event.id.clone());
+        in_flight().lock().expect("claims").insert(key.clone());
+        let worker = spawn_worker(&(group.group_id.clone(), actor.id.clone()));
+        worker
+            .sender
+            .as_ref()
+            .expect("sender")
+            .send(DeliveryJob {
+                home: home.clone(),
+                group: group.clone(),
+                actor: actor.clone(),
+                event: event.clone(),
+            })
+            .expect("enqueue");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let state = crate::ops::runtime_delivery::latest_state(
+                &home,
+                &group.group_id,
+                &actor.id,
+                &event.id,
+            )
+            .expect("state");
+            if state.is_some_and(|(state, _)| state == "failed") {
+                break;
+            }
+            let turns = std::fs::read_to_string(&prompt_log)
+                .map(|log| log.lines().count())
+                .unwrap_or_default();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "still retrying after {turns} failed turns"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Nothing more is sent once the delivery has failed.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        worker.shutdown();
+        crate::ops::deepseek_runtime::stop(&group.group_id, &actor.id);
+        let turns = std::fs::read_to_string(&prompt_log).expect("prompt log");
+        // The first turn and three retries.
+        assert_eq!(turns.lines().count(), 4);
+        assert!(!in_flight().lock().expect("claims").contains(&key));
+        let events =
+            ledger::read_all(&store.ledger_path(&group.group_id).expect("ledger")).expect("events");
+        let failures: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "runtime.delivery")
+            .filter(|event| {
+                event.data.get("state").and_then(serde_json::Value::as_str) == Some("failed")
+            })
+            .filter_map(|event| event.data.get("reason").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("Authentication Fails"));
+    }
+
+    /// The provider answers every turn with the error a DeepSeek actor got
+    /// for each of its turns while its API key was rejected, copied from that
+    /// actor's runtime journal with the key suffix and request id redacted.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_provider_gets_three_retries_and_then_none_for_a_while() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("failing provider", "").expect("group");
+        let script = r#"while IFS= read -r line; do
+if printf '%s' "$line" | grep -q '"method":"initialize"'; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"fake"}}}'
+elif printf '%s' "$line" | grep -q '"method":"session/new"'; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"fake-session"}}'
+else
+  rid=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  echo "$rid" >> "$PROMPT_LOG"
+  printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"Internal error: turn failed: Authentication Fails, Your api key: ****[redacted] is invalid (request_id: [redacted])"}}\n' "$rid"
+fi
+done"#;
+        let prompt_log = temp.path().join("prompts");
+        let mut actor = Actor::new("deepseek");
+        actor.runtime = ActorRuntime::Deepseek;
+        actor.command = vec!["sh".into(), "-c".into(), script.into()];
+        actor.env.insert(
+            "PROMPT_LOG".into(),
+            prompt_log.to_string_lossy().into_owned(),
+        );
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save group");
+        crate::ops::deepseek_runtime::start(&home, &group, &actor, temp.path()).expect("start");
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "user".into();
+        event.data = json!({"to":["deepseek"],"text":"work","message_mode":"send"})
+            .as_object()
+            .expect("data")
+            .clone();
+        let key = (group.group_id.clone(), actor.id.clone(), event.id.clone());
+        in_flight().lock().expect("claims").insert(key.clone());
+        let worker = spawn_worker(&(group.group_id.clone(), actor.id.clone()));
+        worker
+            .sender
+            .as_ref()
+            .expect("sender")
+            .send(DeliveryJob {
+                home: home.clone(),
+                group: group.clone(),
+                actor: actor.clone(),
+                event: event.clone(),
+            })
+            .expect("enqueue");
+        let wait_for_failure = |event: &Event| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let state = crate::ops::runtime_delivery::latest_state(
+                    &home,
+                    &group.group_id,
+                    &actor.id,
+                    &event.id,
+                )
+                .expect("state");
+                if state.is_some_and(|(state, _)| state == "failed") {
+                    return;
+                }
+                let turns = std::fs::read_to_string(&prompt_log)
+                    .map(|log| log.lines().count())
+                    .unwrap_or_default();
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "still retrying after {turns} failed turns"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        wait_for_failure(&event);
+        // Nothing more is sent once the delivery has failed.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let mut next = Event::new("chat.message", &group.group_id);
+        next.by = "user".into();
+        next.data = event.data.clone();
+        let next_key = (group.group_id.clone(), actor.id.clone(), next.id.clone());
+        in_flight().lock().expect("claims").insert(next_key.clone());
+        worker
+            .sender
+            .as_ref()
+            .expect("sender")
+            .send(DeliveryJob {
+                home: home.clone(),
+                group: group.clone(),
+                actor: actor.clone(),
+                event: next.clone(),
+            })
+            .expect("enqueue");
+        wait_for_failure(&next);
+        worker.shutdown();
+        crate::ops::deepseek_runtime::stop(&group.group_id, &actor.id);
+        let turns = std::fs::read_to_string(&prompt_log).expect("prompt log");
+        // The first message's turn and its three retries; none for the second.
+        assert_eq!(turns.lines().count(), 4);
+        assert!(!in_flight().lock().expect("claims").contains(&key));
+        assert!(!in_flight().lock().expect("claims").contains(&next_key));
+        let events =
+            ledger::read_all(&store.ledger_path(&group.group_id).expect("ledger")).expect("events");
+        let failures: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "runtime.delivery")
+            .filter(|event| {
+                event.data.get("state").and_then(serde_json::Value::as_str) == Some("failed")
+            })
+            .filter_map(|event| event.data.get("reason").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(failures.len(), 2);
+        assert!(
+            failures
+                .iter()
+                .all(|reason| reason.contains("Authentication Fails"))
+        );
+    }
+
     #[test]
     fn configured_browser_transport_does_not_require_a_completed_pairing() {
         let temp = tempfile::tempdir().expect("temp");
