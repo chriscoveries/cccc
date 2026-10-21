@@ -15,6 +15,7 @@ pub(super) struct Turn {
     provider_failed: bool,
     message: u64,
     tools: BTreeMap<String, Value>,
+    activities: BTreeMap<String, String>,
 }
 
 impl Turn {
@@ -35,6 +36,7 @@ impl Turn {
             provider_failed: false,
             message: 0,
             tools: BTreeMap::new(),
+            activities: BTreeMap::new(),
         }
     }
 
@@ -136,13 +138,37 @@ impl Turn {
             "auto_retry_end" if record["success"] == false => self.provider_failed = true,
             "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
                 let title = record["toolName"].as_str().unwrap_or_default();
+                let id = record["toolCallId"].as_str().unwrap_or_default();
+                let mut params = json!({"threadId":session,"turnId":self.id,"title":title.chars().take(400).collect::<String>()});
+                // A start and its end name the call, so the journal can show one
+                // started-then-finished activity. Streaming updates stay transient.
+                let phase = match typ {
+                    "tool_execution_start" => Some("started"),
+                    "tool_execution_end" if record["isError"] == true => Some("failed"),
+                    "tool_execution_end" => Some("completed"),
+                    _ => None,
+                };
+                if let Some(phase) = phase
+                    && !id.is_empty()
+                {
+                    let detail = if phase == "started" {
+                        let detail = short_arguments(&record["args"]);
+                        self.activities.insert(id.into(), detail.clone());
+                        detail
+                    } else {
+                        self.activities.remove(id).unwrap_or_default()
+                    };
+                    params["itemId"] = json!(id);
+                    params["itemType"] = json!(item_type(title));
+                    params["phase"] = json!(phase);
+                    params["detail"] = json!(detail);
+                }
                 publish(
                     sender,
                     generation,
                     None,
-                    json!({"method":"cccc/toolActivity","params":{"threadId":session,"turnId":self.id,"title":title.chars().take(400).collect::<String>()}}),
+                    json!({"method":"cccc/toolActivity","params":params}),
                 );
-                let id = record["toolCallId"].as_str().unwrap_or_default();
                 if typ == "tool_execution_start" && title.starts_with("mcp__cccc__") {
                     self.tools.insert(id.into(), record["args"].clone());
                 }
@@ -191,6 +217,35 @@ impl Turn {
     }
 }
 
+/// The same activity categories a Codex trace uses, so the Web labels them alike.
+fn item_type(tool: &str) -> &'static str {
+    match tool {
+        "bash" => "commandExecution",
+        "edit" | "write" => "fileChange",
+        _ if tool.starts_with("mcp__") => "mcpToolCall",
+        _ => "toolCall",
+    }
+}
+
+/// One short line that identifies a call: its command, path, pattern, query or
+/// URL. Any other argument shape (MCP tools, message text, file contents) is
+/// left out of the journal entirely; the tool name still identifies the call.
+fn short_arguments(args: &Value) -> String {
+    const LIMIT: usize = 200;
+    let Some(text) = ["command", "path", "pattern", "query", "url"]
+        .into_iter()
+        .find_map(|key| args[key].as_str())
+    else {
+        return String::new();
+    };
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= LIMIT {
+        line
+    } else {
+        line.chars().take(LIMIT - 1).chain(['…']).collect()
+    }
+}
+
 fn message_text(message: &Value) -> String {
     message["content"]
         .as_str()
@@ -219,9 +274,110 @@ pub(super) fn publish(
     });
 }
 
+/// Replays a real Pi 1.3.0 RPC session through one controlled turn and returns
+/// the normalized events, in order. Captured 2026-10-21 from `pi --mode rpc`
+/// against an OpenAI-compatible provider: one prompt that ran `bash` and `read`
+/// in a scratch directory, then answered. Every line is as captured; only the
+/// two system-prompt records and the closing `agent_end` transcript echo, which
+/// carry local paths, were left out.
+#[cfg(test)]
+pub(crate) fn replay_captured_tool_turn(thread_id: &str) -> Vec<Value> {
+    let records = include_str!("captured_tool_turn.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("captured Pi RPC record"))
+        .collect::<Vec<_>>();
+    let prompt = records
+        .iter()
+        .find(|record| record["type"] == "message_start" && record["message"]["role"] == "user")
+        .map(|record| message_text(&record["message"]))
+        .expect("captured prompt");
+    let (sender, mut receiver) = broadcast::channel(records.len() * 4);
+    let (admission, _) = oneshot::channel();
+    let mut turn = Turn::new("captured".into(), prompt, admission);
+    let mut settled = false;
+    for record in &records {
+        settled |= turn
+            .observe(record, &sender, "generation", thread_id)
+            .expect("captured record is accepted");
+    }
+    assert!(settled, "the captured session settles its turn");
+    std::iter::from_fn(|| receiver.try_recv().ok())
+        .map(|event| event.message)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_tool_calls_are_published_as_started_then_finished() {
+        let calls = replay_captured_tool_turn("s")
+            .into_iter()
+            .filter(|message| {
+                message["method"] == "cccc/toolActivity" && message["params"]["phase"].is_string()
+            })
+            .map(|message| {
+                let params = &message["params"];
+                [
+                    params["phase"].clone(),
+                    params["title"].clone(),
+                    params["itemType"].clone(),
+                    params["detail"].clone(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            [
+                ["started", "bash", "commandExecution", "ls -1 ."],
+                ["started", "read", "toolCall", "notes.txt"],
+                ["completed", "bash", "commandExecution", "ls -1 ."],
+                ["completed", "read", "toolCall", "notes.txt"],
+            ]
+            .map(|call| call.map(Value::from))
+        );
+    }
+
+    /// A real `cccc_message_send` call from a Pi Actor's session, private parts
+    /// redacted: MCP arguments such as message text never reach the journal.
+    #[test]
+    fn mcp_tool_arguments_are_never_published() {
+        let args = json!({
+            "insight": "[redacted] closes as paste collisions, not a cccc crossing; [redacted]",
+            "mode": "mail",
+            "text": concat!(
+                "[redacted] recheck: all four \"wake in the wrong prompt\" reports ",
+                "are Hermes paste-name collisions, no cccc crossing \u{2014} [redacted]"
+            ),
+            "to": "[redacted]"
+        });
+        assert_eq!(short_arguments(&args), "");
+        let (sender, mut receiver) = broadcast::channel(8);
+        let (admission, _) = oneshot::channel();
+        let mut turn = Turn::new("d".into(), "exact".into(), admission);
+        for record in [
+            json!({"type":"message_start","message":{"role":"user","content":"exact"}}),
+            json!({
+                "type": "tool_execution_start",
+                "toolCallId": "call_00_hbn2o36it8dhscl8a784xc5m",
+                "toolName": "mcp__cccc__cccc_message_send",
+                "args": args
+            }),
+        ] {
+            turn.observe(&record, &sender, "g", "s").expect("accepted");
+        }
+        let published = std::iter::from_fn(|| receiver.try_recv().ok())
+            .map(|event| event.message)
+            .find(|message| message["method"] == "cccc/toolActivity")
+            .expect("tool activity");
+        assert_eq!(published["params"]["phase"], "started");
+        assert_eq!(published["params"]["title"], "mcp__cccc__cccc_message_send");
+        assert_eq!(published["params"]["itemType"], "mcpToolCall");
+        assert_eq!(published["params"]["detail"], "");
+        assert!(!published.to_string().contains("wrong prompt"));
+    }
+
     #[test]
     fn only_settled_completes_and_authoritative_message_replaces_deltas() {
         let (sender, mut receiver) = broadcast::channel(32);
