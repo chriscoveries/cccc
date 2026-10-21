@@ -131,6 +131,99 @@ fn context_get_is_bounded_by_default_and_pages_the_whole_board() {
 }
 
 #[test]
+fn repeated_oversized_answers_are_capped_and_the_caller_is_told_to_page() {
+    // Spec item 3 at the op: the caller that keeps asking for the whole board
+    // after it exceeded the budget is refused with one bounded error, and a
+    // paged answer from the same caller lifts the cap.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    home.initialize().expect("initialize");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("retry-cap", "").expect("group");
+    let group_id = group.group_id.clone();
+
+    for index in 0..25 {
+        let note = "x".repeat(400);
+        let title = format!("card-{index:02}");
+        call(
+            &home,
+            "context_sync",
+            json!({
+                "group_id":group_id,
+                "by":"user",
+                "ops":[{"op":"task.create","title":title,"notes":note}]
+            }),
+        );
+    }
+    let mut group = store.load(&group_id).expect("reload");
+    group
+        .extra
+        .insert("state_max_bytes".into(), json!(8 * 1024));
+    store.save(&group).expect("save caps");
+
+    let actor = "lab-dsh-cap";
+    for attempt in 0..3 {
+        let answer = call(
+            &home,
+            "context_get",
+            json!({"group_id":group_id,"unbounded":true,"actor_id":actor}),
+        );
+        assert!(
+            size(&answer) > 8 * 1024,
+            "attempt {attempt} must really be over the budget: {}",
+            size(&answer)
+        );
+    }
+    let refusal = cccc_daemon::handle_request(
+        &home,
+        &DaemonRequest {
+            v: 1,
+            op: "context_get".into(),
+            args: json!({"group_id":group_id,"unbounded":true,"actor_id":actor})
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+        },
+    );
+    assert!(!refusal.ok, "the fourth oversized answer is refused");
+    let error = refusal.error.expect("error");
+    assert_eq!(error.code, "context_too_large");
+    assert!(
+        error.details["retry_after_ms"].as_u64().unwrap_or(0) > 0,
+        "a refused caller is told when to come back: {:?}",
+        error.details
+    );
+    assert!(
+        error.message.len() < 400,
+        "the refusal is one bounded line: {}",
+        error.message
+    );
+
+    // A paged answer from the same caller is served and clears the record.
+    let paged = call(
+        &home,
+        "context_get",
+        json!({"group_id":group_id,"limit":5,"actor_id":actor}),
+    );
+    assert_eq!(paged["truncated"], json!(true));
+    assert!(size(&paged) <= 8 * 1024);
+    let after_paging = call(
+        &home,
+        "context_get",
+        json!({"group_id":group_id,"unbounded":true,"actor_id":actor}),
+    );
+    assert!(size(&after_paging) > 8 * 1024, "paging lifted the cap");
+
+    // A different caller on the same board is unaffected.
+    let other = call(
+        &home,
+        "context_get",
+        json!({"group_id":group_id,"unbounded":true,"actor_id":"lab-hermes5"}),
+    );
+    assert!(size(&other) > 8 * 1024);
+}
+
+#[test]
 fn malformed_context_arguments_fail_once_with_invalid_args() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
@@ -150,6 +243,47 @@ fn malformed_context_arguments_fail_once_with_invalid_args() {
             error_code(&home, "context_get", args.clone()).as_deref(),
             Some("invalid_args"),
             "{args}"
+        );
+    }
+}
+
+#[test]
+fn bootstrap_keeps_its_unbounded_read_past_the_cap() {
+    // The MCP server's own bootstrap needs the whole board once per session;
+    // the retry cap must not refuse it, or a session restart loop would break
+    // the very sessions the cap protects.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    home.initialize().expect("initialize");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("bootstrap-exempt", "").expect("group");
+    let group_id = group.group_id.clone();
+    for index in 0..25 {
+        call(
+            &home,
+            "context_sync",
+            json!({
+                "group_id":group_id,
+                "by":"user",
+                "ops":[{"op":"task.create","title":format!("card-{index:02}"),"notes":"x".repeat(400)}]
+            }),
+        );
+    }
+    let mut group = store.load(&group_id).expect("reload");
+    group
+        .extra
+        .insert("state_max_bytes".into(), json!(8 * 1024));
+    store.save(&group).expect("save caps");
+
+    for attempt in 0..(3 * 3) {
+        let answer = call(
+            &home,
+            "context_get",
+            json!({"group_id":group_id,"unbounded":true,"actor_id":"lab-hermes7","bootstrap":true}),
+        );
+        assert!(
+            size(&answer) > 8 * 1024,
+            "bootstrap attempt {attempt} must be served whole"
         );
     }
 }

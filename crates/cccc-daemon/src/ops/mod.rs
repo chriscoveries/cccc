@@ -32,6 +32,7 @@ mod context;
 mod direct;
 pub(crate) use connect::ConnectService;
 mod context_bounds;
+mod context_guard;
 mod context_projection;
 mod deepseek_runtime;
 mod diagnostics;

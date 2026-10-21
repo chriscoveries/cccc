@@ -71,9 +71,7 @@ impl Bounds {
         let max_board_items = config_usize(group, "max_board_items")
             .unwrap_or(DEFAULT_MAX_BOARD_ITEMS)
             .clamp(1, MAX_LIMIT);
-        let max_bytes = config_usize(group, "state_max_bytes")
-            .unwrap_or(DEFAULT_STATE_MAX_BYTES)
-            .max(1024);
+        let max_bytes = Self::max_bytes(group);
         let (include_coordination, include_board, include_actors) = include_set(request)?;
         let (task_offset, actor_offset) = match string_arg(request, "cursor") {
             Some(cursor) if !cursor.trim().is_empty() => parse_cursor(cursor.trim())?,
@@ -90,6 +88,13 @@ impl Bounds {
             task_offset,
             actor_offset,
         }))
+    }
+
+    /// The serialized budget for one answer, from the group's `state_max_bytes`.
+    pub(super) fn max_bytes(group: &GroupDoc) -> usize {
+        config_usize(group, "state_max_bytes")
+            .unwrap_or(DEFAULT_STATE_MAX_BYTES)
+            .max(1024)
     }
 
     fn page_size(&self) -> usize {

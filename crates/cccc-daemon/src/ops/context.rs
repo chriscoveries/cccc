@@ -45,10 +45,34 @@ fn get(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         super::context_bounds::Bounds::from_request(request, &group)?
     };
     let Some(bounds) = bounds else {
-        return object(super::context_projection::project(
-            document, version, &detail,
-        ));
+        // Spec item 3: a caller that keeps asking for the whole snapshot after
+        // being told it does not fit is refused with one bounded error instead
+        // of being handed another multi-megabyte answer to retry against.
+        let actor_id = string_arg(request, "actor_id").unwrap_or_default();
+        // The MCP server's own bootstrap read is exempt: it needs the whole
+        // board once per session to derive the caller's slice, and refusing it
+        // would break the session the cap exists to protect.
+        let bootstrap = bool_arg(request, "bootstrap", false);
+        let max_bytes = super::context_bounds::Bounds::max_bytes(&group);
+        let now = std::time::Instant::now();
+        if !bootstrap {
+            if let Some(refusal) = super::context_guard::refusal(&group_id, &actor_id, now) {
+                return Err(refusal);
+            }
+        }
+        let payload = super::context_projection::project(document, version, &detail);
+        if !bootstrap {
+            let bytes = serde_json::to_vec(&payload)
+                .map(|body| body.len())
+                .unwrap_or(0);
+            super::context_guard::record(&group_id, &actor_id, bytes, max_bytes, now);
+        }
+        return object(payload);
     };
+    super::context_guard::clear(
+        &group_id,
+        &string_arg(request, "actor_id").unwrap_or_default(),
+    );
     object(super::context_bounds::project(
         &document, &version, &detail, &bounds,
     ))

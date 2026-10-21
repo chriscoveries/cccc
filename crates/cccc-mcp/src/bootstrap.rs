@@ -48,6 +48,11 @@ pub(crate) async fn build(
     // cccc_context_get tool, which is where the transport overflow happened.
     let mut context_args = request_args(&group_id, &actor_id);
     context_args.insert("unbounded".into(), Value::Bool(true));
+    // Bootstrap is the server's own once-per-session read, not the model
+    // asking for the board: it needs the whole task list to derive this
+    // actor's slice, so the retry cap (spec item 3) must not refuse it.
+    context_args.insert("bootstrap".into(), Value::Bool(true));
+
     let context = daemon(client, "context_get", context_args).await?;
 
     let mut inbox_args = request_args(&group_id, &actor_id);
