@@ -1383,39 +1383,45 @@ mod tests {
     }
 
     /// Not knowing the volume is not the volume being clear. After a digest
-    /// listed a low disk, a sample that fails is reported as unavailable, not
-    /// as resolved. The warning comes from the real volume under the test's
-    /// CCCC home, with the mark placed 1 GiB above its own available bytes;
-    /// the failed sample is the real error of sampling a path that does not
-    /// exist.
+    /// listed a low disk, a failed sample is reported as unavailable with the
+    /// warning still listed; a sample back within the warning's recovery band
+    /// does not resolve it, and only one clear of it does. The warning comes
+    /// from the real volume under the test's CCCC home, its mark placed around
+    /// that volume's own available bytes; the failed sample is the real error
+    /// of sampling a path that does not exist.
     #[test]
-    fn a_failed_disk_sample_after_a_warning_is_unavailable_not_resolved() {
+    fn a_failed_disk_sample_keeps_the_warning_until_a_sample_shows_it_clear() {
         const GIB: u64 = 1 << 30;
         let temp = tempfile::tempdir().expect("tempdir");
         let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
         let store = GroupStore::new(home.clone()).expect("store");
         let group = store.create("disk unavailable", "").expect("group");
         let available = fs2::available_space(home.root()).expect("free space");
-        store
-            .mutate(&group.group_id, |group| {
-                group.state = GroupState::Active;
-                actors::add(group, cccc_contracts::Actor::new("lead"))?;
-                group.extra.insert(
-                    "delivery".into(),
-                    json!({
-                        "health_digest_interval_seconds":1,
-                        "disk_warning_percent":0,
-                        "disk_critical_percent":0,
-                        "disk_warning_bytes":available + GIB,
-                    }),
-                );
-                Ok(())
-            })
-            .expect("delivery settings");
-        let group = store.load(&group.group_id).expect("group");
+        assert!(available > 3 * GIB, "needs 3 GiB free to place the mark");
+        let mark = |bytes: u64| {
+            store
+                .mutate(&group.group_id, |group| {
+                    group.state = GroupState::Active;
+                    if group.actors.is_empty() {
+                        actors::add(group, cccc_contracts::Actor::new("lead"))?;
+                    }
+                    group.extra.insert(
+                        "delivery".into(),
+                        json!({
+                            "health_digest_interval_seconds":1,
+                            "disk_warning_percent":0,
+                            "disk_critical_percent":0,
+                            "disk_warning_bytes":bytes,
+                        }),
+                    );
+                    Ok(())
+                })
+                .expect("delivery settings");
+        };
         let lead = HashSet::from(["lead".to_owned()]);
         let missing = temp.path().join("missing");
         let digest = |volume: &std::path::Path| {
+            let group = store.load(&group.group_id).expect("group");
             let mut result = TickResult::default();
             if let Some((ledger_path, notices)) = due_unread_notices(
                 &home,
@@ -1439,14 +1445,17 @@ mod tests {
                 .map(|notice| notice.data["context"]["problem_keys"].clone())
                 .collect::<Vec<_>>()
         };
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(1_100));
 
+        mark(available + GIB);
         assert_eq!(keys(&digest(home.root())), [json!(["disk:warning"])]);
-        std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+        pause();
         let unknown = digest(&missing);
         assert_eq!(
             keys(&unknown),
-            [json!(["disk:unavailable"])],
-            "a failed sample does not resolve the warning"
+            [json!(["disk:unavailable", "disk:warning"])],
+            "a failed sample keeps the warning"
         );
         let message = unknown[0].data["message"].as_str().unwrap_or_default();
         assert!(
@@ -1455,8 +1464,14 @@ mod tests {
         );
         assert!(digest(&missing).is_empty(), "not sent again while it lasts");
 
-        // Sampled again and still under the mark: the warning is listed anew.
-        std::thread::sleep(std::time::Duration::from_millis(1_100));
-        assert_eq!(keys(&digest(home.root())), [json!(["disk:warning"])]);
+        // Sampled again, 0.5 GiB clear of the mark: within its recovery band.
+        pause();
+        mark(available - GIB / 2);
+        assert!(digest(home.root()).is_empty(), "the warning still holds");
+
+        // 2 GiB clear of the mark: resolved.
+        pause();
+        mark(available - 2 * GIB);
+        assert_eq!(keys(&digest(home.root())), [json!([])]);
     }
 }
