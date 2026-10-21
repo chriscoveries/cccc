@@ -25,10 +25,33 @@ const SECTION_SETTING_KEYS: &[(&str, &str, &str)] = &[
         "mail_notice_idle_after_seconds",
     ),
     (
+        "mail_notice_repeat_seconds",
+        "delivery",
+        "mail_notice_repeat_seconds",
+    ),
+    (
         "reply_notice_after_seconds",
         "delivery",
         "reply_notice_after_seconds",
     ),
+    (
+        "health_digest_interval_seconds",
+        "delivery",
+        "health_digest_interval_seconds",
+    ),
+    (
+        "health_digest_repeat_seconds",
+        "delivery",
+        "health_digest_repeat_seconds",
+    ),
+    (
+        "mail_overdue_after_seconds",
+        "delivery",
+        "mail_overdue_after_seconds",
+    ),
+    ("disk_warning_percent", "delivery", "disk_warning_percent"),
+    ("disk_warning_bytes", "delivery", "disk_warning_bytes"),
+    ("disk_critical_percent", "delivery", "disk_critical_percent"),
     (
         "terminal_transcript_visibility",
         "terminal_transcript",
