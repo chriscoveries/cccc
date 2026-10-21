@@ -33,6 +33,23 @@ struct Source {
 }
 
 impl NoticeState {
+    #[cfg(test)]
+    pub(crate) fn allocation_probe_counts(&self) -> Value {
+        json!({
+            "sources": self.sources.len(),
+            "mail_sources": self.sources.iter().filter(|source| source.mail).count(),
+            "request_reply_sources": self.sources.iter().filter(|source| !source.mail).count(),
+            "mail_ids": self.mail_ids.len(),
+            "positions": self.positions.len(),
+            "references": self.references.len(),
+            "mail_claims": self.mail_claims.values().map(Vec::len).sum::<usize>(),
+            "reply_claim_refs": self.reply_claims.len(),
+            "deliveries": self.deliveries.len(),
+            "read_relations": self.mail_reads.values().map(Vec::len).sum::<usize>(),
+            "reply_relations": self.replies.len(),
+            "cancellations": self.cancelled.len(),
+        })
+    }
     pub fn reference_ids(event: &Event) -> Vec<String> {
         if event.kind == "mail.read" {
             return event
@@ -399,12 +416,27 @@ mod allocation_measurement {
             )
             .expect("snapshot");
             let mut mail = 0usize;
+            let mut requests = 0usize;
+            let mut events = 0usize;
+            let mut seed = None;
             snapshot
                 .visit(&[], |event, _| {
+                    events += 1;
+                    if event.kind == "chat.message"
+                        && event.data.get("message_mode").and_then(Value::as_str)
+                            == Some("request_reply")
+                    {
+                        requests += 1;
+                    }
                     if event.kind == "chat.message"
                         && event.data.get("message_mode").and_then(Value::as_str) == Some("mail")
                     {
                         mail += 1;
+                        if seed.is_none()
+                            && event.data.get("text").and_then(Value::as_str).is_some()
+                        {
+                            seed = Some(event.data.clone());
+                        }
                     }
                     ControlFlow::Continue(())
                 })
@@ -416,9 +448,29 @@ mod allocation_measurement {
             assert!(heap >= 0, "allocation ownership accounting underflow");
             let inline = std::mem::size_of::<NoticeState>();
             let total = heap as usize + inline;
+            let counts =
+                crate::inbox::projection::allocation_probe_counts(&home, &group).expect("counts");
+            let mut replayed = 0usize;
+            if let Some(data) = seed {
+                for _ in 0..100 {
+                    let mut event = Event::new("chat.message", &group.group_id);
+                    event.by = "user".to_owned();
+                    event.data = data.clone();
+                    event.data.insert("to".to_owned(), json!([actors[0]]));
+                    crate::ledger::append(
+                        &store.ledger_path(&group.group_id).expect("ledger"),
+                        &event,
+                    )
+                    .expect("replay actual Mail");
+                    replayed += 1;
+                }
+            }
+            let after = counter.load(std::sync::atomic::Ordering::Relaxed);
+            let after_counts = crate::inbox::projection::allocation_probe_counts(&home, &group)
+                .expect("post-append counts");
             println!(
                 "{}",
-                json!({"group_id":group.group_id,"mail_events":mail,"heap_requested_bytes":heap,"inline_bytes":inline,"total_requested_bytes":total,"bytes_per_mail":total as f64 / mail as f64})
+                json!({"group_id":group.group_id,"ledger_records":events,"mail_events":mail,"request_reply_events":requests,"heap_requested_bytes":heap,"inline_bytes":inline,"total_requested_bytes":total,"bytes_per_mail":(mail>0).then(||total as f64 / mail as f64),"cold_counts":counts,"replayed_actual_mail":replayed,"post_append_heap_requested_bytes":after,"post_append_delta_bytes":after-heap,"post_append_counts":after_counts})
             );
         }
     }
