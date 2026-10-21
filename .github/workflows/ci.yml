@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: a6ba2c7edea1f86edf159ee7658ff7040c6597e5
+          ref: 8c573a73450587988740b05af1834cf533501f8e
       - uses: actions/download-artifact@v8
         with:
           github-token: ${{ github.token }}
@@ -59,8 +59,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: before
+            ref: 080d8db6bdd39a3c81bbf6f6ef2c26cee97eb417
           - name: after
-            ref: a6ba2c7edea1f86edf159ee7658ff7040c6597e5
+            ref: 8c573a73450587988740b05af1834cf533501f8e
     steps:
       - uses: actions/checkout@v7
         with:
