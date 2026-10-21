@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 8c573a73450587988740b05af1834cf533501f8e
+          ref: d8c6c71ce27bd63c09e1d0397eef863310966670
       - uses: actions/download-artifact@v8
         with:
           github-token: ${{ github.token }}
@@ -25,6 +25,7 @@ jobs:
           git rev-parse HEAD > replay-source.txt
           cargo test --locked --package cccc-pair-core --lib
           cargo test --locked --package cccc-pair-core --test integration
+          cargo test --locked --package cccc-pair-daemon --lib runtime_delivery::tests
           cargo test --locked --package cccc --test inbox_projection
           cargo build --locked --package cccc --bin cccc
           sha256sum target/debug/cccc > replay-binary.sha256
@@ -40,8 +41,17 @@ jobs:
                       binaries.append(path)
           assert len(binaries) == 1, binaries
           shutil.copyfile(binaries[0], root / 'cccc-core-tests')
+          startup = []
+          for path in pathlib.Path('target/debug/deps').glob('cccc_daemon-*'):
+              if path.is_file() and path.suffix == '' and path.stat().st_mode & 0o111:
+                  listed = subprocess.run([str(path), '--list'], capture_output=True, text=True, check=True).stdout
+                  if 'real_group_startup_claims_match_history' in listed:
+                      startup.append(path)
+          assert len(startup) == 1, startup
+          shutil.copyfile(startup[0], root / 'cccc-daemon-tests')
           PY
           sha256sum replay-oracle/cccc-core-tests > replay-oracle.sha256
+          sha256sum replay-oracle/cccc-daemon-tests > replay-startup-oracle.sha256
       - uses: actions/upload-artifact@v7
         with:
           name: inbox-replay-cli
@@ -51,6 +61,8 @@ jobs:
             replay-binary.sha256
             replay-oracle/cccc-core-tests
             replay-oracle.sha256
+            replay-oracle/cccc-daemon-tests
+            replay-startup-oracle.sha256
 
   replay-release:
     runs-on: ubuntu-24.04
@@ -59,10 +71,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: before
-            ref: 080d8db6bdd39a3c81bbf6f6ef2c26cee97eb417
           - name: after
-            ref: 8c573a73450587988740b05af1834cf533501f8e
+            ref: d8c6c71ce27bd63c09e1d0397eef863310966670
     steps:
       - uses: actions/checkout@v7
         with:
