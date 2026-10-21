@@ -462,7 +462,8 @@ mod tests {
         live.state = cccc_contracts::GroupState::Active;
         live.actors[0].runtime = cccc_contracts::ActorRuntime::WebModel;
         let foreman = [live.actors[0].clone()];
-        let report = super::super::actor_delivery::dispatch_preclaimed(&home, &live, &event, &foreman);
+        let report =
+            super::super::actor_delivery::dispatch_preclaimed(&home, &live, &event, &foreman);
         assert_eq!(report.targeted, 1, "exactly the routed foreman is targeted");
         assert_eq!(report.queued, 1, "the foreman takes the claim");
 
