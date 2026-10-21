@@ -681,3 +681,59 @@ fn submit_sequence_writes_each_key_in_order() {
         "{output:?}"
     );
 }
+
+#[test]
+fn activity_tracks_output_and_delivery_and_resets_on_restart() {
+    let _guard = test_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (group, actor) = ("g_activity_restart", "peer1");
+    let wait_for = |check: &dyn Fn(&crate::ActivitySnapshot) -> bool| {
+        // The property under test is ordering (this output arrived after that
+        // delivery), not latency, so the budget is generous: a shared CI host
+        // can take seconds to schedule the child, and failing here would blame
+        // the tracker for the host. Panicking also skips this test's cleanup,
+        // which leaves a live session for stop_all_terminates_every_runtime to
+        // count.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let snapshot = super::activity(group, actor).expect("activity");
+            if check(&snapshot) || std::time::Instant::now() >= deadline {
+                return snapshot;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    start(spec(
+        &temp,
+        group,
+        actor,
+        "stty raw -echo; printf '\\033[?2004h'; head -c 600 /dev/zero | tr '\\0' x; dd bs=1 count=1 of=/dev/null 2>/dev/null; printf reply; sleep 10",
+    ))
+    .expect("start");
+    let before = wait_for(&|s| s.output_bytes_within(Duration::from_secs(30)) >= 600);
+    assert!(before.last_output.is_some());
+    assert!(before.last_input.is_none());
+    assert!(before.output_bytes_within(Duration::from_secs(30)) >= 600);
+    assert!(
+        submit_sequence_interruptible(
+            group,
+            actor,
+            b"x",
+            &[],
+            Duration::ZERO,
+            Duration::ZERO,
+            &AtomicBool::new(false),
+        )
+        .expect("submit")
+    );
+    let after = wait_for(&|s| s.output_bytes_since_input >= 5);
+    assert!(after.last_input.is_some());
+    assert!(after.output_bytes_since_input >= 5, "{after:?}");
+
+    stop(group, actor).expect("stop");
+    start(spec(&temp, group, actor, "sleep 10")).expect("restart");
+    let restarted = super::activity(group, actor).expect("activity");
+    assert_eq!(restarted, crate::ActivitySnapshot::default());
+    stop(group, actor).expect("cleanup");
+    assert!(super::activity(group, actor).is_err());
+}
