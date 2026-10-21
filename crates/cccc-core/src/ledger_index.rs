@@ -4,7 +4,9 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use crate::ledger::{SourceRevision, read_all_uncached, revisions};
+use crate::ledger::{
+    SourceRevision, is_gzip, ledger_group_id, read_all_uncached, read_source_from, revisions,
+};
 
 mod cache;
 mod queries;
@@ -66,6 +68,11 @@ impl LedgerIndex {
     }
 
     fn push(&mut self, event: Event, next_revisions: Vec<SourceRevision>) {
+        self.push_indexed(event);
+        self.revisions = next_revisions;
+    }
+
+    fn push_indexed(&mut self, event: Event) {
         let position = self.events.len();
         self.positions.insert(event.id.clone(), position);
         if let Some(client_id) = event
@@ -91,6 +98,14 @@ impl LedgerIndex {
             .estimated_bytes
             .saturating_add(estimate_event_bytes(&event));
         self.events.push(event);
+    }
+
+    /// Apply the events committed since the indexed revisions without
+    /// re-reading the sources that produced the retained events.
+    fn catch_up(&mut self, events: Vec<Event>, next_revisions: Vec<SourceRevision>) {
+        for event in events {
+            self.push_indexed(event);
+        }
         self.revisions = next_revisions;
     }
 }
@@ -114,6 +129,75 @@ fn index_actor_generation(
     {
         actor_generations.insert(actor_id.to_owned(), position);
     }
+}
+
+/// The events a stale index can adopt by reading only appended bytes: every
+/// previously indexed source is still present and line-aligned, so the tail
+/// after the old length extends the history the index already holds. Anything
+/// else (a removed, truncated, rewritten, or gzip-grown source, or a torn old
+/// tail line) is unreadable as an incremental delta and the caller falls back
+/// to a full rebuild.
+fn read_appended_tail(
+    path: &Path,
+    old: &[SourceRevision],
+    next: &[SourceRevision],
+) -> io::Result<Option<Vec<Event>>> {
+    if old.is_empty() {
+        // A stale-marked or cold index holds no committed prefix to extend.
+        return Ok(None);
+    }
+    let group_id = ledger_group_id(path);
+    let mut remaining = old
+        .iter()
+        .map(|revision| (revision.path.clone(), (revision.len, revision.modified)))
+        .collect::<HashMap<_, _>>();
+    let mut events = Vec::new();
+    for revision in next {
+        match remaining.remove(&revision.path) {
+            Some((previous_len, _)) if previous_len > revision.len => return Ok(None),
+            Some((previous_len, previous_modified))
+                if previous_len == revision.len && previous_modified != revision.modified =>
+            {
+                // Same length, new mtime: the source was rewritten in place, so
+                // the retained events no longer describe its bytes. Length alone
+                // cannot tell an untouched source from a same-size replacement.
+                return Ok(None);
+            }
+            Some((previous_len, _)) if is_gzip(&revision.path) && previous_len != revision.len => {
+                // Gzip sources cannot be resumed mid-stream.
+                return Ok(None);
+            }
+            Some((previous_len, _)) => {
+                if previous_len > 0 && !old_tail_is_line_aligned(&revision.path, previous_len)? {
+                    return Ok(None);
+                }
+                if revision.len > previous_len {
+                    let (mut read, _) = read_source_from(&revision.path, previous_len, &group_id)?;
+                    events.append(&mut read);
+                }
+            }
+            None => {
+                let (mut read, _) = read_source_from(&revision.path, 0, &group_id)?;
+                events.append(&mut read);
+            }
+        }
+    }
+    if !remaining.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(events))
+}
+
+/// The retained events end on a line boundary only when the byte before the
+/// old length is a newline; a torn old tail means the first bytes after it
+/// continue a line the index never parsed.
+fn old_tail_is_line_aligned(path: &Path, previous_len: u64) -> io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::Start(previous_len - 1))?;
+    let mut last = [0_u8; 1];
+    file.read_exact(&mut last)?;
+    Ok(last[0] == b'\n')
 }
 
 fn estimate_events_bytes(events: &[Event]) -> u64 {
@@ -190,7 +274,10 @@ fn current(path: &Path) -> io::Result<Arc<RwLock<LedgerIndex>>> {
     let source_lock = crate::ledger::acquire_reader_lock(path)?;
     let next_revisions = revisions(path)?;
     if index.revisions != next_revisions {
-        *index = LedgerIndex::rebuild(path, next_revisions)?;
+        match read_appended_tail(path, &index.revisions, &next_revisions) {
+            Ok(Some(tail_events)) => index.catch_up(tail_events, next_revisions),
+            _ => *index = LedgerIndex::rebuild(path, next_revisions)?,
+        }
     }
     let weight = index
         .revisions
@@ -333,6 +420,86 @@ mod tests {
         );
         drop(rotation);
         assert_eq!(reader.join().expect("reader").expect("read"), vec![first]);
+    }
+
+    #[test]
+    fn a_stale_warm_index_catches_up_from_the_appended_tail_only() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let first = Event::new("chat.message", "g_fixture");
+        crate::ledger::append(&path, &first).expect("first event");
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("warm index"),
+            vec![first.clone()]
+        );
+
+        // Rewrite the committed prefix in place, then append a second event.
+        // A full rebuild would fail on the corrupted first line; the tail
+        // catch-up keeps the already-indexed prefix and reads only the tail.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("rewrite");
+        file.write_all(b"x").expect("corrupt first byte");
+        file.sync_data().expect("commit corruption");
+        drop(file);
+        let second = Event::new("chat.message", "g_fixture");
+        let mut encoded = serde_json::to_vec(&second).expect("encode");
+        encoded.push(b'\n');
+        let writer = crate::ledger::acquire_writer_lock(&path).expect("writer lock");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        file.write_all(&encoded).expect("second event");
+        file.sync_data().expect("commit");
+        drop(writer);
+
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("caught up"),
+            vec![first, second]
+        );
+    }
+
+    #[test]
+    fn a_same_length_rewrite_rebuilds_instead_of_catching_up() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let first = Event::new("chat.message", "g_fixture");
+        crate::ledger::append(&path, &first).expect("first event");
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("warm index"),
+            vec![first.clone()]
+        );
+
+        // Rewrite the source in place to the same byte length with a different
+        // event id, so only the mtime moves. A length-only delta check would
+        // keep the retained event and adopt the new revision silently.
+        let original = std::fs::read(&path).expect("read source");
+        let raw = original.strip_suffix(b"\n").unwrap_or(&original);
+        let mut rewritten: Event = serde_json::from_slice(raw).expect("decode");
+        rewritten.id = rewritten.id.chars().rev().collect();
+        let mut encoded = serde_json::to_vec(&rewritten).expect("encode");
+        encoded.push(b'\n');
+        assert_eq!(encoded.len(), original.len(), "rewrite keeps the length");
+        let before = std::fs::metadata(&path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, &encoded).expect("rewrite in place");
+        let after = std::fs::metadata(&path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime");
+        assert_ne!(before, after, "the rewrite must move the mtime");
+
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("rebuilt"),
+            vec![rewritten]
+        );
     }
 
     #[test]
