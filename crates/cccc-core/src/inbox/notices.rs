@@ -5,7 +5,7 @@
 use super::*;
 use std::collections::HashSet;
 
-type MailClaims = HashMap<(String, String), Vec<(String, Vec<String>)>>;
+type MailClaims = HashMap<(String, String), Vec<(String, String, Vec<String>)>>;
 
 #[derive(Default)]
 pub(crate) struct NoticeState {
@@ -187,7 +187,7 @@ impl NoticeState {
                     self.mail_claims
                         .entry((actor.to_owned(), created.to_owned()))
                         .or_default()
-                        .push((event.id.clone(), ids));
+                        .push((event.id.clone(), event.ts.clone(), ids));
                 } else {
                     self.reply_claims.extend(
                         ids.into_iter()
@@ -309,12 +309,16 @@ impl NoticeState {
                     .into_iter()
                     .flatten()
                     .rev()
-                    .filter(|(id, _)| {
+                    .filter(|(id, _, _)| {
                         self.deliveries
                             .get(&(id.clone(), actor.id.clone()))
                             .is_none_or(|v| v.0 != "withdrawn")
                     })
-                    .any(|(_, claimed)| {
+                    .filter(|(_, noticed_at, _)| {
+                        mail_delays.repeat <= 0
+                            || now - timestamp(noticed_at, now) < mail_delays.repeat
+                    })
+                    .any(|(_, _, claimed)| {
                         let claimed = claimed
                             .iter()
                             .filter(|id| self.positions.contains_key(*id))
