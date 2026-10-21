@@ -2535,6 +2535,10 @@ mod tests {
             fixture.operations()
         );
     }
+    /// The fix's confirmation window, defined here so these tests also build on
+    /// the base, where it does not exist.
+    const GONE_CONFIRM: Duration = Duration::from_secs(2);
+
     /// A control endpoint whose socket file never existed (task and harness
     /// already gone) counts as stopped after a short confirmation window
     /// instead of burning the full stop timeout and failing the shutdown.
