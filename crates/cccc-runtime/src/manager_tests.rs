@@ -688,7 +688,13 @@ fn activity_tracks_output_and_delivery_and_resets_on_restart() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (group, actor) = ("g_activity_restart", "peer1");
     let wait_for = |check: &dyn Fn(&crate::ActivitySnapshot) -> bool| {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        // The property under test is ordering (this output arrived after that
+        // delivery), not latency, so the budget is generous: a shared CI host
+        // can take seconds to schedule the child, and failing here would blame
+        // the tracker for the host. Panicking also skips this test's cleanup,
+        // which leaves a live session for stop_all_terminates_every_runtime to
+        // count.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
             let snapshot = super::activity(group, actor).expect("activity");
             if check(&snapshot) || std::time::Instant::now() >= deadline {
