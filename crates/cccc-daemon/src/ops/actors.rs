@@ -2,7 +2,7 @@ use super::operation::{
     Operation,
     Policy::{Read, Write},
 };
-use cccc_contracts::{Actor, ActorRuntime, DaemonRequest, Event};
+use cccc_contracts::{Actor, ActorRole, ActorRuntime, DaemonRequest, Event};
 use cccc_core::actors;
 use cccc_core::ledger;
 use cccc_core::permissions::{self, ActorAction};
@@ -491,6 +491,9 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let actor_id = required_arg(request, "actor_id")?;
     let group = store(home)?.load(&group_id).map_err(OpError::not_found)?;
     authorize(&group, request, ActorAction::Remove, &actor_id)?;
+    // `effective_role` derives the Foreman from Actor order, so the removal may
+    // move the role without anyone naming a successor.
+    let foreman_was = actors::effective_role(&group, &actor_id) == Some(ActorRole::Foreman);
     let index = group
         .actors
         .iter()
@@ -595,6 +598,28 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     };
     if let Err(error) = remove_persisted_headless_state(home, &group_id, &actor_id) {
         tracing::warn!(%error, %group_id, %actor_id, "post-commit headless state cleanup failed");
+    }
+    if foreman_was {
+        // The role moved because of this removal. Say so in the ledger: Mail
+        // still addressed to the old Foreman now fails `invalid_recipient`, and
+        // the next Actor to lead needs a record of when it started leading.
+        let successor = {
+            let doc = store(home)?.load(&group_id).map_err(OpError::not_found)?;
+            actors::visible(&doc).next().map(|actor| actor.id.clone())
+        };
+        if let Err(error) = append_event(
+            home,
+            &group_id,
+            "group.foreman_change",
+            request,
+            json!({"from": actor_id, "to": successor}),
+        ) {
+            // The removal itself is committed and its own event is in the
+            // ledger; restoring here would leave the ledger claiming a removal
+            // the group document denies. A missing succession line is a record
+            // gap, not a state change.
+            tracing::warn!(error = ?error, %group_id, %actor_id, "foreman change not recorded");
+        }
     }
     if let Err(error) = runtime_session::remove(home, &group_id, &actor_id) {
         tracing::warn!(%error, %group_id, %actor_id, "post-commit runtime session cleanup failed");

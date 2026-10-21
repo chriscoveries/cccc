@@ -16,6 +16,8 @@ mod cross_group_attachments;
 mod cross_group_foreman_default;
 #[path = "suite/cross_group_sender_snapshot.rs"]
 mod cross_group_sender_snapshot;
+#[path = "suite/foreman_remove_guard.rs"]
+mod foreman_remove_guard;
 #[path = "suite/group_preamble_ops.rs"]
 mod group_preamble_ops;
 #[path = "suite/integration_ops.rs"]
