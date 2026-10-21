@@ -102,7 +102,7 @@ zip = { version = "2.4", default-features = false, features = ["deflate"] }
 hound = "3.5"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 dbg_macro = "deny"

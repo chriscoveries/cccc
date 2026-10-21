@@ -3,6 +3,7 @@
 //! even when they occur outside a notice mutation scope. Allocator bookkeeping
 //! is excluded with a recursion guard. Sizes are requested bytes, not RSS or
 //! malloc usable sizes.
+#![allow(unsafe_code)]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::collections::HashMap;
