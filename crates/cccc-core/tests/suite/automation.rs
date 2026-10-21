@@ -615,3 +615,317 @@ fn disabled_idle_mail_notice_does_not_announce_overdue_mail_on_write() {
             .all(|event| event.kind != "mail.read")
     );
 }
+
+/// A notice typed into a busy terminal is delivered (`accepted`) and can still be
+/// lost: in the case this follows, one notice was accepted, more Mail arrived
+/// for hours after it, and the recipient heard about none of it. With
+/// `mail_notice_repeat_seconds`, Mail still waiting after that long is announced
+/// again, together with the Mail that came after the first notice.
+#[test]
+fn an_unacted_mail_notice_is_repeated_with_the_mail_that_came_after_it() {
+    use sha2::{Digest, Sha256};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("unacted Mail", "").expect("group");
+    store
+        .mutate(&group.group_id, |group| {
+            group.state = GroupState::Active;
+            actors::add(group, Actor::new("peer"))?;
+            group.extra.insert(
+                "delivery".into(),
+                json!({"mail_notice_after_seconds":60,"mail_notice_repeat_seconds":2}),
+            );
+            Ok(())
+        })
+        .expect("delivery settings");
+    let group = store.load(&group.group_id).expect("group");
+    let peer = group
+        .actors
+        .iter()
+        .find(|actor| actor.id == "peer")
+        .expect("peer")
+        .clone();
+    let ledger_path = store.ledger_path(&group.group_id).expect("ledger");
+    let append_mail = |sent_at: chrono::DateTime<chrono::Utc>| {
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "user".into();
+        event.ts = sent_at.to_rfc3339();
+        event.data = json!({"text":"check-in request","to":["peer"],"message_mode":"mail"})
+            .as_object()
+            .cloned()
+            .expect("Mail data");
+        ledger::append(&ledger_path, &event).expect("append Mail");
+        event
+    };
+    // The facts delivery writes as it hands a notice to the Actor's terminal.
+    let deliver = |notice: &Event, state: &str| {
+        let seed = [
+            group.group_id.as_str(),
+            "peer",
+            peer.created_at.as_str(),
+            notice.id.as_str(),
+        ]
+        .join("\0");
+        let digest = format!("{:x}", Sha256::digest(seed.as_bytes()));
+        let mut event = Event::new("runtime.delivery", &group.group_id);
+        event.by = "system".into();
+        event.data = json!({
+            "actor_id":"peer",
+            "source_event_id":notice.id,
+            "delivery_id":format!("delivery:peer:{}", &digest[..24]),
+            "state":state,
+            "transport":"pty",
+            "reason":null,
+        })
+        .as_object()
+        .cloned()
+        .expect("delivery data");
+        ledger::append(&ledger_path, &event).expect("append delivery");
+    };
+    let eligible = HashSet::from(["peer".to_owned()]);
+    let tick = || {
+        automation::tick_group_for_delivery_actors(&home, &group.group_id, true, &eligible)
+            .expect("tick")
+    };
+
+    let first = append_mail(chrono::Utc::now() - chrono::Duration::seconds(120));
+    let noticed = tick();
+    assert_eq!(noticed.notifications.len(), 1);
+    let notice = &noticed.notifications[0];
+    assert_eq!(
+        notice.data["context"]["source_event_ids"],
+        json!([first.id])
+    );
+    deliver(notice, "claimed");
+    deliver(notice, "accepted");
+    let later = append_mail(chrono::Utc::now());
+    assert!(
+        tick().notifications.is_empty(),
+        "a notice stands for the repeat interval"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
+    let repeated = tick();
+    assert_eq!(repeated.notifications.len(), 1, "the Mail is still unread");
+    assert_eq!(repeated.notifications[0].data["kind"], "mail_notice");
+    assert_eq!(
+        repeated.notifications[0].data["context"]["source_event_ids"],
+        json!([first.id, later.id]),
+        "the repeat names the Mail that came after the first notice"
+    );
+
+    // Reading the Inbox ends the reminders.
+    cccc_core::inbox::consume_unread(&home, &group, "peer", "peer", 50).expect("read Mail");
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
+    assert!(tick().notifications.is_empty());
+}
+
+/// A notice typed into a busy terminal is delivered (`accepted`) and can still be
+/// lost: in the case this follows, one notice was accepted and nobody heard
+/// about its Mail for hours. With
+/// `health_digest_interval_seconds`, Mail still unread
+/// `mail_overdue_after_seconds` after its notice reaches the foreman in a
+/// digest; the digest names no message body, does not repeat a problem it
+/// listed unless asked to, and a read ends the problem, which one more digest
+/// reports. The disk marks are off here; the next test covers them.
+#[test]
+fn mail_left_unread_after_its_notice_reaches_the_foreman_in_a_digest() {
+    use sha2::{Digest, Sha256};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("unread Mail digest", "").expect("group");
+    store
+        .mutate(&group.group_id, |group| {
+            group.state = GroupState::Active;
+            actors::add(group, Actor::new("lead"))?;
+            actors::add(group, Actor::new("peer"))?;
+            group.extra.insert(
+                "delivery".into(),
+                json!({
+                    "mail_notice_after_seconds":60,
+                    "health_digest_interval_seconds":1,
+                    "health_digest_repeat_seconds":2,
+                    "mail_overdue_after_seconds":2,
+                    "disk_warning_percent":0,
+                    "disk_warning_bytes":0,
+                    "disk_critical_percent":0,
+                }),
+            );
+            Ok(())
+        })
+        .expect("delivery settings");
+    let group = store.load(&group.group_id).expect("group");
+    let peer = group
+        .actors
+        .iter()
+        .find(|actor| actor.id == "peer")
+        .expect("peer")
+        .clone();
+    let ledger_path = store.ledger_path(&group.group_id).expect("ledger");
+    let mut mail = Event::new("chat.message", &group.group_id);
+    mail.by = "user".into();
+    mail.ts = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    mail.data = json!({"text":"check-in request","to":["peer"],"message_mode":"mail"})
+        .as_object()
+        .cloned()
+        .expect("Mail data");
+    ledger::append(&ledger_path, &mail).expect("append Mail");
+    // The facts delivery writes as it hands a notice to the Actor's terminal.
+    let deliver = |notice: &Event, state: &str| {
+        let seed = [
+            group.group_id.as_str(),
+            "peer",
+            peer.created_at.as_str(),
+            notice.id.as_str(),
+        ]
+        .join("\0");
+        let digest = format!("{:x}", Sha256::digest(seed.as_bytes()));
+        let mut event = Event::new("runtime.delivery", &group.group_id);
+        event.by = "system".into();
+        event.data = json!({
+            "actor_id":"peer",
+            "source_event_id":notice.id,
+            "delivery_id":format!("delivery:peer:{}", &digest[..24]),
+            "state":state,
+            "transport":"pty",
+            "reason":null,
+        })
+        .as_object()
+        .cloned()
+        .expect("delivery data");
+        ledger::append(&ledger_path, &event).expect("append delivery");
+    };
+    let eligible = HashSet::from(["lead".to_owned(), "peer".to_owned()]);
+    let tick = || {
+        automation::tick_group_for_delivery_actors(&home, &group.group_id, true, &eligible)
+            .expect("tick")
+    };
+
+    let noticed = tick();
+    assert_eq!(noticed.notifications.len(), 1);
+    let notice = &noticed.notifications[0];
+    assert_eq!(notice.data["kind"], "mail_notice");
+    assert_eq!(notice.data["target_actor_id"], "peer");
+    deliver(notice, "claimed");
+    deliver(notice, "accepted");
+    assert!(
+        tick().notifications.is_empty(),
+        "Mail is not overdue right after its notice"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
+    let digest = tick();
+    assert_eq!(digest.notifications.len(), 1, "the Mail is still unread");
+    let digest = &digest.notifications[0];
+    assert_eq!(digest.data["kind"], "health_digest");
+    assert_eq!(digest.data["target_actor_id"], "lead");
+    assert_eq!(
+        digest.data["context"]["problem_keys"],
+        json!([format!("mail:peer:{}", mail.id)])
+    );
+    let message = digest.data["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("peer: 1 Mail item(s) unread, the oldest for 2m, after 1 Mail notice(s)."),
+        "{message}"
+    );
+    assert!(!message.contains("check-in request"), "{message}");
+    assert!(
+        tick().notifications.is_empty(),
+        "a listed problem is not sent again before the repeat interval"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
+    let repeated = tick();
+    assert_eq!(repeated.notifications.len(), 1, "the problem remains");
+    assert_eq!(repeated.notifications[0].data["kind"], "health_digest");
+
+    // Reading the Inbox ends the problem; the foreman hears that once.
+    cccc_core::inbox::consume_unread(&home, &group, "peer", "peer", 50).expect("read Mail");
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
+    let resolved = tick();
+    assert_eq!(resolved.notifications.len(), 1);
+    assert_eq!(resolved.notifications[0].data["kind"], "health_digest");
+    assert_eq!(
+        resolved.notifications[0].data["context"]["problem_keys"],
+        json!([])
+    );
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
+    assert!(tick().notifications.is_empty());
+}
+
+/// The tick samples the real volume that holds CCCC_HOME. The warning mark is
+/// placed around that volume's own available bytes, so the test runs on
+/// whatever disk it finds: the foreman hears when the volume is under the
+/// mark, not again while it hovers within 1 GiB above it, once when it is
+/// clear, and again when it falls back under.
+#[test]
+fn the_foreman_hears_when_the_cccc_home_volume_is_low_and_when_it_recovers() {
+    const GIB: u64 = 1 << 30;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("low disk", "").expect("group");
+    let available = fs2::available_space(temp.path()).expect("free space");
+    assert!(available > 3 * GIB, "needs 3 GiB free to place the mark");
+    let mark = |bytes: u64| {
+        store
+            .mutate(&group.group_id, |group| {
+                group.state = GroupState::Active;
+                if group.actors.is_empty() {
+                    actors::add(group, Actor::new("lead"))?;
+                }
+                group.extra.insert(
+                    "delivery".into(),
+                    json!({
+                        "health_digest_interval_seconds":1,
+                        "disk_warning_percent":0,
+                        "disk_critical_percent":0,
+                        "disk_warning_bytes":bytes,
+                    }),
+                );
+                Ok(())
+            })
+            .expect("delivery settings");
+    };
+    let eligible = HashSet::from(["lead".to_owned()]);
+    let tick = || {
+        automation::tick_group_for_delivery_actors(&home, &group.group_id, true, &eligible)
+            .expect("tick")
+            .notifications
+    };
+    let keys = |notice: &Event| notice.data["context"]["problem_keys"].clone();
+
+    mark(available + GIB);
+    let low = tick();
+    assert_eq!(low.len(), 1);
+    assert_eq!(low[0].data["kind"], "health_digest");
+    assert_eq!(low[0].data["target_actor_id"], "lead");
+    assert_eq!(keys(&low[0]), json!(["disk:warning"]));
+    let message = low[0].data["message"].as_str().unwrap_or_default();
+    assert!(message.contains("CCCC home volume low: "), "{message}");
+    assert!(message.contains(" available of "), "{message}");
+    assert!(tick().is_empty(), "a listed problem is not sent again");
+
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    mark(available - GIB / 2);
+    assert!(
+        tick().is_empty(),
+        "within 1 GiB of the mark the warning holds"
+    );
+
+    mark(available - 2 * GIB);
+    let clear = tick();
+    assert_eq!(clear.len(), 1, "the volume is clear of the mark");
+    assert_eq!(keys(&clear[0]), json!([]));
+    assert!(tick().is_empty());
+
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    mark(available + GIB);
+    let again = tick();
+    assert_eq!(again.len(), 1, "low again after an all-clear is new");
+    assert_eq!(keys(&again[0]), json!(["disk:warning"]));
+}

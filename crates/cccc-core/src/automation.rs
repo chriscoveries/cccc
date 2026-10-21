@@ -1,7 +1,9 @@
 use cccc_contracts::{Event, GroupState};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
+#[cfg(test)]
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 
 use crate::actors;
@@ -401,8 +403,15 @@ fn tick_unread(
     pass: UnreadPass,
     result: &mut TickResult,
 ) -> io::Result<()> {
-    let due = match due_unread_notices(home, store, group, delivery_actor_ids, idle_actor_ids, pass)
-    {
+    let due = match due_unread_notices(
+        home,
+        store,
+        group,
+        delivery_actor_ids,
+        idle_actor_ids,
+        pass,
+        home.root(),
+    ) {
         Ok(due) => due,
         Err(error) if result.notifications.is_empty() && result.actions.is_empty() => {
             return Err(error);
@@ -419,7 +428,8 @@ fn tick_unread(
 }
 
 /// The Mail and reply notices this pass should issue, and the ledger they go
-/// to; `None` when the pass has nothing to look at.
+/// to; `None` when the pass has nothing to look at. The health digest samples
+/// the volume that holds `volume`, the CCCC home.
 fn due_unread_notices(
     home: &HomeLayout,
     store: &GroupStore,
@@ -427,6 +437,7 @@ fn due_unread_notices(
     delivery_actor_ids: Option<&HashSet<String>>,
     idle_actor_ids: &HashSet<String>,
     pass: UnreadPass,
+    volume: &std::path::Path,
 ) -> io::Result<Option<(std::path::PathBuf, Vec<Event>)>> {
     let mail_after = delivery_timing_value(group, "mail_notice_after_seconds", 1_800);
     let mail_idle_after = delivery_timing_value(group, "mail_notice_idle_after_seconds", 60);
@@ -438,8 +449,35 @@ fn due_unread_notices(
         UnreadPass::Scheduled => delivery_timing_value(group, "reply_notice_after_seconds", 900),
         UnreadPass::IdleMailNow => 0,
     };
-    if mail_after <= 0 && reply_after <= 0 {
+    // The foreman's digest also stays with the periodic tick.
+    let mut digest = match pass {
+        UnreadPass::Scheduled => Digest {
+            interval: delivery_timing_value(group, "health_digest_interval_seconds", 0),
+            repeat: delivery_timing_value(group, "health_digest_repeat_seconds", 0),
+            mail_overdue: delivery_timing_value(group, "mail_overdue_after_seconds", 7_200),
+            disk: None,
+            disk_warning_percent: delivery_timing_value(group, "disk_warning_percent", 15),
+            disk_warning_bytes: delivery_timing_value(group, "disk_warning_bytes", 20 << 30),
+            disk_critical_percent: delivery_timing_value(group, "disk_critical_percent", 5),
+        },
+        UnreadPass::IdleMailNow => Digest::default(),
+    };
+    if mail_after <= 0 && reply_after <= 0 && digest.interval <= 0 {
         return Ok(None);
+    }
+    let disk_marks = [
+        digest.disk_warning_percent,
+        digest.disk_warning_bytes,
+        digest.disk_critical_percent,
+    ];
+    if digest.interval > 0 && disk_marks.into_iter().any(|mark| mark > 0) {
+        digest.disk = Some(match fs2::statvfs(volume) {
+            Ok(stats) if stats.total_space() > 0 => {
+                Ok((stats.available_space(), stats.total_space()))
+            }
+            Ok(_) => Err("the volume reports no size".to_owned()),
+            Err(error) => Err(error.to_string()),
+        });
     }
     let eligible = actors::visible(group)
         .filter(|actor| {
@@ -450,26 +488,76 @@ fn due_unread_notices(
         return Ok(None);
     }
     let ledger_path = store.ledger_path(&group.group_id)?;
-    let cursors = inbox::cursors(home, &group.group_id)?;
-    // Project only the notices while borrowing history. Release the index read
-    // lock before appending, since append also updates that same index.
-    let notices = ledger::inspect(&ledger_path, |events, positions| {
-        unread_notices(
-            group,
-            &eligible,
-            events,
-            positions,
-            &cursors,
-            MailDelays {
-                busy: mail_after,
-                idle: mail_idle_after,
-                idle_actor_ids,
-                now: pass == UnreadPass::IdleMailNow,
-            },
-            reply_after,
-        )
-    })?;
+    let notices = inbox::projection::due(
+        home,
+        group,
+        &eligible,
+        MailDelays {
+            busy: mail_after,
+            idle: mail_idle_after,
+            repeat: delivery_timing_value(group, "mail_notice_repeat_seconds", 0),
+            idle_actor_ids,
+            now: pass == UnreadPass::IdleMailNow,
+        },
+        reply_after,
+        &digest,
+    )?;
+    #[cfg(test)]
+    {
+        let cursors = inbox::cursors(home, &group.group_id)?;
+        let expected = ledger::inspect(&ledger_path, |events, positions| {
+            unread_notices(
+                group,
+                &eligible,
+                events,
+                positions,
+                &cursors,
+                MailDelays {
+                    busy: mail_after,
+                    idle: mail_idle_after,
+                    repeat: delivery_timing_value(group, "mail_notice_repeat_seconds", 0),
+                    idle_actor_ids,
+                    now: pass == UnreadPass::IdleMailNow,
+                },
+                reply_after,
+                &digest,
+            )
+        })?;
+        let signature = |events: &[Event]| {
+            events
+                .iter()
+                .map(|event| (&event.kind, &event.by, &event.data))
+                .map(|parts| serde_json::to_value(parts).expect("notice signature"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            signature(&notices),
+            signature(&expected),
+            "compact notice reducer disagrees with the original ordered reducer"
+        );
+    }
     Ok(Some((ledger_path, notices)))
+}
+
+/// One message to the foreman listing what in the group needs a look, one
+/// line per problem. `interval <= 0` turns it off. It goes out when a problem
+/// appears that the last digest did not list, at most once per `interval`,
+/// and again after `repeat` while problems remain; once nothing it listed is
+/// left, one more digest says so. A recipient's Mail becomes a problem once
+/// it is still unread `mail_overdue` after its first notice. The CCCC home
+/// volume is one when its available space is under `disk_critical_percent`,
+/// or under `disk_warning_percent` or `disk_warning_bytes`; zero turns a mark
+/// off. `disk` holds its available and total bytes, or why it could not be
+/// sampled; it is not sampled while every mark is off.
+#[derive(Default)]
+pub(crate) struct Digest {
+    pub(crate) interval: i64,
+    pub(crate) repeat: i64,
+    pub(crate) mail_overdue: i64,
+    pub(crate) disk: Option<Result<(u64, u64), String>>,
+    pub(crate) disk_warning_percent: i64,
+    pub(crate) disk_warning_bytes: i64,
+    pub(crate) disk_critical_percent: i64,
 }
 
 /// Write each notice and hand it to delivery. A written notice is issued for
@@ -495,16 +583,18 @@ fn issue_notices(
 /// waits `busy`; once the actor is idle it only waits `idle`, which batches a
 /// burst of Mail into one notice. `busy <= 0` turns Mail notices off; `idle <= 0`
 /// turns early notices off. With `now`, an idle actor is notified at once: the
-/// pass that runs as Mail is written.
-struct MailDelays<'a> {
-    busy: i64,
+/// pass that runs as Mail is written. A notice only stands for `repeat` seconds
+/// when that is above zero: Mail still waiting after it is announced again.
+pub(crate) struct MailDelays<'a> {
+    pub(crate) busy: i64,
     idle: i64,
+    pub(crate) repeat: i64,
     idle_actor_ids: &'a HashSet<String>,
     now: bool,
 }
 
 impl MailDelays<'_> {
-    fn for_actor(&self, actor_id: &str) -> i64 {
+    pub(crate) fn for_actor(&self, actor_id: &str) -> i64 {
         if self.busy > 0 && self.idle > 0 && self.idle_actor_ids.contains(actor_id) {
             if self.now {
                 0
@@ -517,6 +607,8 @@ impl MailDelays<'_> {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn unread_notices(
     group: &GroupDoc,
     eligible: &[&cccc_contracts::Actor],
@@ -525,8 +617,12 @@ fn unread_notices(
     cursors: &BTreeMap<String, String>,
     mail_delays: MailDelays<'_>,
     reply_after: i64,
+    digest: &Digest,
 ) -> Vec<Event> {
     let mut notices = Vec::new();
+    // Each problem as (key, line); a key names one episode of it.
+    let mut problems = Vec::<(String, String)>::new();
+    let mut last_digest = None::<(i64, HashSet<String>)>;
     let generations = inbox::actor_generation_positions(events);
     let now = Utc::now().timestamp();
     let resume_at = events.iter().rev().find_map(|event| {
@@ -545,8 +641,8 @@ fn unread_notices(
     let mut deliveries = HashMap::<(String, String), (String, i64, usize)>::new();
     let mut actor_resumes = HashMap::<String, i64>::new();
     // Each Mail notice, keyed by its own event id: a withdrawn notice was never
-    // sent and must not stop the next one.
-    let mut mail_claims = HashMap::<(String, String), Vec<(String, Vec<String>)>>::new();
+    // sent and must not stop the next one. Its time bounds how long it stands.
+    let mut mail_claims = HashMap::<(String, String), Vec<(String, i64, Vec<String>)>>::new();
     let mut reply_claims = HashSet::<(String, String, String)>::new();
     for (position, event) in events.iter().enumerate() {
         match event.kind.as_str() {
@@ -597,6 +693,20 @@ fn unread_notices(
                     .get("kind")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
+                if kind == "health_digest" {
+                    let listed = event
+                        .data
+                        .get("context")
+                        .and_then(|context| context.get("problem_keys"))
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect();
+                    last_digest = Some((timestamp(&event.ts, now), listed));
+                    continue;
+                }
                 if !matches!(kind, "mail_notice" | "reply_notice") {
                     continue;
                 }
@@ -622,7 +732,7 @@ fn unread_notices(
                     mail_claims
                         .entry((actor_id.into(), created_at.into()))
                         .or_default()
-                        .push((event.id.clone(), source_ids));
+                        .push((event.id.clone(), timestamp(&event.ts, now), source_ids));
                 } else {
                     reply_claims.extend(
                         source_ids
@@ -727,6 +837,39 @@ fn unread_notices(
             }
         }
 
+        // Announced and still unread long after: the foreman should hear of it.
+        if digest.interval > 0
+            && let Some(oldest) = mail_pending.first()
+        {
+            let noticed_at = mail_claims
+                .get(&(actor.id.clone(), actor.created_at.clone()))
+                .into_iter()
+                .flatten()
+                .filter(|(notice_id, _, claimed)| {
+                    claimed.contains(&oldest.id)
+                        && deliveries
+                            .get(&(notice_id.clone(), actor.id.clone()))
+                            .is_none_or(|(state, _, _)| state != "withdrawn")
+                })
+                .filter_map(|(notice_id, _, _)| positions.get(notice_id))
+                .map(|position| timestamp(&events[*position].ts, now))
+                .collect::<Vec<_>>();
+            if let Some(first_noticed) = noticed_at.iter().min()
+                && now - first_noticed >= digest.mail_overdue
+            {
+                problems.push((
+                    format!("mail:{}:{}", actor.id, oldest.id),
+                    format!(
+                        "{}: {} Mail item(s) unread, the oldest for {}, after {} Mail notice(s).",
+                        actor.id,
+                        mail_pending.len(),
+                        duration_text(now - timestamp(&oldest.ts, now)),
+                        noticed_at.len()
+                    ),
+                ));
+            }
+        }
+
         if mail_delays.busy > 0 && !mail_pending.is_empty() {
             let pending_ids = mail_pending
                 .iter()
@@ -737,12 +880,17 @@ fn unread_notices(
                 .into_iter()
                 .flatten()
                 .rev()
-                .filter(|(notice_id, _)| {
+                .filter(|(notice_id, _, _)| {
                     deliveries
                         .get(&(notice_id.clone(), actor.id.clone()))
                         .is_none_or(|(state, _, _)| state != "withdrawn")
                 })
-                .any(|(_, claimed)| {
+                // A delivered notice is not a read one: once it is `repeat` old,
+                // Mail still waiting is announced again.
+                .filter(|(_, noticed_at, _)| {
+                    mail_delays.repeat <= 0 || now - noticed_at < mail_delays.repeat
+                })
+                .any(|(_, _, claimed)| {
                     let claimed = claimed
                         .iter()
                         .filter(|source| positions.contains_key(*source))
@@ -809,7 +957,168 @@ fn unread_notices(
             notices.push(event);
         }
     }
+    let listed = |key: &str| {
+        last_digest
+            .as_ref()
+            .is_some_and(|(_, listed)| listed.contains(key))
+    };
+    problems.extend(disk_problems(digest, listed));
+    if digest.interval > 0
+        && let Ok(foreman) = actors::unique_available_foreman(group)
+        && eligible.iter().any(|actor| actor.id == foreman.id)
+    {
+        let since = last_digest.as_ref().map_or(i64::MAX, |(at, _)| now - at);
+        let unlisted = problems.iter().any(|(key, _)| !listed(key));
+        // Saying that everything listed is resolved also lets a problem that
+        // comes back under the same key, such as a low disk, count as new.
+        let resolved = problems.is_empty()
+            && last_digest
+                .as_ref()
+                .is_some_and(|(_, listed)| !listed.is_empty());
+        if ((unlisted || resolved) && since >= digest.interval)
+            || (!problems.is_empty() && digest.repeat > 0 && since >= digest.repeat)
+        {
+            notices.push(digest_event(group, foreman, &problems));
+        }
+    }
     notices
+}
+
+/// The CCCC home volume as digest problems, keyed by level. A level the last
+/// digest listed holds until the volume is one point and 1 GiB clear of its
+/// mark, so a volume that hovers at a mark does not flap. A failed sample is a
+/// problem of its own, `disk:unavailable`; not knowing is not clear, so the
+/// level the last digest listed is listed again beside it and keeps holding.
+pub(crate) fn disk_problems(
+    digest: &Digest,
+    listed: impl Fn(&str) -> bool,
+) -> Vec<(String, String)> {
+    const GIB: u64 = 1 << 30;
+    let held_critical = listed("disk:critical");
+    let held_warning = held_critical || listed("disk:warning");
+    let (available, total) = match &digest.disk {
+        None => return Vec::new(),
+        Some(Ok(sample)) => *sample,
+        Some(Err(reason)) => {
+            let mut problems = vec![(
+                "disk:unavailable".to_owned(),
+                format!(
+                    "CCCC home volume unavailable: its free space could not be read: {reason}."
+                ),
+            )];
+            if held_warning {
+                let (level, state) = if held_critical {
+                    ("critical", "critically low")
+                } else {
+                    ("warning", "low")
+                };
+                problems.push((
+                    format!("disk:{level}"),
+                    format!(
+                        "CCCC home volume {state} at its last sample; listed until a sample shows it clear."
+                    ),
+                ));
+            }
+            return problems;
+        }
+    };
+    let percent = available as f64 * 100.0 / total as f64;
+    // Under the mark, or held and within one point of it.
+    let under_percent = |mark: i64, held: bool| {
+        let mark = mark as f64;
+        mark > 0.0 && (percent < mark || (held && percent < mark + 1.0))
+    };
+    let bytes_mark = digest.disk_warning_bytes as u64;
+    let critical = under_percent(digest.disk_critical_percent, held_critical);
+    let warning = critical
+        || under_percent(digest.disk_warning_percent, held_warning)
+        || (bytes_mark > 0
+            && (available < bytes_mark
+                || (held_warning && available < bytes_mark.saturating_add(GIB))));
+    if !warning {
+        return Vec::new();
+    }
+    let level = if critical { "critical" } else { "warning" };
+    let marks = if critical {
+        format!("{}%", digest.disk_critical_percent)
+    } else {
+        [
+            (digest.disk_warning_percent > 0).then(|| format!("{}%", digest.disk_warning_percent)),
+            (bytes_mark > 0).then(|| bytes_text(bytes_mark)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" or ")
+    };
+    vec![(
+        format!("disk:{level}"),
+        format!(
+            "CCCC home volume {}: {} available of {} ({percent:.1}%; {level} mark {marks}).",
+            if critical { "critically low" } else { "low" },
+            bytes_text(available),
+            bytes_text(total),
+        ),
+    )]
+}
+
+/// `20.0 GiB` or `512.0 MiB`.
+fn bytes_text(bytes: u64) -> String {
+    const MIB: f64 = 1_048_576.0;
+    let mib = bytes as f64 / MIB;
+    if mib >= 1024.0 {
+        format!("{:.1} GiB", mib / 1024.0)
+    } else {
+        format!("{mib:.1} MiB")
+    }
+}
+
+pub(crate) fn digest_event(
+    group: &GroupDoc,
+    foreman: &cccc_contracts::Actor,
+    problems: &[(String, String)],
+) -> Event {
+    let lines = problems
+        .iter()
+        .map(|(_, line)| format!("- {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let message = if problems.is_empty() {
+        "Everything the last health digest listed is resolved.".to_owned()
+    } else {
+        format!(
+            "{} thing(s) in this group need a look:\n{lines}",
+            problems.len()
+        )
+    };
+    let mut event = notice_event(
+        group,
+        foreman,
+        "health_digest",
+        "Group health",
+        &message,
+        Vec::new(),
+    );
+    if let Some(context) = event.data.get_mut("context").and_then(Value::as_object_mut) {
+        context.insert(
+            "problem_keys".into(),
+            json!(problems.iter().map(|(key, _)| key).collect::<Vec<_>>()),
+        );
+        context.insert("count".into(), json!(problems.len()));
+    }
+    event
+}
+
+/// `2h05m`, `45m` or `30s`.
+pub(crate) fn duration_text(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds >= 3_600 {
+        format!("{}h{:02}m", seconds / 3_600, seconds % 3_600 / 60)
+    } else if seconds >= 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 fn delivery_timing_value(group: &GroupDoc, key: &str, default: i64) -> i64 {
@@ -823,13 +1132,13 @@ fn delivery_timing_value(group: &GroupDoc, key: &str, default: i64) -> i64 {
         .max(0)
 }
 
-fn timestamp(value: &str, default: i64) -> i64 {
+pub(crate) fn timestamp(value: &str, default: i64) -> i64 {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.timestamp())
         .unwrap_or(default)
 }
 
-fn notice_event(
+pub(crate) fn notice_event(
     group: &GroupDoc,
     actor: &cccc_contracts::Actor,
     kind: &str,
@@ -863,6 +1172,58 @@ fn notice_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Private replay evidence is supplied by the operator, never checked in.
+    /// Run alone so the decode counter has no concurrent test producers.
+    #[test]
+    #[ignore = "requires CCCC_REAL_REPLAY_HOME pointing to copied real groups"]
+    fn real_group_notices_match_history_without_warm_projection_decodes() {
+        let root = std::env::var_os("CCCC_REAL_REPLAY_HOME").expect("copied-group home required");
+        let home = HomeLayout::from_path(root).expect("replay home");
+        let store = GroupStore::new(home.clone()).expect("group store");
+        let groups = store.list().expect("real copied groups");
+        assert!(!groups.is_empty(), "empty replay cannot prove a projection");
+        for meta in groups {
+            let group = store.load(&meta.group_id).expect("real group document");
+            let eligible = actors::visible(&group)
+                .filter(|actor| actor.enabled)
+                .map(|actor| actor.id.clone())
+                .collect::<HashSet<_>>();
+            assert!(!eligible.is_empty(), "replay must keep enabled actors");
+            // due_unread_notices differentially checks the original ordered
+            // reducer's reply/read/delivery/withdrawal/claim decisions.
+            due_unread_notices(
+                &home,
+                &store,
+                &group,
+                Some(&eligible),
+                &HashSet::new(),
+                UnreadPass::Scheduled,
+                home.root(),
+            )
+            .expect("cold projection/oracle");
+            // The test-side legacy oracle intentionally reads history. This
+            // counter measures only the production Snapshot decoder.
+            let decoded = crate::ledger::snapshot::decoded_records();
+            for _ in 0..5 {
+                due_unread_notices(
+                    &home,
+                    &store,
+                    &group,
+                    Some(&eligible),
+                    &HashSet::new(),
+                    UnreadPass::Scheduled,
+                    home.root(),
+                )
+                .expect("warm projection/oracle");
+            }
+            assert_eq!(
+                crate::ledger::snapshot::decoded_records(),
+                decoded,
+                "warm unread projection decoded ledger history"
+            );
+        }
+    }
 
     /// Each recipient of one Mail; notices are issued in this order.
     const RECIPIENTS: [&str; 2] = ["first", "second"];
@@ -936,10 +1297,17 @@ mod tests {
 
             // The second notice cannot be written: the first is already in the
             // ledger, so it must reach delivery from this pass.
-            let (ledger_path, notices) =
-                due_unread_notices(&home, &store, &group, Some(&recipients), &recipients, pass)
-                    .expect("due notices")
-                    .expect("notices to issue");
+            let (ledger_path, notices) = due_unread_notices(
+                &home,
+                &store,
+                &group,
+                Some(&recipients),
+                &recipients,
+                pass,
+                home.root(),
+            )
+            .expect("due notices")
+            .expect("notices to issue");
             let mut interrupted = TickResult::default();
             let mut writes = 0;
             issue_notices(
@@ -1118,5 +1486,98 @@ mod tests {
             assert!(result.notifications.is_empty());
             assert!(!crate::ledger_index::is_cached(&path), "{mode}");
         }
+    }
+
+    /// Not knowing the volume is not the volume being clear. After a digest
+    /// listed a low disk, a failed sample is reported as unavailable with the
+    /// warning still listed; a sample back within the warning's recovery band
+    /// does not resolve it, and only one clear of it does. The warning comes
+    /// from the real volume under the test's CCCC home, its mark placed around
+    /// that volume's own available bytes; the failed sample is the real error
+    /// of sampling a path that does not exist.
+    #[test]
+    fn a_failed_disk_sample_keeps_the_warning_until_a_sample_shows_it_clear() {
+        const GIB: u64 = 1 << 30;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("disk unavailable", "").expect("group");
+        let available = fs2::available_space(home.root()).expect("free space");
+        assert!(available > 3 * GIB, "needs 3 GiB free to place the mark");
+        let mark = |bytes: u64| {
+            store
+                .mutate(&group.group_id, |group| {
+                    group.state = GroupState::Active;
+                    if group.actors.is_empty() {
+                        actors::add(group, cccc_contracts::Actor::new("lead"))?;
+                    }
+                    group.extra.insert(
+                        "delivery".into(),
+                        json!({
+                            "health_digest_interval_seconds":1,
+                            "disk_warning_percent":0,
+                            "disk_critical_percent":0,
+                            "disk_warning_bytes":bytes,
+                        }),
+                    );
+                    Ok(())
+                })
+                .expect("delivery settings");
+        };
+        let lead = HashSet::from(["lead".to_owned()]);
+        let missing = temp.path().join("missing");
+        let digest = |volume: &std::path::Path| {
+            let group = store.load(&group.group_id).expect("group");
+            let mut result = TickResult::default();
+            if let Some((ledger_path, notices)) = due_unread_notices(
+                &home,
+                &store,
+                &group,
+                Some(&lead),
+                &lead,
+                UnreadPass::Scheduled,
+                volume,
+            )
+            .expect("due notices")
+            {
+                issue_notices(&ledger_path, notices, &mut result, &mut ledger::append);
+            }
+            assert!(result.unread_failure.is_none());
+            result.notifications
+        };
+        let keys = |notices: &[Event]| {
+            notices
+                .iter()
+                .map(|notice| notice.data["context"]["problem_keys"].clone())
+                .collect::<Vec<_>>()
+        };
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+        mark(available + GIB);
+        assert_eq!(keys(&digest(home.root())), [json!(["disk:warning"])]);
+
+        pause();
+        let unknown = digest(&missing);
+        assert_eq!(
+            keys(&unknown),
+            [json!(["disk:unavailable", "disk:warning"])],
+            "a failed sample keeps the warning"
+        );
+        let message = unknown[0].data["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("CCCC home volume unavailable: "),
+            "{message}"
+        );
+        assert!(digest(&missing).is_empty(), "not sent again while it lasts");
+
+        // Sampled again, 0.5 GiB clear of the mark: within its recovery band.
+        pause();
+        mark(available - GIB / 2);
+        assert!(digest(home.root()).is_empty(), "the warning still holds");
+
+        // 2 GiB clear of the mark: resolved.
+        pause();
+        mark(available - 2 * GIB);
+        assert_eq!(keys(&digest(home.root())), [json!([])]);
     }
 }
