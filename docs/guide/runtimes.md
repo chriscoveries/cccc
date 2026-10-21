@@ -24,6 +24,7 @@ Use `cccc runtime list --all` to see the full supported list on your machine, an
 | Grok Build | `grok` | CCCC-managed Grok leader + ACP + native TUI | Automatic native MCP registration; identity inherited per session |
 | Hermes Agent | `hermes` | Native TUI or official ACP | Native user profile for TUI; injected per ACP session |
 | Kimi Code | `kimi` | Native TUI or official ACP | Native registration for TUI; injected per ACP session |
+| Muse Code | `muse` | Native TUI | Injected per launch (`-c mcpServers.cccc=…`); no persistent registration |
 | OpenCode | `opencode` | CCCC-managed ACP + authenticated native TUI attach | Injected into each managed session |
 | Pi | `pi` | Official RPC (headless; no native terminal attachment) | Injected per managed session |
 | ChatGPT Web Model | `web_model` | Bound ChatGPT Web conversation | Browser delivery + remote MCP connector |
