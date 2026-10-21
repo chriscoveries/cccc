@@ -103,12 +103,16 @@ pub(super) struct DeliveryJob {
     pub event: Event,
 }
 
+/// A delivery outcome whose ledger record is still pending. It holds the
+/// in-flight slot until recorded, so the event is never dispatched again.
 pub(super) struct DeliveryCompletion {
     pub group_id: String,
     pub actor_id: String,
     pub actor_created_at: String,
     pub event_id: String,
     pub transport: String,
+    /// Set for a withdrawn delivery (never sent); otherwise it was accepted.
+    pub withdrawn_reason: Option<String>,
 }
 
 struct DeliveryWorker {
@@ -194,6 +198,7 @@ pub(super) fn complete_job(job: &DeliveryJob) {
                 actor_created_at: job.actor.created_at.clone(),
                 event_id: job.event.id.clone(),
                 transport: transport.into(),
+                withdrawn_reason: None,
             });
         }
     }
@@ -232,6 +237,37 @@ fn fail_job(job: &DeliveryJob, reason: &str) {
         );
     }
     release_in_flight(job);
+}
+
+/// Close deliveries that were never sent and must not be retried. A failed
+/// record is queued like an accepted one: only the record is retried, never
+/// the submission, and the event keeps its in-flight slot meanwhile.
+pub(super) fn withdraw_jobs(jobs: &[DeliveryJob], reason: &str) {
+    for job in jobs {
+        let transport = delivery_transport(&job.home, &job.group, &job.actor);
+        match crate::ops::runtime_delivery::append_state(
+            &job.home,
+            &job.group.group_id,
+            &job.actor.id,
+            &job.actor.created_at,
+            &job.event.id,
+            transport,
+            crate::ops::runtime_delivery::DeliveryOutcome::Withdrawn(reason),
+        ) {
+            Ok(_) => release_in_flight(job),
+            Err(error) => {
+                tracing::warn!(message = %error.message, event_id = %job.event.id, "withdrawn delivery record is pending");
+                record_completion(DeliveryCompletion {
+                    group_id: job.group.group_id.clone(),
+                    actor_id: job.actor.id.clone(),
+                    actor_created_at: job.actor.created_at.clone(),
+                    event_id: job.event.id.clone(),
+                    transport: transport.into(),
+                    withdrawn_reason: Some(reason.into()),
+                });
+            }
+        }
+    }
 }
 
 pub(super) fn fail_jobs(jobs: &[DeliveryJob], reason: &str) {
@@ -444,6 +480,8 @@ pub(super) fn delivery_transport(
 ) -> &'static str {
     if actor.runtime == ActorRuntime::Deepseek {
         "deepseek"
+    } else if actor.runtime == ActorRuntime::ChatgptDots {
+        "web_model_pull"
     } else if actor.runtime.is_web_model() {
         web_model_delivery_transport(home, group, actor)
     } else if crate::ops::local_headless::uses_managed_delivery(&group.group_id, actor) {
@@ -630,7 +668,7 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
             let mut terminal_reason = None;
             for attempt in 0..3 {
                 match actor_delivery_worker::process_batch(
-                    &batch,
+                    &mut batch,
                     &mut preamble_session,
                     &thread_cancelled,
                 ) {

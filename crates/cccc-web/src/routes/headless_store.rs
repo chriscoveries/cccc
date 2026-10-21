@@ -19,6 +19,7 @@ const REPLAY_START_TYPES: &[&str] = &[
 const REPLAY_END_TYPES: &[&str] = &[
     "headless.turn.completed",
     "headless.turn.failed",
+    "headless.turn.cancelled",
     "headless.control.completed",
     "headless.control.failed",
 ];
@@ -302,6 +303,41 @@ mod tests {
         assert_eq!(events[0]["actor_id"], "b");
         assert_eq!(events[1]["data"]["turn"], 2);
         assert_eq!(events[2]["data"]["text"], "new");
+    }
+
+    #[test]
+    fn replay_keeps_cancelled_turn_when_its_start_is_outside_the_tail_window() {
+        let dir = tempfile::tempdir().expect("temporary group");
+        let path = dir.path().join("events.jsonl");
+        append(
+            &path,
+            &json!({"actor_id":"a","type":"headless.turn.started","data":{"stream_id":"generation:turn"}}),
+        );
+        for index in 0..405 {
+            append(
+                &path,
+                &json!({"actor_id":"a","type":"headless.message.delta","data":{"stream_id":"generation:turn","index":index,"delta":"partial"}}),
+            );
+        }
+        append(
+            &path,
+            &json!({"actor_id":"a","type":"headless.turn.cancelled","data":{"stream_id":"generation:turn","status":"cancelled"}}),
+        );
+
+        let (mut tail, snapshot) =
+            HeadlessEventTail::open(path, true).expect("open cancelled turn replay");
+        assert_eq!(snapshot.len(), super::REPLAY_LINE_LIMIT);
+        assert!(snapshot.iter().all(|event| event["actor_id"] == "a"));
+        assert_eq!(snapshot[0]["data"]["index"], 6);
+        assert_eq!(
+            snapshot.last().expect("cancelled turn")["type"],
+            "headless.turn.cancelled"
+        );
+        assert!(
+            tail.read_new()
+                .expect("no duplicate live events")
+                .is_empty()
+        );
     }
 
     #[test]

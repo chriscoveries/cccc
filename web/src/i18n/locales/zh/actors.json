@@ -121,6 +121,7 @@
   "avatarReset": "头像已恢复默认。",
   "avatarUploadFailed": "上传头像失败。",
   "runtime": "运行时",
+  "piRuntimeHint": "Pi 在受控工作区中运行，没有原生终端。",
   "command": "命令",
   "customCommandOverride": "自定义命令",
   "runtimeChangesNote": "运行时/命令更改在重启后生效。使用\"保存并重启\"立即应用。",
@@ -300,7 +301,7 @@
   "terminalReadOnlyNotice": "此终端当前只读，接管后可以输入。",
   "webModelActorBoundConnectorTitle": "ChatGPT Web Model",
   "webModelActorBoundConnectorHint": "全局 Web Model 设置管理共享登录和一个连接器。保存后正常启动此 Actor，CCCC 会先自动连接对话，再投递任务。",
-  "webModelProfileHint": "Web 模型配置共享运行时与能力设置，每个 Actor 独立配置自己的对话。",
+  "webModelProfileHint": "Web 模型配置共享运行时与能力设置，每个 Actor 独立配置自己的连接。",
   "saveAndApply": "保存并应用",
   "applyWebModelTargetConfirm": "要为“{{label}}”应用新对话吗？CCCC 将只停止此 Actor，保存设置，待新连接保存成功后再启动。应用失败时会保持停止，并保留这里的草稿。",
   "antigravityMode": {
@@ -319,13 +320,18 @@
     "cancel": "取消当前任务及排队输入",
     "input": "追加指令",
     "queued": "排队输入：{{count}}",
-    "hint": "ACP 没有原生终端。输入将在当前任务结束后执行。",
+    "snapshotStale": "状态暂未更新，当前显示上次读取的内容，正在自动重新检查。",
+    "hint": "当前受控会话没有原生终端，可在此查看输出、提交调查；输入会等待当前任务结束。",
     "error": "操作失败，已保留输入内容。",
-    "stopped": "启动此 Actor 后即可使用 ACP 控件。",
+    "stopped": "启动此 Actor 后即可使用会话控制。",
     "cancelCurrent": "取消当前任务",
     "question": "需要回答",
     "plan": "确认计划",
     "answer": "提交回答",
+    "confirm": "确认",
+    "decline": "拒绝",
+    "reply": "提交回复",
+    "cancelInteraction": "取消请求",
     "skip": "跳过问题",
     "acceptPlan": "接受计划",
     "rejectPlan": "拒绝计划",
@@ -352,5 +358,9 @@
     "label": "{{runtime}} 模式",
     "hint": "ACP 使用本机 CLI 登录和独立的受管会话。没有原生终端；输入在当前任务结束后执行。"
   },
-  "selectRuntime": "未配置"
+  "selectRuntime": "未配置",
+  "dotsPause": "暂停 CCCC 访问",
+  "dotsPauseHint": "暂停 CCCC 投递及工具访问，已经在 ChatGPT 中执行的任务可能继续运行。",
+  "dotsEnable": "启用 CCCC 访问",
+  "dotsResume": "恢复 CCCC 访问"
 }

@@ -118,6 +118,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointMan
 The installer downloads a checksum-verified native executable and refuses to
 overwrite a command it does not own.
 
+The website installer resolves the latest stable GitHub Release each time it
+runs, including when upgrading an existing standalone installation. It does not
+select prereleases. To install a specific version, set `CCCC_VERSION` on the
+installer process, for example:
+
+```bash
+curl -fsSL https://chesterra.github.io/cccc/install.sh | CCCC_VERSION=0.4.43 sh
+```
+
+On Windows, set `$env:CCCC_VERSION` before running the installer. If latest-release
+resolution fails, installation stops without falling back to an older version.
+
 ### From PyPI (v0.4.36+)
 
 ```bash

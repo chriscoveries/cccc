@@ -21,6 +21,7 @@ import {
   apiJson,
   ApiResponse,
   capabilityStateRequestKey,
+  clearCapabilityStateRequests,
   clearContextRequest,
   contextRequestKey,
   FetchContextOptions,
@@ -82,10 +83,14 @@ export async function contextSync(
   dryRun: boolean = false,
 ) {
   clearContextRequest(groupId);
-  return apiJson(`/api/v1/groups/${encodeURIComponent(groupId)}/context`, {
-    method: "POST",
-    body: JSON.stringify({ ops, by: "user", dry_run: dryRun }),
-  });
+  try {
+    return await apiJson(`/api/v1/groups/${encodeURIComponent(groupId)}/context`, {
+      method: "POST",
+      body: JSON.stringify({ ops, by: "user", dry_run: dryRun }),
+    });
+  } finally {
+    clearContextRequest(groupId);
+  }
 }
 
 export async function updateCoordinationBrief(groupId: string, brief: CoordinationBrief) {
@@ -265,10 +270,15 @@ export async function blockCapabilityGlobal(
     scope: "global",
   };
   if (String(groupId || "").trim()) body.group_id = String(groupId || "").trim();
-  return apiJson<Record<string, unknown>>(`/api/v1/capabilities/block`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  clearCapabilityStateRequests(groupId);
+  try {
+    return await apiJson<Record<string, unknown>>(`/api/v1/capabilities/block`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  } finally {
+    clearCapabilityStateRequests(groupId);
+  }
 }
 
 export async function fetchGroupCapabilityState(
@@ -322,21 +332,26 @@ export async function enableGroupCapability(
     cleanup?: boolean;
   },
 ) {
-  return apiJson<Record<string, unknown>>(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/enable`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        capability_id: capabilityId,
-        enabled: opts?.enabled ?? true,
-        scope: opts?.scope || "session",
-        actor_id: opts?.actorId || "user",
-        ttl_seconds: opts?.ttlSeconds || 3600,
-        reason: opts?.reason || "",
-        cleanup: opts?.cleanup || false,
-      }),
-    },
-  );
+  clearCapabilityStateRequests(groupId);
+  try {
+    return await apiJson<Record<string, unknown>>(
+      `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/enable`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          capability_id: capabilityId,
+          enabled: opts?.enabled ?? true,
+          scope: opts?.scope || "session",
+          actor_id: opts?.actorId || "user",
+          ttl_seconds: opts?.ttlSeconds || 3600,
+          reason: opts?.reason || "",
+          cleanup: opts?.cleanup || false,
+        }),
+      },
+    );
+  } finally {
+    clearCapabilityStateRequests(groupId);
+  }
 }
 
 export async function updateGroupCapabilityVisibility(
@@ -344,18 +359,24 @@ export async function updateGroupCapabilityVisibility(
   capabilityId: string,
   opts?: { hidden?: boolean; actorId?: string; reason?: string },
 ) {
-  return apiJson<Record<string, unknown>>(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/visibility`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        capability_id: capabilityId,
-        hidden: opts?.hidden ?? true,
-        actor_id: opts?.actorId || "user",
-        reason: opts?.reason || "",
-      }),
-    },
-  );
+  clearCapabilityStateRequests(groupId);
+  try {
+    return await apiJson<Record<string, unknown>>(
+      `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/visibility`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          capability_id: capabilityId,
+          hidden: opts?.hidden ?? true,
+          actor_id: opts?.actorId || "user",
+          reason: opts?.reason || "",
+        }),
+      },
+    );
+  } finally {
+    // A read started before this write cannot reconcile its completed outcome.
+    clearCapabilityStateRequests(groupId);
+  }
 }
 
 export async function useGroupCapability(
@@ -379,10 +400,15 @@ export async function useGroupCapability(
   };
   if (String(args.toolName || "").trim()) body.tool_name = String(args.toolName || "").trim();
   if (args.toolArguments) body.tool_arguments = args.toolArguments;
-  return apiJson<Record<string, unknown>>(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/use`,
-    { method: "POST", body: JSON.stringify(body) },
-  );
+  clearCapabilityStateRequests(groupId);
+  try {
+    return await apiJson<Record<string, unknown>>(
+      `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/use`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
+  } finally {
+    clearCapabilityStateRequests(groupId);
+  }
 }
 
 export async function importCapability(
@@ -397,21 +423,26 @@ export async function importCapability(
     reason?: string;
   },
 ) {
-  return apiJson<Record<string, unknown>>(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/import`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        record,
-        dry_run: opts?.dryRun || false,
-        enable_after_import: opts?.enableAfterImport || false,
-        scope: opts?.scope || "session",
-        actor_id: opts?.actorId || "user",
-        ttl_seconds: opts?.ttlSeconds || 3600,
-        reason: opts?.reason || "",
-      }),
-    },
-  );
+  clearCapabilityStateRequests(groupId);
+  try {
+    return await apiJson<Record<string, unknown>>(
+      `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/import`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          record,
+          dry_run: opts?.dryRun || false,
+          enable_after_import: opts?.enableAfterImport || false,
+          scope: opts?.scope || "session",
+          actor_id: opts?.actorId || "user",
+          ttl_seconds: opts?.ttlSeconds || 3600,
+          reason: opts?.reason || "",
+        }),
+      },
+    );
+  } finally {
+    clearCapabilityStateRequests(groupId);
+  }
 }
 
 export async function installCapabilityTarget(
@@ -424,19 +455,24 @@ export async function installCapabilityTarget(
     reason?: string;
   },
 ) {
-  return apiJson<Record<string, unknown>>(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/install`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        target,
-        scope: opts?.scope || "actor",
-        actor_id: opts?.actorId || "user",
-        ttl_seconds: opts?.ttlSeconds || 3600,
-        reason: opts?.reason || "",
-      }),
-    },
-  );
+  clearCapabilityStateRequests(groupId);
+  try {
+    return await apiJson<Record<string, unknown>>(
+      `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/install`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          target,
+          scope: opts?.scope || "actor",
+          actor_id: opts?.actorId || "user",
+          ttl_seconds: opts?.ttlSeconds || 3600,
+          reason: opts?.reason || "",
+        }),
+      },
+    );
+  } finally {
+    clearCapabilityStateRequests(groupId);
+  }
 }
 
 export async function uninstallCapability(
@@ -444,17 +480,22 @@ export async function uninstallCapability(
   capabilityId: string,
   opts?: { actorId?: string; reason?: string },
 ) {
-  return apiJson<Record<string, unknown>>(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/uninstall`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        capability_id: capabilityId,
-        actor_id: opts?.actorId || "user",
-        reason: opts?.reason || "",
-      }),
-    },
-  );
+  clearCapabilityStateRequests(groupId);
+  try {
+    return await apiJson<Record<string, unknown>>(
+      `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/uninstall`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          capability_id: capabilityId,
+          actor_id: opts?.actorId || "user",
+          reason: opts?.reason || "",
+        }),
+      },
+    );
+  } finally {
+    clearCapabilityStateRequests(groupId);
+  }
 }
 
 export async function deleteCapabilitySource(
@@ -545,6 +586,18 @@ export async function readInbox(groupId: string, actorId: string, limit = 50) {
   );
 }
 
+/** The server's per-message attachment total; checked first to skip a doomed upload. */
+export const MAX_MESSAGE_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+
+function attachmentLimitError(files: File[]) {
+  const total = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
+  if (total <= MAX_MESSAGE_ATTACHMENT_BYTES) return null;
+  return {
+    ok: false as const,
+    error: { code: "attachment_too_large", message: "Attachments exceed 100 MiB in total." },
+  };
+}
+
 export async function sendMessage(
   groupId: string,
   text: string,
@@ -555,6 +608,8 @@ export async function sendMessage(
   refs?: MessageRef[],
 ) {
   if (files && files.length > 0) {
+    const tooLarge = attachmentLimitError(files);
+    if (tooLarge) return tooLarge;
     const form = new FormData();
     form.append("by", "user");
     form.append("text", text);
@@ -655,6 +710,8 @@ export async function replyMessage(
   messageMode: "send" | "mail" = "send",
 ) {
   if (files && files.length > 0) {
+    const tooLarge = attachmentLimitError(files);
+    if (tooLarge) return tooLarge;
     const form = new FormData();
     form.append("by", "user");
     form.append("text", text);
@@ -749,13 +806,18 @@ export async function sendCrossGroupMessage(
       : {}),
   };
   if (files && files.length > 0) {
-    return {
-      ok: false as const,
-      error: {
-        code: "attachments_not_supported",
-        message: "Local cross-group attachments are not supported.",
-      },
-    };
+    const tooLarge = attachmentLimitError(files);
+    if (tooLarge) return tooLarge;
+    // The daemon copies the uploaded files into the destination Group.
+    const form = new FormData();
+    form.append("by", "user");
+    form.append("text", text);
+    form.append("dst_group_id", dstGroupId);
+    form.append("to_json", JSON.stringify(to));
+    form.append("message_mode", messageMode);
+    for (const [key, value] of Object.entries(replyMetadata)) form.append(key, value);
+    for (const file of files) form.append("files", file);
+    return apiForm(`/api/v1/groups/${encodeURIComponent(srcGroupId)}/send_upload`, form);
   }
   return apiJson(`/api/v1/groups/${encodeURIComponent(srcGroupId)}/send_cross_group`, {
     method: "POST",

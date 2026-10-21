@@ -2,14 +2,6 @@ import type { Actor, LedgerEvent } from "../types";
 
 export type ChatTFunction = (key: string, options?: Record<string, unknown>) => string;
 
-export function shouldBlockLocalCrossGroupAttachments(input: {
-  attachmentCount: number;
-  targets: Array<{ isCrossGroup?: boolean }>;
-}): boolean {
-  if (input.attachmentCount <= 0) return false;
-  return input.targets.some((target) => Boolean(target.isCrossGroup));
-}
-
 export function supportsChatStreamingPlaceholder(
   actor: Pick<Actor, "runtime" | "runner" | "runner_effective">,
 ): boolean {
@@ -32,6 +24,7 @@ export function formatSendMessageError(args: {
   if (["NETWORK_ERROR", "EMPTY_RESPONSE", "PARSE_ERROR"].includes(code)) {
     return args.t("sendResultUnknown");
   }
+  if (code === "attachment_too_large") return args.t("attachmentsTooLarge");
   if (!code) return message || args.t("sendFailed", { defaultValue: "Failed to send message." });
   if (!message) return code;
   return `${code}: ${message}`;

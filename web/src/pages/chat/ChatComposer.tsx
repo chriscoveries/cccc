@@ -431,13 +431,21 @@ export function ChatComposer({
     parts.push(escapeHtml(composerText.slice(cursor)));
     return parts.join("");
   }, [composerText, liveAgentMentionTokens, liveGroupMentionTokens]);
-  const consumedSuggestedUserMessageIds = readConsumedSuggestedUserMessageIds();
-  for (const eventId of sessionConsumedSuggestedUserMessageIds) {
-    consumedSuggestedUserMessageIds.add(eventId);
-  }
-  const suggestedUserMessage = latestSuggestedUserMessage(
-    suggestionSourceMessages || recentMessages,
-    consumedSuggestedUserMessageIds,
+  const consumedSuggestedUserMessageIds = useMemo(() => {
+    void selectedGroupId;
+    const ids = readConsumedSuggestedUserMessageIds();
+    for (const eventId of sessionConsumedSuggestedUserMessageIds) {
+      ids.add(eventId);
+    }
+    return ids;
+  }, [selectedGroupId, sessionConsumedSuggestedUserMessageIds]);
+  const suggestedUserMessage = useMemo(
+    () =>
+      latestSuggestedUserMessage(
+        suggestionSourceMessages || recentMessages,
+        consumedSuggestedUserMessageIds,
+      ),
+    [consumedSuggestedUserMessageIds, recentMessages, suggestionSourceMessages],
   );
   const canShowSuggestedUserMessageForTarget = composerTargetAllowsSuggestedUserMessage({
     selectedGroupId,
@@ -848,7 +856,6 @@ export function ChatComposer({
     requestAnimationFrame(() => composerRef.current?.focus());
   };
 
-  const isCrossGroup = !!destGroupId && destGroupId !== selectedGroupId;
   const allModeOptions: Array<{ key: ComposerMessageMode; label: string; description: string }> = [
     { key: "send", label: t("modeSend"), description: t("modeSendDesc") },
     { key: "request_reply", label: t("modeSendReply"), description: t("modeSendReplyDesc") },
@@ -927,7 +934,6 @@ export function ChatComposer({
   const fileDisabledReason = (() => {
     if (!selectedGroupId) return t("selectGroupFirst");
     if (busy === "send") return t("busy");
-    if (isCrossGroup) return t("crossGroupAttachment");
     return t("attachFile");
   })();
   const sendShortcutLabel = useMemo(() => {
@@ -1191,7 +1197,7 @@ export function ChatComposer({
                 <button
                   type="button"
                   className={classNames(
-                    "absolute left-3 top-3 z-10 flex h-6 w-6 items-center justify-center rounded-md transition-colors",
+                    "touch-target-sm absolute left-3 top-3 z-10 flex h-6 w-6 items-center justify-center rounded-md transition-colors",
                     isDark
                       ? "text-white/45 hover:bg-white/10 hover:text-white/75"
                       : "text-gray-400 hover:bg-black/[0.06] hover:text-gray-600",
@@ -1272,14 +1278,14 @@ export function ChatComposer({
                 <button
                   className={classNames(
                     "glass-btn flex h-11 w-11 items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition-colors disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)] disabled:opacity-60 sm:h-9 sm:w-9",
-                    busy !== "send" && selectedGroupId && !isCrossGroup
+                    busy !== "send" && selectedGroupId
                       ? isDark
                         ? "hover:bg-white/10 hover:text-[var(--color-text-primary)]"
                         : "hover:bg-black/5 hover:text-gray-800"
                       : "",
                   )}
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={!selectedGroupId || busy === "send" || isCrossGroup}
+                  disabled={!selectedGroupId || busy === "send"}
                   aria-label={t("attachFile")}
                   title={fileDisabledReason}
                 >
@@ -1296,7 +1302,7 @@ export function ChatComposer({
                     statusPortalTarget={voiceStatusTarget}
                     captureMode={voiceCaptureMode}
                     onCaptureModeChange={setVoiceCaptureMode}
-                    composerText={composerText}
+                    hasComposerText={Boolean(composerText.trim())}
                     composerContext={composerAssistantContext}
                     onQuoteDocument={onQuoteVoiceDocumentRef}
                     onPromptDraft={fillPromptDraftFromSpeech}

@@ -287,6 +287,10 @@ CCCC supports snapshot/compaction. Large blobs are stored separately in the `blo
 
 ## Troubleshooting
 
+### Why do git worktrees remain after an Actor stops?
+
+CCCC does not manage worktree cleanup. Agents or custom native launch commands can create worktrees, and stopping an Actor does not guarantee the runtime's cleanup flow. See [Git worktrees and long-lived Actors](runtimes.md#git-worktrees-and-long-lived-actors) for ownership and manual cleanup steps.
+
 ### Daemon won't start
 
 ```bash

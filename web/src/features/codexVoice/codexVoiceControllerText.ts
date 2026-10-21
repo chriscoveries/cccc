@@ -5,7 +5,7 @@ import type { CodexVoiceSessionController } from "./useCodexVoiceSessionControll
 export function codexVoiceCallStatus(
   controller: Pick<
     CodexVoiceSessionController,
-    "externalCall" | "checking" | "isEngaged" | "readiness" | "phase" | "error"
+    "externalCall" | "checking" | "isEngaged" | "readiness" | "phase" | "error" | "refreshError"
   >,
 ) {
   const blocked =
@@ -13,6 +13,7 @@ export function codexVoiceCallStatus(
     Boolean(
       controller.readiness &&
       (!controller.readiness.realtime_credentials_available ||
+        controller.readiness.realtime_runtime_available === false ||
         !controller.readiness.analyst_runtime_available),
     );
   const labelKey = controller.externalCall
@@ -23,9 +24,13 @@ export function codexVoiceCallStatus(
         ? "codexVoiceCallBlocked"
         : !controller.isEngaged && controller.error
           ? "codexVoicePhase.failed"
-          : !controller.isEngaged && !controller.readiness && controller.phase === "idle"
-            ? "codexVoiceChecking"
-            : `codexVoicePhase.${controller.phase}`;
+          : !controller.isEngaged && controller.refreshError
+            ? controller.readiness
+              ? "codexVoiceStatusStaleLabel"
+              : "codexVoiceStatusUnavailableLabel"
+            : !controller.isEngaged && !controller.readiness && controller.phase === "idle"
+              ? "codexVoiceChecking"
+              : `codexVoicePhase.${controller.phase}`;
   return { blocked, labelKey };
 }
 
@@ -52,7 +57,12 @@ export function codexVoiceCallReadinessProblem(
   t: (key: string, options?: Record<string, unknown>) => string,
   readiness: CodexVoiceReadiness | null,
 ): string {
-  if (!readiness || readiness.realtime_credentials_available) return "";
+  if (!readiness) return "";
+  if (readiness.realtime_provider === "grok") {
+    if (readiness.realtime_runtime_available === false) return t("codexVoiceGrokRuntimeRequired");
+    return readiness.realtime_credentials_available ? "" : t("codexVoiceGrokLoginRequired");
+  }
+  if (readiness.realtime_credentials_available) return "";
   return t("codexVoiceCodexLoginRequired");
 }
 

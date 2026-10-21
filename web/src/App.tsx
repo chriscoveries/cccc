@@ -19,7 +19,11 @@ import { useSwipeNavigation } from "./hooks/useSwipeNavigation";
 import { useCrossGroupRecipients } from "./hooks/useCrossGroupRecipients";
 import { useDeepLink } from "./hooks/useDeepLink";
 import { useGlobalEvents } from "./hooks/useGlobalEvents";
-import { VISUAL_VIEWPORT_BOX, useViewportHeight } from "./hooks/useViewportHeight";
+import {
+  VISUAL_VIEWPORT_BOX,
+  VISUAL_VIEWPORT_BOX_ATTRIBUTE,
+  useViewportHeight,
+} from "./hooks/useViewportHeight";
 import { useAppChrome } from "./hooks/useAppChrome";
 import { useAppGroupLifecycle } from "./hooks/useAppGroupLifecycle";
 import { useAppTabState } from "./hooks/useAppTabState";
@@ -131,7 +135,6 @@ export default function App({
   const {
     activeGroupId,
     destGroupId,
-    composerFiles,
     replyTarget,
     setDestGroupId,
     setReplyTarget,
@@ -140,7 +143,6 @@ export default function App({
     useShallow((s) => ({
       activeGroupId: s.activeGroupId,
       destGroupId: s.destGroupId,
-      composerFiles: s.composerFiles,
       replyTarget: s.replyTarget,
       setDestGroupId: s.setDestGroupId,
       setReplyTarget: s.setReplyTarget,
@@ -224,6 +226,7 @@ export default function App({
     actorsRef,
     allTabs,
     handleTabChange,
+    onDotsActorCreated,
   } = useAppTabState({
     activeTab,
     runtimeActors: visibleRuntimeActors,
@@ -368,14 +371,12 @@ export default function App({
   }, [groups]);
 
   const hasReplyTarget = !!replyTarget;
-  const hasComposerFiles = composerFiles.length > 0;
 
   useAppGroupLifecycle({
     selectedGroupId: remoteSelected ? "" : selectedGroupId,
     destGroupId,
     sendGroupId,
     hasReplyTarget,
-    hasComposerFiles,
     setDestGroupId,
     fileInputRef,
     resetDragDrop,
@@ -392,6 +393,7 @@ export default function App({
     <div
       className="relative min-h-0 w-full overflow-hidden bg-[var(--color-body-bg)] text-[var(--color-text-primary)]"
       style={VISUAL_VIEWPORT_BOX}
+      {...{ [VISUAL_VIEWPORT_BOX_ATTRIBUTE]: "" }}
     >
       <AppBackground isDark={isDark} />
 
@@ -529,6 +531,7 @@ export default function App({
             ccccHome={ccccHome}
             composerRef={composerRef}
             onStartReply={startReply}
+            onDotsActorCreated={onDotsActorCreated}
             onThemeChange={setTheme}
             onTextScaleChange={setTextScale}
             onDeleteGroup={handleDeleteGroup}

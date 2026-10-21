@@ -49,9 +49,12 @@ pub(super) fn reset(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         ));
     }
     super::actor_delivery::shutdown_group(&old.group_id);
-    if let Err(error) = super::actor_runtime::stop_group(&old) {
+    if let Err(error) = super::actor_runtime::stop_group(home, &old) {
         return Err(rollback_new(&store, &old, &replacement.group_id, error));
     }
+    // Stopping the old Group includes its escaped children, even when later
+    // active-group or directory cleanup fails.
+    let old_reaped_processes = super::actor_runtime::reap_group(home, &old.group_id);
     if was_active && let Err(error) = active::set(home, &replacement.group_id).map_err(OpError::io)
     {
         return Err(rollback_new(&store, &old, &replacement.group_id, error));
@@ -67,12 +70,13 @@ pub(super) fn reset(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         "group_id":replacement.group_id,
         "deleted_old":old_delete_error.is_none(),
         "old_delete_error":old_delete_error,
+        "old_reaped_processes":old_reaped_processes,
         "active_group_id":was_active.then_some(&replacement.group_id),
         "group":super::group_runtime::group(replacement),
     }))
 }
 
-/// A failed cleanup must preserve the old Group for recovery, including Actors.
+/// Preserve a deletion error, which may occur before or after unregistration.
 fn settle_old_delete(
     _store: &GroupStore,
     _old: &GroupDoc,

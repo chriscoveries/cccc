@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vite-plus/test";
+import { expect, it } from "vite-plus/test";
 
-import { formatSendMessageError, shouldBlockLocalCrossGroupAttachments } from "./chatSend";
+import { formatSendMessageError } from "./chatSend";
 
 it("distinguishes an unconfirmed response from a confirmed rejection", () => {
   for (const code of ["NETWORK_ERROR", "EMPTY_RESPONSE", "PARSE_ERROR"]) {
@@ -13,22 +13,14 @@ it("distinguishes an unconfirmed response from a confirmed rejection", () => {
   ).toBe("permission_denied: Not allowed");
 });
 
-describe("shouldBlockLocalCrossGroupAttachments", () => {
-  it("blocks attachment sends to local cross-group targets even when replying", () => {
-    expect(
-      shouldBlockLocalCrossGroupAttachments({
-        attachmentCount: 1,
-        targets: [{ isCrossGroup: true }],
-      }),
-    ).toBe(true);
-  });
-
-  it("allows attachments within the selected instance Group", () => {
-    expect(
-      shouldBlockLocalCrossGroupAttachments({
-        attachmentCount: 1,
-        targets: [{ isCrossGroup: false }],
-      }),
-    ).toBe(false);
-  });
+it("localizes attachment-size rejection from client or server", () => {
+  for (const message of [
+    "Attachments exceed 100 MiB in total.",
+    "combined files exceed the message attachment limit",
+    "Connect attachments exceed 10 MiB in total",
+  ]) {
+    expect(formatSendMessageError({ code: "attachment_too_large", message, t: (key) => key })).toBe(
+      "attachmentsTooLarge",
+    );
+  }
 });

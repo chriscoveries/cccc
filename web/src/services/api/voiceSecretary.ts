@@ -5,8 +5,12 @@ import type {
   SecretaryTaskSummary,
   AssistantStateResult,
 } from "../../types";
-import { apiJson, ApiResponse, asOptionalString, asRecord, asString, withAuthToken } from "./base";
-import { appendVoiceAssistantTranscriptSegment, normalizeAssistantStateResult } from "./groups";
+import { apiJson, ApiResponse, asRecord, asString, withAuthToken } from "./base";
+import {
+  appendVoiceAssistantTranscriptSegment,
+  normalizeAssistantStateResult,
+  normalizeAssistantVoiceDocument,
+} from "./groups";
 
 export type SecretaryPreferences = {
   recognition_backend: "browser_asr" | "assistant_service_local_asr" | "external_provider_asr";
@@ -26,12 +30,21 @@ export type GlobalVoiceSecretarySettings = {
   profile_owner?: string;
   config: SecretaryPreferences;
 };
-export type GlobalVoiceSecretaryState = {
+export type SecretaryReadinessCode =
+  | "not_configured"
+  | "invalid_configuration"
+  | "owner_unavailable";
+/** Host admission readiness; provider login and process phase are separate observations. */
+export type SecretaryReadiness = {
+  configured: boolean;
+  ready: boolean;
+  readiness_code: SecretaryReadinessCode | null;
+  readiness_error: string | null;
+};
+export type GlobalVoiceSecretaryState = SecretaryReadiness & {
   settings: GlobalVoiceSecretarySettings;
   environment_keys: string[];
   default_guidance?: string;
-  configured: boolean;
-  readiness_error?: string | null;
   profiles: ActorProfile[];
   backlog_sources?: number;
   held_sources?: number;
@@ -58,17 +71,17 @@ export const saveGlobalVoiceSecretaryPreferences = (preferences: Partial<Secreta
 const taskPath = (groupId: string, taskId = "") =>
   `/api/v1/groups/${encodeURIComponent(groupId)}/assistants/voice_secretary/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ""}`;
 export const fetchSecretaryTasks = (groupId: string) =>
-  apiJson<{
-    group_id: string;
-    tasks: SecretaryTaskSummary[];
-    configured: boolean;
-    global_owner: boolean;
-    readiness_error?: string | null;
-    deferred_sources?: number;
-    unprocessed_document_sources?: number;
-    held_sources?: number;
-    invalid_sources?: number;
-  }>(taskPath(groupId));
+  apiJson<
+    SecretaryReadiness & {
+      group_id: string;
+      tasks: SecretaryTaskSummary[];
+      global_owner: boolean;
+      deferred_sources?: number;
+      unprocessed_document_sources?: number;
+      held_sources?: number;
+      invalid_sources?: number;
+    }
+  >(taskPath(groupId));
 export const cancelSecretaryTask = (groupId: string, taskId: string) =>
   apiJson<{ cancel_requested?: boolean }>(`${taskPath(groupId, taskId)}/cancel`, {
     method: "POST",
@@ -115,41 +128,6 @@ export const removeGlobalAsrModel = (modelId: string) =>
     body: "{}",
   });
 
-function normalizeVoiceDocument(value: unknown): AssistantVoiceDocument | null {
-  const record = asRecord(value);
-  if (!record) return null;
-  const documentId = asString(record.document_id).trim();
-  const documentPath =
-    asOptionalString(record.document_path) || asOptionalString(record.workspace_path) || undefined;
-  if (!documentId && !documentPath) return null;
-  return {
-    document_id: documentId || String(documentPath || ""),
-    document_path: documentPath,
-    filename: asOptionalString(record.filename) || undefined,
-    assistant_id: asOptionalString(record.assistant_id) || undefined,
-    title: asString(record.title).trim() || String(documentPath || "Untitled document"),
-    status: asString(record.status).trim() || "active",
-    storage_kind: asOptionalString(record.storage_kind) || undefined,
-    workspace_path: asOptionalString(record.workspace_path) || undefined,
-    content: asOptionalString(record.content) || undefined,
-    content_sha256: asOptionalString(record.content_sha256) || undefined,
-    content_chars: Number.isFinite(Number(record.content_chars))
-      ? Number(record.content_chars)
-      : undefined,
-    revision_count: Number.isFinite(Number(record.revision_count))
-      ? Number(record.revision_count)
-      : undefined,
-    source_segment_count: Number.isFinite(Number(record.source_segment_count))
-      ? Number(record.source_segment_count)
-      : undefined,
-    last_source_segment_id: asOptionalString(record.last_source_segment_id) || undefined,
-    last_source_path: asOptionalString(record.last_source_path) || undefined,
-    created_at: asOptionalString(record.created_at) || undefined,
-    updated_at: asOptionalString(record.updated_at) || undefined,
-    created_by: asOptionalString(record.created_by) || undefined,
-  };
-}
-
 export async function fetchVoiceAssistantDocumentContent(
   groupId: string,
   documentPath: string,
@@ -168,7 +146,7 @@ export async function fetchVoiceAssistantDocumentContent(
   const result = asRecord(resp.result) ?? {};
   const documents = Array.isArray(result.documents)
     ? result.documents
-        .map((item) => normalizeVoiceDocument(item))
+        .map((item) => normalizeAssistantVoiceDocument(item, { fallbackTitleToPath: true }))
         .filter((item): item is AssistantVoiceDocument => !!item)
     : [];
   return {
@@ -296,7 +274,7 @@ export async function retryVoiceAssistantTranscriptPersistence(
   });
 }
 
-export type SecretaryRuntimeState = {
+export type SecretaryRuntimeState = SecretaryReadiness & {
   manual_turn?: boolean;
   phase:
     | "not_started"

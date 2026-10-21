@@ -1,14 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  CloseIcon,
-  FolderIcon,
-  GlobeIcon,
-  PlusIcon,
-  PowerIcon,
-  RefreshIcon,
-  TrashIcon,
-} from "../../Icons";
 import type {
   GroupSpaceBinding,
   GroupSpaceProviderAuthStatus,
@@ -18,16 +9,8 @@ import type {
 import * as api from "../../../services/api";
 import { ProjectedBrowserSurfacePanel } from "../../browser/ProjectedBrowserSurfacePanel";
 import { SelectCombobox } from "../../SelectCombobox";
-import {
-  inputClass,
-  primaryButtonClass,
-  dangerButtonClass,
-  secondaryButtonClass,
-  settingsWorkspaceBodyClass,
-  settingsWorkspaceHeaderClass,
-  settingsWorkspacePanelClass,
-  settingsWorkspaceShellClass,
-} from "./types";
+import { dangerButtonClass, inputClass, primaryButtonClass, secondaryButtonClass } from "./types";
+import { SettingsCard, SettingsPage, SettingsRow } from "./SettingsKit";
 import {
   isProviderConnectionVerified,
   resolveNotebookSpacesAfterLoad,
@@ -138,13 +121,20 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
   const [workBindRemoteId, setWorkBindRemoteId] = useState("");
   const [memoryBindRemoteId, setMemoryBindRemoteId] = useState("");
   const [loading, setLoading] = useState(false);
-  const [spacesBusy, setSpacesBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [hint, setHint] = useState("");
   const [err, setErr] = useState("");
   const connectHintedFlowRef = useRef("");
   const loadSeqRef = useRef(0);
+  const actionSeqRef = useRef(0);
   const pollInFlightRef = useRef(false);
+  const hintTimerRef = useRef<number | null>(null);
+  const clearHintTimer = () => {
+    if (hintTimerRef.current !== null) {
+      window.clearTimeout(hintTimerRef.current);
+      hintTimerRef.current = null;
+    }
+  };
 
   const providerState = status?.provider || null;
   const workBinding = status?.bindings?.work || null;
@@ -193,15 +183,20 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
     return "text-[var(--color-text-secondary)]";
   }, [connectionConnected, connectionNeedsReconnect, connectionRunning, connectionState]);
 
-  const utilityButtonClass = secondaryButtonClass();
-  const primaryUtilityButtonClass = primaryButtonClass(false);
-  const dangerUtilityButtonClass = dangerButtonClass();
-  const compactDangerButtonClass = dangerButtonClass("sm");
   const showNotebookSection = authConfigured;
+  const laneIdPrefix = useId();
+  const projectedAuthActive =
+    connectionRunning &&
+    String(authFlow?.delivery || "").trim() === "projected_browser" &&
+    Boolean(authFlow?.projected_browser?.active);
 
   const setHintWithTimeout = (text: string) => {
+    clearHintTimer();
     setHint(text);
-    window.setTimeout(() => setHint(""), 2400);
+    hintTimerRef.current = window.setTimeout(() => {
+      hintTimerRef.current = null;
+      setHint("");
+    }, 2400);
   };
 
   const loadAll = async (opts?: { refreshSpaces?: boolean }) => {
@@ -241,15 +236,10 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
         currentSpaces.length,
       );
       if (shouldLoadSpaces) {
-        setSpacesBusy(true);
-        try {
-          const spacesResp = await api.fetchGroupSpaceSpaces(gid, provider);
-          if (loadSeqRef.current !== loadSeq) return;
-          if (spacesResp.ok) {
-            nextSpaces = normalizeNotebookSpaces(spacesResp.result?.spaces);
-          }
-        } finally {
-          setSpacesBusy(false);
+        const spacesResp = await api.fetchGroupSpaceSpaces(gid, provider);
+        if (loadSeqRef.current !== loadSeq) return;
+        if (spacesResp.ok) {
+          nextSpaces = normalizeNotebookSpaces(spacesResp.result?.spaces);
         }
       }
       nextSpaces = resolveNotebookSpacesAfterLoad(currentSpaces, {
@@ -280,28 +270,42 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
     }
   };
 
-  const draftGroupRef = useRef(groupId);
+  const pageVisitRef = useRef({ groupId });
   useEffect(() => {
-    if (draftGroupRef.current !== groupId) {
-      draftGroupRef.current = groupId;
+    const groupChanged = pageVisitRef.current.groupId !== groupId;
+    pageVisitRef.current = { groupId };
+    setHint("");
+    setActionBusy(false);
+    if (groupChanged) {
+      clearHintTimer();
+      setStatus(null);
       setWorkBindRemoteId("");
       setMemoryBindRemoteId("");
+      setErr("");
+      setLoading(false);
     }
     if (!isActive || !groupId) return;
     void loadAll({ refreshSpaces: true });
     return () => {
+      pageVisitRef.current = { groupId };
+      clearHintTimer();
       loadSeqRef.current += 1;
+      actionSeqRef.current += 1;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh when active/group changes
   }, [isActive, groupId]);
 
   useEffect(() => {
     if (!isActive || !groupId || !connectionRunning) return;
+    let cancelled = false;
+    const page = pageVisitRef.current;
+    const isCurrentPage = () => pageVisitRef.current === page;
     const pollOnce = async () => {
-      if (pollInFlightRef.current) return;
+      if (pollInFlightRef.current || cancelled) return;
       pollInFlightRef.current = true;
       try {
         const resp = await api.controlGroupSpaceProviderAuth({ provider, action: "status" });
+        if (cancelled || !isCurrentPage()) return;
         if (!resp.ok) {
           setErr(resp.error?.message || t("groupSpace.loadFailed"));
           return;
@@ -311,6 +315,7 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
         const nextState = String(nextAuth?.state || "").trim();
         if (nextState && nextState !== "running") {
           await loadAll({ refreshSpaces: nextState === "succeeded" });
+          if (!isCurrentPage()) return;
           if (nextState === "succeeded") {
             const flowKey = String(
               nextAuth?.session_id || nextAuth?.started_at || "succeeded",
@@ -322,7 +327,9 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
           }
         }
       } catch (e) {
-        setErr(e instanceof Error ? e.message : t("groupSpace.loadFailed"));
+        if (!cancelled && isCurrentPage()) {
+          setErr(e instanceof Error ? e.message : t("groupSpace.loadFailed"));
+        }
       } finally {
         pollInFlightRef.current = false;
       }
@@ -331,11 +338,17 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
     const timer = window.setInterval(() => {
       void pollOnce();
     }, 3000);
-    return () => window.clearInterval(timer);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- poll only while auth flow is running
   }, [isActive, groupId, connectionRunning]);
 
   const handleStartConnect = async (forceReauth: boolean = false) => {
+    const actionSeq = ++actionSeqRef.current;
+    const page = pageVisitRef.current;
+    const isCurrent = () => actionSeqRef.current === actionSeq && pageVisitRef.current === page;
     setActionBusy(true);
     setErr("");
     try {
@@ -346,6 +359,7 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
         forceReauth,
         projected: true,
       });
+      if (!isCurrent()) return;
       if (!resp.ok) {
         setErr(
           resp.error?.message ||
@@ -356,17 +370,23 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
       setAuthFlow(resp.result?.auth || null);
       setHintWithTimeout(t(forceReauth ? "groupSpace.switchStarted" : "groupSpace.connectStarted"));
     } catch {
-      setErr(t(forceReauth ? "groupSpace.switchStartFailed" : "groupSpace.connectStartFailed"));
+      if (isCurrent()) {
+        setErr(t(forceReauth ? "groupSpace.switchStartFailed" : "groupSpace.connectStartFailed"));
+      }
     } finally {
-      setActionBusy(false);
+      if (isCurrent()) setActionBusy(false);
     }
   };
 
   const handleCancelConnect = async () => {
+    const actionSeq = ++actionSeqRef.current;
+    const page = pageVisitRef.current;
+    const isCurrent = () => actionSeqRef.current === actionSeq && pageVisitRef.current === page;
     setActionBusy(true);
     setErr("");
     try {
       const resp = await api.controlGroupSpaceProviderAuth({ provider, action: "cancel" });
+      if (!isCurrent()) return;
       if (!resp.ok) {
         setErr(resp.error?.message || t("groupSpace.connectCancelFailed"));
         return;
@@ -375,19 +395,23 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
       setHintWithTimeout(t("groupSpace.connectCancelRequested"));
       await loadAll();
     } catch {
-      setErr(t("groupSpace.connectCancelFailed"));
+      if (isCurrent()) setErr(t("groupSpace.connectCancelFailed"));
     } finally {
-      setActionBusy(false);
+      if (isCurrent()) setActionBusy(false);
     }
   };
 
   const handleDisconnect = async () => {
     const confirmText = t("groupSpace.disconnectConfirm");
     if (!window.confirm(confirmText)) return;
+    const actionSeq = ++actionSeqRef.current;
+    const page = pageVisitRef.current;
+    const isCurrent = () => actionSeqRef.current === actionSeq && pageVisitRef.current === page;
     setActionBusy(true);
     setErr("");
     try {
       const resp = await api.controlGroupSpaceProviderAuth({ provider, action: "disconnect" });
+      if (!isCurrent()) return;
       if (!resp.ok) {
         setErr(resp.error?.message || t("groupSpace.disconnectFailed"));
         return;
@@ -396,9 +420,9 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
       setHintWithTimeout(t("groupSpace.disconnectSuccess"));
       await loadAll();
     } catch {
-      setErr(t("groupSpace.disconnectFailed"));
+      if (isCurrent()) setErr(t("groupSpace.disconnectFailed"));
     } finally {
-      setActionBusy(false);
+      if (isCurrent()) setActionBusy(false);
     }
   };
 
@@ -406,10 +430,14 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
     const gid = String(groupId || "").trim();
     const rid = String(remoteSpaceId || "").trim();
     if (!gid || !rid) return;
+    const actionSeq = ++actionSeqRef.current;
+    const page = pageVisitRef.current;
+    const isCurrent = () => actionSeqRef.current === actionSeq && pageVisitRef.current === page;
     setActionBusy(true);
     setErr("");
     try {
       const resp = await api.bindGroupSpace(gid, rid, provider, lane);
+      if (!isCurrent()) return;
       if (!resp.ok) {
         setErr(resp.error?.message || t("groupSpace.bindFailed"));
         return;
@@ -420,19 +448,23 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
       setHintWithTimeout(t("groupSpace.bindSuccess"));
       await loadAll();
     } catch {
-      setErr(t("groupSpace.bindFailed"));
+      if (isCurrent()) setErr(t("groupSpace.bindFailed"));
     } finally {
-      setActionBusy(false);
+      if (isCurrent()) setActionBusy(false);
     }
   };
 
   const handleCreateAndBind = async (lane: NotebookLane) => {
     const gid = String(groupId || "").trim();
     if (!gid) return;
+    const actionSeq = ++actionSeqRef.current;
+    const page = pageVisitRef.current;
+    const isCurrent = () => actionSeqRef.current === actionSeq && pageVisitRef.current === page;
     setActionBusy(true);
     setErr("");
     try {
       const resp = await api.bindGroupSpace(gid, "", provider, lane);
+      if (!isCurrent()) return;
       if (!resp.ok) {
         setErr(resp.error?.message || t("groupSpace.bindFailed"));
         return;
@@ -444,9 +476,9 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
       setHintWithTimeout(t("groupSpace.bindCreated"));
       await loadAll({ refreshSpaces: true });
     } catch {
-      setErr(t("groupSpace.bindFailed"));
+      if (isCurrent()) setErr(t("groupSpace.bindFailed"));
     } finally {
-      setActionBusy(false);
+      if (isCurrent()) setActionBusy(false);
     }
   };
 
@@ -457,10 +489,14 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
       lane === "work" ? "groupSpace.workUnbindConfirm" : "groupSpace.memoryUnbindConfirm",
     );
     if (!window.confirm(confirmText)) return;
+    const actionSeq = ++actionSeqRef.current;
+    const page = pageVisitRef.current;
+    const isCurrent = () => actionSeqRef.current === actionSeq && pageVisitRef.current === page;
     setActionBusy(true);
     setErr("");
     try {
       const resp = await api.unbindGroupSpace(gid, provider, lane);
+      if (!isCurrent()) return;
       if (!resp.ok) {
         setErr(resp.error?.message || t("groupSpace.unbindFailed"));
         return;
@@ -471,9 +507,9 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
       setHintWithTimeout(t("groupSpace.unbindSuccess"));
       await loadAll();
     } catch {
-      setErr(t("groupSpace.unbindFailed"));
+      if (isCurrent()) setErr(t("groupSpace.unbindFailed"));
     } finally {
-      setActionBusy(false);
+      if (isCurrent()) setActionBusy(false);
     }
   };
 
@@ -511,114 +547,96 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
       ) || null;
     const headerTone: "good" | "neutral" | "warn" =
       laneState === "active" ? "good" : laneState === "saved" ? "warn" : "neutral";
+    const chooseId = `${laneIdPrefix}-${lane}-choose`;
 
     return (
-      <div key={lane} className={settingsWorkspacePanelClass(_isDark)}>
-        <div>
-          <div className="text-sm font-semibold text-[var(--color-text-primary)]">
-            {t(titleKey)}
-          </div>
-          <div className="mt-1 text-xs text-[var(--color-text-tertiary)]">{t(hintKey)}</div>
-        </div>
-
-        <div className="mt-3 border-b border-[var(--glass-border-subtle)] pb-3">
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <div className="min-w-0 flex-1 basis-48">
-              <div className="text-xs font-medium text-[var(--color-text-muted)]">
-                {laneTitleLabel}
-              </div>
-              <div className="mt-1 text-sm font-semibold break-words text-[var(--color-text-primary)]">
-                {boundRemoteId ? boundNotebookTitle || boundRemoteId : t("groupSpace.notBound")}
-              </div>
-              {showRemoteIdLine ? (
-                <div className="mt-1 text-xs font-mono break-all text-[var(--color-text-muted)]">
-                  {boundRemoteId}
-                </div>
-              ) : null}
+      <SettingsCard key={lane} title={t(titleKey)} description={t(hintKey)}>
+        <SettingsRow label={laneTitleLabel}>
+          <div className="min-w-0 flex-1 basis-48">
+            <div className="text-[13px] font-semibold break-words text-[var(--color-text-primary)]">
+              {boundRemoteId ? boundNotebookTitle || boundRemoteId : t("groupSpace.notBound")}
             </div>
-            <div
-              className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium ${statusChipClass(headerTone)}`}
-            >
-              {notebookStateText}
-            </div>
+            {showRemoteIdLine ? (
+              <div className="mt-0.5 font-mono text-xs break-all text-[var(--color-text-muted)]">
+                {boundRemoteId}
+              </div>
+            ) : null}
           </div>
+          <span
+            className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium ${statusChipClass(headerTone)}`}
+          >
+            {notebookStateText}
+          </span>
           {canUnbind ? (
-            <div className="mt-3 flex justify-end">
-              <button
-                type="button"
-                onClick={() => void handleUnbind(lane)}
-                disabled={!canUnbind}
-                className={compactDangerButtonClass}
-              >
-                <TrashIcon size={14} />
-                {t("groupSpace.unbind")}
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => void handleUnbind(lane)}
+              disabled={!canUnbind}
+              className={dangerButtonClass("sm")}
+            >
+              {t("groupSpace.unbind")}
+            </button>
           ) : null}
-        </div>
-
-        <div className="mt-3">
-          <label className="block text-xs mb-1 text-[var(--color-text-tertiary)]">
-            {t("groupSpace.chooseNotebook")}
-          </label>
-          <SelectCombobox
-            items={
-              notebookOptions.length
-                ? notebookOptions.map((item) => {
-                    const remoteId = String(item.remote_space_id || "").trim();
-                    const title = String(item.title || "").trim() || remoteId;
-                    return { value: remoteId, label: title };
-                  })
-                : [{ value: "", label: t("groupSpace.noNotebookOptions"), disabled: true }]
-            }
-            value={selectedRemoteId}
-            onChange={(value) => setSelectedRemoteId(String(value || ""))}
-            disabled={!connectionConnected || actionBusy || spacesBusy || !notebookOptions.length}
-            ariaLabel={t("groupSpace.chooseNotebook")}
-            className={inputClass()}
-            searchable
-          />
-          {notebookActionsHint ? (
-            <div className="mt-1 text-xs text-amber-600 dark:text-amber-400">
-              {notebookActionsHint}
-            </div>
-          ) : connectionConnected && !notebookOptions.length ? (
-            <div className="mt-1 text-xs text-[var(--color-text-tertiary)]">
-              {t("groupSpace.noNotebookOptionsHint")}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+        </SettingsRow>
+        <SettingsRow
+          label={t("groupSpace.chooseNotebook")}
+          labelId={chooseId}
+          help={
+            selectedNotebook
+              ? t("groupSpace.bindSelectedHintWithTarget", {
+                  target:
+                    String(selectedNotebook.title || "").trim() ||
+                    String(selectedNotebook.remote_space_id || "").trim(),
+                })
+              : undefined
+          }
+        >
+          <div className="w-full max-w-[320px]">
+            <SelectCombobox
+              items={
+                notebookOptions.length
+                  ? notebookOptions.map((item) => {
+                      const remoteId = String(item.remote_space_id || "").trim();
+                      const title = String(item.title || "").trim() || remoteId;
+                      return { value: remoteId, label: title };
+                    })
+                  : [{ value: "", label: t("groupSpace.noNotebookOptions"), disabled: true }]
+              }
+              value={selectedRemoteId}
+              onChange={(value) => setSelectedRemoteId(String(value || ""))}
+              disabled={!connectionConnected || actionBusy || loading || !notebookOptions.length}
+              ariaLabel={t("groupSpace.chooseNotebook")}
+              className={inputClass()}
+              searchable
+            />
+          </div>
           <button
             type="button"
             onClick={() => void handleBind(lane, selectedRemoteId)}
             disabled={!canBind || !String(selectedRemoteId || "").trim()}
-            className={`${primaryUtilityButtonClass} w-full sm:flex-1`}
+            className={primaryButtonClass(false)}
           >
-            <FolderIcon size={16} />
             {t("groupSpace.bindSelected")}
           </button>
           <button
             type="button"
             onClick={() => void handleCreateAndBind(lane)}
             disabled={!canBind}
-            className={`${utilityButtonClass} w-full sm:w-auto sm:min-w-[132px]`}
+            className={secondaryButtonClass()}
           >
-            <PlusIcon size={16} />
             {t("groupSpace.createAndBind")}
           </button>
-        </div>
-        {selectedNotebook ? (
-          <div className="mt-2 text-xs text-[var(--color-text-tertiary)]">
-            {t("groupSpace.bindSelectedHintWithTarget", {
-              target:
-                String(selectedNotebook.title || "").trim() ||
-                String(selectedNotebook.remote_space_id || "").trim(),
-            })}
-          </div>
-        ) : null}
-      </div>
+          {notebookActionsHint ? (
+            <div className="w-full text-xs text-amber-600 dark:text-amber-400">
+              {notebookActionsHint}
+            </div>
+          ) : connectionConnected && !notebookOptions.length ? (
+            <div className="w-full text-xs text-[var(--color-text-tertiary)]">
+              {t("groupSpace.noNotebookOptionsHint")}
+            </div>
+          ) : null}
+        </SettingsRow>
+      </SettingsCard>
     );
   };
 
@@ -631,171 +649,140 @@ export function GroupSpaceTab({ isDark: _isDark, groupId, isActive = true }: Gro
   }
 
   return (
-    <div className="space-y-5">
-      <section className={settingsWorkspaceShellClass(_isDark)}>
-        <div className={settingsWorkspaceHeaderClass(_isDark)}>
-          <div>
-            <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
-              {t("groupSpace.title")}
-            </h3>
-            <p className="mt-1 max-w-3xl text-xs text-[var(--color-text-muted)]">
-              {t("groupSpace.description")}
-            </p>
-          </div>
+    <SettingsPage title={t("groupSpace.title")} description={t("groupSpace.description")}>
+      {err ? (
+        <div role="alert" className="text-sm text-rose-700 dark:text-rose-300">
+          {err}
+        </div>
+      ) : null}
+      {hint ? (
+        <div role="status" className="text-sm text-[var(--color-accent-success)]">
+          {hint}
+        </div>
+      ) : null}
+
+      <SettingsCard
+        title={t("groupSpace.accountTitle")}
+        description={t("groupSpace.accountHint")}
+        actions={
           <button
             type="button"
             onClick={() => void loadAll()}
             disabled={actionBusy || loading}
             className={secondaryButtonClass("sm")}
           >
-            <RefreshIcon size={16} />
             {loading ? t("common:loading") : t("groupSpace.refresh")}
           </button>
-        </div>
-
-        <div className={settingsWorkspaceBodyClass}>
-          <div className={settingsWorkspacePanelClass(_isDark)}>
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold text-[var(--color-text-primary)]">
-                  {t("groupSpace.accountTitle")}
-                </div>
-                <div className="mt-1 text-xs text-[var(--color-text-tertiary)]">
-                  {t("groupSpace.accountHint")}
-                </div>
-              </div>
-              <div className={`text-xs font-medium ${connectionStatusTone}`}>
-                {connectionStatusText}
-              </div>
-            </div>
-
-            <div className="mt-3 flex flex-wrap gap-2">
-              {connectionRunning ? (
-                <button
-                  type="button"
-                  onClick={() => void handleCancelConnect()}
-                  disabled={actionBusy}
-                  className={dangerUtilityButtonClass}
-                >
-                  <CloseIcon size={16} />
-                  {t("groupSpace.cancelConnect")}
-                </button>
-              ) : !authConfigured ? (
-                <button
-                  type="button"
-                  onClick={() => void handleStartConnect(false)}
-                  disabled={actionBusy}
-                  className={primaryUtilityButtonClass}
-                >
-                  <GlobeIcon size={16} />
-                  {t("groupSpace.connectGoogle")}
-                </button>
-              ) : (
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void handleStartConnect(true)}
-                    disabled={actionBusy}
-                    className={utilityButtonClass}
-                  >
-                    <RefreshIcon size={16} />
-                    {t("groupSpace.switchGoogle")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleDisconnect()}
-                    disabled={actionBusy}
-                    className={dangerUtilityButtonClass}
-                  >
-                    <PowerIcon size={16} />
-                    {t("groupSpace.disconnectGoogle")}
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {authConfigured && !connectionRunning ? (
-              <div className="mt-3 text-xs text-[var(--color-text-tertiary)]">
-                {t("groupSpace.disconnectBehaviorHint")}
-              </div>
-            ) : null}
-
+        }
+      >
+        <SettingsRow
+          label={t("common:status")}
+          help={
+            authConfigured && !connectionRunning
+              ? t("groupSpace.disconnectBehaviorHint")
+              : undefined
+          }
+        >
+          <span className={`text-[13px] font-semibold ${connectionStatusTone}`}>
+            {connectionStatusText}
+          </span>
+          {connectionRunning ? (
+            <button
+              type="button"
+              onClick={() => void handleCancelConnect()}
+              disabled={actionBusy}
+              className={dangerButtonClass("sm")}
+            >
+              {t("groupSpace.cancelConnect")}
+            </button>
+          ) : !authConfigured ? (
+            <button
+              type="button"
+              onClick={() => void handleStartConnect(false)}
+              disabled={actionBusy}
+              className={primaryButtonClass(false)}
+            >
+              {t("groupSpace.connectGoogle")}
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => void handleStartConnect(true)}
+                disabled={actionBusy}
+                className={secondaryButtonClass("sm")}
+              >
+                {t("groupSpace.switchGoogle")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDisconnect()}
+                disabled={actionBusy}
+                className={dangerButtonClass("sm")}
+              >
+                {t("groupSpace.disconnectGoogle")}
+              </button>
+            </>
+          )}
+        </SettingsRow>
+        {authFlow?.message || authFlow?.error?.message || projectedAuthActive ? (
+          <div className="flex flex-col gap-2 px-5 py-4">
             {authFlow?.message ? (
-              <div className="mt-3 text-xs text-[var(--color-text-tertiary)]">
+              <div className="text-xs text-[var(--color-text-tertiary)]">
                 {String(authFlow.message)}
               </div>
             ) : null}
             {authFlow?.error?.message ? (
-              <div className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+              <div className="text-xs text-amber-600 dark:text-amber-400">
                 {String(authFlow.error.message)}
               </div>
             ) : null}
-            {connectionRunning &&
-            String(authFlow?.delivery || "").trim() === "projected_browser" &&
-            Boolean(authFlow?.projected_browser?.active) ? (
-              <div className="mt-4">
-                <ProjectedBrowserSurfacePanel
-                  key={String(authFlow?.session_id || authFlow?.started_at || "notebooklm-auth")}
-                  isDark={_isDark}
-                  refreshNonce={0}
-                  defaultViewerMode="browser"
-                  viewportClassName="h-[68vh] min-h-[460px] max-h-[780px] w-full sm:h-[72vh] sm:min-h-[560px]"
-                  fallbackUrl="https://notebook.google.com/"
-                  labels={{
-                    starting: t("groupSpace.projectedAuthStarting"),
-                    waiting: t("groupSpace.projectedAuthWaiting"),
-                    ready: t("groupSpace.projectedAuthReady"),
-                    failed: t("groupSpace.projectedAuthFailed"),
-                    closed: t("groupSpace.projectedAuthClosed"),
-                    reconnecting: t("groupSpace.projectedAuthReconnecting"),
-                    reconnect: t("groupSpace.projectedAuthReconnect"),
-                    back: t("groupSpace.projectedAuthBack"),
-                    frameAlt: t("groupSpace.projectedAuthFrameAlt"),
-                  }}
-                  webSocketUrl={api.getGroupSpaceProviderAuthBrowserWebSocketUrl(provider)}
-                  loadSession={() => api.fetchGroupSpaceProviderAuthBrowserSession(provider)}
-                />
-              </div>
+            {projectedAuthActive ? (
+              <ProjectedBrowserSurfacePanel
+                key={String(authFlow?.session_id || authFlow?.started_at || "notebooklm-auth")}
+                isDark={_isDark}
+                refreshNonce={0}
+                defaultViewerMode="browser"
+                viewportClassName="h-[68vh] min-h-[460px] max-h-[780px] w-full sm:h-[72vh] sm:min-h-[560px]"
+                fallbackUrl="https://notebook.google.com/"
+                labels={{
+                  starting: t("groupSpace.projectedAuthStarting"),
+                  waiting: t("groupSpace.projectedAuthWaiting"),
+                  ready: t("groupSpace.projectedAuthReady"),
+                  failed: t("groupSpace.projectedAuthFailed"),
+                  closed: t("groupSpace.projectedAuthClosed"),
+                  reconnecting: t("groupSpace.projectedAuthReconnecting"),
+                  reconnect: t("groupSpace.projectedAuthReconnect"),
+                  back: t("groupSpace.projectedAuthBack"),
+                  frameAlt: t("groupSpace.projectedAuthFrameAlt"),
+                }}
+                webSocketUrl={api.getGroupSpaceProviderAuthBrowserWebSocketUrl(provider)}
+                loadSession={() => api.fetchGroupSpaceProviderAuthBrowserSession(provider)}
+              />
             ) : null}
           </div>
+        ) : null}
+      </SettingsCard>
 
-          {showNotebookSection ? (
-            <>
-              <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-                {NOTEBOOK_LANES.map((lane) => renderNotebookCard(lane))}
-              </div>
-
-              {connectionWarning ? (
-                <div role="status" className="text-sm text-amber-700 dark:text-amber-300">
-                  {t("groupSpace.summaryWarning")}: {connectionWarning}
-                </div>
-              ) : null}
-            </>
-          ) : (
-            <div className={settingsWorkspacePanelClass(_isDark)}>
-              <div className="text-sm font-semibold text-[var(--color-text-primary)]">
-                {t("groupSpace.notebookSectionLockedTitle")}
-              </div>
-              <div className="mt-1 text-xs text-[var(--color-text-tertiary)]">
-                {connectionRunning
-                  ? t("groupSpace.notebookSectionLockedConnecting")
-                  : t("groupSpace.notebookSectionLockedDisconnected")}
-              </div>
-            </div>
-          )}
-
-          {err ? (
-            <div role="alert" className="text-xs text-rose-700 dark:text-rose-300">
-              {err}
+      {showNotebookSection ? (
+        <>
+          {NOTEBOOK_LANES.map((lane) => renderNotebookCard(lane))}
+          {connectionWarning ? (
+            <div role="status" className="text-sm text-amber-700 dark:text-amber-300">
+              {t("groupSpace.summaryWarning")}: {connectionWarning}
             </div>
           ) : null}
-          {hint ? (
-            <div role="status" className="text-xs text-[var(--color-accent-success)]">
-              {hint}
-            </div>
-          ) : null}
-        </div>
-      </section>
-    </div>
+        </>
+      ) : (
+        <SettingsCard
+          title={t("groupSpace.notebookSectionLockedTitle")}
+          description={
+            connectionRunning
+              ? t("groupSpace.notebookSectionLockedConnecting")
+              : t("groupSpace.notebookSectionLockedDisconnected")
+          }
+        />
+      )}
+    </SettingsPage>
   );
 }

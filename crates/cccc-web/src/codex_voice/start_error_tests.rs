@@ -74,19 +74,43 @@ fn analyst_timeout_credentials_and_recording_conflicts_stay_distinct() {
     );
 }
 
+#[test]
+fn grok_prerequisites_keep_safe_actionable_categories() {
+    for (error, code) in [
+        (RealtimeCallError::GrokRuntime, "grok_voice_runtime_missing"),
+        (
+            RealtimeCallError::GrokCredentials,
+            "grok_voice_login_required",
+        ),
+        (
+            RealtimeCallError::GrokAuthentication,
+            "grok_voice_auth_failed",
+        ),
+    ] {
+        let error = Error::new(error).context("private-native-path-and-credential");
+        let details = StartDiagnostic::from_error(&error, 20).details();
+        assert_eq!(details["code"], code);
+        assert_eq!(details["stage"], "realtime");
+        assert!(!details.to_string().contains("private-native"));
+    }
+}
+
+fn no_proxy_client(timeout: std::time::Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(timeout)
+        .build()
+        .expect("client")
+}
+
 #[tokio::test]
-async fn request_timeout_and_connection_failure_do_not_become_login_errors() {
+async fn request_timeout_does_not_become_a_login_error() {
+    // TCP can connect but no HTTP answer is sent; no provider traffic.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener");
     let address = listener.local_addr().expect("address");
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_millis(100))
-        .build()
-        .expect("client");
-    // TCP can connect but no HTTP answer is sent; no provider traffic.
-    let error = client
+    let error = no_proxy_client(std::time::Duration::from_millis(100))
         .get(format!("http://{address}/?private-token=secret"))
         .send()
         .await
@@ -95,18 +119,40 @@ async fn request_timeout_and_connection_failure_do_not_become_login_errors() {
     let diagnostic = StartDiagnostic::from_error(&error, 100);
     assert_eq!(diagnostic.code, "codex_voice_realtime_timeout");
     assert!(!diagnostic.details().to_string().contains("secret"));
-    drop(listener);
-    let error = client
-        .get(format!("http://{address}/"))
+}
+
+#[tokio::test]
+async fn connection_failure_does_not_become_a_login_error() {
+    const SYNTHETIC_OS_ERROR: i32 = 111;
+    struct FailedDns;
+    impl reqwest::dns::Resolve for FailedDns {
+        fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            assert_eq!(name.as_str(), "connection-fixture.invalid");
+            // Synthetic resolver error: test connector classification and
+            // raw OS metadata without depending on the host's TCP behavior.
+            Box::pin(async move {
+                Err(Box::new(io::Error::from_raw_os_error(SYNTHETIC_OS_ERROR))
+                    as Box<dyn std::error::Error + Send + Sync>)
+            })
+        }
+    }
+    // Fail inside the real connector without DNS/TCP traffic or a freed port.
+    let error = reqwest::Client::builder()
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::new(FailedDns))
+        .build()
+        .expect("client")
+        .get("http://connection-fixture.invalid/")
         .send()
         .await
-        .expect_err("closed port");
+        .expect_err("connection failure");
     let error = Error::new(error).context(StartStage::Realtime);
+    let details = StartDiagnostic::from_error(&error, 2).details();
     assert_eq!(
-        StartDiagnostic::from_error(&error, 2).details()["request_kind"],
-        "connect"
+        details["request_kind"], "connect",
+        "safe diagnostic: {details}"
     );
-    assert!(StartDiagnostic::from_error(&error, 2).details()["os_error"].is_number());
+    assert_eq!(details["os_error"], SYNTHETIC_OS_ERROR);
     assert_eq!(
         StartDiagnostic::from_error(&error, 2).code,
         "codex_voice_realtime_connection_failed"

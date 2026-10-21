@@ -10,6 +10,37 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+pub(super) async fn voice_provider_metadata() -> Vec<Value> {
+    use cccc_contracts::codex_voice::VoiceProvider;
+    use cccc_daemon::experimental_codex_voice::{
+        default_realtime_voice, grok_credentials_available, realtime_voices,
+    };
+    let mut providers = Vec::new();
+    for provider in [VoiceProvider::Codex, VoiceProvider::Grok] {
+        let config =
+            RealtimeCallConfig::from_environment_for(provider, default_realtime_voice(provider))
+                .ok();
+        let native_available = provider == VoiceProvider::Codex
+            || config
+                .as_ref()
+                .is_some_and(|config| config.grok_executable.is_some());
+        let credentials_available = if let Some(config) = &config {
+            match provider {
+                VoiceProvider::Codex => {
+                    read_realtime_credentials_available(&config.auth_path).await
+                }
+                VoiceProvider::Grok => grok_credentials_available(&config.auth_path).await,
+            }
+        } else {
+            false
+        };
+        providers.push(json!({"id":provider,"voices":realtime_voices(provider),
+            "default_voice":default_realtime_voice(provider),
+            "credentials_available":credentials_available,"native_runtime_available":native_available}));
+    }
+    providers
+}
+
 pub(super) async fn codex_voice_readiness(home: &cccc_core::HomeLayout) -> Value {
     let settings = cccc_core::codex_voice_settings::load(home).unwrap_or_default();
     let custom_environment =
@@ -29,17 +60,17 @@ pub(super) async fn codex_voice_readiness(home: &cccc_core::HomeLayout) -> Value
             return !analyst_runtime_setup_required;
         }
         let executable = analyst_runtime_executable(runtime);
-        let explicit = std::path::Path::new(executable).is_absolute()
+        let explicit = std::path::Path::new(&executable).is_absolute()
             || executable == "~"
             || executable.starts_with("~/")
             || executable.starts_with("~\\")
             || executable.contains('/')
             || executable.contains('\\');
         if explicit {
-            cccc_core::path_input::expand_user_path(executable).is_ok_and(|path| path.is_file())
+            cccc_core::path_input::expand_user_path(&executable).is_ok_and(|path| path.is_file())
         } else {
             cccc_runtime::resolve_executable_in_path(
-                executable,
+                &executable,
                 runtime.environment.get("PATH").map(String::as_str),
             )
             .is_some()
@@ -61,22 +92,17 @@ pub(super) async fn codex_voice_readiness(home: &cccc_core::HomeLayout) -> Value
 
 fn analyst_runtime_executable(
     runtime: &cccc_core::codex_voice_settings::ResolvedAgentRuntime,
-) -> &str {
+) -> String {
     runtime
         .command
         .first()
-        .map(String::as_str)
-        .unwrap_or_else(|| match runtime.runtime {
-            cccc_contracts::ActorRuntime::Claude => "claude",
-            cccc_contracts::ActorRuntime::Grok => "grok",
-            cccc_contracts::ActorRuntime::Opencode => "opencode",
-            cccc_contracts::ActorRuntime::Kilo => "kilo",
-            cccc_contracts::ActorRuntime::Antigravity => "agy",
-            cccc_contracts::ActorRuntime::Copilot => "copilot",
-            cccc_contracts::ActorRuntime::Devin => "devin",
-            cccc_contracts::ActorRuntime::Cursor => "cursor-agent",
-            _ => "codex",
+        .cloned()
+        .or_else(|| {
+            cccc_runtime::default_command(runtime.runtime)
+                .into_iter()
+                .next()
         })
+        .unwrap_or_default()
 }
 
 fn runtime_name(runtime: cccc_contracts::ActorRuntime) -> String {
@@ -238,6 +264,7 @@ mod tests {
             (ActorRuntime::Grok, "grok"),
             (ActorRuntime::Opencode, "opencode"),
             (ActorRuntime::Kilo, "kilo"),
+            (ActorRuntime::Pi, "pi"),
         ] {
             let resolved = ResolvedAgentRuntime {
                 runtime,

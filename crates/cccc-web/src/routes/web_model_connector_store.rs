@@ -70,14 +70,40 @@ pub(super) fn resolve(
         web_model_connectors::binding_for_token(connector, token).ok_or_else(|| {
             ApiError::forbidden("actor_token_invalid: use the Actor credential from this Bot's current CCCC task message")
         })?
+    } else if request["params"]["arguments"].get("actor_token").is_some() {
+        let token = request["params"]["arguments"]["actor_token"]
+            .as_str()
+            .unwrap_or_default();
+        web_model_connectors::dots_binding_for_token(
+            connector,
+            token,
+            request["params"]["name"].as_str().unwrap_or_default(),
+        )
+        .ok_or_else(|| {
+            ApiError::forbidden(
+                "dots_token_invalid: Dots claims work with {} from its explicitly paired conversation. Update the existing native task using Get setup instructions in CCCC. Business tools require the execution credential returned by the current claim",
+            )
+        })?
     } else {
         let session = web_model_connectors::session_key(connector, &request["params"]["_meta"])
             .map_err(io_error)?;
-        web_model_connectors::binding_for_session(connector, &session).ok_or_else(|| {
+        let paired = web_model_connectors::binding_for_session(connector, &session).ok_or_else(|| {
             ApiError::forbidden(
-                "conversation_not_paired: pair this conversation in the Actor settings",
+                "conversation_not_paired: use the selected Actor's setup instructions to explicitly pair this conversation; missing or changed host identity cannot select an Actor",
             )
-        })?
+        })?;
+        if paired["transport"] == "mcp_events" {
+            if request["params"]["name"] != "cccc_runtime_wait_next_turn" {
+                return Err(ApiError::forbidden(
+                    "dots_execution_token_required: pairing authorizes only one current task claim. Business tools require the execution actor_token returned by cccc_runtime_wait_next_turn",
+                ));
+            }
+            web_model_connectors::dots_claim_binding(connector, &session).ok_or_else(|| {
+                ApiError::forbidden("dots_pairing_changed: get new setup instructions in CCCC")
+            })?
+        } else {
+            paired
+        }
     };
     let group = GroupStore::new(state.home.clone())
         .map_err(io_error)?

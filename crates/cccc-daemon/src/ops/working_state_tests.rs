@@ -14,26 +14,31 @@ fn stopped_actor_listing_uses_the_configured_surface_without_starting_work() {
     home.initialize().expect("initialize fixture home");
     let store = GroupStore::new(home.clone()).expect("fixture store");
     let mut group = store.create("Stopped surfaces", "").expect("fixture group");
-    // 0.4.43 decides headless from `actor.runner`, not from runtime+mode, and
-    // ACP-capable runtimes route through a managed session, so the surface is
-    // "pty" there even when the runner field says headless.
     let cases = [
+        (ActorRuntime::Pi, RuntimeMode::Default, "headless"),
+        (ActorRuntime::Antigravity, RuntimeMode::Acp, "headless"),
+        (ActorRuntime::Auggie, RuntimeMode::Acp, "headless"),
+        (ActorRuntime::Copilot, RuntimeMode::Acp, "headless"),
+        (ActorRuntime::Cursor, RuntimeMode::Acp, "headless"),
+        (ActorRuntime::Devin, RuntimeMode::Acp, "headless"),
+        (ActorRuntime::Kimi, RuntimeMode::Acp, "headless"),
+        (ActorRuntime::Kiro, RuntimeMode::Acp, "headless"),
+        (ActorRuntime::Hermes, RuntimeMode::Acp, "headless"),
+        (ActorRuntime::Droid, RuntimeMode::Acp, "headless"),
+        (ActorRuntime::Kiro, RuntimeMode::Default, "pty"),
         (ActorRuntime::Hermes, RuntimeMode::Default, "pty"),
+        (ActorRuntime::Droid, RuntimeMode::Default, "pty"),
+        (ActorRuntime::Kimi, RuntimeMode::Default, "pty"),
+        (ActorRuntime::Auggie, RuntimeMode::Default, "pty"),
+        (ActorRuntime::Claude, RuntimeMode::Default, "pty"),
+        (ActorRuntime::Codex, RuntimeMode::Default, "pty"),
         (ActorRuntime::Deepseek, RuntimeMode::Default, "headless"),
         (ActorRuntime::WebModel, RuntimeMode::Default, "headless"),
-        (ActorRuntime::Hermes, RuntimeMode::Acp, "pty"),
-        (ActorRuntime::Claude, RuntimeMode::Acp, "pty"),
     ];
-    for (index, (runtime, mode, runner)) in cases.iter().enumerate() {
+    for (index, (runtime, mode, _)) in cases.iter().enumerate() {
         let mut actor = Actor::new(format!("stopped-{index}"));
         actor.runtime = *runtime;
         actor.runtime_mode = *mode;
-        // 0.4.43 derives the runner from this field, not from runtime+mode.
-        actor.runner = if *runner == "headless" {
-            RunnerKind::Headless
-        } else {
-            RunnerKind::Pty
-        };
         group.actors.push(actor);
     }
     store.save(&group).expect("save stopped actors");

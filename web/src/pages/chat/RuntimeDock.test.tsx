@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import type { Actor, LedgerEvent } from "../../types";
 import { RuntimeDock } from "./RuntimeDock";
+import type { LiveWorkCard } from "./liveWorkCards";
+import { getRuntimeRingTone } from "./runtimeDockRingTone";
 
 const mocks = vi.hoisted(() => ({ events: [] as LedgerEvent[], workingState: "", open: vi.fn() }));
 vi.mock("../../stores", () => ({
@@ -39,13 +41,17 @@ const actor: Actor = {
   effective_working_updated_at: "2026-09-26T10:00:00Z",
   unread_count: 2,
 };
-async function render(overrides: Partial<Actor> = {}, groupId = "g1") {
+async function render(
+  overrides: Partial<Actor> = {},
+  groupId = "g1",
+  liveWorkCards: LiveWorkCard[] = [],
+) {
   await act(async () => {
     root.render(
       <RuntimeDock
         groupId={groupId}
         runtimeActors={[{ ...actor, ...overrides }]}
-        liveWorkCards={[]}
+        liveWorkCards={liveWorkCards}
         isDark={false}
         isSmallScreen={false}
         actorStatusProvisional={false}
@@ -150,3 +156,124 @@ it("refreshes counts and activity when switching Groups with the same Actor ID",
   expect(activity()).toBeNull();
   expect(host.querySelector('span[title*="queued for next turn"]')).toBeNull();
 });
+
+it.each(["headless", "pty"] as const)(
+  "shows a running %s owner error before an older completed preview",
+  async (runner) => {
+    const card: LiveWorkCard = {
+      actorId: actor.id,
+      actorLabel: actor.id,
+      runtime: actor.runtime!,
+      phase: "completed",
+      streamPhase: "final_answer",
+      text: "Previous result",
+      transcriptBlocks: [],
+      activities: [],
+      updatedAt: "2026-09-26T09:00:00Z",
+      streamId: "old-turn",
+      pendingEventId: "",
+    };
+    await render({ runner, runner_effective: runner, effective_working_state: "error" }, "g1", [
+      card,
+    ]);
+    expect(host.querySelector("button")?.title).toContain("Error");
+    expect(host.querySelector(".sr-only")?.textContent).toContain("Error");
+    expect(host.querySelector("button")?.title).not.toContain("Stopped");
+    expect(getRuntimeRingTone({ actor, runner, liveWorkCard: card }, true, "error")).toBe(
+      "attention",
+    );
+    const failedCard = { ...card, phase: "failed" as const };
+    await render({ runner, runner_effective: runner, effective_working_state: "working" }, "g1", [
+      failedCard,
+    ]);
+    expect(host.querySelector("button")?.title).toContain("Working");
+    expect(activity()).not.toBeNull();
+    expect(getRuntimeRingTone({ actor, runner, liveWorkCard: failedCard }, true, "working")).toBe(
+      "active",
+    );
+    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+    expect(mocks.open).toHaveBeenCalledWith(actor.id);
+  },
+);
+
+it.each(["headless", "pty"] as const)(
+  "shows the recovered %s owner state while retaining older task results",
+  async (runner) => {
+    const card: LiveWorkCard = {
+      actorId: actor.id,
+      actorLabel: actor.id,
+      runtime: actor.runtime!,
+      phase: "failed",
+      streamPhase: "final_answer",
+      text: "Previous failure",
+      transcriptBlocks: [],
+      activities: [],
+      updatedAt: "2026-09-26T09:00:00Z",
+      streamId: "old-turn",
+      pendingEventId: "",
+    };
+    const recovered = {
+      ...actor,
+      runner,
+      runner_effective: runner,
+      effective_working_state: "idle",
+    };
+    await render({ ...recovered, effective_working_state: "error" }, "g1", [card]);
+    expect(host.querySelector("button")?.title).toContain("Error");
+
+    for (const phase of ["failed", "pending"] as const) {
+      const previous = { ...card, phase };
+      await render(recovered, "g1", [previous]);
+      expect.soft(host.querySelector("button")?.title).toContain("Running");
+      expect.soft(host.querySelector(".sr-only")?.textContent).toContain("Running");
+      expect(activity()).toBeNull();
+      expect
+        .soft(
+          getRuntimeRingTone({ actor: recovered, runner, liveWorkCard: previous }, true, "idle"),
+        )
+        .toBe("idle");
+    }
+    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+    expect(mocks.open).toHaveBeenCalledWith(actor.id);
+  },
+);
+
+it.each([
+  ["headless", "waiting", true, "Waiting", "idle"],
+  ["pty", "waiting", true, "Waiting", "idle"],
+  ["headless", "stopped", false, "Stopped", "stopped"],
+  ["pty", "stopped", false, "Stopped", "stopped"],
+] as const)(
+  "shows the %s owner's current %s state before an older failed preview",
+  async (runner, workingState, running, label, tone) => {
+    const current = {
+      ...actor,
+      runner,
+      runner_effective: runner,
+      running,
+      effective_working_state: workingState,
+    };
+    const card: LiveWorkCard = {
+      actorId: actor.id,
+      actorLabel: actor.id,
+      runtime: actor.runtime!,
+      phase: "failed",
+      streamPhase: "final_answer",
+      text: "Previous failure",
+      transcriptBlocks: [],
+      activities: [],
+      updatedAt: "2026-09-26T09:00:00Z",
+      streamId: "old-turn",
+      pendingEventId: "",
+    };
+    await render(current, "g1", [card]);
+    expect.soft(host.querySelector("button")?.title).toContain(label);
+    expect.soft(host.querySelector(".sr-only")?.textContent).toContain(label);
+    expect(activity()).toBeNull();
+    expect
+      .soft(
+        getRuntimeRingTone({ actor: current, runner, liveWorkCard: card }, running, workingState),
+      )
+      .toBe(tone);
+  },
+);

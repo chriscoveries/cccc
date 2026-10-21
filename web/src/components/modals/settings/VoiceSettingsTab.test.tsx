@@ -23,7 +23,9 @@ vi.mock("../../../services/api", () => ({
   updateProfilePrivateEnv: mocks.updateProfileEnv,
 }));
 vi.mock("../../../features/codexVoice/CodexVoiceSettingsPanel", () => ({
-  CodexVoiceSettingsPanel: () => <div data-analyst-settings />,
+  CodexVoiceSettingsPanel: ({ analystRequest }: { analystRequest?: number }) => (
+    <div data-analyst-settings data-analyst-request={analystRequest} />
+  ),
 }));
 vi.mock("./LocalAsrModels", () => ({ LocalAsrModels: () => null }));
 vi.mock("../ActorSecretManager", () => ({
@@ -106,6 +108,9 @@ const state: GlobalVoiceSecretaryState = {
   settings: { profile_id: "", config: defaultSecretaryPreferences },
   environment_keys: [],
   configured: false,
+  ready: false,
+  readiness_code: "not_configured",
+  readiness_error: "Global Voice Secretary is not configured",
   profiles: [
     {
       id: "p",
@@ -198,6 +203,73 @@ describe("global voice configuration", () => {
     expect(select("runtime").value).toBe("claude");
     expect(guard()).toBe(false);
   });
+  it.each([
+    ["pi", "default", "Pi (RPC)"],
+    ["kimi", "acp", "Kimi Code (ACP)"],
+    ["auggie", "acp", "Auggie (Augment) (ACP)"],
+    ["kiro", "acp", "Kiro CLI (ACP)"],
+    ["hermes", "acp", "Hermes Agent (ACP)"],
+    ["droid", "acp", "Droid (ACP)"],
+  ] as const)(
+    "selects and saves the supported %s Secretary surface",
+    async (runtime, runtimeMode, label) => {
+      await render();
+      const option = [...select("runtime").options].find((item) => item.value === runtime);
+      expect(option?.textContent).toBe(label);
+      await change("runtime", runtime);
+      mocks.save.mockResolvedValueOnce({
+        ok: true,
+        result: {
+          ...state,
+          configured: true,
+          settings: { ...state.settings, runtime, runtime_mode: runtimeMode },
+        },
+      });
+      await act(async () => button("common:save").click());
+      expect(mocks.save).toHaveBeenCalledWith(
+        expect.objectContaining({ runtime, runtime_mode: runtimeMode }),
+        { environment: { set: {}, unset: [], clear: false } },
+      );
+    },
+  );
+  it("keeps an Analyst settings destination when forwarding to the realtime editor", async () => {
+    await act(async () =>
+      root.render(
+        <VoiceSettingsTab
+          voice={voice}
+          section="realtime"
+          analystRequest={125}
+          onSectionChange={() => undefined}
+          isDark={false}
+          isActive
+          onBeforeLeaveChange={register}
+        />,
+      ),
+    );
+    expect(host.querySelector("[data-analyst-request]")?.getAttribute("data-analyst-request")).toBe(
+      "125",
+    );
+  });
+  it.each([
+    ["owner_unavailable", "ownerUnavailable"],
+    ["invalid_configuration", "invalidConfiguration"],
+  ] as const)("shows %s separately from saved configuration", async (code, title) => {
+    mocks.fetch.mockResolvedValueOnce({
+      ok: true,
+      result: {
+        ...state,
+        settings: { ...state.settings, runtime: "codex" },
+        configured: true,
+        ready: false,
+        readiness_code: code,
+        readiness_error: "Safe fixture diagnostic",
+      },
+    });
+    await render();
+    expect(host.textContent).toContain(`voiceSettings.readiness.${title}`);
+    expect(host.textContent).toContain("Safe fixture diagnostic");
+    expect(host.textContent).not.toContain("Global Voice Secretary is not configured");
+  });
   it("preserves a Profile draft across refresh and saves its scoped identity", async () => {
     let resolve!: (value: unknown) => void;
     mocks.fetch.mockImplementationOnce(
@@ -255,6 +327,38 @@ describe("global voice configuration", () => {
     expect(button("common:save").disabled).toBe(true);
     expect(button("stage-secret").dataset.stagedSecret).not.toContain("fixture-draft");
   });
+  it.each([
+    ["pi", undefined],
+    ["kimi", "acp"],
+    ["auggie", "acp"],
+    ["kiro", "acp"],
+    ["hermes", "acp"],
+    ["droid", "acp"],
+  ] as const)(
+    "creates a reusable %s Profile with the same admitted mode",
+    async (runtime, runtimeMode) => {
+      await render();
+      await change("runtime", runtime);
+      const profile = {
+        id: "new-runtime-profile",
+        name: "Secretary reusable",
+        runtime,
+        ...(runtimeMode ? { runtime_mode: runtimeMode } : {}),
+        command: [],
+        revision: 1,
+        scope: "global",
+        owner_id: "",
+      };
+      mocks.upsert.mockResolvedValue({ ok: true, result: { profile } });
+      mocks.copySecrets.mockResolvedValue({ ok: true, result: { keys: [] } });
+      await act(async () => button("addToActorProfiles").click());
+      const saved = mocks.upsert.mock.calls[0][0];
+      expect(saved.runtime).toBe(runtime);
+      expect(saved.runtime_mode).toBe(runtimeMode);
+      expect(mocks.copySecrets).toHaveBeenCalledWith(profile.id);
+      expect(mocks.save).not.toHaveBeenCalled();
+    },
+  );
   it("autosaves recognition defaults independently of Runtime and credential drafts", async () => {
     await render();
     await change("runtime", "claude");

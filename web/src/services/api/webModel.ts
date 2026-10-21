@@ -22,6 +22,10 @@ export type WebModelConnector = {
   last_wait_status?: string;
   last_turn_id?: string;
   last_error?: string;
+  /** Shared connector diagnostics: event/tool outcomes and fixed reason codes only. */
+  events_log?: DotsEventCall[];
+  /** The Actor this connector's Dot is bound to, if any. */
+  dots_actor?: { group_id: string; actor_id: string } | null;
   connector_url?: string;
   connector_url_with_token?: string;
   connector_url_path_token?: string;
@@ -33,6 +37,72 @@ export type WebModelConnectorCreateResult = {
   secret: string;
   replaced_connector_ids?: string[];
 };
+
+export type DotsPhase =
+  | "unconfigured"
+  | "waiting_pairing"
+  | "waiting_subscription"
+  | "ready"
+  | "pending"
+  | "delivering"
+  | "delivered"
+  | "working"
+  | "interrupted"
+  | "failed"
+  | "stopped";
+
+export type DotsEventCall = {
+  at: string;
+  method: string;
+  tool_name?: string;
+  ok: boolean;
+  reason: string | null;
+};
+
+export type DotsActorState = {
+  group_id: string;
+  actor_id: string;
+  enabled: boolean;
+  connected: boolean;
+  paired: boolean;
+  subscribed: boolean;
+  phase: DotsPhase;
+  pending_count: number;
+  active_turn_id?: string | null;
+  active_event_ids?: string[];
+  last_execution?: {
+    turn_id: string;
+    event_ids: string[];
+    status: "done" | "partial" | "failed" | "cancelled";
+    completed_at: string;
+  } | null;
+  error_code?: string | null;
+  subscription_expires_at?: number | null;
+};
+
+export type DotsActorActionResult = { connected?: boolean; url?: string; instructions?: string };
+
+export function fetchDotsActorState(groupId: string, actorId: string) {
+  const params = new URLSearchParams({ group_id: groupId, actor_id: actorId });
+  return apiJson<DotsActorState>(`/api/v1/web-model/dots?${params.toString()}`);
+}
+
+export function updateDotsActorConnection(
+  groupId: string,
+  actorId: string,
+  action: "connect" | "disconnect" | "resolve",
+  turnId?: string,
+) {
+  return apiJson<DotsActorActionResult>("/api/v1/web-model/dots", {
+    method: "POST",
+    body: JSON.stringify({
+      group_id: groupId,
+      actor_id: actorId,
+      action,
+      ...(turnId ? { turn_id: turnId } : {}),
+    }),
+  });
+}
 
 export type NomcpSession = {
   sid: string;
@@ -211,17 +281,30 @@ export type WebModelPairing = {
 };
 
 export async function fetchWebModelConnectors() {
-  return apiJson<{ connectors: WebModelConnector[]; requires_reconfiguration?: boolean }>(
-    "/api/v1/web-model/connectors",
-  );
+  return apiJson<{
+    connectors: WebModelConnector[];
+    requires_reconfiguration?: boolean;
+    /** The Web access address every connector URL is built on; empty when unset. */
+    connector_base_url?: string;
+  }>("/api/v1/web-model/connectors");
 }
 
 export type WebModelProvider = "chatgpt_web" | "grok_web";
+/** A Web Models settings view: a provider, or Dots on the shared ChatGPT connector. */
+export type WebModelView = WebModelProvider | "dots";
 
-export async function createWebModelConnector(provider: WebModelProvider = "chatgpt_web") {
+/**
+ * Create (or, by default, rotate) the provider's shared connector. With
+ * `createOnly`, an existing connector is refused with `connector_exists` and
+ * keeps its credential.
+ */
+export async function createWebModelConnector(
+  provider: WebModelProvider = "chatgpt_web",
+  options: { createOnly?: boolean } = {},
+) {
   return apiJson<WebModelConnectorCreateResult>("/api/v1/web-model/connectors", {
     method: "POST",
-    body: JSON.stringify({ provider }),
+    body: JSON.stringify(options.createOnly ? { provider, create_only: true } : { provider }),
   });
 }
 

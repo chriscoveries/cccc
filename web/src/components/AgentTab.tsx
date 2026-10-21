@@ -32,6 +32,9 @@ import {
 import { ActorAcpControls } from "./headless/ActorAcpControls";
 import { HeadlessRuntimePanel } from "./headless/HeadlessRuntimePanel";
 import { WebModelRuntimePanel } from "./webModel/WebModelRuntimePanel";
+import { DotsActorPanel } from "./webModel/DotsActorPanel";
+import type { DotsActorState } from "../services/api";
+import { useModalStore } from "../stores";
 import {
   AlertIcon,
   StopIcon,
@@ -48,7 +51,10 @@ import { ActorQuickControls } from "./agentTerminal/ActorQuickControls";
 import { TerminalHistoryPanel } from "./agentTerminal/TerminalHistoryPanel";
 import { ScrollFade } from "./ScrollFade";
 import { getRuntimeIndicatorState } from "../utils/statusIndicators";
-import { getEffectiveActorRunner } from "../utils/headlessRuntimeSupport";
+import {
+  getEffectiveActorRunner,
+  hasManagedRuntimeControls,
+} from "../utils/headlessRuntimeSupport";
 import { copyTextToClipboard } from "../utils/copy";
 import { getStoppedTerminalOutputText } from "../utils/stoppedTerminalOutput";
 import { fetchTerminalTail } from "../services/api/diagnostics";
@@ -162,7 +168,34 @@ export function AgentTab({
   const effectiveRunner = getEffectiveActorRunner(actor);
   const isHeadless = effectiveRunner === "headless";
   const isWebModel = isWebModelRuntime(actor.runtime);
-  const canStartNewSession = actorSupportsNewSession(actor.runtime, actor.runtime_mode);
+  const isDots = actor.runtime === "chatgpt_dots";
+  const lifecycleActive = isDots ? Boolean(actor.enabled) : isRunning;
+  const openSettingsTarget = useModalStore((state) => state.openSettingsTarget);
+  const settingsOpen = useModalStore((state) => state.modals.settings);
+  const canAccessGlobalSettings = useUIStore((state) => state.canAccessGlobalSettings !== false);
+  const [dotsSnapshot, setDotsSnapshot] = useState<{
+    groupId: string;
+    actorId: string;
+    state: DotsActorState | null;
+  } | null>(null);
+  const currentActorRef = useRef({ groupId, actorId: actor.id });
+  currentActorRef.current = { groupId, actorId: actor.id };
+  const receiveDotsState = useCallback(
+    (state: DotsActorState | null) => {
+      if (
+        currentActorRef.current.groupId !== groupId ||
+        currentActorRef.current.actorId !== actor.id
+      )
+        return;
+      if (state && (state.group_id !== groupId || state.actor_id !== actor.id)) return;
+      setDotsSnapshot({ groupId, actorId: actor.id, state });
+    },
+    [groupId, actor.id],
+  );
+  const dotsVisit = dotsSnapshot?.groupId === groupId && dotsSnapshot.actorId === actor.id;
+  const dotsState = dotsVisit && canAccessGlobalSettings ? dotsSnapshot.state : null;
+  const dotsStartKey = dotsState?.connected ? "dotsResume" : "dotsEnable";
+  const canStartNewSession = !isDots && actorSupportsNewSession(actor.runtime, actor.runtime_mode);
   const hasRuntimeResumeFailure = actorHasRuntimeResumeFailure(actor);
   const runtimeResumeError = String(actor.runtime_session_last_resume_error || "").trim();
   const canControl = !readOnly;
@@ -334,8 +367,16 @@ export function AgentTab({
   };
 
   const runtimeIndicator = getRuntimeIndicatorState({
-    isRunning: Boolean(isRunning),
-    workingState,
+    isRunning: isDots
+      ? ["ready", "pending", "delivering", "delivered", "working"].includes(dotsState?.phase || "")
+      : Boolean(isRunning),
+    workingState: isDots
+      ? dotsState?.phase === "working"
+        ? "working"
+        : dotsState?.phase === "failed" || dotsState?.phase === "interrupted"
+          ? "stuck"
+          : "waiting"
+      : workingState,
   });
   const statusTone = (() => {
     switch (runtimeIndicator.tone) {
@@ -365,7 +406,18 @@ export function AgentTab({
   })();
 
   const runtimeStatusText = (() => {
+    if (isDots)
+      return t(
+        !canAccessGlobalSettings
+          ? "settings:dotsActor.adminStatus"
+          : dotsState
+            ? `settings:dotsActor.phases.${dotsState.phase}`
+            : dotsVisit
+              ? "settings:dotsActor.unavailable"
+              : "common:loading",
+      );
     if (!isRunning) return t("stopped");
+    if (workingState === "error") return t("common:error");
     if (workingState === "working" || workingState === "waiting" || workingState === "stuck")
       return t(workingState);
     return t("running");
@@ -661,15 +713,24 @@ export function AgentTab({
   const actorGroupRole = normalizeActorGroupRole(actor.role);
   const titlePaging = useTerminalTitlePaging(isVisible && compact ? onPage : undefined);
 
-  const compactStatusText = !isRunning
+  const compactStatusText = isDots
     ? runtimeStatusText
-    : !isHeadless && connectionStatus !== "connected"
-      ? t(connectionStatus === "disconnected" ? "connectionLost" : "chat:workView.connecting")
-      : workingState === "waiting" || workingState === "stuck"
-        ? runtimeStatusText
-        : !isHeadless && terminalReady && !terminalWritable
-          ? t("readOnlyConnection")
-          : "";
+    : !isRunning
+      ? runtimeStatusText
+      : !isHeadless && connectionStatus !== "connected"
+        ? t(connectionStatus === "disconnected" ? "connectionLost" : "chat:workView.connecting")
+        : workingState === "waiting" || workingState === "stuck" || workingState === "error"
+          ? runtimeStatusText
+          : !isHeadless && terminalReady && !terminalWritable
+            ? t("readOnlyConnection")
+            : "";
+
+  const compactIdentityTitle = [
+    actor.title || actor.id,
+    [rtInfo.label, isHeadless ? (actor.runtime_mode === "acp" ? "ACP" : "") : "TUI"]
+      .filter(Boolean)
+      .join(" · "),
+  ].join("\n");
 
   return (
     <div className="@container/actor-view flex min-h-0 min-w-0 flex-col h-full">
@@ -679,7 +740,7 @@ export function AgentTab({
           data-terminal-title-bar
           style={onPage ? { touchAction: "pan-y pinch-zoom" } : undefined}
           className={classNames(
-            "flex min-h-9 shrink-0 items-center border-b border-[var(--glass-border-subtle)] px-2 text-xs [@media(pointer:coarse)]:min-h-11",
+            "flex min-h-9 shrink-0 items-center border-b border-[var(--glass-border-subtle)] px-2 text-xs group-focus-within/runtime-pane:bg-[var(--glass-tab-bg-active)] [@media(pointer:coarse)]:min-h-11",
             navigation
               ? "flex-wrap @min-[480px]/actor-view:flex-nowrap @min-[480px]/actor-view:gap-2"
               : "gap-2",
@@ -691,23 +752,38 @@ export function AgentTab({
               Boolean(navigation) && "basis-full min-h-8 @min-[480px]/actor-view:basis-auto",
             )}
           >
-            <span
-              className={`h-2 w-2 shrink-0 rounded-full ${statusTone.dotClass}`}
-              role="img"
-              aria-label={runtimeStatusText}
-              title={[runtimeStatusText, actor.effective_working_reason].filter(Boolean).join("\n")}
-            />
+            <div className="relative h-5 w-5 shrink-0" title={compactIdentityTitle}>
+              <span aria-hidden="true">
+                <ActorAvatar
+                  avatarUrl={actor.avatar_url || undefined}
+                  runtime={actor.runtime}
+                  title={actor.title || actor.id}
+                  isDark={isDark}
+                  sizeClassName="h-5 w-5"
+                  textClassName="text-[10px]"
+                  className="!border-0 !shadow-none"
+                />
+              </span>
+              <span
+                className={`absolute -bottom-0.5 -right-0.5 h-1.5 w-1.5 rounded-full ring-1 ring-[var(--color-bg-secondary)] ${statusTone.dotClass}`}
+                role="img"
+                aria-label={runtimeStatusText}
+                title={[runtimeStatusText, !isDots && actor.effective_working_reason]
+                  .filter(Boolean)
+                  .join("\n")}
+              />
+            </div>
             <span
               id={`runtime-inspector-${groupId}-${actor.id}`}
               className="min-w-0 flex-1 truncate font-semibold"
-              title={actor.title || actor.id}
+              title={compactIdentityTitle}
             >
               {actor.title || actor.id}
             </span>
             {compactStatusText ? (
               <span
                 className="max-w-[40%] shrink-0 truncate text-[var(--color-text-secondary)]"
-                title={[compactStatusText, actor.effective_working_reason]
+                title={[compactStatusText, !isDots && actor.effective_working_reason]
                   .filter(Boolean)
                   .join("\n")}
               >
@@ -719,7 +795,7 @@ export function AgentTab({
           <ActorQuickControls
             key={String(isVisible)}
             actorTitle={actor.title || actor.id}
-            running={isRunning}
+            running={lifecycleActive}
             busy={isBusy}
             readOnly={!canControl}
             hasTerminal={!isHeadless}
@@ -727,6 +803,8 @@ export function AgentTab({
             connected={terminalReady && connectionStatus === "connected"}
             connectionFailed={connectionFailed}
             canStartNewSession={canStartNewSession}
+            pauseCcccAccess={isDots}
+            dotsConnected={Boolean(dotsState?.connected)}
             unreadCount={unreadCount}
             onInterrupt={sendInterrupt}
             onLaunch={onLaunch}
@@ -747,6 +825,7 @@ export function AgentTab({
       <div
         className={classNames(
           compact ? "hidden" : "border-b px-4 py-2 sm:px-5",
+          isDots && "max-sm:pr-16",
           isDark
             ? "border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.025),rgba(255,255,255,0.01))]"
             : "border-black/6 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.88))]",
@@ -791,7 +870,7 @@ export function AgentTab({
             </div>
 
             <div className="flex min-w-0 items-center gap-3">
-              <div className="min-w-0 shrink-0">
+              <div className={classNames("min-w-0", !isDots && "shrink-0")}>
                 <div className="flex items-center gap-2 min-w-0">
                   <span
                     id={compact ? undefined : `runtime-inspector-${groupId}-${actor.id}`}
@@ -814,87 +893,91 @@ export function AgentTab({
                   {rtInfo?.label || t("custom")} • {runtimeStatusText}
                 </div>
                 {/* Mobile-only: condensed single-line agent state */}
-                <div
-                  className={classNames(
-                    "sm:hidden mt-1 text-xs truncate leading-tight",
-                    stateHeadline !== t("noAgentStateYet")
-                      ? "text-[var(--color-text-secondary)]"
-                      : "text-[var(--color-text-muted)] italic",
-                  )}
-                  title={stateHeadline}
-                >
-                  {stateHeadline}
-                </div>
-              </div>
-
-              <div
-                className={classNames(
-                  "hidden sm:grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-start gap-2 rounded-xl border px-3 py-1.5 backdrop-blur-sm",
-                  isDark
-                    ? "max-w-[min(660px,54vw)] border-white/10 bg-white/[0.035]"
-                    : "max-w-[min(660px,54vw)] border-black/8 bg-white/78",
-                )}
-                aria-label={t("agentState")}
-              >
-                <div className="min-w-0">
+                {(!isDots || agentState) && (
                   <div
                     className={classNames(
-                      "min-w-0 text-sm font-medium leading-[1.15rem]",
+                      "sm:hidden mt-1 text-xs truncate leading-tight",
                       stateHeadline !== t("noAgentStateYet")
-                        ? "text-[var(--color-text-primary)]"
-                        : isDark
-                          ? "text-slate-500 italic"
-                          : "text-gray-500 italic",
+                        ? "text-[var(--color-text-secondary)]"
+                        : "text-[var(--color-text-muted)] italic",
                     )}
-                    style={statusClamp2Style}
-                    title={
-                      agentState?.updated_at
-                        ? `${stateHeadline}\nUpdated: ${formatFullTime(agentState.updated_at)}`
-                        : stateHeadline
-                    }
+                    title={stateHeadline}
                   >
-                    <span>{stateHeadline}</span>
+                    {stateHeadline}
                   </div>
-                  {stateTask || blockerCount > 0 || stateNext ? (
-                    <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
-                      {stateTask ? (
-                        <span
-                          className={classNames(
-                            "shrink-0 rounded-full bg-[var(--glass-tab-bg)] px-2 py-0.5 text-xs text-[var(--color-text-secondary)]",
-                          )}
-                        >
-                          {t("taskShort", { id: stateTask })}
-                        </span>
-                      ) : null}
-                      {blockerCount > 0 ? (
-                        <span
-                          className={classNames(
-                            "shrink-0 rounded-full bg-rose-500/15 px-2 py-0.5 text-xs text-rose-600 dark:text-rose-300",
-                          )}
-                        >
-                          {t("blockersShort", { count: blockerCount })}
-                        </span>
-                      ) : null}
-                      {stateNext ? (
-                        <span
-                          className={classNames(
-                            "min-w-0 truncate text-xs leading-4",
-                            "text-[var(--color-text-tertiary)]",
-                          )}
-                          title={stateNext}
-                        >
-                          {t("nextShort", { value: stateNext })}
-                        </span>
-                      ) : null}
+                )}
+              </div>
+
+              {(!isDots || agentState) && (
+                <div
+                  className={classNames(
+                    "hidden sm:grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-start gap-2 rounded-xl border px-3 py-1.5 backdrop-blur-sm",
+                    isDark
+                      ? "max-w-[min(660px,54vw)] border-white/10 bg-white/[0.035]"
+                      : "max-w-[min(660px,54vw)] border-black/8 bg-white/78",
+                  )}
+                  aria-label={t("agentState")}
+                >
+                  <div className="min-w-0">
+                    <div
+                      className={classNames(
+                        "min-w-0 text-sm font-medium leading-[1.15rem]",
+                        stateHeadline !== t("noAgentStateYet")
+                          ? "text-[var(--color-text-primary)]"
+                          : isDark
+                            ? "text-slate-500 italic"
+                            : "text-gray-500 italic",
+                      )}
+                      style={statusClamp2Style}
+                      title={
+                        agentState?.updated_at
+                          ? `${stateHeadline}\nUpdated: ${formatFullTime(agentState.updated_at)}`
+                          : stateHeadline
+                      }
+                    >
+                      <span>{stateHeadline}</span>
+                    </div>
+                    {stateTask || blockerCount > 0 || stateNext ? (
+                      <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+                        {stateTask ? (
+                          <span
+                            className={classNames(
+                              "shrink-0 rounded-full bg-[var(--glass-tab-bg)] px-2 py-0.5 text-xs text-[var(--color-text-secondary)]",
+                            )}
+                          >
+                            {t("taskShort", { id: stateTask })}
+                          </span>
+                        ) : null}
+                        {blockerCount > 0 ? (
+                          <span
+                            className={classNames(
+                              "shrink-0 rounded-full bg-rose-500/15 px-2 py-0.5 text-xs text-rose-600 dark:text-rose-300",
+                            )}
+                          >
+                            {t("blockersShort", { count: blockerCount })}
+                          </span>
+                        ) : null}
+                        {stateNext ? (
+                          <span
+                            className={classNames(
+                              "min-w-0 truncate text-xs leading-4",
+                              "text-[var(--color-text-tertiary)]",
+                            )}
+                            title={stateNext}
+                          >
+                            {t("nextShort", { value: stateNext })}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                  {agentState?.updated_at ? (
+                    <div className="shrink-0 rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] px-2 py-0.5 text-xs font-medium leading-4 text-[var(--color-text-tertiary)]">
+                      {formatTime(agentState.updated_at)}
                     </div>
                   ) : null}
                 </div>
-                {agentState?.updated_at ? (
-                  <div className="shrink-0 rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] px-2 py-0.5 text-xs font-medium leading-4 text-[var(--color-text-tertiary)]">
-                    {formatTime(agentState.updated_at)}
-                  </div>
-                ) : null}
-              </div>
+              )}
             </div>
           </div>
         </div>
@@ -911,7 +994,7 @@ export function AgentTab({
             className={classNames(
               "flex h-full min-h-0 flex-col",
               compact
-                ? "p-2"
+                ? "p-0"
                 : isWebModel
                   ? "px-3 pb-3 pt-2 sm:px-4 sm:pb-4"
                   : "px-5 pb-5 pt-3 sm:px-7 sm:pb-6 sm:pt-3",
@@ -920,10 +1003,32 @@ export function AgentTab({
             <div
               className={classNames(
                 "mx-auto flex w-full min-h-0 flex-1 flex-col",
-                isWebModel ? "max-w-none gap-3" : "max-w-6xl gap-4",
+                compact ? "max-w-none gap-0" : isWebModel ? "max-w-none gap-3" : "max-w-6xl gap-4",
               )}
             >
-              {isWebModel ? (
+              {isDots ? (
+                <DotsActorPanel
+                  groupId={groupId}
+                  actorId={actor.id}
+                  isRunning={isRunning}
+                  isVisible={isVisible && !settingsOpen}
+                  readOnly={readOnly}
+                  compact={compact}
+                  onExpand={onExpand}
+                  canAccessConnection={canAccessGlobalSettings}
+                  onStateChange={receiveDotsState}
+                  onOpenSharedSettings={
+                    canControl && canAccessGlobalSettings
+                      ? () =>
+                          openSettingsTarget({
+                            scope: "global",
+                            tab: "webModels",
+                            webModelProvider: "dots",
+                          })
+                      : undefined
+                  }
+                />
+              ) : isWebModel ? (
                 <WebModelRuntimePanel
                   groupId={groupId}
                   actor={actor}
@@ -931,9 +1036,10 @@ export function AgentTab({
                   isDark={isDark}
                   isVisible={isVisible}
                   readOnly={readOnly}
+                  compact={compact}
                 />
               ) : null}
-              {(actor.effective_runtime_mode || actor.runtime_mode) === "acp" && (
+              {hasManagedRuntimeControls(actor) && (
                 <ActorAcpControls
                   groupId={groupId}
                   actorId={actor.id}
@@ -1085,35 +1191,40 @@ export function AgentTab({
           innerClassName="flex items-center gap-2 px-4 py-3 sm:px-5"
           fadeWidth={20}
         >
-          {isRunning ? (
+          {lifecycleActive ? (
             <>
               <button
                 onClick={onQuit}
                 disabled={isBusy}
                 className={`${secondaryActionButtonClass} flex-shrink-0 whitespace-nowrap`}
-                aria-label={t("quitAgent")}
+                aria-label={t(isDots ? "dotsPause" : "quitAgent")}
+                title={isDots ? t("dotsPauseHint") : undefined}
               >
                 <StopIcon size={16} />
-                {!isSmallScreen && t("quit")}
+                {!isSmallScreen && t(isDots ? "dotsPause" : "quit")}
               </button>
-              <button
-                onClick={sendInterrupt}
-                disabled={connectionStatus !== "connected" || !terminalWritable}
-                className={`${ghostActionButtonClass} flex-shrink-0 whitespace-nowrap`}
-                title={t("sendInterruptTitle")}
-                aria-label={t("sendInterruptLabel")}
-              >
-                ⌃C
-              </button>
-              <button
-                onClick={onRelaunch}
-                disabled={isBusy}
-                className={`${secondaryActionButtonClass} flex-shrink-0 whitespace-nowrap`}
-                aria-label={t("relaunchAgent")}
-              >
-                <RefreshIcon size={16} />
-                {!isSmallScreen && t("relaunch")}
-              </button>
+              {!isDots ? (
+                <button
+                  onClick={sendInterrupt}
+                  disabled={connectionStatus !== "connected" || !terminalWritable}
+                  className={`${ghostActionButtonClass} flex-shrink-0 whitespace-nowrap`}
+                  title={t("sendInterruptTitle")}
+                  aria-label={t("sendInterruptLabel")}
+                >
+                  ⌃C
+                </button>
+              ) : null}
+              {!isDots ? (
+                <button
+                  onClick={onRelaunch}
+                  disabled={isBusy}
+                  className={`${secondaryActionButtonClass} flex-shrink-0 whitespace-nowrap`}
+                  aria-label={t("relaunchAgent")}
+                >
+                  <RefreshIcon size={16} />
+                  {!isSmallScreen && t("relaunch")}
+                </button>
+              ) : null}
               {canStartNewSession ? (
                 <button
                   onClick={handleNewSession}
@@ -1141,10 +1252,10 @@ export function AgentTab({
                 onClick={onLaunch}
                 disabled={isBusy}
                 className={`${primaryActionButtonClass} flex-shrink-0 whitespace-nowrap`}
-                aria-label={t("launchAgentLabel")}
+                aria-label={t(isDots ? dotsStartKey : "launchAgentLabel")}
               >
                 <PlayIcon size={16} />
-                {isBusy ? t("launching") : t("launch")}
+                {isBusy ? t("common:loading") : t(isDots ? dotsStartKey : "launch")}
               </button>
               {canStartNewSession ? (
                 <button

@@ -14,7 +14,10 @@ pub(super) async fn list(State(state): State<AppState>) -> ApiResult {
     let base_url = connector_base_url(&state)?;
     Ok(success(json!({
         "requires_reconfiguration":cccc_core::web_model_connectors::requires_reconfiguration(&state.home).map_err(store::io_error)?,
-        "connectors": connectors.iter().map(|item| public(item, &base_url)).collect::<Vec<_>>()
+        "connectors": connectors.iter().map(|item| public(item, &base_url)).collect::<Vec<_>>(),
+        // The configured address used to build connector URLs. This metadata
+        // does not verify connectivity from an external service.
+        "connector_base_url": base_url
     })))
 }
 
@@ -25,10 +28,17 @@ pub(super) async fn create(State(state): State<AppState>, Json(body): Json<Value
             .as_str()
             .ok_or_else(|| ApiError::bad("provider must be a string"))?,
     };
+    // create_only: create when absent, never rotate an existing credential. Only
+    // a real boolean may choose; a mistyped flag must not fall back to rotation.
+    let create_only = match body.get("create_only") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(ApiError::bad("create_only must be a boolean")),
+    };
     let result = super::web_model_delivery_completion::call(
         &state,
         "web_model_connector_configure",
-        json!({"by":"user","provider":provider})
+        json!({"by":"user","provider":provider,"create_only":create_only})
             .as_object()
             .expect("literal JSON object")
             .clone(),
@@ -74,9 +84,17 @@ fn public(item: &Value, base_url: &str) -> Value {
         "last_tool_name",
         "last_call_status",
         "last_error",
+        "events_log",
     ] {
         result[field] = item[field].clone();
     }
+    // Which Actor the Dot is bound to; its credentials and callback stay private.
+    let dots = &item["dots"];
+    result["dots_actor"] = if dots["actor_id"].is_string() {
+        json!({"group_id":dots["group_id"],"actor_id":dots["actor_id"]})
+    } else {
+        Value::Null
+    };
     result
 }
 

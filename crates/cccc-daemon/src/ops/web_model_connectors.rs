@@ -38,6 +38,21 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 .as_str()
                 .ok_or_else(|| OpError::new("invalid_argument", "provider must be a string"))?,
         };
+        let create_only = match request.args.get("create_only") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| OpError::new("invalid_argument", "create_only must be a boolean"))?,
+        };
+        if create_only {
+            return match store::create_provider_if_absent(home, provider).map_err(OpError::io)? {
+                Some(created) => object(created),
+                None => Err(OpError::new(
+                    "connector_exists",
+                    "A shared connector already exists; its credential was not changed",
+                )),
+            };
+        }
         return object(store::configure_provider(home, provider).map_err(OpError::io)?);
     }
     let id = required_arg(request, "connector_id")?;
@@ -47,9 +62,12 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     if request.op == "web_model_pairing_accept" {
         let code = required_arg(request, "code")?;
         let session = required_arg(request, "session_key")?;
-        // Candidate receipt grants no tools. Confirmation checks the Actor's
-        // current generation and stopped state before granting any authority.
+        // Browser candidates remain pending until receipt verification. Dots
+        // commits only its explicitly selected route after lifecycle validation.
         let pair = store::accept_pairing(home, &id, &code, &session).map_err(OpError::io)?;
+        if pair["transport"] == "mcp_events" {
+            return super::dots_events::accept_pairing(home, &id, &pair);
+        }
         return object(
             json!({"state":pair["state"],"pairing_id":pair["pairing_id"],"receipt":pair["receipt"]}),
         );
@@ -67,6 +85,12 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         return Err(OpError::new(
             "invalid_actor_runtime",
             "Pairing requires a Web Model Actor",
+        ));
+    }
+    if actor.runtime == cccc_contracts::ActorRuntime::ChatgptDots {
+        return Err(OpError::new(
+            "dots_requires_events",
+            "Dots connects through MCP Events, not conversation pairing",
         ));
     }
     let connector = store::load(home)

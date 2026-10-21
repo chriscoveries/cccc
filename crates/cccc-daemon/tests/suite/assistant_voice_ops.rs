@@ -773,6 +773,43 @@ fn disabled_voice_secretary_direct_dictation_heartbeat_preserves_lease_scope() {
 }
 
 #[test]
+fn legacy_group_voice_secretary_switch_does_not_block_document_recording() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("legacy switch", "").expect("group");
+    store
+        .mutate(&group.group_id, |doc| {
+            doc.extra.insert(
+                "assistants".into(),
+                json!({"voice_secretary":{"enabled":false}}),
+            );
+            Ok(())
+        })
+        .expect("legacy switch");
+
+    let acquired = ok(
+        &home,
+        "assistant_voice_recording_lease",
+        json!({"group_id":group.group_id,"action":"acquire","owner_id":"tab-doc"}),
+    );
+    let lease_id = acquired.result["lease_id"]
+        .as_str()
+        .expect("private lease token");
+    let heartbeat = ok(
+        &home,
+        "assistant_voice_recording_lease",
+        json!({
+            "group_id":group.group_id,
+            "action":"heartbeat",
+            "owner_id":"tab-doc",
+            "lease_id":lease_id
+        }),
+    );
+    assert_eq!(heartbeat.result["lost"], false);
+}
+
+#[test]
 fn voice_input_retries_cleanly_after_document_preflight_failure() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
@@ -1244,6 +1281,38 @@ fn enabled_voice_group() -> (tempfile::TempDir, HomeLayout, GroupStore, String) 
         })
         .expect("group");
     (temp, home, store, group.group_id)
+}
+
+#[test]
+fn an_empty_document_flush_without_segment_id_is_accepted() {
+    let (_temp, home, _store, group_id) = enabled_voice_group();
+    let document_path = "docs/voice-secretary/empty-flush.md";
+    // Stopping a document recording that recognized nothing flushes empty text
+    // with an empty segment id; it must close the window, not fail.
+    for text in ["", "spoken words"] {
+        ok(
+            &home,
+            "assistant_voice_transcript_append",
+            json!({
+                "group_id":group_id,"by":"user","session_id":"empty-flush-session",
+                "segment_id":"","text":text,"flush":true,"is_final":true,
+                "document_path":document_path
+            }),
+        );
+    }
+    let rejected = call(
+        &home,
+        "assistant_voice_transcript_append",
+        json!({
+            "group_id":group_id,"by":"user","session_id":"empty-flush-session",
+            "segment_id":"../escape","text":"x","document_path":document_path
+        }),
+    );
+    assert_eq!(
+        rejected.error.as_ref().map(|error| error.code.as_str()),
+        Some("invalid_args"),
+        "an unsafe explicit id is still refused"
+    );
 }
 
 fn ok(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {

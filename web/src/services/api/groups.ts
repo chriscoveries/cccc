@@ -35,7 +35,6 @@ import {
   clearGroupsReadRequest,
   filenameFromContentDisposition,
   groupPromptsRequestKey,
-  groupPromptsRequestKey as groupPromptsKey,
   groupsRequestKey,
   normalizePresentation,
   normalizePresentationBrowserSurfaceState,
@@ -89,19 +88,27 @@ function normalizeBuiltinAssistant(value: unknown): BuiltinAssistant | null {
   };
 }
 
-function normalizeAssistantVoiceDocument(value: unknown): AssistantVoiceDocument | null {
+export function normalizeAssistantVoiceDocument(
+  value: unknown,
+  opts?: { fallbackTitleToPath?: boolean },
+): AssistantVoiceDocument | null {
   const record = asRecord(value);
   if (!record) return null;
   const documentId = asString(record.document_id).trim();
-  const documentPath =
-    asOptionalString(record.document_path) || asOptionalString(record.workspace_path) || documentId;
+  const rawPath =
+    asOptionalString(record.document_path) || asOptionalString(record.workspace_path) || undefined;
+  const documentPath = rawPath || (opts?.fallbackTitleToPath ? undefined : documentId);
   if (!documentId && !documentPath) return null;
   return {
-    document_id: documentId || documentPath,
+    document_id: documentId || String(documentPath || ""),
     document_path: documentPath,
     filename: asOptionalString(record.filename) || undefined,
     assistant_id: asOptionalString(record.assistant_id) || undefined,
-    title: asOptionalString(record.title) || "Untitled document",
+    title:
+      asOptionalString(record.title) ||
+      (opts?.fallbackTitleToPath
+        ? String(documentPath || "Untitled document")
+        : "Untitled document"),
     status: asOptionalString(record.status) || "active",
     storage_kind: asOptionalString(record.storage_kind) || undefined,
     workspace_path: asOptionalString(record.workspace_path) || undefined,
@@ -151,6 +158,7 @@ function normalizeAssistantVoiceAskFeedback(value: unknown): AssistantVoiceAskFe
   if (!requestId) return undefined;
   return {
     request_id: requestId,
+    secretary_task_id: asOptionalString(record.secretary_task_id) || undefined,
     status: asOptionalString(record.status) || "pending",
     request_text: asOptionalString(record.request_text) || undefined,
     request_preview: asOptionalString(record.request_preview) || undefined,
@@ -531,24 +539,10 @@ function normalizeAssistantVoiceDocumentMutationResult(
   };
 }
 
-function normalizeAssistantVoiceInputResult(
+const normalizeAssistantVoiceInputResult: (
   groupId: string,
   result: unknown,
-): AssistantVoiceInputResult {
-  const record = asRecord(result) ?? {};
-  return {
-    group_id: asString(record.group_id).trim() || groupId,
-    assistant: normalizeBuiltinAssistant(record.assistant) || undefined,
-    document: normalizeAssistantVoiceDocument(record.document) || undefined,
-    input_event: asRecord(record.input_event) ?? undefined,
-    input_event_created: Boolean(record.input_event_created),
-    secretary_processing_deferred: Boolean(record.secretary_processing_deferred),
-    secretary_processing_error: asOptionalString(record.secretary_processing_error) || undefined,
-    event: record.event,
-    request_id: asOptionalString(record.request_id) || undefined,
-    input_append_id: asOptionalString(record.input_append_id) || undefined,
-  };
-}
+) => AssistantVoiceInputResult = normalizeAssistantVoiceDocumentMutationResult;
 
 function normalizeAssistantVoicePromptDraftMutationResult(
   groupId: string,
@@ -1582,7 +1576,7 @@ export type PromptUpdateOptions = { editorMode?: "structured" | "raw"; changedBl
 
 export async function fetchGroupPrompts(groupId: string) {
   const gid = String(groupId || "").trim();
-  return reuseSharedReadRequest(groupPromptsKey(gid), () =>
+  return reuseSharedReadRequest(groupPromptsRequestKey(gid), () =>
     apiJson<GroupPromptsResponse>(`/api/v1/groups/${encodeURIComponent(gid)}/prompts`),
   );
 }
@@ -1597,16 +1591,24 @@ export async function updateGroupPrompt(
   const body: Record<string, unknown> = { content, by: "user" };
   if (opts?.editorMode) body.editor_mode = opts.editorMode;
   if (Array.isArray(opts?.changedBlocks)) body.changed_blocks = opts.changedBlocks;
-  return apiJson<GroupPromptInfo>(`/api/v1/groups/${encodeURIComponent(groupId)}/prompts/${kind}`, {
-    method: "PUT",
-    body: JSON.stringify(body),
-  });
+  try {
+    return await apiJson<GroupPromptInfo>(
+      `/api/v1/groups/${encodeURIComponent(groupId)}/prompts/${kind}`,
+      { method: "PUT", body: JSON.stringify(body) },
+    );
+  } finally {
+    clearSharedReadRequest(groupPromptsRequestKey(groupId));
+  }
 }
 
 export async function resetGroupPrompt(groupId: string, kind: GroupPromptKind) {
   clearSharedReadRequest(groupPromptsRequestKey(groupId));
-  return apiJson<GroupPromptInfo>(
-    `/api/v1/groups/${encodeURIComponent(groupId)}/prompts/${kind}?confirm=${encodeURIComponent(kind)}`,
-    { method: "DELETE" },
-  );
+  try {
+    return await apiJson<GroupPromptInfo>(
+      `/api/v1/groups/${encodeURIComponent(groupId)}/prompts/${kind}?confirm=${encodeURIComponent(kind)}`,
+      { method: "DELETE" },
+    );
+  } finally {
+    clearSharedReadRequest(groupPromptsRequestKey(groupId));
+  }
 }

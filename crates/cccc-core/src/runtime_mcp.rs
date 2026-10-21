@@ -28,6 +28,7 @@ pub const fn is_auto_managed(runtime: ActorRuntime) -> bool {
             | ActorRuntime::Kimi
             | ActorRuntime::Kilo
             | ActorRuntime::Opencode
+            | ActorRuntime::Pi
     )
 }
 
@@ -51,7 +52,9 @@ pub const fn name(runtime: ActorRuntime) -> &'static str {
         ActorRuntime::Hermes => "hermes",
         ActorRuntime::Kimi => "kimi",
         ActorRuntime::Opencode => "opencode",
+        ActorRuntime::Pi => "pi",
         ActorRuntime::WebModel => "web_model",
+        ActorRuntime::ChatgptDots => "chatgpt_dots",
         ActorRuntime::GrokWebModel => "grok_web_model",
         ActorRuntime::Custom => "custom",
     }
@@ -210,6 +213,7 @@ mod tests {
             ActorRuntime::Kimi,
             ActorRuntime::Kilo,
             ActorRuntime::Opencode,
+            ActorRuntime::Pi,
         ];
         assert!(runtimes.into_iter().all(is_auto_managed));
         assert!(!is_auto_managed(ActorRuntime::Cursor));

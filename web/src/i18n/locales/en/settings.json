@@ -27,6 +27,8 @@
   },
   "navigation": {
     "targetScope": "Target Scope",
+    "appliesToGroup": "Applies to group {{name}}",
+    "appliesToGlobal": "Applies to the whole CCCC instance (daemon + Web)",
     "thisGroup": "This group",
     "global": "This instance",
     "groupScopeTitle": "Group Scope",
@@ -193,7 +195,6 @@
   "capabilities": {
     "title": "Capability Governance",
     "subtitle": "Self-evolving skill governance with a dedicated Capability Center for the full registry.",
-    "pageGuide": "Use Capability Center for sources and full registry browsing. This tab only manages generated self-evolving skill records across groups.",
     "refresh": "Refresh",
     "openCenter": "Open Capability Center",
     "revision": "Revision",
@@ -892,6 +893,8 @@
     "description": "Control runtime delivery pacing and the single reminder allowed for Mail and Send + Reply.",
     "mailNotice": "Mail Notice After (sec)",
     "mailNoticeHelp": "Send one content-free inbox notice if Mail is still unread. 0 disables the notice.",
+    "mailIdleNotice": "Mail Notice When Idle (sec)",
+    "mailIdleNoticeHelp": "When the recipient Agent is idle, new Mail is announced as soon as it arrives. Mail that arrives while it is busy is announced once it is idle and the Mail has waited this long (several Mail become one notice), at the latest by the delay above. Applies only to managed Agents that report their working state; others are notified by the delay above. 0 turns early notices off.",
     "replyNotice": "Reply Notice After (sec)",
     "replyNoticeHelp": "Send one content-free reminder if a requested reply is still open. 0 disables the notice.",
     "saveDelivery": "Save Delivery Settings"
@@ -1058,6 +1061,7 @@
     "compactFrames": "Compact repeated frames"
   },
   "guidance": {
+    "commonAndRolesTitle": "Shared Scopes",
     "openFromGroup": "Open this tab from a group.",
     "overridesHint": "Guidance files are stored in the attached project scope.",
     "preambleTitle": "Bootstrap (Preamble)",
@@ -1127,7 +1131,7 @@
     "runtimeReset": "Actors import stopped; browser and runtime sessions are cleared.",
     "workspaceExcluded": "Workspace files are not included.",
     "secretsExcluded": "System credentials, cookies, and auth sessions are not included. Chat history, memory, and attachments may still contain sensitive user content.",
-    "reconnectChatGPT": "ChatGPT Web Model setup must be reconnected after import.",
+    "reconnectChatGPT": "ChatGPT connections must be reconfigured after import.",
     "reconnectNotebookLM": "NotebookLM / Group Space may need reconnect after import.",
     "importButton": "Import Group",
     "importConfirm": "Import group copy package \"{{filename}}\"?",
@@ -1506,7 +1510,7 @@
   },
   "webModelShared": {
     "title": "ChatGPT shared setup",
-    "description": "Sign in once in the CCCC browser. Each Actor keeps its own window and conversation.",
+    "description": "ChatGPT Web Model Actors chat in CCCC's browser. Sign in once; each Actor keeps its own window and conversation.",
     "upgrade": "This version requires a new shared connector and conversation pairing. Old chats and history are preserved.",
     "login": "Shared ChatGPT login",
     "loginHint": "All Actor windows share this login. Signing out affects every ChatGPT Actor. Closing the login window leaves Actor windows and the saved login intact.",
@@ -1518,8 +1522,9 @@
     "check": "Check login",
     "close": "Close login window",
     "connector": "One CCCC connector",
-    "connectorHint": "Add this connector once in ChatGPT. Each Actor connects its own conversation automatically when started; no Actor-specific connector URLs are needed.",
-    "publicUrl": "ChatGPT needs a public HTTPS URL for this connector. Configure Web access before copying it.",
+    "connectorHint": "Add this connector once in ChatGPT. Web Model conversations connect automatically on start. Dots uses this same connector; see the Dots view.",
+    "publicUrlMissing": "No public Web access address is configured yet. ChatGPT can reach this connector only through a public HTTPS address.",
+    "publicUrlInvalid": "The configured address {{url}} does not meet the public HTTPS requirement. Set an externally accessible HTTPS address in Web access.",
     "webAccess": "Web access settings",
     "configured": "Connector credential created",
     "pairedActors": "paired Actors",
@@ -1534,10 +1539,20 @@
     "revokeHint": "All ChatGPT Actors will lose tool access. Creating a connector again will require pairing their conversations again.",
     "confirm": "Confirm",
     "cancel": "Cancel",
-    "actorHint": "Create a ChatGPT Web Model Actor and enable the CCCC connector in its conversation. Start the Actor normally; connection is automatic. To use an existing chat or change it later, open that Actor’s ChatGPT conversation settings.",
+    "actorHint": "Create a ChatGPT Web Model Actor, enable the CCCC connector in its conversation, then start the Actor as usual.",
     "maintenance": "Manage connector credential",
     "notSeen": "No connector request recorded yet. Add this connector in ChatGPT to finish setup.",
-    "lastSeen": "Last connector request: {{time}}"
+    "lastSeen": "Last connector request: {{time}}",
+    "pluginSetup": {
+      "title": "Add CCCC as a plugin in ChatGPT (once per account)",
+      "path": "In ChatGPT, open Plugins, choose Add (top right) → Add custom MCP server, then enter these values. A Dot cannot add it by itself.",
+      "openPlugins": "Open ChatGPT plugins ↗",
+      "name": "Name",
+      "url": "URL",
+      "auth": "Authentication",
+      "urlHidden": "Private URL, hidden; copy it",
+      "copyName": "Copy name"
+    }
   },
   "webModelActor": {
     "title": "ChatGPT conversation",
@@ -1609,7 +1624,8 @@
     "rotateHint": "The old URL will stop working for Grok Actors. Update the Grok connector with the new URL. Existing Bot bindings remain.",
     "revokeHint": "All Grok Actors will lose tool access. After creating a new connector, save their Bot URLs again.",
     "upgrade": "Configure the Grok connector and save each Actor’s Bot URL.",
-    "publicUrl": "Grok needs a public HTTPS URL for this connector. Configure Web access before copying it.",
+    "publicUrlMissing": "No public Web access address is configured yet. Grok can reach this connector only through a public HTTPS address.",
+    "publicUrlInvalid": "The configured address {{url}} does not meet the public HTTPS requirement. Set an externally accessible HTTPS address in Web access.",
     "copyOnce": "Copy this private URL now and add it to Grok Connectors. It is only shown after creation or rotation; do not share it.",
     "notSeen": "No connector request recorded yet. Add this connector in Grok to finish setup."
   },
@@ -1658,8 +1674,8 @@
     "saveFailed": "Could not save voice settings.",
     "asr": "Recognition services",
     "sharedAsrHint": "Recognition is part of Voice Secretary; provider credentials and local models are shared.",
-    "realtime": "Codex Voice",
-    "realtimeHint": "Talk live with Codex Voice. Voice Analyst handles investigations with its own runtime configuration.",
+    "realtime": "Voice conversation",
+    "realtimeHint": "Choose Codex or Grok for live conversation. Call preferences and message notifications are shared; Voice Analyst has its own runtime. Preferences save automatically; save Analyst changes explicitly.",
     "discardChanges": "Discard unsaved voice settings?",
     "waitForSave": "Wait for the current save or check to finish.",
     "groupHint": "This Group owns its documents, transcripts and work rules. A single global Voice Secretary handles its tasks; runtime and model settings are shared.",
@@ -1779,7 +1795,7 @@
       "terminalHint": "Interact directly with the Secretary. Document updates and prompt drafts use their original task targets.",
       "manualTurn": "Working on terminal input. Queued tasks will follow when it finishes.",
       "notStartedHint": "The Secretary starts with the first task and stays available between tasks.",
-      "outputHint": "Execution output appears here. ACP runtimes do not provide a native terminal.",
+      "outputHint": "Execution output appears here. This controlled session has no native terminal.",
       "phases": {
         "not_started": "Not started",
         "starting": "Starting",
@@ -1790,7 +1806,17 @@
         "unavailable": "Unavailable"
       },
       "adminOnly": "The shared Secretary terminal requires administrator access. Group tasks and results remain available here."
-    }
+    },
+    "readiness": {
+      "notConfigured": "Voice Secretary isn't set up",
+      "invalidConfiguration": "Voice Secretary configuration needs attention",
+      "ownerUnavailable": "Voice Secretary is unavailable",
+      "configureHint": "Input is saved. Configure the Secretary to process it.",
+      "configurationHint": "Input is saved. Check the diagnostic and voice settings.",
+      "ownerHint": "Input is saved. Check execution details for the cause.",
+      "askAdminToCheck": "Ask an administrator to check the service."
+    },
+    "sourcesUnavailable": "{{count}} inputs are saved, awaiting an available Secretary."
   },
   "voiceAudio": {
     "title": "Audio devices",
@@ -1802,7 +1828,7 @@
     "systemSpeaker": "This browser uses the system speaker.",
     "applyHint": "Saved automatically. Device changes apply to the next recording or call.",
     "permissionHint": "Device names may be hidden until microphone access is granted.",
-    "browserAsrHint": "Browser ASR uses the browser’s default microphone; local/external ASR and Codex Voice use the selection above.",
+    "browserAsrHint": "Browser ASR uses the browser’s default microphone; local/external ASR and live voice calls use the selection above.",
     "unavailable": "Unable to read audio devices. Check browser permissions and try refreshing.",
     "loading": "Reading devices…",
     "microphoneNumber": "Microphone {{number}}",
@@ -1812,5 +1838,148 @@
     "currentDevices": "In use",
     "nextDevices": "Next start",
     "storageUnavailable": "Browser storage is unavailable. These devices are kept for this page only; they may reset when you reopen it."
+  },
+  "dotsActor": {
+    "openDetails": "View details",
+    "title": "ChatGPT Dots",
+    "hint": "Tasks arrive through native ChatGPT events. Pausing CCCC access does not stop a task that is already running in ChatGPT. Replies return to this Group.",
+    "createHint": "After saving, continue in this Actor’s pane to connect a native Dots event task. Reuse the CCCC plugin in the same ChatGPT account; no CCCC browser login window is needed. One Dot connects to one Actor.",
+    "connect": "Connect Dots",
+    "getInstructions": "Get setup instructions",
+    "connectHint": "If the CCCC plugin is not connected in your ChatGPT account, use Shared ChatGPT setup first. After upgrading CCCC, refresh the plugin’s tools. Copy the setup instructions into your Dot to pair it with this Actor and save a native event task.",
+    "nativeStepCopy": "Copy the setup instructions below.",
+    "nativeStepPasteConfirm": "Paste into your Dot to complete pairing and save the native event task. Update the existing task rather than creating another; a chat reply alone does not save it.",
+    "nativeStepObserve": "Return here. CCCC checks both pairing and subscription automatically. If CCCC access is paused, resume it after setup is complete.",
+    "adminSetup": "An administrator needs to connect this Actor to a native Dots task.",
+    "adminStatus": "Administrator-managed connection",
+    "adminManaged": "An administrator manages this Actor’s Dots connection and task status.",
+    "disconnect": "Disconnect Dots",
+    "sharedSettings": "Shared ChatGPT setup",
+    "connectionSettings": "Connection settings",
+    "openDots": "Open Dots ↗",
+    "instructions": "Dots setup instructions",
+    "copyInstructions": "Copy setup instructions",
+    "copied": "Copied",
+    "pauseBeforeChanging": "Pause CCCC access before changing this connection.",
+    "disconnectConfirm": "Disconnect this Actor from Dots? This removes CCCC access. The native task and ChatGPT history remain.",
+    "resolve": "Resolve unfinished delivery",
+    "resolveConfirm": "Have you reviewed the task in Dots? Mark this unfinished delivery as resolved without sending it again. A remote task may still be running.",
+    "reviewUnfinished": "Review this delivery in Dots before resolving it. CCCC will not resend it automatically.",
+    "readFailed": "Status could not be updated. The last known state is retained.",
+    "actionFailed": "The connection action failed. Try again.",
+    "copyFailed": "Copy failed. Select and copy the instructions instead.",
+    "pending_one": "{{count}} pending message",
+    "pending_other": "{{count}} pending messages",
+    "executionError": "Delivery needs attention. Review the task in Dots.",
+    "phases": {
+      "unconfigured": "Not connected",
+      "waiting_pairing": "Waiting for Dot pairing",
+      "waiting_subscription": "Waiting for the native event task",
+      "ready": "Ready for tasks",
+      "delivering": "Sending event",
+      "delivered": "Waiting for the Dot to claim the task",
+      "working": "Dot is processing the task",
+      "interrupted": "Unfinished delivery · review required",
+      "failed": "Delivery failed · review required",
+      "stopped": "CCCC access paused",
+      "pending": "Messages waiting for delivery"
+    },
+    "lastExecution": {
+      "done": "Last task completed",
+      "partial": "Last task partially completed",
+      "failed": "Last task failed",
+      "cancelled": "Last task cancelled"
+    },
+    "errors": {
+      "callbackRejected": "ChatGPT did not accept the event. Check the native task and shared connector.",
+      "callbackFailed": "The event could not reach ChatGPT. Check the connection before retrying.",
+      "deliveryUnconfirmed": "Delivery has not been confirmed. Review Dots before resolving it; CCCC will not resend the task automatically.",
+      "executionInterrupted": "CCCC access changed before the result arrived. Review the unfinished task in Dots.",
+      "subscriptionGone": "The native event subscription is no longer valid. Get setup instructions again and update the native task in Dots.",
+      "connectorRequired": "Configure the shared ChatGPT connector first.",
+      "bindingConflict": "This account’s Dot is connected to another Actor. Pause and disconnect that Actor before moving the connection."
+    },
+    "unavailable": "Status unavailable",
+    "subscriptionExpires": "Event subscription expires: {{time}}",
+    "subscriptionExpired": "Event subscription expired: {{time}}",
+    "notifyAgain": "Pause CCCC access, then resume it to notify messages that ChatGPT has not claimed. If the subscription is no longer valid, get setup instructions again and update the native task in Dots.",
+    "pending": "{{count}} pending messages",
+    "status": {
+      "subscription": "Event subscription",
+      "permanent": "Permanent",
+      "notSubscribed": "Not subscribed",
+      "pending": "Pending messages",
+      "lastTask": "Last task",
+      "noTask": "No task yet"
+    },
+    "delivery": {
+      "title": "Task delivery",
+      "lastCompleted": "Last completed task",
+      "hint": "An accepted event may wait before the Dot claims the task.",
+      "empty": "No active delivery."
+    },
+    "steps": {
+      "notify": "Queued / Sending",
+      "notifyHint": "The message is saved and waiting for CCCC to notify the Dot.",
+      "notifySending": "Sending notification",
+      "notifySendingHint": "CCCC is sending the event to ChatGPT.",
+      "waiting": "Waiting for Dot",
+      "waitingHint": "ChatGPT accepted the event. Waiting for the Dot to claim this task.",
+      "working": "Working",
+      "workingHint": "The Dot has claimed this task. Waiting for its result.",
+      "completed": "Completed",
+      "completedHint": "CCCC has confirmed this task’s completion receipt."
+    },
+    "settings": {
+      "instructions": "Setup instructions",
+      "instructionsHint": "Retrieve the setup instructions to finish pairing or update the existing native event task. Queued messages are retained.",
+      "shared": "Shared ChatGPT connector",
+      "sharedHint": "Dots and ChatGPT Web Model Actors share one CCCC plugin.",
+      "disconnectHint": "Pause CCCC access and resolve unfinished work first. Also disable the native task in Dots."
+    },
+    "setup": {
+      "connectorReadFailed": "Could not read the shared connector. Retry or open shared settings.",
+      "noConnector": "No shared CCCC connector yet. Create it here, then add CCCC as a plugin in ChatGPT with the values shown.",
+      "connectorExists": "A shared connector already exists, so nothing was changed. If ChatGPT does not have the CCCC plugin yet, open the shared settings.",
+      "createConnector": "Create connector and get plugin URL",
+      "creatingConnector": "Creating…",
+      "pluginTitle": "Connect the CCCC plugin",
+      "copyTitle": "Copy the setup instructions to your Dot",
+      "waitTitle": "Wait for pairing and subscription",
+      "tipsTitle": "Did the Dot say saving failed?",
+      "tipRefresh": "In ChatGPT's plugin settings, choose Refresh tools for CCCC, then ask the Dot to retry.",
+      "tipPermissions": "Make sure the CCCC plugin may claim, reply to and complete tasks.",
+      "tipRetry": "A chat confirmation is not enough. CCCC must detect both pairing and subscription before this Actor can receive work."
+    }
+  },
+  "dotsSettings": {
+    "title": "ChatGPT Dots",
+    "description": "Dots receive work through ChatGPT native events and reply to their Group. They do not need CCCC's browser login window.",
+    "prereq": "Prerequisites",
+    "prereqHint": "Dots share the ChatGPT CCCC connector. Its status shows here; manage it in the ChatGPT view so only one exists.",
+    "addressReady": "Public HTTPS Web address is configured.",
+    "configureWebAccess": "Web access settings",
+    "connectorReady": "Shared CCCC connector is ready.",
+    "connectorMissing": "Create the shared CCCC connector in the ChatGPT view first.",
+    "manageConnector": "Manage in ChatGPT",
+    "boundActor": "Bound Dots Actor",
+    "boundHint": "One Dot serves one Actor. Set it up and follow deliveries in that Actor's main pane.",
+    "actorReadFailed": "Couldn't read this Actor's status just now. Showing the last known status; it retries automatically.",
+    "noActor": "No Dots Actor is bound yet. Create an Actor with runtime ChatGPT Dots and connect it from its main pane.",
+    "actorGroup": "Group {{group}}",
+    "diagnostics": "Shared plugin diagnostics",
+    "diagnosticsHint": "The latest 10 subscription and task-tool outcomes, newest first. This plugin also serves ordinary ChatGPT Actors; these are not all this Dot’s calls. Only reason codes are kept, without credentials or call arguments.",
+    "noCalls": "No recorded calls yet.",
+    "callOk": "Call succeeded",
+    "callFailed": "Failed · {{reason}}",
+    "reasons": {
+      "pairingExpired": "Get fresh setup instructions for the intended Actor and use its code within 10 minutes.",
+      "bindingChanged": "Check the intended Actor and its current connection before requesting new setup instructions.",
+      "conversationUnpaired": "Use the paired conversation. If this Actor is paired but that same Dot is rejected, pause its CCCC access and explicitly disconnect and reconnect it.",
+      "executionToken": "Refresh the plugin tools and update the existing native task with the latest setup instructions. Turn tools use only the execution token returned by the claim.",
+      "actorStopped": "Resume CCCC access for the intended Actor if you want it to receive work.",
+      "refreshTools": "Refresh the CCCC plugin tools in ChatGPT and check the latest setup instructions.",
+      "callFailed": "Check the failed call reported in ChatGPT before retrying; this record alone does not establish whether a turn completed."
+    }
   }
 }

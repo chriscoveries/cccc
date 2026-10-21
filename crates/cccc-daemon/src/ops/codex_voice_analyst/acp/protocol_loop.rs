@@ -42,6 +42,7 @@ pub(super) async fn run(
     permission_policy: PermissionPolicy,
     prompt_completion: PromptCompletion,
     permissions: Arc<Mutex<std::collections::BTreeMap<String, Value>>>,
+    private_values: Vec<String>,
 ) {
     let mut next_id = 1_u64;
     let mut pending: HashMap<u64, PendingKind> = HashMap::new();
@@ -333,6 +334,7 @@ pub(super) async fn run(
                                 &events,
                                 &generation,
                                 &session_id,
+                                runtime,
                             );
                         }
                         pending.retain(|_, kind| !matches!(kind, PendingKind::Prompt { rpc_completed: true, response: None, .. }));
@@ -467,6 +469,7 @@ pub(super) async fn run(
                                 &events,
                                 &generation,
                                 &session_id,
+                                runtime,
                             );
                         }
                         match buffer_unadmitted_notification(&message, frame.len(), &mut pending, active.as_ref()) {
@@ -513,10 +516,11 @@ pub(super) async fn run(
                     loading_request_id = None;
                 }
                 let result = if let Some(error) = message.get("error") {
-                    Err(io::Error::other(format!(
-                        "ACP request failed: {}",
-                        error.get("message").and_then(Value::as_str).unwrap_or("Provider returned an error"),
-                    )))
+                    let method = match &kind {
+                        PendingKind::Request { method, .. } => method.as_str(),
+                        PendingKind::Prompt { .. } => "session/prompt",
+                    };
+                    Err(rpc_error(runtime, method, error, &private_values))
                 } else {
                     Ok(message.get("result").cloned().unwrap_or(Value::Null))
                 };
@@ -565,15 +569,19 @@ pub(super) async fn run(
                         match result {
                             Err(error) if response.is_some() => {
                                 clear_unadmitted_turn(&mut active, &turn_id);
-                                let error = if cancelling_turn_id.as_deref() == Some(turn_id.as_str()) {
+                                let cancelled = cancelling_turn_id.as_deref() == Some(turn_id.as_str());
+                                let error = if cancelled {
                                     cancelling_turn_id = None;
                                     io::Error::new(io::ErrorKind::Interrupted, "ACP pending input was cancelled")
                                 } else {
-                                    prompt_admission_error(error)
+                                    error
                                 };
                                 let _ = response
                                     .expect("guarded pending ACP response")
                                     .send(Err(error));
+                                if cancelled && runtime == "hermes" {
+                                    break "Hermes cancelled session was retired to prevent replaying its interrupted input; the saved conversation is retained".to_owned();
+                                }
                                 continue;
                             }
                             outcome => {
@@ -620,6 +628,13 @@ pub(super) async fn run(
                                     );
                                     if cancellation_requested {
                                         cancelling_turn_id = None;
+                                    }
+                                    if runtime == "hermes" && status == "cancelled" {
+                                        // Hermes keeps the interrupted input in process memory
+                                        // and prepends it to the next prompt, even after load.
+                                        // Retire this process through its existing owner;
+                                        // restart can load the retained durable identity.
+                                        break "Hermes cancelled session was retired to prevent replaying its interrupted input; the saved conversation is retained".to_owned();
                                     }
                                 } else {
                                     if active.as_ref().is_none_or(|turn| turn.turn_id != turn_id) {
@@ -931,6 +946,7 @@ fn admit_matching_native_input(
     events: &broadcast::Sender<AnalystEvent>,
     generation: &str,
     session_id: &str,
+    runtime: &str,
 ) {
     if message.get("method").and_then(Value::as_str) != Some("session/update")
         || message.pointer("/params/sessionId").and_then(Value::as_str) != Some(session_id)
@@ -946,6 +962,21 @@ fn admit_matching_native_input(
         .and_then(Value::as_str)
     else {
         return;
+    };
+    // Grok wraps native interjections before echoing them. Only unwrap its
+    // explicitly marked, complete envelope; ownership still requires an exact
+    // match of the original payload, never a substring or a queue position.
+    let text = if runtime == "grok"
+        && message
+            .pointer("/params/update/_meta/interjection")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        text.strip_prefix("The user sent a message while you were working:\n<user_query>\n")
+            .and_then(|text| text.strip_suffix("\n</user_query>\nIf the user is asking for a response, address the user first. After replying, complete any unfinished tasks from previous turns."))
+            .unwrap_or(text)
+    } else {
+        text
     };
     let Some(delegation_id) = native_input::observe(native_inputs, text) else {
         return;
@@ -1019,11 +1050,49 @@ fn prompt_admission_error(error: io::Error) -> io::Error {
     )
 }
 
+fn rpc_error(runtime: &str, method: &str, error: &Value, private_values: &[String]) -> io::Error {
+    let message = super::diagnostic::sanitize(
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Provider returned an error"),
+        private_values,
+    );
+    // Only the provider's original message establishes an explicit busy rejection.
+    // An explanatory details field cannot turn a failed prompt into deferred work.
+    let kind = if method == "session/prompt" {
+        prompt_admission_error(io::Error::other(message.clone())).kind()
+    } else {
+        io::ErrorKind::Other
+    };
+    let prefix = error.get("code").and_then(Value::as_i64).map_or_else(
+        || format!("ACP {method} failed"),
+        |code| format!("ACP {method} failed (code {code})"),
+    );
+    let details = (runtime == "hermes")
+        .then(|| error.pointer("/data/details").and_then(Value::as_str))
+        .flatten()
+        .map(|value| super::diagnostic::sanitize(value, private_values))
+        .filter(|value| !value.is_empty() && value != &message);
+    let diagnostic = if let Some(details) = details {
+        format!("{prefix}: {message}; {details}")
+    } else {
+        format!("{prefix}: {message}")
+    };
+    io::Error::new(
+        kind,
+        diagnostic
+            .chars()
+            .take(super::diagnostic::LIMIT)
+            .collect::<String>(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         MAX_PENDING_NOTIFICATION_BYTES, admit_matching_native_input, admit_matching_prompt,
-        buffer_unadmitted_notification, prompt_admission_error,
+        buffer_unadmitted_notification, prompt_admission_error, rpc_error,
     };
     use crate::ops::codex_voice_analyst::acp::events::ActiveTurn;
     use crate::ops::codex_voice_analyst::acp::pending::PendingKind;
@@ -1043,6 +1112,26 @@ mod tests {
             r#"ACP request failed: {"code":-32603,"message":"provider failed"}"#,
         ));
         assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn explanatory_details_and_private_values_cannot_make_a_failed_prompt_retryable() {
+        let error = rpc_error(
+            "hermes",
+            "session/prompt",
+            &json!({"code":-32603,"message":"Internal error: private-busy-value","data":{"details":"Refresh request denied because its service is busy"}}),
+            &["private-busy-value".into()],
+        );
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("service is busy"));
+        assert!(!error.to_string().contains("private-busy-value"));
+        let busy = rpc_error(
+            "hermes",
+            "session/prompt",
+            &json!({"code":-32603,"message":"session is busy"}),
+            &[],
+        );
+        assert_eq!(busy.kind(), io::ErrorKind::WouldBlock);
     }
 
     #[test]
@@ -1195,6 +1284,7 @@ mod tests {
             &events,
             "generation-1",
             "session-1",
+            "grok",
         );
 
         assert_eq!(active.as_ref().expect("active").turn_id, "turn-1");
@@ -1240,6 +1330,7 @@ mod tests {
             &events,
             "generation-1",
             "session-1",
+            "grok",
         );
 
         let turn = active.as_ref().expect("dequeued Runtime turn");
@@ -1253,6 +1344,122 @@ mod tests {
             Some("voice-queued")
         );
         assert!(native_inputs.is_empty());
+    }
+
+    #[test]
+    fn grok_interjection_and_later_turn_keep_their_owners_after_a_missing_echo() {
+        let mut native_inputs = std::collections::VecDeque::new();
+        for (id, text) in [
+            ("missing", "an input without an observed echo"),
+            ("interjection", "inspect the synthetic fixture"),
+            ("next", "inspect the next fixture"),
+        ] {
+            crate::ops::codex_voice_analyst::native_input::register(
+                &mut native_inputs,
+                id.into(),
+                text.into(),
+            )
+            .expect("register native input");
+        }
+        let mut active = Some(ActiveTurn {
+            turn_id: "current-turn".into(),
+            external: true,
+            admitted: true,
+            provider_prompt_id: None,
+            provider_start_sequence: None,
+        });
+        let (events, mut receiver) = broadcast::channel(16);
+        let message = json!({
+            "method":"session/update",
+            "params":{"sessionId":"session-1","update":{
+                "sessionUpdate":"user_message_chunk",
+                "_meta":{"interjection":true},
+                "content":{"type":"text","text":concat!(
+                    "The user sent a message while you were working:\n<user_query>\n",
+                    "inspect the synthetic fixture",
+                    "\n</user_query>\nIf the user is asking for a response, address the user first. After replying, complete any unfinished tasks from previous turns."
+                )}
+            }}
+        });
+        admit_matching_native_input(
+            &message,
+            &mut native_inputs,
+            &mut active,
+            &events,
+            "generation-1",
+            "session-1",
+            "grok",
+        );
+        let associated = receiver
+            .try_recv()
+            .expect("the interjection must be associated");
+        assert_eq!(
+            associated.requested_delegation_id.as_deref(),
+            Some("interjection")
+        );
+        assert_eq!(associated.message["params"]["turnId"], "current-turn");
+        super::settle_turn(
+            &events,
+            "generation-1",
+            "session-1",
+            "current-turn",
+            "completed",
+            None,
+            &mut active,
+        );
+        let mut completed = false;
+        while let Ok(event) = receiver.try_recv() {
+            if event.message["method"] == "turn/completed" {
+                assert_eq!(event.message["params"]["turn"]["id"], "current-turn");
+                completed = true;
+            }
+        }
+        assert!(completed, "the preceding turn must settle");
+        let next = json!({
+            "method":"session/update",
+            "params":{"sessionId":"session-1","update":{
+                "sessionUpdate":"user_message_chunk",
+                "content":{"type":"text","text":"inspect the next fixture"}
+            }}
+        });
+        admit_matching_native_input(
+            &next,
+            &mut native_inputs,
+            &mut active,
+            &events,
+            "generation-1",
+            "session-1",
+            "grok",
+        );
+        let started = receiver.try_recv().expect("the following turn must start");
+        assert_eq!(started.requested_delegation_id.as_deref(), Some("next"));
+        assert_eq!(started.message["method"], "turn/started");
+        let turn_id = active
+            .as_ref()
+            .expect("confirmed native turn")
+            .turn_id
+            .clone();
+        let output = json!({
+            "method":"session/update",
+            "params":{"sessionId":"session-1","update":{
+                "sessionUpdate":"agent_message_chunk",
+                "content":{"type":"text","text":"the synthetic answer"}
+            }}
+        });
+        super::handle_notification(
+            "session/update",
+            &output,
+            &events,
+            "generation-1",
+            "session-1",
+            &mut active,
+            &mut HashMap::new(),
+        );
+        let result = receiver.try_recv().expect("the following result must flow");
+        assert_eq!(result.message["params"]["turnId"], turn_id);
+        assert_eq!(result.message["params"]["delta"], "the synthetic answer");
+        assert_eq!(native_inputs.len(), 1);
+        assert_eq!(native_inputs[0].delegation_id, "missing");
     }
 
     #[test]
@@ -1313,11 +1520,54 @@ mod tests {
                 &events,
                 "generation-1",
                 "session-1",
+                "grok",
             );
         }
 
         assert_eq!(admitted_turn.as_deref(), Some("turn-1"));
         assert_eq!(native_inputs.len(), 1);
         assert_eq!(native_inputs[0].delegation_id, "voice-2");
+    }
+
+    #[test]
+    fn interjection_unwrapping_requires_grok_metadata_and_the_exact_envelope() {
+        let wrapped = concat!(
+            "The user sent a message while you were working:\n<user_query>\n",
+            "inspect the fixture",
+            "\n</user_query>\nIf the user is asking for a response, address the user first. After replying, complete any unfinished tasks from previous turns."
+        );
+        for (runtime, marked, text) in [
+            ("kimi", true, wrapped.to_owned()),
+            ("grok", false, wrapped.to_owned()),
+            ("grok", true, format!("{wrapped} extra content")),
+        ] {
+            let mut pending = std::collections::VecDeque::new();
+            crate::ops::codex_voice_analyst::native_input::register(
+                &mut pending,
+                "input".into(),
+                "inspect the fixture".into(),
+            )
+            .expect("register native input");
+            let message = json!({
+                "method":"session/update","params":{"sessionId":"session-1","update":{
+                    "sessionUpdate":"user_message_chunk","_meta":{"interjection":marked},
+                    "content":{"type":"text","text":text}
+                }}
+            });
+            let (events, mut receiver) = broadcast::channel(4);
+            let mut active = None;
+            admit_matching_native_input(
+                &message,
+                &mut pending,
+                &mut active,
+                &events,
+                "generation-1",
+                "session-1",
+                runtime,
+            );
+            assert!(receiver.try_recv().is_err());
+            assert_eq!(pending.len(), 1);
+            assert!(active.is_none());
+        }
     }
 }

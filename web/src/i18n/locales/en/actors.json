@@ -121,6 +121,7 @@
   "avatarReset": "Avatar reset to default.",
   "avatarUploadFailed": "Failed to upload avatar.",
   "runtime": "Runtime",
+  "piRuntimeHint": "Pi runs in a controlled workspace without a native terminal.",
   "command": "Command",
   "customCommandOverride": "Custom command",
   "runtimeChangesNote": "Runtime/command changes take effect after restart. Use \"Save & Restart\" to apply immediately.",
@@ -300,7 +301,7 @@
   "terminalReadOnlyNotice": "This terminal is read-only. Take control to type here.",
   "webModelActorBoundConnectorTitle": "ChatGPT Web Model",
   "webModelActorBoundConnectorHint": "Global Web Model settings manage shared login and one connector. Save this Actor and start it normally; its conversation connects automatically before task delivery.",
-  "webModelProfileHint": "Web Model profiles reuse runtime and capability settings. Each Actor configures its own conversation.",
+  "webModelProfileHint": "Web Model profiles share runtime and capability settings. Each Actor configures its own connection.",
   "saveAndApply": "Save & apply",
   "applyWebModelTargetConfirm": "Apply the new conversation for \"{{label}}\"? CCCC will stop only this Actor, save its settings, then restart it after the new connection is saved. If applying fails, it stays stopped and your draft remains here.",
   "antigravityMode": {
@@ -319,13 +320,18 @@
     "cancel": "Cancel current and queued inputs",
     "input": "Additional instruction",
     "queued": "Queued inputs: {{count}}",
-    "hint": "ACP has no native terminal. Inputs wait for the current task to finish.",
+    "snapshotStale": "Status could not be refreshed. Showing the last update; checking again automatically.",
+    "hint": "This controlled session has no native terminal. View output and submit investigations here; inputs wait for the current task to finish.",
     "error": "The action failed. Your input has been kept.",
-    "stopped": "Start this Actor to use ACP controls.",
+    "stopped": "Start this Actor to use session controls.",
     "cancelCurrent": "Cancel current task",
     "question": "Answer required",
     "plan": "Plan confirmation",
     "answer": "Submit answers",
+    "confirm": "Confirm",
+    "decline": "Decline",
+    "reply": "Submit reply",
+    "cancelInteraction": "Cancel request",
     "skip": "Skip questions",
     "acceptPlan": "Accept plan",
     "rejectPlan": "Reject plan",
@@ -352,5 +358,9 @@
     "label": "{{runtime}} mode",
     "hint": "ACP uses the native CLI login and its own managed session. There is no terminal; inputs queue until the current task finishes."
   },
-  "selectRuntime": "Not configured"
+  "selectRuntime": "Not configured",
+  "dotsPause": "Pause CCCC access",
+  "dotsPauseHint": "Pauses CCCC delivery and tool access. A task already running in ChatGPT may continue.",
+  "dotsEnable": "Enable CCCC access",
+  "dotsResume": "Resume CCCC access"
 }

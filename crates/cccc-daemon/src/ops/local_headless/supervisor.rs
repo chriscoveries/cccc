@@ -5,16 +5,21 @@ use super::{
 };
 use cccc_contracts::{Actor, ActorRuntime, Event, RunnerKind, utc_now};
 use cccc_core::{GroupDoc, HomeLayout};
-use serde_json::Map;
+use serde_json::{Map, json};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use tracing::Instrument;
 
+// Reachable from the `output` sibling module's session-level settle test,
+// which needs the same fake control socket.
 #[cfg(all(test, unix))]
 #[path = "control_fixture.rs"]
-mod control_fixture;
+pub(in crate::ops::local_headless) mod control_fixture;
+#[cfg(all(test, unix))]
+#[path = "notice_gate_tests.rs"]
+mod notice_gate_tests;
 #[cfg(all(test, unix))]
 #[path = "shutdown_tests.rs"]
 mod shutdown_tests;
@@ -73,6 +78,7 @@ pub(super) fn uses_managed_session(actor: &Actor) -> bool {
             | ActorRuntime::Grok
             | ActorRuntime::Opencode
             | ActorRuntime::Kilo
+            | ActorRuntime::Pi
     ) || actor.runtime.is_headless_acp(actor.runtime_mode)
 }
 
@@ -151,6 +157,7 @@ pub(super) fn attach_managed(
             task_id: None,
             updated_at: utc_now(),
             pid: app.process_id(),
+            reason: None,
         }),
         stopped: AtomicBool::new(false),
         stop_lock: Mutex::new(()),
@@ -413,6 +420,27 @@ pub fn submit_batch(
     if cancelled.load(std::sync::atomic::Ordering::Acquire) {
         return BatchSubmission::Deferred;
     }
+    item.admit_batch(source_events, || {
+        submit_admitted(home, group, actor, source_events, cancelled, &item)
+    })
+}
+
+/// True when this managed Actor's Runtime reports no work, so an early Mail
+/// notice is admitted. Actors without a managed session report no state and
+/// are never idle.
+pub fn ready_for_mail_notice(group_id: &str, actor_id: &str) -> bool {
+    lookup(&(group_id.to_owned(), actor_id.to_owned()))
+        .is_some_and(|item| item.running() && item.ready_for_mail_notice())
+}
+
+fn submit_admitted(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    source_events: &[Event],
+    cancelled: &AtomicBool,
+    item: &Session,
+) -> BatchSubmission {
     let Some(delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
         home,
         group,
@@ -455,7 +483,37 @@ pub fn submit_batch(
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
                 Err(error) => {
-                    tracing::warn!(%error,group_id=%group.group_id,actor_id=%actor.id,"ACP delivery outcome is unconfirmed; quarantining the batch");
+                    let diagnostic = item.managed.safe_diagnostic(&error);
+                    tracing::warn!(
+                        message = %diagnostic,
+                        group_id = %group.group_id,
+                        actor_id = %actor.id,
+                        "ACP delivery outcome is unconfirmed; quarantining the batch"
+                    );
+                    if error.kind() != io::ErrorKind::Interrupted {
+                        super::output::emit(
+                            item,
+                            "headless.control.failed",
+                            Map::from_iter([
+                                ("control_kind".into(), json!("input")),
+                                ("status".into(), json!("unconfirmed")),
+                                (
+                                    "event_id".into(),
+                                    json!(source_events.first().map(|event| event.id.as_str())),
+                                ),
+                                (
+                                    "source_event_ids".into(),
+                                    json!(
+                                        source_events
+                                            .iter()
+                                            .map(|event| &event.id)
+                                            .collect::<Vec<_>>()
+                                    ),
+                                ),
+                                ("error".into(), json!({"message":diagnostic})),
+                            ]),
+                        );
+                    }
                     outcome = BatchSubmission::Unconfirmed;
                     false
                 }

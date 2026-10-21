@@ -247,7 +247,7 @@ fn copied_claude_resume_stops_auto_wake_and_explicit_retry_delivers_the_original
     let f = Fixture::new("copied");
     let job = f.delivery();
     let handled = super::super::actor_delivery_worker::process_batch(
-        std::slice::from_ref(&job),
+        &mut vec![job.clone()],
         &mut String::new(),
         &AtomicBool::new(false),
     );
@@ -274,7 +274,7 @@ fn copied_claude_resume_stops_auto_wake_and_explicit_retry_delivers_the_original
     for _ in 0..4 {
         assert!(matches!(
             super::super::actor_delivery_worker::process_batch(
-                std::slice::from_ref(&job),
+                &mut vec![job.clone()],
                 &mut String::new(),
                 &AtomicBool::new(false)
             ),
@@ -303,7 +303,12 @@ fn copied_claude_resume_stops_auto_wake_and_explicit_retry_delivers_the_original
     std::fs::write(f.config.join("mode"), "healthy").expect("correct provider behavior");
     let started = f.lifecycle("actor_start");
     assert!(started.ok, "{:?}", started.error);
-    f.wait(|| f.config.join("received").exists());
+    // The fixture creates `received` before writing the line into it; wait for
+    // the delivered text rather than the file's existence.
+    f.wait(|| {
+        std::fs::read_to_string(f.config.join("received"))
+            .is_ok_and(|received| received.contains("PENDING_TASK"))
+    });
     assert_eq!(f.launches(), 2);
     assert_eq!(f.receipt()["provider_session_id"], SAVED);
     assert_eq!(f.receipt()["failure_count"], 0);
@@ -363,7 +368,7 @@ fn claude_trust_prompt_never_receives_tasks_and_stops_after_nontrust_resume_fail
     let job = f.delivery();
     assert!(matches!(
         super::super::actor_delivery_worker::process_batch(
-            std::slice::from_ref(&job),
+            &mut vec![job.clone()],
             &mut String::new(),
             &AtomicBool::new(false)
         ),
@@ -382,7 +387,7 @@ fn claude_trust_prompt_never_receives_tasks_and_stops_after_nontrust_resume_fail
         .expect("save next-launch native settings");
     assert!(matches!(
         super::super::actor_delivery_worker::process_batch(
-            std::slice::from_ref(&job),
+            &mut vec![job.clone()],
             &mut String::new(),
             &AtomicBool::new(false)
         ),
@@ -415,13 +420,97 @@ fn claude_trust_prompt_never_receives_tasks_and_stops_after_nontrust_resume_fail
     );
     assert!(matches!(
         super::super::actor_delivery_worker::process_batch(
-            std::slice::from_ref(&job),
+            &mut vec![job.clone()],
             &mut String::new(),
             &AtomicBool::new(false)
         ),
         crate::ops::actor_delivery_worker::BatchOutcome::Delivered
     ));
     assert!(!f.config.join("received").exists());
+}
+
+#[test]
+fn explicit_start_retries_only_the_registered_claude_trust_owner() {
+    if isolated("explicit_start_retries_only_the_registered_claude_trust_owner") {
+        return;
+    }
+    let f = Fixture::new("untrusted");
+    let started = f.lifecycle("actor_start");
+    assert!(started.ok, "{:?}", started.error);
+    f.wait(|| f.config.join("terminal_ready").exists());
+    assert!(
+        super::waiting_for_workspace_trust(&f.group.group_id, &f.actor.id)
+            .expect("registered trust owner")
+    );
+    let trust_pid = cccc_runtime::status(&f.group.group_id, &f.actor.id)
+        .expect("trust terminal")
+        .pid;
+    let receipt = f
+        .home
+        .groups_dir()
+        .join(&f.group.group_id)
+        .join("state/runtime_sessions/claude-1.json");
+    let mut failed = f.receipt();
+    failed["status"] = json!("resume_failed");
+    failed["resume_eligible"] = json!(false);
+    cccc_core::fs::write_json(&receipt, &failed).expect("retained failure gate");
+    let retained = std::fs::read(&receipt).expect("retained conversation receipt");
+    let history = f
+        .config
+        .join("projects/workspace")
+        .join(format!("{SAVED}.jsonl"));
+    let history_bytes = std::fs::read(&history).expect("original history");
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    let mut pending = f.group.clone();
+    pending.actors[0].runtime = ActorRuntime::Kiro;
+    pending.actors[0].runtime_mode = cccc_contracts::RuntimeMode::Acp;
+    pending.actors[0].normalize_runtime_constraints();
+    store.save(&pending).expect("save next-launch ACP settings");
+
+    let preserved = f.lifecycle("actor_start");
+    assert!(preserved.ok, "{:?}", preserved.error);
+    assert_eq!(
+        cccc_runtime::status(&f.group.group_id, &f.actor.id)
+            .expect("same pending trust terminal")
+            .pid,
+        trust_pid,
+        "Start with saved ACP settings must not replace the pending trust owner"
+    );
+    assert_eq!(
+        std::fs::read(&receipt).expect("old receipt retained"),
+        retained
+    );
+    assert_eq!(f.launches(), 1);
+    assert!(!f.config.join("received").exists());
+
+    store
+        .save(&f.group)
+        .expect("restore matching Claude configuration");
+    std::fs::write(f.config.join("mode"), "healthy").expect("allow explicit provider retry");
+    let retried = f.lifecycle("actor_start");
+    assert!(retried.ok, "{:?}", retried.error);
+    assert!(super::running(&f.group.group_id, &f.actor.id));
+    f.wait(|| {
+        !super::waiting_for_workspace_trust(&f.group.group_id, &f.actor.id)
+            .expect("trust owner retirement")
+    });
+    assert!(
+        !super::waiting_for_workspace_trust(&f.group.group_id, &f.actor.id)
+            .expect("trust owner retired")
+    );
+    assert_ne!(
+        cccc_runtime::status(&f.group.group_id, &f.actor.id)
+            .expect("managed native attachment")
+            .pid,
+        trust_pid
+    );
+    assert_eq!(f.launches(), 2);
+    assert_eq!(f.receipt()["provider_session_id"], SAVED);
+    assert_eq!(f.receipt()["status"], "usable");
+    assert_eq!(
+        std::fs::read(&history).expect("history retained"),
+        history_bytes
+    );
 }
 
 #[test]
@@ -471,4 +560,48 @@ fn new_claude_session_retires_pending_trust_recovery_before_removing_the_receipt
             .exists(),
         "reset retains provider history"
     );
+}
+
+#[test]
+fn mail_sent_to_an_idle_managed_actor_is_announced_without_waiting_for_the_unread_tick() {
+    if isolated(
+        "mail_sent_to_an_idle_managed_actor_is_announced_without_waiting_for_the_unread_tick",
+    ) {
+        return;
+    }
+    let f = Fixture::new("healthy");
+    let store = GroupStore::new(f.home.clone()).expect("store");
+    store
+        .mutate(&f.group.group_id, |group| {
+            group.state = cccc_contracts::GroupState::Active;
+            cccc_core::actors::add(group, Actor::new("lead"))
+        })
+        .expect("sender");
+    let started = f.lifecycle("actor_start");
+    assert!(started.ok, "{:?}", started.error);
+    f.wait(|| super::ready_for_mail_notice(&f.group.group_id, &f.actor.id));
+
+    // No automation scheduler runs here: only the send itself can announce it.
+    let sent = crate::handle_request(
+        &f.home,
+        &DaemonRequest {
+            v: 1,
+            op: "send".into(),
+            args: json!({"group_id":f.group.group_id,"by":"lead","to":[f.actor.id],
+                "text":"please review","message_mode":"mail"})
+            .as_object()
+            .expect("arguments")
+            .clone(),
+        },
+    );
+    assert!(sent.ok, "{:?}", sent.error);
+    let mail_id = sent.result["event"]["id"].as_str().expect("Mail id");
+    let events =
+        ledger::read_all(&store.ledger_path(&f.group.group_id).expect("ledger")).expect("ledger");
+    let notice = events
+        .iter()
+        .find(|event| event.kind == "system.notify" && event.data["kind"] == "mail_notice")
+        .expect("Mail notice issued by the send");
+    assert_eq!(notice.data["context"]["actor_id"], f.actor.id);
+    assert_eq!(notice.data["context"]["source_event_ids"], json!([mail_id]));
 }

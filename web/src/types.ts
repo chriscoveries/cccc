@@ -783,7 +783,7 @@ export type GroupContext = {
 };
 
 export type ProjectMdInfo = {
-  found: boolean;
+  exists: boolean;
   path?: string | null;
   content?: string | null;
   error?: string | null;
@@ -798,6 +798,7 @@ export type GroupSettings = {
   help_nudge_interval_seconds: number;
   help_nudge_min_messages: number;
   mail_notice_after_seconds: number;
+  mail_notice_idle_after_seconds: number;
   reply_notice_after_seconds: number;
 
   terminal_transcript_visibility: "off" | "foreman" | "all";
@@ -1083,6 +1084,7 @@ export type AssistantVoicePromptDraft = {
 
 export type AssistantVoiceAskFeedback = {
   request_id: string;
+  secretary_task_id?: string;
   status: "pending" | "working" | "done" | "needs_user" | "failed" | "handed_off" | string;
   request_text?: string;
   request_preview?: string;
@@ -1583,7 +1585,9 @@ export const SUPPORTED_RUNTIMES = [
   "hermes",
   "kimi",
   "opencode",
+  "pi",
   "web_model",
+  "chatgpt_dots",
   "grok_web_model",
   "custom",
 ] as const;
@@ -1591,6 +1595,10 @@ export const SUPPORTED_RUNTIMES = [
 export type SupportedRuntime = (typeof SUPPORTED_RUNTIMES)[number];
 
 export function isWebModelRuntime(runtime: string | undefined): boolean {
+  return runtime === "chatgpt_dots" || isBrowserWebModelRuntime(runtime);
+}
+
+export function isBrowserWebModelRuntime(runtime: string | undefined): boolean {
   return runtime === "web_model" || runtime === "grok_web_model";
 }
 
@@ -1621,9 +1629,14 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   hermes: { label: "Hermes Agent", desc: "Uses your Hermes profile with CCCC MCP" },
   kimi: { label: "Kimi Code", desc: "" },
   opencode: { label: "OpenCode", desc: "Managed delivery in the same native OpenCode TUI" },
+  pi: { label: "Pi", desc: "" },
   web_model: {
     label: "ChatGPT Web Model",
     desc: "ChatGPT browser delivery + remote MCP connector",
+  },
+  chatgpt_dots: {
+    label: "ChatGPT Dots",
+    desc: "ChatGPT event tasks + shared remote MCP connector",
   },
   grok_web_model: {
     label: "Grok Bot Web Model",
@@ -1650,6 +1663,16 @@ export const RUNTIME_COLORS: Record<
     dotLight: string;
   }
 > = {
+  pi: {
+    bg: "bg-slate-900/40",
+    text: "text-slate-200",
+    border: "border-slate-500/60",
+    dot: "bg-slate-300",
+    bgLight: "bg-slate-100",
+    textLight: "text-slate-800",
+    borderLight: "border-slate-300",
+    dotLight: "bg-slate-600",
+  },
   amp: {
     bg: "bg-rose-900/30",
     text: "text-rose-300",
@@ -1820,6 +1843,16 @@ export const RUNTIME_COLORS: Record<
     borderLight: "border-indigo-300",
     dotLight: "bg-indigo-500",
   },
+  chatgpt_dots: {
+    bg: "bg-indigo-900/30",
+    text: "text-indigo-300",
+    border: "border-indigo-600/50",
+    dot: "bg-indigo-400",
+    bgLight: "bg-indigo-50",
+    textLight: "text-indigo-700",
+    borderLight: "border-indigo-300",
+    dotLight: "bg-indigo-500",
+  },
   grok_web_model: {
     bg: "bg-indigo-900/30",
     text: "text-indigo-300",
@@ -1937,5 +1970,15 @@ export function getActorAccentColor(actorId?: string, isDark: boolean = true) {
 }
 
 export function supportsAcpMode(runtime?: string | null): boolean {
-  return ["antigravity", "copilot", "devin", "cursor"].includes(runtime || "");
+  return [
+    "antigravity",
+    "copilot",
+    "devin",
+    "cursor",
+    "kimi",
+    "auggie",
+    "kiro",
+    "hermes",
+    "droid",
+  ].includes(runtime || "");
 }

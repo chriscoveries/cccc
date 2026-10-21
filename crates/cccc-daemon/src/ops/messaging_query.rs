@@ -1,6 +1,7 @@
 use cccc_contracts::{DaemonRequest, Event};
 use cccc_core::{HomeLayout, ledger};
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 
 use crate::dispatch::{OpError, OpResult, object, required_arg, store, string_arg};
 
@@ -22,11 +23,13 @@ pub fn search(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         kind: kind(request, "all"),
         text: string_arg(request, "q").unwrap_or_default(),
         by: string_arg(request, "by").unwrap_or_default(),
+        by_any: sender_ids(request)?,
         before: nonempty(request, "before"),
         after: nonempty(request, "after"),
         limit: integer(request, "limit", 50).clamp(1, 200),
     };
-    let page = ledger::inspect(&path, |events, _| page(events, query)).map_err(OpError::io)??;
+    let page = ledger::inspect(&path, |events, positions| page(events, positions, query))
+        .map_err(OpError::io)??;
     result(home, request, page)
 }
 
@@ -53,6 +56,7 @@ pub fn window(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             }
             let before = page(
                 events,
+                positions,
                 Query {
                     kind,
                     before: Some(center_id.clone()),
@@ -62,6 +66,7 @@ pub fn window(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             )?;
             let after = page(
                 events,
+                positions,
                 Query {
                     kind,
                     after: Some(center_id.clone()),
@@ -119,6 +124,7 @@ struct Query {
     kind: Kind,
     text: String,
     by: String,
+    by_any: HashSet<String>,
     before: Option<String>,
     after: Option<String>,
     limit: usize,
@@ -129,43 +135,98 @@ struct Page {
     has_more: bool,
 }
 
-fn page(events: &[Event], query: Query) -> Result<Page, OpError> {
-    let start = cursor(events, query.after.as_deref())?.map_or(0, |index| index + 1);
-    let end = cursor(events, query.before.as_deref())?.unwrap_or(events.len());
+fn page(
+    events: &[Event],
+    positions: &HashMap<String, usize>,
+    query: Query,
+) -> Result<Page, OpError> {
+    let start = cursor(events, positions, query.after.as_deref())?
+        .map_or(0, |index| index.saturating_add(1));
+    let end = cursor(events, positions, query.before.as_deref())?.unwrap_or(events.len());
     let range = events.get(start.min(end)..end).unwrap_or_default();
     let text = query.text.to_lowercase();
-    let mut matches = range
-        .iter()
-        .filter(|event| matches_kind(event, query.kind))
-        .filter(|event| query.by.is_empty() || event.by == query.by)
-        .filter(|event| {
-            text.is_empty()
+    let matches_query = |event: &&Event| {
+        matches_kind(event, query.kind)
+            && (query.by.is_empty() || event.by == query.by)
+            && (query.by_any.is_empty() || query.by_any.contains(&event.by))
+            && (text.is_empty()
                 || serde_json::to_string(event)
                     .unwrap_or_default()
                     .to_lowercase()
-                    .contains(&text)
-        })
+                    .contains(&text))
+    };
+    let take_limit = query.limit.saturating_add(1);
+    if query.after.is_some() {
+        let mut matches = range
+            .iter()
+            .filter(matches_query)
+            .take(take_limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let has_more = matches.len() > query.limit;
+        if has_more {
+            matches.truncate(query.limit);
+        }
+        return Ok(Page {
+            events: matches,
+            has_more,
+        });
+    }
+    let mut matches = range
+        .iter()
+        .rev()
+        .filter(matches_query)
+        .take(take_limit)
         .cloned()
         .collect::<Vec<_>>();
     let has_more = matches.len() > query.limit;
-    if query.after.is_some() {
+    if has_more {
         matches.truncate(query.limit);
-    } else if has_more {
-        matches.drain(..matches.len() - query.limit);
     }
+    matches.reverse();
     Ok(Page {
         events: matches,
         has_more,
     })
 }
 
-fn cursor(events: &[Event], id: Option<&str>) -> Result<Option<usize>, OpError> {
+fn cursor(
+    events: &[Event],
+    positions: &HashMap<String, usize>,
+    id: Option<&str>,
+) -> Result<Option<usize>, OpError> {
     let Some(id) = id else { return Ok(None) };
-    events
-        .iter()
-        .position(|event| event.id == id)
+    positions
+        .get(id)
+        .copied()
+        .filter(|&index| index < events.len())
+        .or_else(|| events.iter().position(|event| event.id == id))
         .map(Some)
         .ok_or_else(|| OpError::new("event_not_found", format!("event not found: {id}")))
+}
+
+fn sender_ids(request: &DaemonRequest) -> Result<HashSet<String>, OpError> {
+    let Some(value) = request.args.get("by_any").filter(|value| !value.is_null()) else {
+        return Ok(HashSet::new());
+    };
+    let invalid = || {
+        OpError::new(
+            "invalid_args",
+            "by_any must be an array of nonempty sender identities",
+        )
+    };
+    value
+        .as_array()
+        .ok_or_else(invalid)?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+                .ok_or_else(invalid)
+        })
+        .collect()
 }
 
 fn matches_kind(event: &Event, kind: Kind) -> bool {

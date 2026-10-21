@@ -43,7 +43,6 @@ use crate::dispatch::{
 };
 use crate::ops::actor_delivery;
 
-const KEY: &str = "assistants";
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "assistant_state" | "assistant_index"
@@ -51,10 +50,7 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         {
             Operation::new(Write, voice_session::view)
         }
-        "assistant_state" | "assistant_index" => Operation::new(Write, |home, request| {
-            document_reconcile::run(home, request)
-                .and_then(|_| voice_settings::index(home, request))
-        }),
+        "assistant_state" | "assistant_index" => Operation::new(Write, voice_settings::index),
         "assistant_voice_recording_lease" => Operation::new(GlobalWrite, recording_lease),
         "assistant_voice_transcript_append" => Operation::new(Write, voice_input::append),
         "assistant_voice_session_transcript_clear" => Operation::new(Write, |home, request| {
@@ -92,32 +88,9 @@ fn recording_lease(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group = store.load(&group_id).map_err(OpError::not_found)?;
     let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
     require_voice_status_permission(&group, &by)?;
-    let action = string_arg(request, "action").unwrap_or_else(|| "status".into());
-    let dispatch_target = string_arg(request, "dispatch_target").unwrap_or_default();
-    let state = group.extra.get(KEY).cloned().unwrap_or_else(|| json!({}));
-    let assistant = voice_settings::effective_assistant(&state);
-    let disabled_recording_allowed = match action.as_str() {
-        "acquire" => dispatch_target == "composer",
-        "heartbeat" if dispatch_target == "composer" => true,
-        "heartbeat" if dispatch_target.is_empty() => {
-            let owner_id = string_arg(request, "owner_id").unwrap_or_default();
-            let lease_id = string_arg(request, "lease_id").unwrap_or_default();
-            match voice_recording_lease::validate(home, &group_id, &owner_id, &lease_id) {
-                Ok(lease) => lease["dispatch_target"] == "composer",
-                Err(_) => true,
-            }
-        }
-        _ => false,
-    };
-    if !assistant["enabled"].as_bool().unwrap_or(false)
-        && matches!(action.as_str(), "acquire" | "heartbeat")
-        && !disabled_recording_allowed
-    {
-        return Err(OpError::new(
-            "assistant_disabled",
-            "voice_secretary is disabled",
-        ));
-    }
+    // The Secretary is one global instance with no per-group switch. A legacy
+    // `assistants.voice_secretary.enabled: false` left in group.yaml has no UI
+    // to change it, so it must not gate recording.
     voice_recording_lease::update(
         home,
         &group_id,
@@ -386,12 +359,19 @@ pub(super) fn confirm_secretary_handoff(home: &HomeLayout, request: &DaemonReque
             "Secretary proposals require user confirmation",
         ));
     }
-    if let Some(event) = ledger::read_all(&store.ledger_path(&group_id).map_err(OpError::io)?)
-        .map_err(OpError::io)?
-        .into_iter()
-        .find(|event| {
-            event.kind == "system.notify" && event.data["context"]["secretary_task_id"] == task_id
-        })
+    if let Some(event) = ledger::inspect(
+        &store.ledger_path(&group_id).map_err(OpError::io)?,
+        |events, _| {
+            events
+                .iter()
+                .find(|event| {
+                    event.kind == "system.notify"
+                        && event.data["context"]["secretary_task_id"] == task_id
+                })
+                .cloned()
+        },
+    )
+    .map_err(OpError::io)?
     {
         return object(json!({"group_id":group_id,"notify_event":event,"already_forwarded":true}));
     }

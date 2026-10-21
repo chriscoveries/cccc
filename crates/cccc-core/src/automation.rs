@@ -37,6 +37,10 @@ pub enum ScheduledAction {
 pub struct TickResult {
     pub notifications: Vec<Event>,
     pub actions: Vec<ScheduledAction>,
+    /// Failure while discovering or appending Mail/reply notices. Retained
+    /// alongside committed notifications and prepared rule actions so callers
+    /// can still apply those results. Unwritten notices remain due for a later pass.
+    pub unread_failure: Option<io::Error>,
 }
 
 pub fn tick(home: &HomeLayout) -> io::Result<TickResult> {
@@ -53,6 +57,9 @@ pub fn tick_scheduled(home: &HomeLayout, include_unread: bool) -> io::Result<Tic
         };
         result.notifications.extend(group_result.notifications);
         result.actions.extend(group_result.actions);
+        if result.unread_failure.is_none() {
+            result.unread_failure = group_result.unread_failure;
+        }
     }
     Ok(result)
 }
@@ -149,7 +156,7 @@ pub fn tick_group(
     group_id: &str,
     include_unread: bool,
 ) -> io::Result<TickResult> {
-    tick_group_inner(home, group_id, include_unread, None)
+    tick_group_inner(home, group_id, include_unread, None, &HashSet::new())
 }
 
 pub fn tick_group_for_delivery_actors(
@@ -158,7 +165,63 @@ pub fn tick_group_for_delivery_actors(
     include_unread: bool,
     delivery_actor_ids: &HashSet<String>,
 ) -> io::Result<TickResult> {
-    tick_group_inner(home, group_id, include_unread, Some(delivery_actor_ids))
+    tick_group_inner(
+        home,
+        group_id,
+        include_unread,
+        Some(delivery_actor_ids),
+        &HashSet::new(),
+    )
+}
+
+/// Like [`tick_group_for_delivery_actors`], with the actors known to be idle:
+/// waiting Mail reaches them after the short idle delay instead of the
+/// interruption-avoiding delay used while they work or their state is unknown.
+pub fn tick_group_with_idle_actors(
+    home: &HomeLayout,
+    group_id: &str,
+    include_unread: bool,
+    delivery_actor_ids: &HashSet<String>,
+    idle_actor_ids: &HashSet<String>,
+) -> io::Result<TickResult> {
+    tick_group_inner(
+        home,
+        group_id,
+        include_unread,
+        Some(delivery_actor_ids),
+        idle_actor_ids,
+    )
+}
+
+/// Announce waiting Mail right away to `idle_actor_ids`, the recipients of a
+/// Mail just written that are idle now, instead of on the next unread tick.
+/// Only Mail notices are issued, under the tick's rules: one notice per unread
+/// batch, `deliver_by` at the busy delay, and nothing when early notices are
+/// off (`mail_notice_idle_after_seconds` 0). Recipients that are busy keep the
+/// tick's delays.
+pub fn notify_idle_mail(
+    home: &HomeLayout,
+    group_id: &str,
+    idle_actor_ids: &HashSet<String>,
+) -> io::Result<TickResult> {
+    let mut result = TickResult::default();
+    if idle_actor_ids.is_empty() {
+        return Ok(result);
+    }
+    let store = GroupStore::new(home.clone())?;
+    let group = store.load(group_id)?;
+    if matches!(group.state, GroupState::Active | GroupState::Idle) {
+        tick_unread(
+            home,
+            &store,
+            &group,
+            Some(idle_actor_ids),
+            idle_actor_ids,
+            UnreadPass::IdleMailNow,
+            &mut result,
+        )?;
+    }
+    Ok(result)
 }
 
 fn tick_group_inner(
@@ -166,6 +229,7 @@ fn tick_group_inner(
     group_id: &str,
     include_unread: bool,
     delivery_actor_ids: Option<&HashSet<String>>,
+    idle_actor_ids: &HashSet<String>,
 ) -> io::Result<TickResult> {
     let store = GroupStore::new(home.clone())?;
     let mut result = TickResult::default();
@@ -176,11 +240,21 @@ fn tick_group_inner(
     let mut state = state::load(&store, group_id)?;
     let previous = state.clone();
     tick_rules(&store, &group, &mut state, &mut result)?;
-    if include_unread && matches!(group.state, GroupState::Active | GroupState::Idle) {
-        tick_unread(home, &store, &group, delivery_actor_ids, &mut result)?;
-    }
+    // Save before issuing unread notices: a notice written to the ledger counts
+    // as issued, so no error may follow it and drop the result carrying it.
     if state != previous {
         state::save(&store, group_id, &state)?;
+    }
+    if include_unread && matches!(group.state, GroupState::Active | GroupState::Idle) {
+        tick_unread(
+            home,
+            &store,
+            &group,
+            delivery_actor_ids,
+            idle_actor_ids,
+            UnreadPass::Scheduled,
+            &mut result,
+        )?;
     }
     Ok(result)
 }
@@ -311,17 +385,61 @@ fn scheduled_at(
     timestamp.map_or_else(String::new, |value| value.to_rfc3339())
 }
 
+/// The periodic unread tick, or the pass that runs as Mail is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnreadPass {
+    Scheduled,
+    IdleMailNow,
+}
+
 fn tick_unread(
     home: &HomeLayout,
     store: &GroupStore,
     group: &GroupDoc,
     delivery_actor_ids: Option<&HashSet<String>>,
+    idle_actor_ids: &HashSet<String>,
+    pass: UnreadPass,
     result: &mut TickResult,
 ) -> io::Result<()> {
+    let due = match due_unread_notices(home, store, group, delivery_actor_ids, idle_actor_ids, pass)
+    {
+        Ok(due) => due,
+        Err(error) if result.notifications.is_empty() && result.actions.is_empty() => {
+            return Err(error);
+        }
+        Err(error) => {
+            result.unread_failure = Some(error);
+            return Ok(());
+        }
+    };
+    if let Some((ledger_path, notices)) = due {
+        issue_notices(&ledger_path, notices, result, &mut ledger::append);
+    }
+    Ok(())
+}
+
+/// The Mail and reply notices this pass should issue, and the ledger they go
+/// to; `None` when the pass has nothing to look at.
+fn due_unread_notices(
+    home: &HomeLayout,
+    store: &GroupStore,
+    group: &GroupDoc,
+    delivery_actor_ids: Option<&HashSet<String>>,
+    idle_actor_ids: &HashSet<String>,
+    pass: UnreadPass,
+) -> io::Result<Option<(std::path::PathBuf, Vec<Event>)>> {
     let mail_after = delivery_timing_value(group, "mail_notice_after_seconds", 1_800);
-    let reply_after = delivery_timing_value(group, "reply_notice_after_seconds", 900);
+    let mail_idle_after = delivery_timing_value(group, "mail_notice_idle_after_seconds", 60);
+    if pass == UnreadPass::IdleMailNow && mail_idle_after <= 0 {
+        return Ok(None);
+    }
+    // Reply notices stay with the periodic tick.
+    let reply_after = match pass {
+        UnreadPass::Scheduled => delivery_timing_value(group, "reply_notice_after_seconds", 900),
+        UnreadPass::IdleMailNow => 0,
+    };
     if mail_after <= 0 && reply_after <= 0 {
-        return Ok(());
+        return Ok(None);
     }
     let eligible = actors::visible(group)
         .filter(|actor| {
@@ -329,7 +447,7 @@ fn tick_unread(
         })
         .collect::<Vec<_>>();
     if eligible.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let ledger_path = store.ledger_path(&group.group_id)?;
     let cursors = inbox::cursors(home, &group.group_id)?;
@@ -342,15 +460,61 @@ fn tick_unread(
             events,
             positions,
             &cursors,
-            mail_after,
+            MailDelays {
+                busy: mail_after,
+                idle: mail_idle_after,
+                idle_actor_ids,
+                now: pass == UnreadPass::IdleMailNow,
+            },
             reply_after,
         )
     })?;
+    Ok(Some((ledger_path, notices)))
+}
+
+/// Write each notice and hand it to delivery. A written notice is issued for
+/// good, so it goes to delivery even when a later one fails; returning the
+/// error instead would strand it. The rest stay unwritten for a later pass.
+fn issue_notices(
+    ledger_path: &std::path::Path,
+    notices: Vec<Event>,
+    result: &mut TickResult,
+    append: &mut impl FnMut(&std::path::Path, &Event) -> io::Result<()>,
+) {
     for event in notices {
-        ledger::append(&ledger_path, &event)?;
+        if let Err(error) = append(ledger_path, &event) {
+            result.unread_failure = Some(error);
+            break;
+        }
         result.notifications.push(event);
     }
-    Ok(())
+}
+
+/// How long unread Mail waits before its notice. Mail exists so senders do not
+/// interrupt work: while an actor works, or its state is unknown, the notice
+/// waits `busy`; once the actor is idle it only waits `idle`, which batches a
+/// burst of Mail into one notice. `busy <= 0` turns Mail notices off; `idle <= 0`
+/// turns early notices off. With `now`, an idle actor is notified at once: the
+/// pass that runs as Mail is written.
+struct MailDelays<'a> {
+    busy: i64,
+    idle: i64,
+    idle_actor_ids: &'a HashSet<String>,
+    now: bool,
+}
+
+impl MailDelays<'_> {
+    fn for_actor(&self, actor_id: &str) -> i64 {
+        if self.busy > 0 && self.idle > 0 && self.idle_actor_ids.contains(actor_id) {
+            if self.now {
+                0
+            } else {
+                self.idle.min(self.busy)
+            }
+        } else {
+            self.busy
+        }
+    }
 }
 
 fn unread_notices(
@@ -359,7 +523,7 @@ fn unread_notices(
     events: &[Event],
     positions: &HashMap<String, usize>,
     cursors: &BTreeMap<String, String>,
-    mail_after: i64,
+    mail_delays: MailDelays<'_>,
     reply_after: i64,
 ) -> Vec<Event> {
     let mut notices = Vec::new();
@@ -380,7 +544,9 @@ fn unread_notices(
     let mut cancelled = HashSet::<String>::new();
     let mut deliveries = HashMap::<(String, String), (String, i64, usize)>::new();
     let mut actor_resumes = HashMap::<String, i64>::new();
-    let mut mail_claims = HashMap::<(String, String), Vec<Vec<String>>>::new();
+    // Each Mail notice, keyed by its own event id: a withdrawn notice was never
+    // sent and must not stop the next one.
+    let mut mail_claims = HashMap::<(String, String), Vec<(String, Vec<String>)>>::new();
     let mut reply_claims = HashSet::<(String, String, String)>::new();
     for (position, event) in events.iter().enumerate() {
         match event.kind.as_str() {
@@ -456,7 +622,7 @@ fn unread_notices(
                     mail_claims
                         .entry((actor_id.into(), created_at.into()))
                         .or_default()
-                        .push(source_ids);
+                        .push((event.id.clone(), source_ids));
                 } else {
                     reply_claims.extend(
                         source_ids
@@ -491,6 +657,7 @@ fn unread_notices(
     };
 
     for actor in eligible {
+        let mail_after = mail_delays.for_actor(&actor.id);
         let generation = generations.get(&actor.id).copied().unwrap_or(0);
         let cursor_position = cursors
             .get(&actor.id)
@@ -527,11 +694,11 @@ fn unread_notices(
                         .iter()
                         .any(|recipient| matches!(*recipient, "@all" | "@peers" | "@foreman"));
                 if !broadcast_like
-                    && !read
-                    && !replied
-                    && !delivery.is_some_and(|(state, _, _)| {
-                        matches!(state.as_str(), "accepted" | "ambiguous")
-                    })
+                    && crate::mail_pending::awaiting(
+                        read,
+                        replied,
+                        delivery.map(|(state, _, _)| state.as_str()),
+                    )
                 {
                     mail_pending.push(source);
                 }
@@ -560,7 +727,7 @@ fn unread_notices(
             }
         }
 
-        if mail_after > 0 && !mail_pending.is_empty() {
+        if mail_delays.busy > 0 && !mail_pending.is_empty() {
             let pending_ids = mail_pending
                 .iter()
                 .map(|event| event.id.clone())
@@ -570,7 +737,12 @@ fn unread_notices(
                 .into_iter()
                 .flatten()
                 .rev()
-                .any(|claimed| {
+                .filter(|(notice_id, _)| {
+                    deliveries
+                        .get(&(notice_id.clone(), actor.id.clone()))
+                        .is_none_or(|(state, _, _)| state != "withdrawn")
+                })
+                .any(|(_, claimed)| {
                     let claimed = claimed
                         .iter()
                         .filter(|source| positions.contains_key(*source))
@@ -598,7 +770,7 @@ fn unread_notices(
                 .get(&actor.id)
                 .map_or(first_at, |resume| first_at.max(*resume));
             if !active_claim && now - first_at >= mail_after {
-                let event = notice_event(
+                let mut event = notice_event(
                     group,
                     actor,
                     "mail_notice",
@@ -609,6 +781,16 @@ fn unread_notices(
                     ),
                     mail_pending.iter().map(|event| event.id.clone()).collect(),
                 );
+                if mail_after < mail_delays.busy
+                    && let Some(deadline) = DateTime::from_timestamp(first_at + mail_delays.busy, 0)
+                    && let Some(context) =
+                        event.data.get_mut("context").and_then(Value::as_object_mut)
+                {
+                    // Sent early because the Actor looked idle: delivery may hold it
+                    // while the Actor turns out busy, but no later than the notice
+                    // the busy delay would have sent anyway.
+                    context.insert("deliver_by".into(), json!(deadline.to_rfc3339()));
+                }
                 notices.push(event);
             }
         }
@@ -681,6 +863,234 @@ fn notice_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each recipient of one Mail; notices are issued in this order.
+    const RECIPIENTS: [&str; 2] = ["first", "second"];
+
+    fn mail_for_both(home: &HomeLayout) -> (GroupStore, GroupDoc) {
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("notice handover", "").expect("group");
+        store
+            .mutate(&group.group_id, |group| {
+                group.state = GroupState::Active;
+                for id in RECIPIENTS {
+                    actors::add(group, cccc_contracts::Actor::new(id))?;
+                }
+                group
+                    .extra
+                    .insert("delivery".into(), json!({"mail_notice_after_seconds":60}));
+                Ok(())
+            })
+            .expect("group");
+        let mut mail = Event::new("chat.message", &group.group_id);
+        mail.by = "user".into();
+        // Past every notice delay, so whichever pass runs announces it now.
+        mail.ts = (Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+        mail.data = json!({"text":"review","to":RECIPIENTS,"message_mode":"mail"})
+            .as_object()
+            .cloned()
+            .expect("mail");
+        ledger::append(&store.ledger_path(&group.group_id).expect("ledger"), &mail).expect("Mail");
+        let group = store.load(&group.group_id).expect("group");
+        (store, group)
+    }
+
+    fn told(result: &TickResult) -> Vec<String> {
+        result
+            .notifications
+            .iter()
+            .filter(|event| event.data.get("kind") == Some(&json!("mail_notice")))
+            .map(|event| {
+                event.data["context"]["actor_id"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_notice_write_still_hands_over_the_notices_written_before_it() {
+        for pass in [UnreadPass::Scheduled, UnreadPass::IdleMailNow] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let home = HomeLayout::from_path(temp.path()).expect("home");
+            let (store, group) = mail_for_both(&home);
+            let recipients = RECIPIENTS
+                .map(str::to_owned)
+                .into_iter()
+                .collect::<HashSet<_>>();
+            let pass_result = || {
+                let mut result = TickResult::default();
+                tick_unread(
+                    &home,
+                    &store,
+                    &group,
+                    Some(&recipients),
+                    &recipients,
+                    pass,
+                    &mut result,
+                )
+                .expect("unread pass");
+                result
+            };
+
+            // The second notice cannot be written: the first is already in the
+            // ledger, so it must reach delivery from this pass.
+            let (ledger_path, notices) =
+                due_unread_notices(&home, &store, &group, Some(&recipients), &recipients, pass)
+                    .expect("due notices")
+                    .expect("notices to issue");
+            let mut interrupted = TickResult::default();
+            let mut writes = 0;
+            issue_notices(
+                &ledger_path,
+                notices,
+                &mut interrupted,
+                &mut |path, event| {
+                    writes += 1;
+                    if writes == 2 {
+                        Err(io::Error::other("disk full"))
+                    } else {
+                        ledger::append(path, event)
+                    }
+                },
+            );
+            assert!(interrupted.unread_failure.is_some(), "{pass:?}");
+            assert_eq!(told(&interrupted), ["first"], "{pass:?}");
+
+            // The next pass issues only the notice that was never written, and
+            // after that nobody is told again.
+            let next = pass_result();
+            assert!(next.unread_failure.is_none(), "{pass:?}");
+            assert_eq!(told(&next), ["second"], "{pass:?}");
+            assert!(told(&pass_result()).is_empty(), "{pass:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_unread_discovery_preserves_an_already_issued_rule_notice() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path()).expect("home");
+        let (store, group) = mail_for_both(&home);
+        let recipients = RECIPIENTS
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let tick =
+            || tick_group_with_idle_actors(&home, &group.group_id, true, &recipients, &recipients);
+        let cursor_path = store
+            .state_dir(&group.group_id)
+            .expect("state directory")
+            .join("read_cursors.json");
+        std::fs::write(&cursor_path, b"invalid cursor JSON").expect("damaged cursor fixture");
+        // Discovery failure before any rule result retains the normal Err path.
+        assert!(tick().is_err());
+        store
+            .mutate(&group.group_id, |group| {
+                group.automation = json!({"version":1,"rules":[{
+                    "id":"one-shot","enabled":true,"to":[RECIPIENTS[0]],
+                    "trigger":{"kind":"at","at":"2020-01-01T00:00:00Z"},
+                    "action":{"kind":"notify","message":"scheduled reminder"}
+                }]})
+                .as_object()
+                .cloned()
+                .expect("rule");
+                Ok(())
+            })
+            .expect("one-shot rule");
+
+        let partial = tick().expect("issued rule must still reach delivery");
+        assert!(partial.unread_failure.is_some());
+        assert_eq!(partial.notifications.len(), 1);
+        let issued = &partial.notifications[0];
+        assert_eq!(issued.data["kind"], "automation");
+        assert_eq!(issued.data["context"]["rule_id"], "one-shot");
+        let ledger_path = store.ledger_path(&group.group_id).expect("ledger");
+        let events = ledger::read_all(&ledger_path).expect("events");
+        assert!(events.iter().any(|event| event.id == issued.id));
+        assert!(
+            state::load(&store, &group.group_id)
+                .expect("saved rule state")
+                .last_rule
+                .contains_key("one-shot")
+        );
+
+        crate::fs::write_json(&cursor_path, &json!({"schema":1,"cursors":{}}))
+            .expect("repaired cursor fixture");
+        let next = tick().expect("next pass");
+        assert!(next.unread_failure.is_none());
+        assert_eq!(told(&next), RECIPIENTS);
+        assert!(
+            next.notifications
+                .iter()
+                .all(|event| event.data["kind"] != "automation")
+        );
+        let events = ledger::read_all(&ledger_path).expect("events after repair");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.data.get("kind") == Some(&json!("automation")))
+                .count(),
+            1
+        );
+        assert!(tick().expect("settled pass").notifications.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_rule_state_save_issues_no_notice_it_cannot_hand_over() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path()).expect("home");
+        let (store, group) = mail_for_both(&home);
+        // A rule seen for the first time changes the saved rule state.
+        store
+            .mutate(&group.group_id, |group| {
+                group.automation = json!({"version":1,"rules":[{
+                    "id":"reminder","enabled":true,"to":["@all"],
+                    "trigger":{"kind":"interval","every_seconds":3600},
+                    "action":{"kind":"notify","message":"check in"}
+                }]})
+                .as_object()
+                .cloned()
+                .expect("rules");
+                Ok(())
+            })
+            .expect("rules");
+        let recipients = RECIPIENTS
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let tick =
+            || tick_group_with_idle_actors(&home, &group.group_id, true, &recipients, &recipients);
+        let ledger_path = store.ledger_path(&group.group_id).expect("ledger");
+        let written_notices = || {
+            ledger::inspect(&ledger_path, |events, _| {
+                events
+                    .iter()
+                    .filter(|event| event.data.get("kind") == Some(&json!("mail_notice")))
+                    .count()
+            })
+            .expect("ledger")
+        };
+        // The ledger lives under the state directory and stays writable; only
+        // the rule state file next to it cannot be created.
+        let state_dir = store.state_dir(&group.group_id).expect("state dir");
+        let set_mode = |mode| {
+            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(mode))
+                .expect("permissions");
+        };
+
+        set_mode(0o555);
+        let failed = tick();
+        set_mode(0o755);
+        assert!(failed.is_err());
+        assert_eq!(written_notices(), 0, "a notice nobody receives was issued");
+
+        let retried = tick().expect("retry");
+        assert_eq!(told(&retried), RECIPIENTS);
+    }
 
     #[test]
     fn unread_tick_without_eligible_recipients_does_not_load_history() {

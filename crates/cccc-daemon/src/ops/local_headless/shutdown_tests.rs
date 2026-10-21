@@ -92,6 +92,9 @@ async fn shutdown_requests_all_jobs_and_confirms_stops_concurrently() {
     let group = store.create("shutdown fixture", "").expect("group");
     let blocked_cleanup = config.join("blocked-cleanup");
     std::fs::create_dir(&blocked_cleanup).expect("cleanup failure fixture");
+    let unexpected_file = blocked_cleanup.join("unexpected");
+    std::fs::write(&unexpected_file, "retain unexpected contents")
+        .expect("nonempty cleanup failure fixture");
     let items = short_ids
         .iter()
         .map(|short| {
@@ -116,6 +119,7 @@ async fn shutdown_requests_all_jobs_and_confirms_stops_concurrently() {
                     task_id: None,
                     updated_at: String::new(),
                     pid: None,
+                    reason: None,
                 }),
                 stopped: AtomicBool::new(false),
                 stop_lock: Mutex::new(()),
@@ -243,7 +247,7 @@ async fn shutdown_requests_all_jobs_and_confirms_stops_concurrently() {
             );
         }
     }
-    std::fs::remove_dir(&blocked_cleanup).expect("unblock cleanup");
+    std::fs::remove_file(&unexpected_file).expect("unblock cleanup");
     let group_id = group.group_id.clone();
     tokio::task::spawn_blocking(move || stop(&group_id, "abcdef02"))
         .await
