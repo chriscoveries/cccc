@@ -144,7 +144,7 @@ fn pty_moves_from_unknown_to_active_to_quiet() {
     let busy = output(0..5, 4096);
     let liveness = pty_liveness(Some(&busy), config);
     assert_eq!(liveness.state, "working");
-    assert_eq!(liveness.reason, "pty_output_activity");
+    assert_eq!(liveness.reason, "pty_output_active");
     assert_eq!(liveness.idle_seconds, Some(0));
     let updated_at = liveness.updated_at.expect("updated_at");
     assert!(chrono::DateTime::parse_from_rfc3339(&updated_at).is_ok());
@@ -177,7 +177,7 @@ fn pty_small_output_answering_a_delivery_is_active_only_within_the_window() {
     answered.last_input = Some(at(2));
     let liveness = pty_liveness(Some(&answered), config);
     assert_eq!(liveness.state, "working");
-    assert_eq!(liveness.reason, "pty_output_activity");
+    assert_eq!(liveness.reason, "pty_output_active");
 
     // Delivered but nothing has come back since: not evidence of work.
     answered.output_bytes_since_input = 0;
@@ -227,7 +227,7 @@ fn recorded_hermes_startup_reads_as_working_then_idle_once_quiet() {
         liveness.state, "working",
         "a real startup burst is output, not redraw noise"
     );
-    assert_eq!(liveness.reason, "pty_output_activity");
+    assert_eq!(liveness.reason, "pty_output_active");
 
     let mut quiet = output([90], bytes);
     quiet.last_output = Some(at(90));

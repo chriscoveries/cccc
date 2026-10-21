@@ -87,7 +87,7 @@ pub(crate) fn pty_liveness(
         .is_some_and(|input| input.age <= config.window)
         && activity.output_bytes_since_input > 0;
     let (state, reason) = if recent && (voluminous || answers_delivery) {
-        ("working", "pty_output_activity")
+        ("working", "pty_output_active")
     } else {
         ("idle", "pty_output_quiet")
     };
