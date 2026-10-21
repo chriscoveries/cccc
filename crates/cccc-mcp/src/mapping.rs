@@ -339,6 +339,24 @@ mod tests {
     use serde_json::{Map, json};
 
     #[test]
+    fn context_reads_never_ask_for_more_than_one_bounded_page() {
+        let (op, args) = daemon_call("cccc_context_get", Map::new()).expect("mapping");
+        assert_eq!(op, "context_get");
+        assert_eq!(args["limit"], 100);
+        assert_eq!(args["max_bytes"], 256 * 1024);
+        assert_eq!(args["include_archived"], false);
+        let asked = json!({"limit":5000,"max_bytes":10_000_000,"include_archived":true});
+        let (_, args) = daemon_call(
+            "cccc_context_get",
+            asked.as_object().cloned().expect("args"),
+        )
+        .expect("mapping");
+        assert_eq!(args["limit"], 100);
+        assert_eq!(args["max_bytes"], 256 * 1024);
+        assert_eq!(args["include_archived"], true);
+    }
+
+    #[test]
     fn connect_destination_is_qualified_even_when_group_ids_match() {
         let args=serde_json::json!({"group_id":"g_same","actor_id":"worker","dst_instance_id":"i_other","dst_group_id":"g_same","text":"hello","mode":"send","idempotency_key":"stable"}).as_object().expect("args").clone();
         let (op, args) = daemon_call("cccc_message_send", args).expect("mapping");
