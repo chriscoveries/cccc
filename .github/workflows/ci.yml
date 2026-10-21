@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 666c2b0a
+          ref: 78368221d364347df478bb937912b280c6f1eb3b
       - uses: actions/download-artifact@v8
         with:
           github-token: ${{ github.token }}
@@ -23,6 +23,9 @@ jobs:
       - name: Build replay CLI from the reviewed source
         run: |
           git rev-parse HEAD > replay-source.txt
+          cargo test --locked --package cccc-pair-core --lib
+          cargo test --locked --package cccc-pair-core --test integration
+          cargo test --locked --package cccc --test inbox_projection
           cargo build --locked --package cccc --bin cccc
           sha256sum target/debug/cccc > replay-binary.sha256
       - uses: actions/upload-artifact@v7
