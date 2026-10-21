@@ -85,8 +85,12 @@ fn read_ledger(home: &HomeLayout, group_id: &str) -> Vec<cccc_contracts::Event> 
 }
 
 fn create_group(home: &HomeLayout) -> String {
-    call(home, "group_create", json!({"title":"foreman removal","by":"user"})).result["group"]
-        ["group_id"]
+    call(
+        home,
+        "group_create",
+        json!({"title":"foreman removal","by":"user"}),
+    )
+    .result["group"]["group_id"]
         .as_str()
         .expect("group id")
         .to_owned()
