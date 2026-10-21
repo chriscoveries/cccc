@@ -446,7 +446,12 @@ mod allocation_measurement {
                 .expect("cold projection");
             let heap = counter.load(std::sync::atomic::Ordering::Relaxed);
             assert!(heap >= 0, "allocation ownership accounting underflow");
-            let inline = std::mem::size_of::<NoticeState>();
+            let kind = std::env::var("CCCC_ALLOCATION_KIND").unwrap_or_else(|_| "notice".into());
+            let inline = if kind == "delivery" {
+                std::mem::size_of::<super::super::deliveries::DeliveryState>()
+            } else {
+                std::mem::size_of::<NoticeState>()
+            };
             let total = heap as usize + inline;
             let counts =
                 crate::inbox::projection::allocation_probe_counts(&home, &group).expect("counts");
@@ -470,7 +475,7 @@ mod allocation_measurement {
                 .expect("post-append counts");
             println!(
                 "{}",
-                json!({"group_id":group.group_id,"ledger_records":events,"mail_events":mail,"request_reply_events":requests,"heap_requested_bytes":heap,"inline_bytes":inline,"total_requested_bytes":total,"bytes_per_mail":(mail>0).then(||total as f64 / mail as f64),"cold_counts":counts,"replayed_actual_mail":replayed,"post_append_heap_requested_bytes":after,"post_append_delta_bytes":after-heap,"post_append_counts":after_counts})
+                json!({"reducer":kind,"group_id":group.group_id,"ledger_records":events,"mail_events":mail,"request_reply_events":requests,"heap_requested_bytes":heap,"inline_bytes":inline,"total_requested_bytes":total,"bytes_per_mail":(mail>0).then(||total as f64 / mail as f64),"cold_counts":counts,"replayed_actual_mail":replayed,"post_append_heap_requested_bytes":after,"post_append_delta_bytes":after-heap,"post_append_counts":after_counts})
             );
         }
     }

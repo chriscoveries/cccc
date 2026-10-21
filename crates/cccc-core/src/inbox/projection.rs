@@ -449,6 +449,12 @@ pub(crate) fn note_cursor(path: &Path) {
 pub(crate) fn allocation_probe_counts(home: &HomeLayout, group: &GroupDoc) -> io::Result<Value> {
     let state = load(home, &group.group_id)?;
     with_projection(home, group, &[], &state, |projection, _| {
-        Ok(projection.notices.allocation_probe_counts())
+        Ok(
+            if std::env::var("CCCC_ALLOCATION_KIND").as_deref() == Ok("delivery") {
+                projection.deliveries.allocation_probe_counts()
+            } else {
+                projection.notices.allocation_probe_counts()
+            },
+        )
     })
 }

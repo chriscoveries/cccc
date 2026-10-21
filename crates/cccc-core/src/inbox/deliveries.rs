@@ -33,6 +33,10 @@ struct State {
 }
 
 impl DeliveryState {
+    #[cfg(test)]
+    pub(crate) fn allocation_probe_counts(&self) -> Value {
+        json!({"sources": self.sources.len(), "actors": self.actors.len(), "positions": self.positions.len(), "references": self.references.len(), "read_relations": self.reads.values().map(Vec::len).sum::<usize>(), "deliveries": self.latest.values().map(HashMap::len).sum::<usize>()})
+    }
     fn reference_ids(event: &Event) -> Vec<String> {
         match event.kind.as_str() {
             "chat.read" => event
@@ -55,6 +59,8 @@ impl DeliveryState {
         }
     }
     pub fn remember_references(&mut self, event: &Event) {
+        #[cfg(test)]
+        let _allocation_scope = crate::notice_allocation_probe::scope_for("delivery");
         self.references.extend(Self::reference_ids(event));
     }
     pub fn can_append(&self, event: &Event) -> bool {
@@ -63,6 +69,8 @@ impl DeliveryState {
             .all(|id| self.positions.contains_key(id) || self.references.contains(id))
     }
     pub fn note(&mut self, group: &GroupDoc, event: &Event, location: Location) {
+        #[cfg(test)]
+        let _allocation_scope = crate::notice_allocation_probe::scope_for("delivery");
         let position = self.next_position;
         self.next_position += 1;
         let mode = event.data.get("message_mode").and_then(Value::as_str);

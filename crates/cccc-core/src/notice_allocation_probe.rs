@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 thread_local! {
+    static KIND: Cell<bool> = const { Cell::new(false) };
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
     static ENTERED: Cell<bool> = const { Cell::new(false) };
     static COUNTER: Cell<Option<&'static AtomicI64>> = const { Cell::new(None) };
@@ -80,12 +81,17 @@ unsafe impl GlobalAlloc for Probe {
 }
 pub(crate) fn begin() -> &'static AtomicI64 {
     let counter = Box::leak(Box::new(AtomicI64::new(0)));
+    KIND.with(|kind| kind.set(std::env::var("CCCC_ALLOCATION_KIND").as_deref() == Ok("delivery")));
     COUNTER.with(|current| current.set(Some(counter)));
     counter
 }
 pub(crate) struct Scope(bool);
 pub(crate) fn scope() -> Scope {
-    Scope(ACTIVE.with(|active| active.replace(true)))
+    scope_for("notice")
+}
+pub(crate) fn scope_for(kind: &str) -> Scope {
+    let selected = KIND.with(|selected| selected.get() == (kind == "delivery"));
+    Scope(ACTIVE.with(|active| active.replace(selected)))
 }
 impl Drop for Scope {
     fn drop(&mut self) {
