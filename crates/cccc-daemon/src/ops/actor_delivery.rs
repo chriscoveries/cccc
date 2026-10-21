@@ -312,7 +312,10 @@ pub fn dispatch(home: &HomeLayout, group: &GroupDoc, event: &Event) -> DispatchR
     dispatch_to(home, group, event, &targets, false)
 }
 
-fn event_targets_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
+/// The routing decision for one actor: does this event name it? Kept separate from
+/// delivery so it can be asserted without a live runtime (a stopped group routes
+/// but never delivers, and a test must not need a delivery worker to see that).
+pub(super) fn event_targets_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
     if event.kind == "system.notify"
         && event.data.get("kind").and_then(serde_json::Value::as_str) == Some("memory_restart")
     {

@@ -437,14 +437,48 @@ mod tests {
         )
         .expect("emit notice");
         assert_eq!(event.data["target_actor_id"], "lead");
-        // The stopped group selects routing without starting any test actor.
-        let report = super::super::actor_delivery::dispatch(&home, &group, &event);
-        assert_eq!(report.targeted, 1);
-        assert_eq!(report.queued, 0);
-        for (actor, expected) in [(&group.actors[0], true), (&group.actors[1], false)] {
+
+        // The claim under test is routing, and routing is a pure decision: the
+        // notice names the foreman and nobody else. Asserting it here keeps the
+        // fixture off the delivery path entirely.
+        let delivery = super::super::actor_delivery::event_targets_actor;
+        assert!(delivery(&group, &event, "lead"), "the notice routes to the foreman");
+        assert!(!delivery(&group, &event, "peer"), "a peer is never routed a fresh restart");
+
+        // The production entrypoint refuses a stopped group instead of delivering
+        // into it; a fixture that expected it to deliver was asserting a contract
+        // the engine has never had.
+        let refused = super::super::actor_delivery::dispatch(&home, &group, &event);
+        assert_eq!(refused.targeted, 0, "a stopped group is not dispatched into");
+        assert_eq!(refused.queued, 0);
+
+        // The legitimate seam: a caller that has already made the routing decision
+        // hands it to dispatch_preclaimed, which delivers exactly to the targets it
+        // was given and never re-derives them. A live group is used here because
+        // that is when a maintenance notice is actually produced; a Web Model target
+        // takes the durable claim instead of a PTY enqueue, so no worker thread is
+        // spawned and the assertion stays deterministic.
+        let mut live = group.clone();
+        live.state = cccc_contracts::GroupState::Active;
+        live.actors[0].runtime = cccc_contracts::ActorRuntime::WebModel;
+        let foreman = [live.actors[0].clone()];
+        let report = super::super::actor_delivery::dispatch_preclaimed(&home, &live, &event, &foreman);
+        assert_eq!(report.targeted, 1, "exactly the routed foreman is targeted");
+        assert_eq!(report.queued, 1, "the foreman takes the claim");
+
+        // pending_sources is a ledger question, not a delivery one: a notice is
+        // pending for an actor exactly when it names that actor. So this asserts
+        // the routing decision from the consumer's side, and it holds whether or
+        // not anything was delivered.
+        for (actor, addressed) in [(&group.actors[0], true), (&group.actors[1], false)] {
             let pending = super::super::runtime_delivery::pending_sources(&home, &group, actor, 10)
                 .expect("pending notifications");
-            assert_eq!(pending.iter().any(|item| item.id == event.id), expected);
+            assert_eq!(
+                pending.iter().any(|item| item.id == event.id),
+                addressed,
+                "pending routing for {}",
+                actor.id
+            );
             assert!(
                 !cccc_core::inbox::is_for_actor(&group, &event, &actor.id),
                 "maintenance notices never become inbox messages"
@@ -477,6 +511,15 @@ mod tests {
         )
         .expect("emit outcome");
         assert!(event.data.get("target_actor_id").is_none());
+        // No foreman means no routing decision, so no actor is named at all --
+        // that is the behaviour, not the stopped-group delivery gate.
+        for actor in &group.actors {
+            assert!(
+                !super::super::actor_delivery::event_targets_actor(&group, &event, &actor.id),
+                "a failed restart with no live foreman names nobody ({})",
+                actor.id
+            );
+        }
         let report = super::super::actor_delivery::dispatch(&home, &group, &event);
         assert_eq!(report.targeted, 0, "never fall back to broadcasting");
         let ledger =
