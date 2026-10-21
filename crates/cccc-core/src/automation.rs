@@ -401,8 +401,15 @@ fn tick_unread(
     pass: UnreadPass,
     result: &mut TickResult,
 ) -> io::Result<()> {
-    let due = match due_unread_notices(home, store, group, delivery_actor_ids, idle_actor_ids, pass)
-    {
+    let due = match due_unread_notices(
+        home,
+        store,
+        group,
+        delivery_actor_ids,
+        idle_actor_ids,
+        pass,
+        home.root(),
+    ) {
         Ok(due) => due,
         Err(error) if result.notifications.is_empty() && result.actions.is_empty() => {
             return Err(error);
@@ -427,6 +434,7 @@ fn due_unread_notices(
     delivery_actor_ids: Option<&HashSet<String>>,
     idle_actor_ids: &HashSet<String>,
     pass: UnreadPass,
+    _volume: &std::path::Path,
 ) -> io::Result<Option<(std::path::PathBuf, Vec<Event>)>> {
     let mail_after = delivery_timing_value(group, "mail_notice_after_seconds", 1_800);
     let mail_idle_after = delivery_timing_value(group, "mail_notice_idle_after_seconds", 60);
@@ -1068,10 +1076,17 @@ mod tests {
 
             // The second notice cannot be written: the first is already in the
             // ledger, so it must reach delivery from this pass.
-            let (ledger_path, notices) =
-                due_unread_notices(&home, &store, &group, Some(&recipients), &recipients, pass)
-                    .expect("due notices")
-                    .expect("notices to issue");
+            let (ledger_path, notices) = due_unread_notices(
+                &home,
+                &store,
+                &group,
+                Some(&recipients),
+                &recipients,
+                pass,
+                home.root(),
+            )
+            .expect("due notices")
+            .expect("notices to issue");
             let mut interrupted = TickResult::default();
             let mut writes = 0;
             issue_notices(
@@ -1250,5 +1265,98 @@ mod tests {
             assert!(result.notifications.is_empty());
             assert!(!crate::ledger_index::is_cached(&path), "{mode}");
         }
+    }
+
+    /// Not knowing the volume is not the volume being clear. After a digest
+    /// listed a low disk, a failed sample is reported as unavailable with the
+    /// warning still listed; a sample back within the warning's recovery band
+    /// does not resolve it, and only one clear of it does. The warning comes
+    /// from the real volume under the test's CCCC home, its mark placed around
+    /// that volume's own available bytes; the failed sample is the real error
+    /// of sampling a path that does not exist.
+    #[test]
+    fn a_failed_disk_sample_keeps_the_warning_until_a_sample_shows_it_clear() {
+        const GIB: u64 = 1 << 30;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("disk unavailable", "").expect("group");
+        let available = fs2::available_space(home.root()).expect("free space");
+        assert!(available > 3 * GIB, "needs 3 GiB free to place the mark");
+        let mark = |bytes: u64| {
+            store
+                .mutate(&group.group_id, |group| {
+                    group.state = GroupState::Active;
+                    if group.actors.is_empty() {
+                        actors::add(group, cccc_contracts::Actor::new("lead"))?;
+                    }
+                    group.extra.insert(
+                        "delivery".into(),
+                        json!({
+                            "health_digest_interval_seconds":1,
+                            "disk_warning_percent":0,
+                            "disk_critical_percent":0,
+                            "disk_warning_bytes":bytes,
+                        }),
+                    );
+                    Ok(())
+                })
+                .expect("delivery settings");
+        };
+        let lead = HashSet::from(["lead".to_owned()]);
+        let missing = temp.path().join("missing");
+        let digest = |volume: &std::path::Path| {
+            let group = store.load(&group.group_id).expect("group");
+            let mut result = TickResult::default();
+            if let Some((ledger_path, notices)) = due_unread_notices(
+                &home,
+                &store,
+                &group,
+                Some(&lead),
+                &lead,
+                UnreadPass::Scheduled,
+                volume,
+            )
+            .expect("due notices")
+            {
+                issue_notices(&ledger_path, notices, &mut result, &mut ledger::append);
+            }
+            assert!(result.unread_failure.is_none());
+            result.notifications
+        };
+        let keys = |notices: &[Event]| {
+            notices
+                .iter()
+                .map(|notice| notice.data["context"]["problem_keys"].clone())
+                .collect::<Vec<_>>()
+        };
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+        mark(available + GIB);
+        assert_eq!(keys(&digest(home.root())), [json!(["disk:warning"])]);
+
+        pause();
+        let unknown = digest(&missing);
+        assert_eq!(
+            keys(&unknown),
+            [json!(["disk:unavailable", "disk:warning"])],
+            "a failed sample keeps the warning"
+        );
+        let message = unknown[0].data["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("CCCC home volume unavailable: "),
+            "{message}"
+        );
+        assert!(digest(&missing).is_empty(), "not sent again while it lasts");
+
+        // Sampled again, 0.5 GiB clear of the mark: within its recovery band.
+        pause();
+        mark(available - GIB / 2);
+        assert!(digest(home.root()).is_empty(), "the warning still holds");
+
+        // 2 GiB clear of the mark: resolved.
+        pause();
+        mark(available - 2 * GIB);
+        assert_eq!(keys(&digest(home.root())), [json!([])]);
     }
 }
