@@ -438,18 +438,28 @@ fn due_unread_notices(
         UnreadPass::Scheduled => delivery_timing_value(group, "reply_notice_after_seconds", 900),
         UnreadPass::IdleMailNow => 0,
     };
-    if mail_after <= 0 && reply_after <= 0 {
-        return Ok(None);
-    }
     // The foreman's digest also stays with the periodic tick.
-    let digest = match pass {
+    let mut digest = match pass {
         UnreadPass::Scheduled => Digest {
             interval: delivery_timing_value(group, "health_digest_interval_seconds", 0),
             repeat: delivery_timing_value(group, "health_digest_repeat_seconds", 0),
             mail_overdue: delivery_timing_value(group, "mail_overdue_after_seconds", 7_200),
+            disk: None,
+            disk_warning_percent: delivery_timing_value(group, "disk_warning_percent", 15),
+            disk_warning_bytes: delivery_timing_value(group, "disk_warning_bytes", 20 << 30),
+            disk_critical_percent: delivery_timing_value(group, "disk_critical_percent", 5),
         },
         UnreadPass::IdleMailNow => Digest::default(),
     };
+    if mail_after <= 0 && reply_after <= 0 && digest.interval <= 0 {
+        return Ok(None);
+    }
+    if digest.interval > 0 {
+        digest.disk = fs2::statvfs(home.root())
+            .ok()
+            .filter(|stats| stats.total_space() > 0)
+            .map(|stats| (stats.available_space(), stats.total_space()));
+    }
     let eligible = actors::visible(group)
         .filter(|actor| {
             actor.enabled && delivery_actor_ids.is_none_or(|ids| ids.contains(&actor.id))
@@ -485,13 +495,21 @@ fn due_unread_notices(
 /// One message to the foreman listing what in the group needs a look, one
 /// line per problem. `interval <= 0` turns it off. It goes out when a problem
 /// appears that the last digest did not list, at most once per `interval`,
-/// and again after `repeat` while problems remain. A recipient's Mail becomes
-/// a problem once it is still unread `mail_overdue` after its first notice.
+/// and again after `repeat` while problems remain; once nothing it listed is
+/// left, one more digest says so. A recipient's Mail becomes a problem once
+/// it is still unread `mail_overdue` after its first notice. The CCCC home
+/// volume (`disk`: available and total bytes) is one when its available space
+/// is under `disk_critical_percent`, or under `disk_warning_percent` or
+/// `disk_warning_bytes`; zero turns a mark off.
 #[derive(Default)]
 struct Digest {
     interval: i64,
     repeat: i64,
     mail_overdue: i64,
+    disk: Option<(u64, u64)>,
+    disk_warning_percent: i64,
+    disk_warning_bytes: i64,
+    disk_critical_percent: i64,
 }
 
 /// Write each notice and hand it to delivery. A written notice is issued for
@@ -883,22 +901,92 @@ fn unread_notices(
             notices.push(event);
         }
     }
+    let listed = |key: &str| {
+        last_digest
+            .as_ref()
+            .is_some_and(|(_, listed)| listed.contains(key))
+    };
+    if let Some(problem) = disk_problem(digest, &listed) {
+        problems.push(problem);
+    }
     if digest.interval > 0
-        && !problems.is_empty()
         && let Ok(foreman) = actors::unique_available_foreman(group)
         && eligible.iter().any(|actor| actor.id == foreman.id)
     {
         let since = last_digest.as_ref().map_or(i64::MAX, |(at, _)| now - at);
-        let unlisted = problems.iter().any(|(key, _)| {
-            last_digest
+        let unlisted = problems.iter().any(|(key, _)| !listed(key));
+        // Saying that everything listed is resolved also lets a problem that
+        // comes back under the same key, such as a low disk, count as new.
+        let resolved = problems.is_empty()
+            && last_digest
                 .as_ref()
-                .is_none_or(|(_, listed)| !listed.contains(key))
-        });
-        if (unlisted && since >= digest.interval) || (digest.repeat > 0 && since >= digest.repeat) {
+                .is_some_and(|(_, listed)| !listed.is_empty());
+        if ((unlisted || resolved) && since >= digest.interval)
+            || (!problems.is_empty() && digest.repeat > 0 && since >= digest.repeat)
+        {
             notices.push(digest_event(group, foreman, &problems));
         }
     }
     notices
+}
+
+/// The CCCC home volume as a digest problem, keyed by level. A level the last
+/// digest listed holds until the volume is one point and 1 GiB clear of its
+/// mark, so a volume that hovers at a mark does not flap.
+fn disk_problem(digest: &Digest, listed: impl Fn(&str) -> bool) -> Option<(String, String)> {
+    const GIB: u64 = 1 << 30;
+    let (available, total) = digest.disk?;
+    let percent = available as f64 * 100.0 / total as f64;
+    let held_critical = listed("disk:critical");
+    let held_warning = held_critical || listed("disk:warning");
+    // Under the mark, or held and within one point of it.
+    let under_percent = |mark: i64, held: bool| {
+        let mark = mark as f64;
+        mark > 0.0 && (percent < mark || (held && percent < mark + 1.0))
+    };
+    let bytes_mark = digest.disk_warning_bytes as u64;
+    let critical = under_percent(digest.disk_critical_percent, held_critical);
+    let warning = critical
+        || under_percent(digest.disk_warning_percent, held_warning)
+        || (bytes_mark > 0
+            && (available < bytes_mark
+                || (held_warning && available < bytes_mark.saturating_add(GIB))));
+    if !warning {
+        return None;
+    }
+    let level = if critical { "critical" } else { "warning" };
+    let marks = if critical {
+        format!("{}%", digest.disk_critical_percent)
+    } else {
+        [
+            (digest.disk_warning_percent > 0).then(|| format!("{}%", digest.disk_warning_percent)),
+            (bytes_mark > 0).then(|| bytes_text(bytes_mark)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" or ")
+    };
+    Some((
+        format!("disk:{level}"),
+        format!(
+            "CCCC home volume {}: {} available of {} ({percent:.1}%; {level} mark {marks}).",
+            if critical { "critically low" } else { "low" },
+            bytes_text(available),
+            bytes_text(total),
+        ),
+    ))
+}
+
+/// `20.0 GiB` or `512.0 MiB`.
+fn bytes_text(bytes: u64) -> String {
+    const MIB: f64 = 1_048_576.0;
+    let mib = bytes as f64 / MIB;
+    if mib >= 1024.0 {
+        format!("{:.1} GiB", mib / 1024.0)
+    } else {
+        format!("{mib:.1} MiB")
+    }
 }
 
 fn digest_event(
@@ -911,15 +999,20 @@ fn digest_event(
         .map(|(_, line)| format!("- {line}"))
         .collect::<Vec<_>>()
         .join("\n");
+    let message = if problems.is_empty() {
+        "Everything the last health digest listed is resolved.".to_owned()
+    } else {
+        format!(
+            "{} thing(s) in this group need a look:\n{lines}",
+            problems.len()
+        )
+    };
     let mut event = notice_event(
         group,
         foreman,
         "health_digest",
         "Group health",
-        &format!(
-            "{} thing(s) in this group need a look:\n{lines}",
-            problems.len()
-        ),
+        &message,
         Vec::new(),
     );
     if let Some(context) = event.data.get_mut("context").and_then(Value::as_object_mut) {
