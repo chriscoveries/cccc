@@ -7,28 +7,31 @@ permissions:
 jobs:
   replay-binary:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 6f3015324501ef089d9e8612aed9561fe395966e
+          ref: 94af181520ec41d6b4c0af4e912930ee1cc64b57
       - uses: actions/download-artifact@v8
         with:
           github-token: ${{ github.token }}
-          run-id: 39638158450
+          run-id: 39676405937
           name: bundled-web
           path: web/dist
       - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Build replay CLI from the reviewed source
         run: |
+          set -o pipefail
+          test "$(git rev-parse HEAD)" = 94af181520ec41d6b4c0af4e912930ee1cc64b57
           git rev-parse HEAD > replay-source.txt
-          cargo test --locked --package cccc-pair-core --lib
-          cargo test --locked --package cccc-pair-core --test integration
-          cargo test --locked --package cccc-pair-daemon --lib runtime_delivery::tests
-          cargo test --locked --package cccc --test inbox_projection
-          cargo build --locked --package cccc --bin cccc
-          sha256sum target/debug/cccc > replay-binary.sha256
+          git rev-parse HEAD^{tree} > replay-tree.txt
+          git rev-parse HEAD:web > replay-web-tree.txt
+          cargo fmt --all --check 2>&1 | tee fmt.log
+          cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | tee clippy.log
+          cargo test --workspace --locked --no-fail-fast 2>&1 | tee full-suite.log
           python3 - <<'PY'
           import pathlib, shutil, subprocess
           root = pathlib.Path('replay-oracle')
@@ -56,46 +59,15 @@ jobs:
           sha256sum replay-oracle/cccc-daemon-tests > replay-startup-oracle.sha256
       - uses: actions/upload-artifact@v7
         with:
-          name: inbox-replay-cli
+          name: candidate-replay-oracles
           path: |
-            target/debug/cccc
             replay-source.txt
-            replay-binary.sha256
+            replay-tree.txt
+            replay-web-tree.txt
+            fmt.log
+            clippy.log
+            full-suite.log
             replay-oracle/cccc-core-tests
             replay-oracle.sha256
             replay-oracle/cccc-daemon-tests
             replay-startup-oracle.sha256
-
-  replay-release:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: after
-            ref: 6f3015324501ef089d9e8612aed9561fe395966e
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ matrix.ref }}
-      - uses: actions/download-artifact@v8
-        with:
-          github-token: ${{ github.token }}
-          run-id: 39638158450
-          name: bundled-web
-          path: web/dist
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: Swatinem/rust-cache@v2
-      - name: Build comparable release replay CLI
-        run: |
-          git rev-parse HEAD > replay-source.txt
-          cargo build --release --locked --package cccc --bin cccc
-          sha256sum target/release/cccc > replay-binary.sha256
-      - uses: actions/upload-artifact@v7
-        with:
-          name: inbox-replay-cli-${{ matrix.name }}
-          path: |
-            target/release/cccc
-            replay-source.txt
-            replay-binary.sha256
