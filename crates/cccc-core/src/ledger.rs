@@ -19,6 +19,15 @@ pub(crate) struct SourceRevision {
     pub(crate) modified: Option<SystemTime>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EventLocation {
+    pub(crate) source_index: usize,
+    /// Byte offset in the decoded source. For plain JSONL this is also the
+    /// physical file offset; gzip segments are decoded from the beginning.
+    pub(crate) offset: u64,
+    pub(crate) len: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct LedgerFollower {
     initialized: bool,
@@ -142,12 +151,14 @@ fn append_with(
     let original_len = file.metadata()?.len();
     let mut encoded = serde_json::to_vec(event).map_err(io::Error::other)?;
     encoded.push(b'\n');
+    let mut record_offset = original_len;
     if original_len > 0 {
         file.seek(SeekFrom::End(-1))?;
         let mut last = [0_u8; 1];
         file.read_exact(&mut last)?;
         if last[0] != b'\n' {
             encoded.insert(0, b'\n');
+            record_offset = record_offset.saturating_add(1);
         }
         file.seek(SeekFrom::End(0))?;
     }
@@ -158,7 +169,7 @@ fn append_with(
             Ok(true)
         ) {
             let _ = FileExt::unlock(&lock);
-            crate::ledger_index::note_append(path, event, encoded.len());
+            crate::ledger_index::note_append(path, event, encoded.len(), record_offset);
             return Ok(());
         }
         file.set_len(original_len).map_err(|rollback| {
@@ -175,7 +186,7 @@ fn append_with(
         return Err(error);
     }
     let _ = FileExt::unlock(&lock);
-    crate::ledger_index::note_append(path, event, encoded.len());
+    crate::ledger_index::note_append(path, event, encoded.len(), record_offset);
     Ok(())
 }
 
@@ -274,6 +285,128 @@ pub(crate) fn read_all_uncached(path: &Path) -> io::Result<Vec<Event>> {
         events.extend(read_source(&source, &group_id)?);
     }
     Ok(events)
+}
+
+/// Materialize one stable history snapshot only when the caller needs the
+/// complete borrowed slice. The index read lock is held by the caller, so the
+/// lock order remains index -> ledger, as in `ledger_index::current`.
+pub(crate) fn read_all_if_current(
+    path: &Path,
+    expected: &[SourceRevision],
+) -> io::Result<Option<Vec<Event>>> {
+    let _source_lock = acquire_reader_lock(path)?;
+    if revisions(path)? != expected {
+        return Ok(None);
+    }
+    read_all_uncached(path).map(Some)
+}
+
+/// Rebuild a ledger index one decoded record at a time. `current` holds the
+/// stable ledger read lock while this visits the source revisions.
+pub(crate) fn visit_indexed_events(
+    path: &Path,
+    sources: &[SourceRevision],
+    mut visit: impl FnMut(Event, EventLocation),
+) -> io::Result<()> {
+    let group_id = ledger_group_id(path);
+    for (source_index, source) in sources.iter().enumerate() {
+        let file = File::open(&source.path)?;
+        if is_gzip(&source.path) {
+            let mut reader = BufReader::new(GzDecoder::new(file));
+            visit_indexed_events_from(
+                &mut reader,
+                &source.path,
+                &group_id,
+                source_index,
+                0,
+                &mut visit,
+            )?;
+        } else {
+            FileExt::lock_shared(&file)?;
+            let result = visit_indexed_events_from(
+                BufReader::new(&file),
+                &source.path,
+                &group_id,
+                source_index,
+                0,
+                &mut visit,
+            );
+            let unlock = FileExt::unlock(&file);
+            result?;
+            unlock?;
+        }
+    }
+    Ok(())
+}
+
+/// Read one cold event from the exact source snapshot used by the index.
+/// `None` means compaction or append changed the snapshot; callers should
+/// refresh the index and retry.
+pub(crate) fn read_event_at(
+    path: &Path,
+    expected: &[SourceRevision],
+    location: EventLocation,
+) -> io::Result<Option<Event>> {
+    let _source_lock = acquire_reader_lock(path)?;
+    if revisions(path)? != expected {
+        return Ok(None);
+    }
+    let source = expected
+        .get(location.source_index)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "event source is missing"))?;
+    let group_id = ledger_group_id(path);
+    let mut line = Vec::new();
+    if is_gzip(&source.path) {
+        let file = File::open(&source.path)?;
+        let mut reader = BufReader::new(GzDecoder::new(file));
+        let mut offset = 0_u64;
+        let mut line_no = 0_usize;
+        while reader.read_until(b'\n', &mut line)? != 0 {
+            let line_len = line.len() as u64;
+            if offset == location.offset {
+                if line_len != location.len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "cold event length no longer matches its index",
+                    ));
+                }
+                return decode_event_line(trim_ascii(&line), &source.path, line_no + 1, &group_id)
+                    .map(Some)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "indexed event is malformed")
+                    });
+            }
+            if offset > location.offset {
+                break;
+            }
+            offset = offset.saturating_add(line_len);
+            line_no += 1;
+            line.clear();
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cold event offset is outside its gzip source",
+        ));
+    }
+
+    let end = location
+        .offset
+        .checked_add(location.len)
+        .filter(|end| *end <= source.len)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cold event is out of range"))?;
+    let line_len = usize::try_from(location.len).map_err(io::Error::other)?;
+    let mut file = File::open(&source.path)?;
+    FileExt::lock_shared(&file)?;
+    file.seek(SeekFrom::Start(location.offset))?;
+    line.resize(line_len, 0);
+    let read = file.read_exact(&mut line);
+    let unlock = FileExt::unlock(&file);
+    read?;
+    unlock?;
+    debug_assert!(end <= source.len);
+    decode_event_line(trim_ascii(&line), &source.path, 0, &group_id)
+        .map(Some)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "indexed event is malformed"))
 }
 
 /// Visit canonical records for maintenance without retaining a query index.
@@ -399,52 +532,103 @@ pub(crate) fn read_source_from(
     offset: u64,
     group_id: &str,
 ) -> io::Result<(Vec<Event>, u64)> {
+    let (events, consumed) = read_source_from_indexed(path, offset, group_id, 0)?;
+    Ok((
+        events.into_iter().map(|(event, _)| event).collect(),
+        consumed,
+    ))
+}
+
+pub(crate) fn read_source_from_indexed(
+    path: &Path,
+    offset: u64,
+    group_id: &str,
+    source_index: usize,
+) -> io::Result<(Vec<(Event, EventLocation)>, u64)> {
     if is_gzip(path) {
         return if offset == 0 {
-            read_source(path, group_id)
-                .and_then(|events| std::fs::metadata(path).map(|metadata| (events, metadata.len())))
+            let mut events = Vec::new();
+            let file = File::open(path)?;
+            let mut reader = BufReader::new(GzDecoder::new(file));
+            visit_indexed_events_from(
+                &mut reader,
+                path,
+                group_id,
+                source_index,
+                0,
+                &mut |event, location| events.push((event, location)),
+            )?;
+            Ok((events, std::fs::metadata(path)?.len()))
         } else {
             Ok((Vec::new(), std::fs::metadata(path)?.len()))
         };
     }
     let mut file = File::open(path)?;
     FileExt::lock_shared(&file)?;
-    file.seek(io::SeekFrom::Start(offset))?;
-    let result = read_events_from(BufReader::new(&file), path, group_id, offset);
+    file.seek(SeekFrom::Start(offset))?;
+    let result =
+        read_indexed_events_from(BufReader::new(&file), path, group_id, source_index, offset);
     let unlock = FileExt::unlock(&file);
     result.and_then(|events| unlock.map(|()| events))
 }
 
-fn read_events_from(
+fn read_indexed_events_from(
+    reader: impl BufRead,
+    source: &Path,
+    group_id: &str,
+    source_index: usize,
+    offset: u64,
+) -> io::Result<(Vec<(Event, EventLocation)>, u64)> {
+    let mut events = Vec::new();
+    let end = visit_indexed_events_from(
+        reader,
+        source,
+        group_id,
+        source_index,
+        offset,
+        &mut |event, location| events.push((event, location)),
+    )?;
+    Ok((events, end))
+}
+
+fn visit_indexed_events_from(
     mut reader: impl BufRead,
     source: &Path,
     group_id: &str,
+    source_index: usize,
     offset: u64,
-) -> io::Result<(Vec<Event>, u64)> {
-    let mut events = Vec::new();
-    let mut line = Vec::new();
+    visit: &mut impl FnMut(Event, EventLocation),
+) -> io::Result<u64> {
     let mut consumed = 0_u64;
-    let mut line_no = 0;
+    let mut line_no = 0_usize;
+    let mut line = Vec::new();
     loop {
         let read = reader.read_until(b'\n', &mut line)?;
         if read == 0 {
             break;
         }
-        line_no += 1;
         let terminated = line.last() == Some(&b'\n');
         let raw = trim_ascii(&line);
         if !terminated && !raw.is_empty() && serde_json::from_slice::<Value>(raw).is_err() {
             break;
         }
         if !raw.is_empty()
-            && let Some(event) = decode_event_line(raw, source, line_no, group_id)
+            && let Some(event) = decode_event_line(raw, source, line_no + 1, group_id)
         {
-            events.push(event);
+            visit(
+                event,
+                EventLocation {
+                    source_index,
+                    offset: offset.saturating_add(consumed),
+                    len: read as u64,
+                },
+            );
         }
-        consumed += read as u64;
+        consumed = consumed.saturating_add(read as u64);
+        line_no += 1;
         line.clear();
     }
-    Ok((events, offset + consumed))
+    Ok(offset.saturating_add(consumed))
 }
 
 fn read_events(mut reader: impl BufRead, source: &Path, group_id: &str) -> io::Result<Vec<Event>> {

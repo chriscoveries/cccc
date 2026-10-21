@@ -1,11 +1,12 @@
 use cccc_contracts::Event;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::ledger::{
-    SourceRevision, is_gzip, ledger_group_id, read_all_uncached, read_source_from, revisions,
+    EventLocation, SourceRevision, is_gzip, ledger_group_id, read_source_from_indexed, revisions,
+    visit_indexed_events,
 };
 
 mod cache;
@@ -13,67 +14,82 @@ mod queries;
 pub(crate) use queries::{find_event, find_idempotent, find_relay, inspect, inspect_status};
 
 type ClientKey = (String, String, String);
+const MAX_HOT_EVENT_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_COLD_POINT_EVENT_BYTES: u64 = 4 * 1024 * 1024;
+
+#[derive(Default)]
+struct ColdPointCache {
+    events: HashMap<usize, Event>,
+    order: VecDeque<usize>,
+    estimated_bytes: u64,
+}
+
+impl ColdPointCache {
+    fn get(&self, position: usize) -> Option<Event> {
+        self.events.get(&position).cloned()
+    }
+
+    fn insert(&mut self, position: usize, event: Event) {
+        if self.events.contains_key(&position) {
+            return;
+        }
+        let bytes = estimate_event_bytes(&event);
+        if bytes > MAX_COLD_POINT_EVENT_BYTES {
+            return;
+        }
+        self.estimated_bytes = self.estimated_bytes.saturating_add(bytes);
+        self.order.push_back(position);
+        self.events.insert(position, event);
+        while self.estimated_bytes > MAX_COLD_POINT_EVENT_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(event) = self.events.remove(&oldest) {
+                self.estimated_bytes = self
+                    .estimated_bytes
+                    .saturating_sub(estimate_event_bytes(&event));
+            }
+        }
+    }
+}
 
 #[derive(Default)]
 struct LedgerIndex {
     revisions: Vec<SourceRevision>,
-    events: Vec<Event>,
+    /// The newest parsed events. Older records are addressed through `locations`.
+    events: VecDeque<Event>,
+    events_start: usize,
+    locations: Vec<EventLocation>,
     positions: HashMap<String, usize>,
     client_ids: HashMap<ClientKey, usize>,
     relays: HashMap<String, usize>,
     replied_by: HashMap<String, BTreeSet<String>>,
     estimated_bytes: u64,
+    /// Recently requested cold point lookups. These need not be contiguous
+    /// with the newest hot window, so they have a separate bounded cache.
+    cold_points: Mutex<ColdPointCache>,
 }
 
 impl LedgerIndex {
     fn rebuild(path: &Path, revisions: Vec<SourceRevision>) -> io::Result<Self> {
-        let events = read_all_uncached(path)?;
         let mut index = Self {
             revisions,
-            events,
             ..Self::default()
         };
-        index.reindex();
-        index.estimated_bytes = estimate_events_bytes(&index.events);
+        let sources = index.revisions.clone();
+        visit_indexed_events(path, &sources, |event, location| {
+            index.push_indexed(event, location);
+        })?;
         Ok(index)
     }
 
-    fn reindex(&mut self) {
-        self.positions.clear();
-        self.client_ids.clear();
-        self.relays.clear();
-        self.replied_by.clear();
-        for (position, event) in self.events.iter().enumerate() {
-            self.positions.insert(event.id.clone(), position);
-            if let Some(client_id) = event
-                .data
-                .get("client_id")
-                .and_then(serde_json::Value::as_str)
-            {
-                self.client_ids.insert(
-                    (event.kind.clone(), event.by.clone(), client_id.to_owned()),
-                    position,
-                );
-            }
-            if event.kind == "chat.message"
-                && let Some(source_id) = event
-                    .data
-                    .get("src_event_id")
-                    .and_then(serde_json::Value::as_str)
-            {
-                self.relays.insert(source_id.to_owned(), position);
-            }
-            index_reply(event, &mut self.replied_by);
-        }
-    }
-
-    fn push(&mut self, event: Event, next_revisions: Vec<SourceRevision>) {
-        self.push_indexed(event);
+    fn push(&mut self, event: Event, location: EventLocation, next_revisions: Vec<SourceRevision>) {
+        self.push_indexed(event, location);
         self.revisions = next_revisions;
     }
 
-    fn push_indexed(&mut self, event: Event) {
-        let position = self.events.len();
+    fn push_indexed(&mut self, event: Event, location: EventLocation) {
+        let position = self.locations.len();
         self.positions.insert(event.id.clone(), position);
         if let Some(client_id) = event
             .data
@@ -97,16 +113,37 @@ impl LedgerIndex {
         self.estimated_bytes = self
             .estimated_bytes
             .saturating_add(estimate_event_bytes(&event));
-        self.events.push(event);
+        self.locations.push(location);
+        self.events.push_back(event);
+        self.trim_hot_events(MAX_HOT_EVENT_BYTES);
     }
 
     /// Apply the events committed since the indexed revisions without
     /// re-reading the sources that produced the retained events.
-    fn catch_up(&mut self, events: Vec<Event>, next_revisions: Vec<SourceRevision>) {
-        for event in events {
-            self.push_indexed(event);
+    fn catch_up(
+        &mut self,
+        events: Vec<(Event, EventLocation)>,
+        next_revisions: Vec<SourceRevision>,
+    ) {
+        for (event, location) in events {
+            self.push_indexed(event, location);
         }
         self.revisions = next_revisions;
+    }
+
+    fn trim_hot_events(&mut self, max_bytes: u64) {
+        while self.estimated_bytes > max_bytes {
+            let Some(event) = self.events.pop_front() else {
+                break;
+            };
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_sub(estimate_event_bytes(&event));
+            self.events_start = self.events_start.saturating_add(1);
+        }
+        if self.events.is_empty() {
+            self.events.shrink_to_fit();
+        }
     }
 }
 
@@ -120,7 +157,7 @@ fn read_appended_tail(
     path: &Path,
     old: &[SourceRevision],
     next: &[SourceRevision],
-) -> io::Result<Option<Vec<Event>>> {
+) -> io::Result<Option<Vec<(Event, EventLocation)>>> {
     if old.is_empty() {
         // A stale-marked or cold index holds no committed prefix to extend.
         return Ok(None);
@@ -131,7 +168,7 @@ fn read_appended_tail(
         .map(|revision| (revision.path.clone(), revision.len))
         .collect::<HashMap<_, _>>();
     let mut events = Vec::new();
-    for revision in next {
+    for (source_index, revision) in next.iter().enumerate() {
         match remaining.remove(&revision.path) {
             Some(previous_len) if previous_len > revision.len => return Ok(None),
             Some(previous_len) if is_gzip(&revision.path) && previous_len != revision.len => {
@@ -143,12 +180,18 @@ fn read_appended_tail(
                     return Ok(None);
                 }
                 if revision.len > previous_len {
-                    let (mut read, _) = read_source_from(&revision.path, previous_len, &group_id)?;
+                    let (mut read, _) = read_source_from_indexed(
+                        &revision.path,
+                        previous_len,
+                        &group_id,
+                        source_index,
+                    )?;
                     events.append(&mut read);
                 }
             }
             None => {
-                let (mut read, _) = read_source_from(&revision.path, 0, &group_id)?;
+                let (mut read, _) =
+                    read_source_from_indexed(&revision.path, 0, &group_id, source_index)?;
                 events.append(&mut read);
             }
         }
@@ -189,10 +232,6 @@ fn index_reply(event: &Event, replied_by: &mut HashMap<String, BTreeSet<String>>
             .or_default()
             .insert(actor.to_owned());
     }
-}
-
-fn estimate_events_bytes(events: &[Event]) -> u64 {
-    events.iter().map(estimate_event_bytes).sum()
 }
 
 fn estimate_event_bytes(event: &Event) -> u64 {
@@ -282,7 +321,7 @@ fn current(path: &Path) -> io::Result<Arc<RwLock<LedgerIndex>>> {
     Ok(entry)
 }
 
-pub(crate) fn note_append(path: &Path, event: &Event, encoded_len: usize) {
+pub(crate) fn note_append(path: &Path, event: &Event, encoded_len: usize, record_offset: u64) {
     let cached = cache::get(path);
     let Some(cached) = cached else { return };
     let Ok(next_revisions) = revisions(path) else {
@@ -315,10 +354,22 @@ pub(crate) fn note_append(path: &Path, event: &Event, encoded_len: usize) {
     let exact_append = previous_len
         .zip(next_len)
         .is_some_and(|(before, after)| after == before.saturating_add(encoded_len as u64));
+    let source_index = next_revisions
+        .iter()
+        .position(|revision| revision.path == path);
     // A delayed callback may describe an event already loaded by a rebuild,
     // while the file has grown by a different event of the same encoded size.
-    if exact_append && other_sources_unchanged && !index.positions.contains_key(&event.id) {
-        index.push(event.clone(), next_revisions);
+    if exact_append
+        && other_sources_unchanged
+        && !index.positions.contains_key(&event.id)
+        && let (Some(next_len), Some(source_index)) = (next_len, source_index)
+    {
+        let location = EventLocation {
+            source_index,
+            offset: record_offset,
+            len: next_len.saturating_sub(record_offset),
+        };
+        index.push(event.clone(), location, next_revisions);
         let weight = source_bytes.max(index.estimated_bytes);
         drop(index);
         cache::update_weight(path, weight, &cached);
@@ -367,6 +418,7 @@ mod tests {
         // callback. The first writer's callback may arrive during this interval.
         let mut encoded = serde_json::to_vec(&second).expect("encode");
         encoded.push(b'\n');
+        let record_offset = std::fs::metadata(&path).expect("first source").len();
         let source_lock = crate::ledger::acquire_writer_lock(&path).expect("writer lock");
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -375,12 +427,12 @@ mod tests {
         file.write_all(&encoded).expect("second event");
         file.sync_data().expect("commit");
         drop(source_lock);
-        note_append(&path, &first, encoded.len());
+        note_append(&path, &first, encoded.len(), record_offset);
         assert_eq!(
             crate::ledger::read_all(&path).expect("current index"),
             vec![first, second.clone()]
         );
-        note_append(&path, &second, encoded.len());
+        note_append(&path, &second, encoded.len(), record_offset);
         let entry = cache::get(&path).expect("cache");
         assert_eq!(
             entry.read().expect("index").revisions,
@@ -478,8 +530,104 @@ mod tests {
 
         let index = current(&path).expect("caught up");
         let index = index.read().expect("index");
-        assert_eq!(index.events, vec![first, second]);
+        assert_eq!(
+            index.events.iter().cloned().collect::<Vec<_>>(),
+            vec![first, second]
+        );
         assert_eq!(index.revisions, revisions(&path).expect("revisions"));
+    }
+
+    #[test]
+    fn cold_event_lookup_and_full_inspection_reparse_evicted_events() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let mut expected = Vec::new();
+        for number in 0..4 {
+            let mut event = Event::new("chat.message", "g_fixture");
+            event.id = format!("event-{number}");
+            event.data.insert(
+                "text".into(),
+                serde_json::json!(format!("message {number}")),
+            );
+            crate::ledger::append(&path, &event).expect("append fixture");
+            expected.push(event);
+        }
+
+        let entry = current(&path).expect("build index");
+        {
+            let mut index = entry.write().expect("index write");
+            index.trim_hot_events(0);
+            assert!(index.events.is_empty());
+            assert_eq!(index.events_start, expected.len());
+            assert_eq!(index.positions.len(), expected.len());
+            assert_eq!(index.locations.len(), expected.len());
+        }
+
+        for event in &expected {
+            assert_eq!(
+                crate::ledger::find_event(&path, &event.id).expect("cold lookup"),
+                Some(event.clone())
+            );
+        }
+        let index = entry.read().expect("index read");
+        let cold_points = index.cold_points.lock().expect("cold point cache");
+        assert_eq!(cold_points.events.len(), expected.len());
+        assert!(cold_points.estimated_bytes <= MAX_COLD_POINT_EVENT_BYTES);
+        drop(cold_points);
+        drop(index);
+        let inspected = crate::ledger::inspect(&path, |events, _| {
+            events
+                .iter()
+                .map(|event| event.id.clone())
+                .collect::<Vec<_>>()
+        })
+        .expect("full history inspection");
+        assert_eq!(
+            inspected,
+            expected
+                .iter()
+                .map(|event| event.id.clone())
+                .collect::<Vec<_>>()
+        );
+
+        let appended = Event::new("chat.message", "g_fixture");
+        crate::ledger::append(&path, &appended).expect("append after eviction");
+        assert_eq!(
+            crate::ledger::find_event(&path, &appended.id).expect("hot append lookup"),
+            Some(appended)
+        );
+        assert_eq!(
+            crate::ledger::find_event(&path, &expected[0].id).expect("old event lookup"),
+            Some(expected[0].clone())
+        );
+    }
+
+    #[test]
+    fn cold_event_lookup_reads_compressed_segments() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let group_dir = temp.path().join("g_fixture");
+        let path = group_dir.join("ledger.jsonl");
+        let segments = group_dir.join("state/ledger/segments");
+        std::fs::create_dir_all(&segments).expect("segments");
+        let archived = Event::new("chat.message", "g_fixture");
+        let encoded = format!("{}\n", serde_json::to_string(&archived).expect("serialize"));
+        let mut gzip = flate2::write::GzEncoder::new(
+            std::fs::File::create(segments.join("0001.jsonl.gz")).expect("gzip file"),
+            flate2::Compression::default(),
+        );
+        gzip.write_all(encoded.as_bytes()).expect("write segment");
+        gzip.finish().expect("finish gzip");
+        crate::ledger::append(&path, &Event::new("actor.add", "g_fixture"))
+            .expect("append active event");
+
+        let entry = current(&path).expect("build index");
+        entry.write().expect("index write").trim_hot_events(0);
+        assert_eq!(
+            crate::ledger::find_event(&path, &archived.id).expect("compressed cold lookup"),
+            Some(archived)
+        );
     }
 
     #[cfg(unix)]
