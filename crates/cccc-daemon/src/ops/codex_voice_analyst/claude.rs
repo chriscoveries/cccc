@@ -508,10 +508,12 @@ async fn kill_and_confirm(endpoint: &control::Endpoint, short: &str) -> io::Resu
     }
     let deadline = tokio::time::Instant::now() + STOP_TIMEOUT;
     let mut last_error: Option<io::Error>;
-    // A control endpoint that stays NotFound is gone for good: the task and its
-    // harness are already dead, so that counts as stopped. Agent View jobs can
-    // outlive a brief harness restart, so only a NotFound sustained past the
-    // confirmation window counts — anything shorter is a restart race.
+    // A control endpoint that stays unreachable is gone for good: the task and
+    // its harness are already dead, so that counts as stopped. Agent View jobs
+    // can outlive a brief harness restart, so only an absence sustained past
+    // the confirmation window counts — anything shorter is a restart race.
+    // A missing socket and a socket nobody listens on are both absence, and an
+    // exiting supervisor can show either; only a reply proves the task lives.
     let mut gone_since: Option<tokio::time::Instant> = None;
     loop {
         match control::list(endpoint).await {
@@ -526,7 +528,7 @@ async fn kill_and_confirm(endpoint: &control::Endpoint, short: &str) -> io::Resu
                 last_error = None;
                 gone_since = None;
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(error) if control_endpoint_absent(&error) => {
                 last_error = Some(error);
                 let since = gone_since.get_or_insert_with(tokio::time::Instant::now);
                 if since.elapsed() >= GONE_CONFIRM {
@@ -553,6 +555,16 @@ async fn kill_and_confirm(endpoint: &control::Endpoint, short: &str) -> io::Resu
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Nothing is serving the control endpoint: its socket is missing, or is left
+/// behind with no listener. Unlike a reset or an aborted connection, neither
+/// shows that a supervisor is still there.
+fn control_endpoint_absent(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+    )
 }
 
 fn retryable_control_error(error: &io::Error) -> bool {
@@ -2605,6 +2617,62 @@ mod tests {
             .expect_err("a stuck task still fails the stop");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         server.abort();
+    }
+
+    /// A control socket left behind by a supervisor that has exited refuses
+    /// connections. Nothing is listening, so nothing can still run the task:
+    /// a refusal sustained past the confirmation window counts as stopped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_treats_a_persistently_refused_endpoint_as_stopped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config_dir, listener, _guard) = bind_fake_control(&temp.path().join("config"));
+        // The socket file outlives its listener, so connecting is refused.
+        drop(listener);
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint resolves");
+        let started = std::time::Instant::now();
+        kill_and_confirm(&endpoint, "deadbeef")
+            .await
+            .expect("a refused endpoint is already stopped");
+        assert!(started.elapsed() >= GONE_CONFIRM, "{:?}", started.elapsed());
+        assert!(started.elapsed() < STOP_TIMEOUT, "{:?}", started.elapsed());
+    }
+
+    /// While a supervisor exits, its socket path can be seen both missing and
+    /// present-but-refusing. Either observation is evidence of absence, so
+    /// switching between them must not restart the confirmation window.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_treats_an_endpoint_alternating_missing_and_refused_as_stopped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config_dir, listener, guard) = bind_fake_control(&temp.path().join("config"));
+        let socket = guard.0.join("control.sock");
+        drop(listener);
+        let alternating = Arc::new(AtomicBool::new(true));
+        let alternate = {
+            let alternating = Arc::clone(&alternating);
+            let socket = socket.clone();
+            tokio::spawn(async move {
+                while alternating.load(Ordering::Acquire) {
+                    if socket.exists() {
+                        // NotFound from here on.
+                        let _ = std::fs::remove_file(&socket);
+                    } else {
+                        // ConnectionRefused from here on: bound, never accepted.
+                        drop(std::os::unix::net::UnixListener::bind(&socket).expect("rebind"));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+        };
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint resolves");
+        let started = std::time::Instant::now();
+        let stopped = kill_and_confirm(&endpoint, "deadbeef").await;
+        alternating.store(false, Ordering::Release);
+        alternate.await.expect("alternating endpoint");
+        stopped.expect("an endpoint that is only ever missing or refused is stopped");
+        assert!(started.elapsed() >= GONE_CONFIRM, "{:?}", started.elapsed());
+        assert!(started.elapsed() < STOP_TIMEOUT, "{:?}", started.elapsed());
     }
 }
 
