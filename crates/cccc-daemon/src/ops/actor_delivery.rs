@@ -20,6 +20,9 @@ const DEFERRED_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(4
 /// Retries of a turn the provider ran and failed: after the first turn and
 /// this many more, the delivery is settled Failed with the provider's error.
 const FAILED_TURN_RETRIES: u32 = 3;
+/// After a delivery used up its failed turns, the Actor's next deliveries fail
+/// at once with the same error for this long; then a single turn is tried.
+const FAILED_TURN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
 const TERMINAL_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(1_500);
 const TERMINAL_REPEAT_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -631,6 +634,8 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
         let mut deferred_failures: u32 = 0;
         // Failed turns of the job at the head of the batch, by event id.
         let mut failed_turns = (String::new(), 0_u32);
+        // Until when, and why, deliveries fail without a turn.
+        let mut breaker: Option<(std::time::Instant, String)> = None;
         while !thread_cancelled.load(Ordering::Acquire) {
             let mut batch = if deferred.is_empty() {
                 let Ok(job) = receiver.recv() else {
@@ -669,6 +674,14 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                         Err(mpsc::TryRecvError::Disconnected) => break,
                     }
                 }
+            }
+            if let Some((_, reason)) = breaker
+                .as_ref()
+                .filter(|(until, _)| std::time::Instant::now() < *until)
+            {
+                fail_jobs(&batch, reason);
+                deferred_failures = 0;
+                continue;
             }
             let mut delivered = false;
             let mut terminal_reason = None;
@@ -714,9 +727,16 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                     failed_turns = (head.unwrap_or_default(), 0);
                 }
                 failed_turns.1 += 1;
-                if failed_turns.1 > FAILED_TURN_RETRIES && !batch.is_empty() {
+                // Once the cooldown is over, a failed turn reopens it at once.
+                let retries = if breaker.is_some() {
+                    0
+                } else {
+                    FAILED_TURN_RETRIES
+                };
+                if failed_turns.1 > retries && !batch.is_empty() {
                     fail_job(&batch.remove(0), &reason);
                     failed_turns = (String::new(), 0);
+                    breaker = Some((std::time::Instant::now() + FAILED_TURN_COOLDOWN, reason));
                 }
                 deferred = batch;
                 deferred_failures = deferred_failures.saturating_add(1);
@@ -725,6 +745,7 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                 deferred_failures = deferred_failures.saturating_add(1);
             } else {
                 deferred_failures = 0;
+                breaker = None;
             }
         }
         fail_jobs(
@@ -832,7 +853,7 @@ mod tests {
     /// actor's runtime journal with the key suffix and request id redacted.
     #[cfg(unix)]
     #[test]
-    fn a_turn_the_provider_keeps_failing_is_retried_three_times_then_failed() {
+    fn a_failing_provider_gets_three_retries_and_then_none_for_a_while() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
         let store = GroupStore::new(home.clone()).expect("store");
@@ -879,35 +900,56 @@ done"#;
                 event: event.clone(),
             })
             .expect("enqueue");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        loop {
-            let state = crate::ops::runtime_delivery::latest_state(
-                &home,
-                &group.group_id,
-                &actor.id,
-                &event.id,
-            )
-            .expect("state");
-            if state.is_some_and(|(state, _)| state == "failed") {
-                break;
+        let wait_for_failure = |event: &Event| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let state = crate::ops::runtime_delivery::latest_state(
+                    &home,
+                    &group.group_id,
+                    &actor.id,
+                    &event.id,
+                )
+                .expect("state");
+                if state.is_some_and(|(state, _)| state == "failed") {
+                    return;
+                }
+                let turns = std::fs::read_to_string(&prompt_log)
+                    .map(|log| log.lines().count())
+                    .unwrap_or_default();
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "still retrying after {turns} failed turns"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            let turns = std::fs::read_to_string(&prompt_log)
-                .map(|log| log.lines().count())
-                .unwrap_or_default();
-            assert!(
-                std::time::Instant::now() < deadline,
-                "still retrying after {turns} failed turns"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        };
+        wait_for_failure(&event);
         // Nothing more is sent once the delivery has failed.
         std::thread::sleep(std::time::Duration::from_secs(2));
+        let mut next = Event::new("chat.message", &group.group_id);
+        next.by = "user".into();
+        next.data = event.data.clone();
+        let next_key = (group.group_id.clone(), actor.id.clone(), next.id.clone());
+        in_flight().lock().expect("claims").insert(next_key.clone());
+        worker
+            .sender
+            .as_ref()
+            .expect("sender")
+            .send(DeliveryJob {
+                home: home.clone(),
+                group: group.clone(),
+                actor: actor.clone(),
+                event: next.clone(),
+            })
+            .expect("enqueue");
+        wait_for_failure(&next);
         worker.shutdown();
         crate::ops::deepseek_runtime::stop(&group.group_id, &actor.id);
         let turns = std::fs::read_to_string(&prompt_log).expect("prompt log");
-        // The first turn and three retries.
+        // The first message's turn and its three retries; none for the second.
         assert_eq!(turns.lines().count(), 4);
         assert!(!in_flight().lock().expect("claims").contains(&key));
+        assert!(!in_flight().lock().expect("claims").contains(&next_key));
         let events =
             ledger::read_all(&store.ledger_path(&group.group_id).expect("ledger")).expect("events");
         let failures: Vec<_> = events
@@ -918,8 +960,12 @@ done"#;
             })
             .filter_map(|event| event.data.get("reason").and_then(serde_json::Value::as_str))
             .collect();
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("Authentication Fails"));
+        assert_eq!(failures.len(), 2);
+        assert!(
+            failures
+                .iter()
+                .all(|reason| reason.contains("Authentication Fails"))
+        );
     }
 
     #[test]
