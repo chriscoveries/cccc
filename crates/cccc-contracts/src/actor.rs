@@ -52,9 +52,9 @@ impl RuntimeMode {
     }
 
     pub fn validate(self, runtime: ActorRuntime) -> Result<(), &'static str> {
-        if self == Self::Acp && !runtime.supports_acp_mode() {
+        if self == Self::Acp && !runtime.supports_any_acp_mode() {
             return Err(
-                "runtime_mode=acp requires Antigravity, Auggie, Copilot, Devin, Cursor, Kimi Code, Kiro, Hermes or Droid",
+                "runtime_mode=acp requires Antigravity, Auggie, Copilot, Devin, Cursor, Kimi Code, Kiro, Hermes, Droid or Kilo",
             );
         }
         Ok(())
