@@ -219,7 +219,9 @@ fn notice(
 /// caller to dispatch. Pure observation when nothing qualifies: no writes,
 /// no signals.
 pub fn tick(home: &HomeLayout, group: &GroupDoc) -> io::Result<Vec<Event>> {
-    use super::local_headless::memory::{MemoryRestartOutcome, memory_candidate, restart_for_memory};
+    use super::local_headless::memory::{
+        MemoryRestartOutcome, memory_candidate, restart_for_memory,
+    };
     let mut out = Vec::new();
     let now = now_secs();
     let marks = read_cooldowns(home, &group.group_id)?;
@@ -442,14 +444,23 @@ mod tests {
         // notice names the foreman and nobody else. Asserting it here keeps the
         // fixture off the delivery path entirely.
         let delivery = super::super::actor_delivery::event_targets_actor;
-        assert!(delivery(&group, &event, "lead"), "the notice routes to the foreman");
-        assert!(!delivery(&group, &event, "peer"), "a peer is never routed a fresh restart");
+        assert!(
+            delivery(&group, &event, "lead"),
+            "the notice routes to the foreman"
+        );
+        assert!(
+            !delivery(&group, &event, "peer"),
+            "a peer is never routed a fresh restart"
+        );
 
         // The production entrypoint refuses a stopped group instead of delivering
         // into it; a fixture that expected it to deliver was asserting a contract
         // the engine has never had.
         let refused = super::super::actor_delivery::dispatch(&home, &group, &event);
-        assert_eq!(refused.targeted, 0, "a stopped group is not dispatched into");
+        assert_eq!(
+            refused.targeted, 0,
+            "a stopped group is not dispatched into"
+        );
         assert_eq!(refused.queued, 0);
 
         // The legitimate seam: a caller that has already made the routing decision
