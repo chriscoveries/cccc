@@ -1540,6 +1540,56 @@ mod tests {
         (config_dir, listener, guard)
     }
 
+    /// The Agent View supervisor is one process per host and every Claude lane
+    /// talks to it, so a stall on that socket used to disconnect all of them at
+    /// once: one 5s request timeout was enough. A supervisor that is merely
+    /// slow must still deliver the prompt, exactly once.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reply_survives_a_control_stall_past_the_request_timeout() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config_dir, listener, _guard) = bind_fake_control(&temp.path().join("config"));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.expect("request");
+            server_requests.fetch_add(1, Ordering::AcqRel);
+            let request: Value = serde_json::from_str(&line).expect("request JSON");
+            assert_eq!(request["op"].as_str(), Some("reply"));
+            // A healthy supervisor under load: late, not dead.
+            tokio::time::sleep(control::REQUEST_TIMEOUT + Duration::from_secs(2)).await;
+            let stream = stream.get_mut();
+            stream
+                .write_all(b"{\"ok\":true,\"op\":\"reply\"}\n")
+                .await
+                .expect("response");
+            stream.flush().await.expect("flush");
+        });
+
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint");
+        let started = tokio::time::Instant::now();
+        control::reply(&endpoint, "abcdef12", "hello")
+            .await
+            .expect("a slow endpoint must not fail an accepted prompt");
+        assert!(
+            started.elapsed() > control::REQUEST_TIMEOUT,
+            "the fixture must actually stall past the single-request timeout"
+        );
+        assert_eq!(
+            requests.load(Ordering::Acquire),
+            1,
+            "a timed-out read must not re-send the prompt"
+        );
+        server.await.expect("server");
+    }
+
+
     #[test]
     fn parses_only_exact_short_ids() {
         assert_eq!(
