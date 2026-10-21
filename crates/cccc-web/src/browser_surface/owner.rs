@@ -45,7 +45,7 @@ impl BrowserOwner {
         let mut system_browser = match mode {
             BrowserMode::Headless => None,
             BrowserMode::System { background } => {
-                Some(SystemBrowserLaunch::prepare(width, height, background).await?)
+                Some(SystemBrowserLaunch::prepare(width, height, background, actor_id).await?)
             }
         };
         let proxy_args = BrowserProxy::from_env()?

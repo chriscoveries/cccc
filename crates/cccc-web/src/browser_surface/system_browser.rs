@@ -41,12 +41,19 @@ pub(super) struct SystemBrowserLaunch {
     #[cfg(target_os = "linux")]
     vnc: Option<ProjectedVncServer>,
     vnc_error: String,
+    /// The Actor whose window this is, so the process can be attributed to it.
+    actor_id: Option<String>,
     #[cfg(target_os = "macos")]
     managed_profile: Option<PathBuf>,
 }
 
 impl SystemBrowserLaunch {
-    pub(super) async fn prepare(width: u32, height: u32, background: bool) -> Result<Self> {
+    pub(super) async fn prepare(
+        width: u32,
+        height: u32,
+        background: bool,
+        actor_id: Option<&str>,
+    ) -> Result<Self> {
         let (executable, channel) = find_system_browser().ok_or_else(|| {
             anyhow::anyhow!(
                 "Chrome, Microsoft Edge, or Chromium is required for projected browser authentication"
@@ -72,6 +79,7 @@ impl SystemBrowserLaunch {
             #[cfg(target_os = "linux")]
             vnc,
             vnc_error,
+            actor_id: actor_id.map(str::to_owned),
             #[cfg(target_os = "macos")]
             managed_profile: None,
         })
@@ -89,6 +97,12 @@ impl SystemBrowserLaunch {
             .arg(window_position(self.background))
             .arg("--force-device-scale-factor=1");
         config = config.with_head();
+        // Attribute the process to its Actor on this launch path too: the headless
+        // path sets this in `owner.rs`, and an operator or reaper must be able to
+        // tell whose window holds the memory whichever browser we spawn.
+        if let Some(actor_id) = &self.actor_id {
+            config = config.env("CCCC_ACTOR_ID", actor_id.as_str());
+        }
         if let Some(display) = &self.display {
             config = config
                 .env("DISPLAY", display.name())
@@ -941,6 +955,7 @@ mod tests {
             #[cfg(target_os = "linux")]
             vnc: None,
             vnc_error: "unsupported_platform".to_owned(),
+            actor_id: None,
             #[cfg(target_os = "macos")]
             managed_profile: None,
         };
