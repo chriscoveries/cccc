@@ -142,6 +142,12 @@ pub fn claim_deliveries(
     source_event_id: &str,
     force_ambiguous: bool,
 ) -> Result<(bool, HashMap<String, String>), OpError> {
+    if std::env::var_os("CCCC_DELIVERY_QUERY_PROBE").is_some_and(|value| value == "1") {
+        eprintln!(
+            "CCCC_DELIVERY_STATE_QUERY {}",
+            json!({"group_id":group.group_id,"actors":deliveries.len()})
+        );
+    }
     let store = GroupStore::new(home.clone()).map_err(OpError::io)?;
     let ledger_path = store.ledger_path(&group.group_id).map_err(OpError::io)?;
     let lock_path = delivery_lock_path(&ledger_path);
