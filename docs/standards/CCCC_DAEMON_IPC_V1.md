@@ -1859,7 +1859,10 @@ Patch keys used by CCCC include:
   `mail_notice_idle_after_seconds` (default 60, zero disables only the early idle notice),
   `mail_notice_repeat_seconds` (default 0: one notice per batch; above zero, Mail
   still waiting is announced again that long after its last notice),
-  `reply_notice_after_seconds` (default 900, zero disables)
+    `reply_notice_after_seconds` (default 900, zero disables),
+  `health_digest_interval_seconds` (default 0, zero disables the foreman health digest),
+  `health_digest_repeat_seconds` (default 0, zero never repeats a digest),
+  `mail_overdue_after_seconds` (default 7200)
 - Automation: `actor_idle_timeout_seconds`, `keepalive_delay_seconds`,
   `keepalive_max_per_actor`,
   `silence_timeout_seconds`, `help_nudge_interval_seconds`,
@@ -4596,7 +4599,7 @@ it does not copy message bodies, escalate, or create another Inbox
 obligation. It does not repeat unless `mail_notice_repeat_seconds` is above zero:
 then a notice stands only that long, and Mail still waiting after it, together
 with Mail that arrived meanwhile, gets a new notice. A delivered notice does not
-count as read. Bootstrap, the next explicit Push, and low-frequency coordination
+count as read. Mail left unread long after its notice may also be listed in the foreman health digest below. Bootstrap, the next explicit Push, and low-frequency coordination
 responses MAY carry a passive `mail_pending` count without writing a notice.
 
 A `request_reply` obligation starts its timer only after an accepted runtime
@@ -4605,6 +4608,17 @@ message or cancellation has closed it by `reply_notice_after_seconds`, an
 active/idle enabled actor may receive one content-free
 `system.notify(kind="reply_notice")`. It never repeats or escalates. Failed,
 blocked, or ambiguous delivery does not nudge the recipient.
+
+With `health_digest_interval_seconds` above zero, the unread tick also sends
+the group's foreman, while it is enabled and receives delivery, one
+`system.notify(kind="health_digest")` listing what in the group needs a look,
+one line per problem; `context.problem_keys` names each problem's episode. An
+actor's Mail is such a problem while it is still unread
+`mail_overdue_after_seconds` after its first Mail notice that was not
+withdrawn. A digest goes out when a problem appears that the last digest did
+not list, at most once per interval, and, with `health_digest_repeat_seconds`
+above zero, again after that long while problems remain. It copies no message
+bodies and advances no Mail cursor.
 
 Paused, stopped, or disabled actors are never woken for either notice. Pending
 Mail is surfaced at the next start/resume bootstrap and begins a fresh notice

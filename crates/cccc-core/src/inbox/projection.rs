@@ -328,6 +328,7 @@ pub(crate) fn due(
     eligible: &[&cccc_contracts::Actor],
     mail_delays: crate::automation::MailDelays<'_>,
     reply_after: i64,
+    digest: &crate::automation::Digest,
 ) -> io::Result<Vec<Event>> {
     let state = load(home, &group.group_id)?;
     with_projection(home, group, &[], &state, |projection, _| {
@@ -337,6 +338,7 @@ pub(crate) fn due(
             &projection.cursors,
             mail_delays,
             reply_after,
+            digest,
         ))
     })
 }

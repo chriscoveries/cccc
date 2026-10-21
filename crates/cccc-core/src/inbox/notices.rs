@@ -23,6 +23,7 @@ pub(crate) struct NoticeState {
     mail_claims: MailClaims,
     reply_claims: HashSet<(String, String, String)>,
     resume_at: Option<String>,
+    last_digest: Option<(String, HashSet<String>)>,
 }
 struct Source {
     id: String,
@@ -169,6 +170,20 @@ impl NoticeState {
                     .get("kind")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
+                if kind == "health_digest" {
+                    let listed = event
+                        .data
+                        .get("context")
+                        .and_then(|context| context.get("problem_keys"))
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect();
+                    self.last_digest = Some((event.ts.clone(), listed));
+                    return;
+                }
                 if !matches!(kind, "mail_notice" | "reply_notice") {
                     return;
                 }
@@ -229,6 +244,7 @@ impl NoticeState {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn due(
         &self,
         group: &GroupDoc,
@@ -236,11 +252,13 @@ impl NoticeState {
         cursors: &BTreeMap<String, String>,
         mail_delays: crate::automation::MailDelays<'_>,
         reply_after: i64,
+        digest: &crate::automation::Digest,
     ) -> Vec<Event> {
-        use crate::automation::{notice_event, timestamp};
+        use crate::automation::{digest_event, duration_text, notice_event, timestamp};
         let now = Utc::now().timestamp();
         let resume_at = self.resume_at.as_deref().map(|ts| timestamp(ts, now));
         let mut notices = Vec::new();
+        let mut problems = Vec::<(String, String)>::new();
         let resolution = |actor: &str, id: &str| {
             let source = self.positions.get(id)?;
             let read = self.mail_reads.get(actor).and_then(|facts| {
@@ -300,6 +318,31 @@ impl NoticeState {
                     if reply_after > 0 && now - started >= reply_after {
                         replies.push(source);
                     }
+                }
+            }
+            if digest.interval > 0
+                && let Some(oldest) = mail.first()
+            {
+                let noticed_at = self
+                    .mail_claims
+                    .get(&(actor.id.clone(), actor.created_at.clone()))
+                    .into_iter()
+                    .flatten()
+                    .filter(|(notice_id, _, claimed)| {
+                        claimed.contains(&oldest.id)
+                            && self
+                                .deliveries
+                                .get(&(notice_id.clone(), actor.id.clone()))
+                                .is_none_or(|(state, _, _)| state != "withdrawn")
+                    })
+                    .map(|(_, at, _)| timestamp(at, now))
+                    .collect::<Vec<_>>();
+                if let Some(first_noticed) = noticed_at.iter().min()
+                    && now - first_noticed >= digest.mail_overdue
+                {
+                    problems.push((format!("mail:{}:{}", actor.id, oldest.id),
+                        format!("{}: {} Mail item(s) unread, the oldest for {}, after {} Mail notice(s).",
+                            actor.id, mail.len(), duration_text(now - timestamp(&oldest.ts, now)), noticed_at.len())));
                 }
             }
             if mail_delays.busy > 0 && !mail.is_empty() {
@@ -369,6 +412,26 @@ impl NoticeState {
                 notices.push(notice_event(group,actor,"reply_notice","Reply requested",
                     &format!("{} message(s) still need a concrete reply. Use cccc_message_history if needed, then cccc_message_reply.",replies.len()),
                     replies.iter().map(|source| source.id.clone()).collect()));
+            }
+        }
+        if digest.interval > 0
+            && !problems.is_empty()
+            && let Ok(foreman) = crate::actors::unique_available_foreman(group)
+            && eligible.iter().any(|actor| actor.id == foreman.id)
+        {
+            let since = self
+                .last_digest
+                .as_ref()
+                .map_or(i64::MAX, |(at, _)| now - timestamp(at, now));
+            let unlisted = problems.iter().any(|(key, _)| {
+                self.last_digest
+                    .as_ref()
+                    .is_none_or(|(_, listed)| !listed.contains(key))
+            });
+            if (unlisted && since >= digest.interval)
+                || (digest.repeat > 0 && since >= digest.repeat)
+            {
+                notices.push(digest_event(group, foreman, &problems));
             }
         }
         notices
