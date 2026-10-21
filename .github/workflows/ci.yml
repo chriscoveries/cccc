@@ -28,6 +28,20 @@ jobs:
           cargo test --locked --package cccc --test inbox_projection
           cargo build --locked --package cccc --bin cccc
           sha256sum target/debug/cccc > replay-binary.sha256
+          python3 - <<'PY'
+          import pathlib, shutil, subprocess
+          root = pathlib.Path('replay-oracle')
+          root.mkdir()
+          binaries = []
+          for path in pathlib.Path('target/debug/deps').glob('cccc_core-*'):
+              if path.is_file() and path.suffix == '' and path.stat().st_mode & 0o111:
+                  listed = subprocess.run([str(path), '--list'], capture_output=True, text=True, check=True).stdout
+                  if 'real_group_notices_match_history_without_warm_projection_decodes' in listed:
+                      binaries.append(path)
+          assert len(binaries) == 1, binaries
+          shutil.copyfile(binaries[0], root / 'cccc-core-tests')
+          PY
+          sha256sum replay-oracle/cccc-core-tests > replay-oracle.sha256
       - uses: actions/upload-artifact@v7
         with:
           name: inbox-replay-cli
@@ -35,6 +49,8 @@ jobs:
             target/debug/cccc
             replay-source.txt
             replay-binary.sha256
+            replay-oracle/cccc-core-tests
+            replay-oracle.sha256
 
   replay-release:
     runs-on: ubuntu-24.04
