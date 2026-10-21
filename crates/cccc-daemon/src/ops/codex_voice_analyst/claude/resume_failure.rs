@@ -145,4 +145,33 @@ mod tests {
         );
         assert!(!safe.contains("synthetic-secret"));
     }
+
+    #[test]
+    fn transient_resume_diagnostics_name_the_error_kind_and_nothing_else() {
+        for (kind, token) in [
+            (io::ErrorKind::TimedOut, "timed_out"),
+            (io::ErrorKind::WouldBlock, "would_block"),
+            (io::ErrorKind::Interrupted, "interrupted"),
+            (io::ErrorKind::ConnectionAborted, "connection_aborted"),
+            (io::ErrorKind::ConnectionRefused, "connection_refused"),
+            (io::ErrorKind::ConnectionReset, "connection_reset"),
+            (io::ErrorKind::BrokenPipe, "broken_pipe"),
+        ] {
+            let error = io::Error::new(
+                kind,
+                "/home/user/.claude/daemon/control.sock ANTHROPIC_API_KEY=synthetic-secret",
+            );
+            let (safe, blocked) = diagnostic(&error).expect("transient failure");
+            assert!(!blocked, "{kind:?} keeps automatic recovery");
+            assert!(safe.contains(&format!("(kind={token})")), "{safe}");
+            assert!(safe.contains("remains eligible for retry"), "{safe}");
+            assert!(!safe.contains("synthetic-secret"), "{safe}");
+            assert!(!safe.contains("control.sock"), "{safe}");
+        }
+        for kind in [io::ErrorKind::NotFound, io::ErrorKind::Other] {
+            let (safe, blocked) = diagnostic(&io::Error::new(kind, "x")).expect("failure");
+            assert!(blocked, "{kind:?} still pauses automatic recovery");
+            assert!(!safe.contains("kind="), "{safe}");
+        }
+    }
 }

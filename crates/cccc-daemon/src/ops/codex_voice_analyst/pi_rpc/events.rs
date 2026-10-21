@@ -219,9 +219,72 @@ pub(super) fn publish(
     });
 }
 
+/// Replays a real Pi 1.3.0 RPC session through one controlled turn and returns
+/// the normalized events, in order. Captured 2026-10-21 from `pi --mode rpc`
+/// against an OpenAI-compatible provider: one prompt that ran `bash` and `read`
+/// in a scratch directory, then answered. Every line is as captured, except
+/// that the provider and model names of our private endpoint read
+/// `[redacted]`; only the two system-prompt records and the closing
+/// `agent_end` transcript echo were left out.
+#[cfg(test)]
+pub(crate) fn replay_captured_tool_turn(thread_id: &str) -> Vec<Value> {
+    let records = include_str!("captured_tool_turn.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("captured Pi RPC record"))
+        .collect::<Vec<_>>();
+    let prompt = records
+        .iter()
+        .find(|record| record["type"] == "message_start" && record["message"]["role"] == "user")
+        .map(|record| message_text(&record["message"]))
+        .expect("captured prompt");
+    let (sender, mut receiver) = broadcast::channel(records.len() * 4);
+    let (admission, _) = oneshot::channel();
+    let mut turn = Turn::new("captured".into(), prompt, admission);
+    let mut settled = false;
+    for record in &records {
+        settled |= turn
+            .observe(record, &sender, "generation", thread_id)
+            .expect("captured record is accepted");
+    }
+    assert!(settled, "the captured session settles its turn");
+    std::iter::from_fn(|| receiver.try_recv().ok())
+        .map(|event| event.message)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_tool_calls_are_published_as_started_then_finished() {
+        let calls = replay_captured_tool_turn("s")
+            .into_iter()
+            .filter(|message| {
+                message["method"] == "cccc/toolActivity" && message["params"]["phase"].is_string()
+            })
+            .map(|message| {
+                let params = &message["params"];
+                [
+                    params["phase"].clone(),
+                    params["title"].clone(),
+                    params["itemType"].clone(),
+                    params["detail"].clone(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            [
+                ["started", "bash", "commandExecution", "ls -1 ."],
+                ["started", "read", "toolCall", "notes.txt"],
+                ["completed", "bash", "commandExecution", "ls -1 ."],
+                ["completed", "read", "toolCall", "notes.txt"],
+            ]
+            .map(|call| call.map(Value::from))
+        );
+    }
+
     #[test]
     fn only_settled_completes_and_authoritative_message_replaces_deltas() {
         let (sender, mut receiver) = broadcast::channel(32);

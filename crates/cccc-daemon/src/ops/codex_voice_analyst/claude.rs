@@ -2454,6 +2454,47 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn prompt_reply_survives_an_agent_view_stall_past_one_request_window() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config_dir, listener, _control_directory) =
+            bind_fake_control(&temp.path().join("config"));
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("control endpoint");
+        let stall = Duration::from_secs(7);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept the reply");
+            let mut stream = BufReader::new(stream);
+            let mut request = String::new();
+            stream.read_line(&mut request).await.expect("reply frame");
+            // A supervisor under load: the prompt is accepted, the answer is late.
+            tokio::time::sleep(stall).await;
+            stream
+                .get_mut()
+                .write_all(b"{\"ok\":true,\"op\":\"reply\"}\n")
+                .await
+                .expect("late answer");
+            // A second connection here would be the prompt sent twice.
+            let resent = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+                .await
+                .is_ok();
+            (request, resent)
+        });
+
+        let started = tokio::time::Instant::now();
+        control::reply(&endpoint, "abcdef12", "late but accepted")
+            .await
+            .expect("a late answer from a live supervisor is still an answer");
+        assert!(started.elapsed() >= stall, "the answer really was late");
+        let (request, resent) = server.await.expect("control server");
+        let request: Value = serde_json::from_str(&request).expect("reply frame JSON");
+        assert_eq!(request["op"], "reply");
+        assert_eq!(request["text"], "late but accepted");
+        assert!(!resent, "the prompt must be written exactly once");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn idle_session_with_stale_bookkeeping_is_attached_untouched() {
         let fixture = SettleFixture::new(json!({
             "tempo":"blocked",
@@ -2493,6 +2534,154 @@ mod tests {
             "{:?}",
             fixture.operations()
         );
+    }
+    /// A control endpoint whose socket file never existed (task and harness
+    /// already gone) counts as stopped after a short confirmation window
+    /// instead of burning the full stop timeout and failing the shutdown.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_treats_a_persistently_missing_endpoint_as_stopped() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(config_dir.join("daemon")).expect("daemon config");
+        let control_key = config_dir.join("daemon/control.key");
+        std::fs::write(&control_key, "0123456789abcdef0123456789abcdef\n").expect("key");
+        std::fs::set_permissions(&control_key, std::fs::Permissions::from_mode(0o600))
+            .expect("key permissions");
+        let config_dir = config_dir.canonicalize().expect("canonical config");
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(config_dir.to_string_lossy().as_bytes())
+        );
+        let control_dir = Path::new("/tmp")
+            .join(format!(
+                "cc-daemon-{}",
+                config_dir.metadata().expect("metadata").uid()
+            ))
+            .join(&digest[..8]);
+        std::fs::create_dir_all(&control_dir).expect("control directory");
+        std::fs::set_permissions(&control_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("control directory permissions");
+        let _guard = ControlDirectory(control_dir); // no control.sock is bound
+
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint resolves");
+        let started = std::time::Instant::now();
+        kill_and_confirm(&endpoint, "deadbeef")
+            .await
+            .expect("a missing endpoint is already stopped");
+        assert!(
+            started.elapsed() >= GONE_CONFIRM,
+            "a missing endpoint must be confirmed gone first: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            started.elapsed() < STOP_TIMEOUT,
+            "missing endpoint must not wait out the stop timeout: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A task that stays listed keeps the full timeout: a stuck Agent View
+    /// job must still fail the stop, not masquerade as gone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_still_times_out_when_the_task_stays_listed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        let (config_dir, listener, _guard) = bind_fake_control(&config_dir);
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut line = Vec::new();
+                let mut byte = [0u8; 1];
+                while tokio::io::AsyncReadExt::read(&mut stream, &mut byte)
+                    .await
+                    .expect("read")
+                    > 0
+                {
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    line.push(byte[0]);
+                }
+                let request: Value = serde_json::from_slice(&line).expect("request json");
+                let op = request.get("op").and_then(Value::as_str).unwrap_or("");
+                let response = match op {
+                    "list" => json!({"ok":true,"op":"list","jobs":[{"short":"deadbeef"}]}),
+                    "kill" => json!({"ok":true,"op":"kill"}),
+                    _ => json!({"ok":false,"op":op,"code":"EPROTO","error":"unexpected op"}),
+                };
+                let mut bytes = serde_json::to_vec(&response).expect("response");
+                bytes.push(b'\n');
+                tokio::io::AsyncWriteExt::write_all(&mut stream, &bytes)
+                    .await
+                    .expect("write");
+            }
+        });
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint resolves");
+        let error = kill_and_confirm(&endpoint, "deadbeef")
+            .await
+            .expect_err("a stuck task still fails the stop");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        server.abort();
+    }
+
+    /// A control socket left behind by a supervisor that has exited refuses
+    /// connections. Nothing is listening, so nothing can still run the task:
+    /// a refusal sustained past the confirmation window counts as stopped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_treats_a_persistently_refused_endpoint_as_stopped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config_dir, listener, _guard) = bind_fake_control(&temp.path().join("config"));
+        // The socket file outlives its listener, so connecting is refused.
+        drop(listener);
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint resolves");
+        let started = std::time::Instant::now();
+        kill_and_confirm(&endpoint, "deadbeef")
+            .await
+            .expect("a refused endpoint is already stopped");
+        assert!(started.elapsed() >= GONE_CONFIRM, "{:?}", started.elapsed());
+        assert!(started.elapsed() < STOP_TIMEOUT, "{:?}", started.elapsed());
+    }
+
+    /// While a supervisor exits, its socket path can be seen both missing and
+    /// present-but-refusing. Either observation is evidence of absence, so
+    /// switching between them must not restart the confirmation window.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_treats_an_endpoint_alternating_missing_and_refused_as_stopped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config_dir, listener, guard) = bind_fake_control(&temp.path().join("config"));
+        let socket = guard.0.join("control.sock");
+        drop(listener);
+        let alternating = Arc::new(AtomicBool::new(true));
+        let alternate = {
+            let alternating = Arc::clone(&alternating);
+            let socket = socket.clone();
+            tokio::spawn(async move {
+                while alternating.load(Ordering::Acquire) {
+                    if socket.exists() {
+                        // NotFound from here on.
+                        let _ = std::fs::remove_file(&socket);
+                    } else {
+                        // ConnectionRefused from here on: bound, never accepted.
+                        drop(std::os::unix::net::UnixListener::bind(&socket).expect("rebind"));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+        };
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint resolves");
+        let started = std::time::Instant::now();
+        let stopped = kill_and_confirm(&endpoint, "deadbeef").await;
+        alternating.store(false, Ordering::Release);
+        alternate.await.expect("alternating endpoint");
+        stopped.expect("an endpoint that is only ever missing or refused is stopped");
+        assert!(started.elapsed() >= GONE_CONFIRM, "{:?}", started.elapsed());
+        assert!(started.elapsed() < STOP_TIMEOUT, "{:?}", started.elapsed());
     }
 }
 
