@@ -8,7 +8,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const PROTOCOL_VERSION: u64 = 1;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// A control request used to get exactly one 5s window, and every Claude lane
+/// on a host shares one Agent View supervisor, so a load hiccup on that socket
+/// dropped all of them at once. Slow answers are retried on the connection that
+/// already carries the request (never re-sent, so a reply cannot be delivered
+/// twice): ~3 tries over a ~25s bounded window, one log line per retry.
+const REQUEST_ATTEMPTS: u32 = 3;
+const REQUEST_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_FRAME_BYTES: usize = 512 * 1024;
 
 #[cfg(unix)]
@@ -188,14 +195,44 @@ pub(super) async fn interrupt(endpoint: &Endpoint, short: &str) -> io::Result<()
 async fn request(endpoint: &Endpoint, value: Value) -> io::Result<Value> {
     let mut stream = connect(endpoint).await?;
     write_frame(&mut stream, &value).await?;
-    tokio::time::timeout(REQUEST_TIMEOUT, read_frame(&mut stream))
-        .await
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Claude Agent View request timed out",
-            )
-        })?
+    let operation = value
+        .get("op")
+        .and_then(Value::as_str)
+        .unwrap_or("request")
+        .to_owned();
+    read_response(&mut stream, &operation).await
+}
+
+/// Read the answer to a frame that is already on the wire, retrying the read
+/// while the endpoint is slow to respond. The frame is never written twice: an
+/// accepted `reply` whose answer arrives late must not be sent a second time,
+/// so the retry happens on the open connection and only the read is repeated.
+async fn read_response(
+    stream: &mut (impl AsyncRead + Unpin),
+    operation: &str,
+) -> io::Result<Value> {
+    let mut attempt = 1;
+    loop {
+        match tokio::time::timeout(REQUEST_TIMEOUT, read_frame(&mut *stream)).await {
+            Ok(response) => return response,
+            Err(_) if attempt < REQUEST_ATTEMPTS => {
+                tracing::warn!(
+                    operation,
+                    attempt,
+                    timeout_ms = REQUEST_TIMEOUT.as_millis() as u64,
+                    "Claude Agent View control endpoint did not answer in time; retrying the read on the open connection"
+                );
+                attempt += 1;
+                tokio::time::sleep(REQUEST_RETRY_DELAY).await;
+            }
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Claude Agent View request timed out",
+                ));
+            }
+        }
+    }
 }
 
 #[cfg(unix)]

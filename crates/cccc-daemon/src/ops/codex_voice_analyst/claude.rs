@@ -555,6 +555,46 @@ fn retryable_liveness_error(error: &io::Error) -> bool {
         )
 }
 
+/// What a failed `reply` (prompt delivery) means for the managed session.
+///
+/// Every Claude lane on a host talks to one Agent View supervisor, so dropping
+/// the client over a single bad answer disconnects all of them. A slow or
+/// half-open control connection is not evidence that the job is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplyFailureAction {
+    KeepSession,
+    Disconnect,
+}
+
+async fn reply_failure_action(
+    endpoint: &control::Endpoint,
+    short: &str,
+    session_id: &str,
+    error: &io::Error,
+) -> ReplyFailureAction {
+    if !transient_control_failure(error) {
+        return ReplyFailureAction::Disconnect;
+    }
+    // The request path already exhausted its bounded retry window; the job is
+    // gone only if the control plane can no longer list it.
+    match observe_live_job(control::list(endpoint).await, short, session_id) {
+        Ok(_) => ReplyFailureAction::KeepSession,
+        Err(_) => ReplyFailureAction::Disconnect,
+    }
+}
+
+fn transient_control_failure(error: &io::Error) -> bool {
+    // ConnectionAborted is deliberately absent: `ENOJOB`/`EHOSTDEAD` map to it
+    // and both mean the job really is gone.
+    matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::UnexpectedEof
+    )
+}
+
 fn sustained_liveness_failure(
     failure: &mut Option<(tokio::time::Instant, String)>,
     now: tokio::time::Instant,
@@ -1042,8 +1082,22 @@ async fn run_client(
                             let detail = error.to_string();
                             let _ = response.send(Err(io::Error::new(kind, detail.clone())));
                             if kind != io::ErrorKind::WouldBlock {
-                                terminal_error = Some(detail);
-                                break 'client;
+                                match reply_failure_action(&endpoint, &short, &session_id, &error)
+                                    .await
+                                {
+                                    ReplyFailureAction::KeepSession => {
+                                        tracing::warn!(
+                                            generation = %generation,
+                                            session = %session_id,
+                                            error = %detail,
+                                            "Claude Agent View reply failed while the job is still listed; keeping the managed session connected"
+                                        );
+                                    }
+                                    ReplyFailureAction::Disconnect => {
+                                        terminal_error = Some(detail);
+                                        break 'client;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1538,6 +1592,128 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(control_dir.join("control.sock"))
             .expect("control socket");
         (config_dir, listener, guard)
+    }
+
+    /// The Agent View supervisor is one process per host and every Claude lane
+    /// talks to it, so a stall on that socket used to disconnect all of them at
+    /// once: one 5s request timeout was enough. A supervisor that is merely
+    /// slow must still deliver the prompt, exactly once.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reply_survives_a_control_stall_past_the_request_timeout() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config_dir, listener, _guard) = bind_fake_control(&temp.path().join("config"));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.expect("request");
+            server_requests.fetch_add(1, Ordering::AcqRel);
+            let request: Value = serde_json::from_str(&line).expect("request JSON");
+            assert_eq!(request["op"].as_str(), Some("reply"));
+            // A healthy supervisor under load: late, not dead.
+            tokio::time::sleep(control::REQUEST_TIMEOUT + Duration::from_secs(2)).await;
+            let stream = stream.get_mut();
+            stream
+                .write_all(b"{\"ok\":true,\"op\":\"reply\"}\n")
+                .await
+                .expect("response");
+            stream.flush().await.expect("flush");
+        });
+
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint");
+        let started = tokio::time::Instant::now();
+        control::reply(&endpoint, "abcdef12", "hello")
+            .await
+            .expect("a slow endpoint must not fail an accepted prompt");
+        assert!(
+            started.elapsed() > control::REQUEST_TIMEOUT,
+            "the fixture must actually stall past the single-request timeout"
+        );
+        assert_eq!(
+            requests.load(Ordering::Acquire),
+            1,
+            "a timed-out read must not re-send the prompt"
+        );
+        server.await.expect("server");
+    }
+
+    /// Disconnect only when the control plane can no longer show the job.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reply_failure_disconnects_only_when_the_job_is_not_listed() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        const SHORT: &str = "abcdef12";
+        const SESSION: &str = "52b41c61-e23c-4b7c-8b60-809c347451b5";
+
+        async fn action_with_listed_jobs(jobs: Value) -> (ReplyFailureAction, usize) {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let (config_dir, listener, _guard) = bind_fake_control(&temp.path().join("config"));
+            let requests = Arc::new(AtomicUsize::new(0));
+            let server_requests = Arc::clone(&requests);
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.expect("request");
+                server_requests.fetch_add(1, Ordering::AcqRel);
+                let request: Value = serde_json::from_str(&line).expect("request JSON");
+                assert_eq!(request["op"].as_str(), Some("list"));
+                let response = json!({"ok":true,"op":"list","jobs":jobs});
+                let stream = stream.get_mut();
+                stream
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .expect("response");
+                stream.flush().await.expect("flush");
+            });
+            let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint");
+            let action = reply_failure_action(
+                &endpoint,
+                SHORT,
+                SESSION,
+                &io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Claude Agent View request timed out",
+                ),
+            )
+            .await;
+            server.await.expect("server");
+            (action, requests.load(Ordering::Acquire))
+        }
+
+        let listed = json!([{
+            "short":SHORT,
+            "sessionId":SESSION,
+            "cwd":"/tmp/workspace",
+            "cliVersion":"2.1.259",
+        }]);
+        let (action, requests) = action_with_listed_jobs(listed).await;
+        assert_eq!(action, ReplyFailureAction::KeepSession);
+        assert_eq!(
+            requests, 1,
+            "the job check must actually ask the control plane"
+        );
+
+        let (action, _) = action_with_listed_jobs(json!([])).await;
+        assert_eq!(action, ReplyFailureAction::Disconnect);
+
+        // ENOJOB/EHOSTDEAD already mean "gone": no extra round trip, no waiting.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config_dir, _listener, _guard) = bind_fake_control(&temp.path().join("config"));
+        let endpoint = control::Endpoint::resolve(&config_dir).expect("endpoint");
+        let gone = io::Error::new(io::ErrorKind::ConnectionAborted, "ENOJOB");
+        assert_eq!(
+            reply_failure_action(&endpoint, SHORT, SESSION, &gone).await,
+            ReplyFailureAction::Disconnect
+        );
     }
 
     #[test]
