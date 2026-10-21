@@ -35,3 +35,39 @@ jobs:
             target/debug/cccc
             replay-source.txt
             replay-binary.sha256
+
+  replay-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: before
+            ref: 3d3d10cb3906dc353a7d421541b6c6ec98a6d04d
+          - name: after
+            ref: 78368221d364347df478bb937912b280c6f1eb3b
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39638158450
+          name: bundled-web
+          path: web/dist
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build comparable release replay CLI
+        run: |
+          git rev-parse HEAD > replay-source.txt
+          cargo build --release --locked --package cccc --bin cccc
+          sha256sum target/release/cccc > replay-binary.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: inbox-replay-cli-${{ matrix.name }}
+          path: |
+            target/release/cccc
+            replay-source.txt
+            replay-binary.sha256
