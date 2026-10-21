@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 0cc4429ff1663d15ade43ae5f4f5405aeec28a4a
+          ref: d30fbe1620499dbc24adcfcfb561247ea2e58a51
       - uses: actions/download-artifact@v8
         with:
           github-token: ${{ github.token }}
@@ -48,6 +48,8 @@ jobs:
                   if 'real_group_startup_claims_match_history' in listed:
                       startup.append(path)
           assert len(startup) == 1, startup
+          listed = subprocess.run([str(startup[0]), '--list'], capture_output=True, text=True, check=True).stdout
+          assert 'real_group_delivery_queries_match_history' in listed
           shutil.copyfile(startup[0], root / 'cccc-daemon-tests')
           PY
           sha256sum replay-oracle/cccc-core-tests > replay-oracle.sha256
@@ -71,8 +73,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: before
+            ref: 5484aef1fdc23e3cbcd6f8af8bc628e4a0e6d216
           - name: after
-            ref: 0cc4429ff1663d15ade43ae5f4f5405aeec28a4a
+            ref: d30fbe1620499dbc24adcfcfb561247ea2e58a51
     steps:
       - uses: actions/checkout@v7
         with:
@@ -97,3 +101,36 @@ jobs:
             target/release/cccc
             replay-source.txt
             replay-binary.sha256
+
+  metadata-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 55531e0b46bfb4eba9ab794565e37f9a2a41fc84
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build scoped requested-byte probe
+        run: |
+          git rev-parse HEAD > metadata-source.txt
+          cargo test --locked --package cccc-pair-core --lib --no-run
+          python3 - <<'PYBUILD'
+          import pathlib, shutil, subprocess
+          matches = []
+          for path in pathlib.Path('target/debug/deps').glob('cccc_core-*'):
+              if path.is_file() and path.suffix == '' and path.stat().st_mode & 0o111:
+                  listed = subprocess.run([str(path), '--list'], capture_output=True, text=True, check=True).stdout
+                  if 'real_group_notice_retained_allocations' in listed:
+                      matches.append(path)
+          assert len(matches) == 1, matches
+          shutil.copyfile(matches[0], 'metadata-core-tests')
+          PYBUILD
+          sha256sum metadata-core-tests > metadata-binary.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: inbox-metadata-probe
+          path: |
+            metadata-source.txt
+            metadata-binary.sha256
+            metadata-core-tests
