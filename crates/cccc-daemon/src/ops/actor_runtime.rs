@@ -150,33 +150,88 @@ pub(super) fn same_untrusted_workspace(original: &OpError, restart: &OpError) ->
 
 fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionStatus, OpError> {
     let actor = environment::resolve_launch_actor(home, group, actor)?;
-    let command = if actor.command.is_empty() {
+    let base_command = if actor.command.is_empty() {
         cccc_runtime::default_command(actor.runtime)
     } else {
         actor.command.clone()
     };
     let cwd = working_directory(group, &actor)?;
     let mut env = environment::launch_env(home, group, &actor);
-    super::runtime_mcp::prepare(home, actor.runtime, &command, &cwd, &mut env)?;
+    super::runtime_mcp::prepare(home, actor.runtime, &base_command, &cwd, &mut env)?;
+    // Muse assembles its final PTY argv here: private data home, session
+    // resume from its receipt, and the per-launch CCCC MCP server entry.
+    let mut muse_capture = None;
+    let command = if actor.runtime == ActorRuntime::Muse {
+        let executable = super::codex_mcp::resolve_cccc_executable().ok_or_else(|| {
+            OpError::new(
+                "runtime_mcp_executable_missing",
+                "cannot locate the active CCCC executable for runtime MCP setup",
+            )
+        })?;
+        let prepared = super::runtime_session::prepare_muse_session(
+            home,
+            &group.group_id,
+            &actor.id,
+            &cwd,
+            &base_command,
+            &mut env,
+            &executable,
+        )
+        .map_err(OpError::io)?;
+        if prepared.session_id.is_none() {
+            muse_capture = Some((base_command.clone(), env.clone()));
+        }
+        prepared.command
+    } else {
+        base_command
+    };
     let _start_permit = crate::runtime_start_gate::permit(home)
         .map_err(|message| OpError::new("runtime_shutting_down", message))?;
     let command = cccc_runtime::resolve_command_executable(&command, &env);
     let history =
         terminal_history::config(home, &group.group_id, &actor.id).map_err(OpError::io)?;
-    cccc_runtime::start_with_history(
+    let status = cccc_runtime::start_with_history(
         LaunchSpec {
             group_id: group.group_id.clone(),
             actor_id: actor.id.clone(),
             runner: RunnerKind::Pty,
             command,
-            cwd,
+            cwd: cwd.clone(),
             env,
             cols: 120,
             rows: 40,
         },
         history,
     )
-    .map_err(runtime_error)
+    .map_err(runtime_error)?;
+    if let Some((base_command, env)) = muse_capture {
+        // The TUI creates its session directory at startup; capture it now so
+        // the receipt names the session before any restart needs it. Failure
+        // is non-fatal: the next start discovers it from the launch marker.
+        for _ in 0..14 {
+            match super::runtime_session::capture_muse_session_after_launch(
+                home,
+                &group.group_id,
+                &actor.id,
+                &cwd,
+                &base_command,
+                &env,
+            ) {
+                Ok(Some(_)) => break,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(150)),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        group_id = %group.group_id,
+                        actor_id = %actor.id,
+                        "failed to capture Muse session after launch"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    Ok(status)
 }
 
 pub(super) fn stop(group: &GroupDoc, actor_id: &str) -> Result<Option<SessionStatus>, OpError> {
