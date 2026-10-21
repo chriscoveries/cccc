@@ -254,7 +254,9 @@ impl NoticeState {
         reply_after: i64,
         digest: &crate::automation::Digest,
     ) -> Vec<Event> {
-        use crate::automation::{digest_event, duration_text, notice_event, timestamp};
+        use crate::automation::{
+            digest_event, disk_problem, duration_text, notice_event, timestamp,
+        };
         let now = Utc::now().timestamp();
         let resume_at = self.resume_at.as_deref().map(|ts| timestamp(ts, now));
         let mut notices = Vec::new();
@@ -414,8 +416,15 @@ impl NoticeState {
                     replies.iter().map(|source| source.id.clone()).collect()));
             }
         }
+        let listed = |key: &str| {
+            self.last_digest
+                .as_ref()
+                .is_some_and(|(_, listed)| listed.contains(key))
+        };
+        if let Some(problem) = disk_problem(digest, listed) {
+            problems.push(problem);
+        }
         if digest.interval > 0
-            && !problems.is_empty()
             && let Ok(foreman) = crate::actors::unique_available_foreman(group)
             && eligible.iter().any(|actor| actor.id == foreman.id)
         {
@@ -423,13 +432,14 @@ impl NoticeState {
                 .last_digest
                 .as_ref()
                 .map_or(i64::MAX, |(at, _)| now - timestamp(at, now));
-            let unlisted = problems.iter().any(|(key, _)| {
-                self.last_digest
+            let unlisted = problems.iter().any(|(key, _)| !listed(key));
+            let resolved = problems.is_empty()
+                && self
+                    .last_digest
                     .as_ref()
-                    .is_none_or(|(_, listed)| !listed.contains(key))
-            });
-            if (unlisted && since >= digest.interval)
-                || (digest.repeat > 0 && since >= digest.repeat)
+                    .is_some_and(|(_, listed)| !listed.is_empty());
+            if ((unlisted || resolved) && since >= digest.interval)
+                || (!problems.is_empty() && digest.repeat > 0 && since >= digest.repeat)
             {
                 notices.push(digest_event(group, foreman, &problems));
             }
