@@ -292,6 +292,13 @@ impl Session {
         if !self.attachments.same_session(registry) || !registry.is_writer(attachment_id)? {
             return Ok(None);
         }
+        // The registry proves the attachment belongs to this session and still
+        // holds the writer slot. It says nothing about which process runs
+        // behind the PTY: a terminal launched for another actor accepts the
+        // keystrokes, the human watches a lane work under the wrong identity,
+        // and the daemon records the write as delivered. Ask the process, the
+        // same way the delivery path asks it before it writes.
+        self.verify_process_identity()?;
         self.input_writer().map(Some)
     }
 
