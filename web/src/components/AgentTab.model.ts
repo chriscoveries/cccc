@@ -1,0 +1,54 @@
+import type { Actor } from "../types";
+
+export function actorSupportsNewSession(
+  runtime: Actor["runtime"],
+  mode?: Actor["runtime_mode"],
+): boolean {
+  if (["antigravity", "copilot", "devin", "cursor"].includes(runtime || "") && mode === "acp")
+    return true;
+  return ["claude", "codex", "grok"].includes(
+    String(runtime || "")
+      .trim()
+      .toLowerCase(),
+  );
+}
+
+export function actorHasRuntimeResumeFailure(
+  actor: Pick<Actor, "runtime_session_status">,
+): boolean {
+  return (
+    String(actor.runtime_session_status || "")
+      .trim()
+      .toLowerCase() === "resume_failed"
+  );
+}
+
+export function shouldFetchStoppedTerminalTail(args: {
+  activated: boolean;
+  isRunning: boolean;
+  isHeadless: boolean;
+  groupId: string;
+  actorId: string;
+  isActorBusy: boolean;
+}): boolean {
+  return Boolean(
+    args.activated &&
+    !args.isRunning &&
+    !args.isHeadless &&
+    args.groupId &&
+    args.actorId &&
+    !args.isActorBusy,
+  );
+}
+
+export function shouldReconcileStoppedActorStatus(args: {
+  activated: boolean;
+  isVisible: boolean;
+  isRunning: boolean;
+  isActorEnabled: boolean;
+  isActorBusy: boolean;
+}): boolean {
+  return Boolean(
+    args.activated && args.isVisible && !args.isRunning && args.isActorEnabled && !args.isActorBusy,
+  );
+}

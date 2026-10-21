@@ -1,0 +1,39 @@
+[build-system]
+requires = []
+build-backend = "scripts.native_wheel_backend"
+backend-path = ["."]
+
+[project]
+name = "cccc-pair"
+version = "0.4.42"
+description = "Global multi-agent delivery kernel with working groups, scopes, and an append-only collaboration ledger"
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [
+  { name = "ChesterRa", email = "ra@ike.ba" }
+]
+license = "Apache-2.0"
+keywords = ["orchestrator","ai","rfd","pair","collaboration"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "Programming Language :: Rust",
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: Software Development :: Build Tools",
+]
+
+[project.urls]
+Homepage = "https://github.com/ChesterRa/cccc"
+Repository = "https://github.com/ChesterRa/cccc"
+Issues = "https://github.com/ChesterRa/cccc/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]

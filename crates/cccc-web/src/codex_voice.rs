@@ -1,0 +1,146 @@
+use cccc_core::HomeLayout;
+use cccc_core::codex_voice_settings::ResolvedAgentRuntime;
+use cccc_daemon::experimental_codex_voice::{
+    AnalystLifecycleEvent, CodexVoiceAnalyst, CodexVoiceCall, LaunchConfig, RealtimeCallConfig,
+    create_realtime_answer,
+};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+
+use crate::ledger_event_hub::LedgerEventHub;
+
+#[cfg(all(test, unix))]
+mod acp_regression_tests;
+mod active_session;
+mod analyst_events;
+mod analyst_runtime;
+mod analyst_settings;
+mod analyst_tasks;
+mod analyst_terminal;
+mod notifications;
+mod persistence;
+#[cfg(test)]
+mod persona_tests;
+mod sessions_lifecycle;
+mod sessions_start;
+#[cfg(all(test, unix))]
+mod socket_tests;
+pub(crate) mod start_error;
+#[cfg(test)]
+mod tests;
+
+const CONNECTION_UNATTACHED: u8 = 0;
+const CONNECTION_ATTACHED: u8 = 1;
+const CONNECTION_CLOSING: u8 = 2;
+
+#[derive(Debug, Clone)]
+pub(crate) struct SessionInfo {
+    pub generation: String,
+    pub analyst_generation: Option<String>,
+    pub mode: cccc_contracts::codex_voice::VoiceCallMode,
+    pub voice: String,
+    pub connected: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AnalystInfo {
+    pub generation: String,
+    pub tui_ready: bool,
+    pub phase: String,
+    pub last_result: String,
+    pub warning: String,
+    pub structured: bool,
+    pub queued_inputs: usize,
+    pub permissions: Vec<serde_json::Value>,
+    pub progress: String,
+    pub last_error: String,
+    pub manual_tasks: Vec<ManualAnalystTask>,
+    pub manual_task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ManualAnalystTask {
+    pub id: String,
+    pub text: String,
+    pub call_generation: Option<String>,
+    pub status: String,
+    pub result: String,
+    pub error: String,
+    #[serde(skip)]
+    turn_id: String,
+    #[serde(skip)]
+    projected: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VoiceState {
+    pub call: Option<SessionInfo>,
+    pub analyst: Option<AnalystInfo>,
+}
+
+pub(crate) struct StartedSession {
+    pub session: Arc<ActiveSession>,
+    pub answer_sdp: String,
+    pub newly_created: bool,
+}
+
+pub(crate) enum StartOutcome {
+    Started(StartedSession),
+    Busy(SessionInfo),
+}
+
+#[derive(Debug, Default)]
+struct AnalystSnapshot {
+    phase: String,
+    last_result: String,
+    warning: String,
+    progress: String,
+    last_error: String,
+    manual_tasks: Vec<ManualAnalystTask>,
+    manual_task_id: Option<String>,
+}
+
+pub(crate) struct AnalystRuntime {
+    workdir: PathBuf,
+    analyst: Arc<CodexVoiceAnalyst>,
+    launch_runtime: ResolvedAgentRuntime,
+    terminal_gate: Mutex<()>,
+    snapshot: StdMutex<AnalystSnapshot>,
+    monitor: StdMutex<Option<JoinHandle<()>>>,
+}
+
+pub(crate) struct ActiveSession {
+    verbosity: cccc_contracts::voice_notifications::VoiceVerbosity,
+    notification_paused: tokio::sync::watch::Sender<bool>,
+    call: Arc<CodexVoiceCall>,
+    analyst: Option<Arc<AnalystRuntime>>,
+    client_session_id: String,
+    offer_digest: [u8; 32],
+    answer_sdp: String,
+    voice: String,
+    connection_state: AtomicU8,
+}
+
+pub(crate) struct SessionAttachment {
+    session: Arc<ActiveSession>,
+}
+
+#[derive(Default)]
+struct ManagedState {
+    active: Option<Arc<ActiveSession>>,
+    analyst: Option<Arc<AnalystRuntime>>,
+}
+
+pub(crate) struct AnalystSettingsOutcome {
+    pub analyst: Option<AnalystInfo>,
+    pub restarted: bool,
+    pub started_new_session: bool,
+    pub discarded_work: bool,
+}
+
+pub(crate) struct CodexVoiceSessions {
+    state: Mutex<ManagedState>,
+}

@@ -1,0 +1,145 @@
+import { useCallback, useEffect, useState } from "react";
+import * as api from "../services/api";
+import { useGroupStore, useObservabilityStore, useUIStore } from "../stores";
+import type { DirSuggestion } from "../types";
+import { MOBILE_VIEWPORT_MEDIA_QUERY } from "../utils/responsiveLayout";
+
+type UseAppChromeOptions = {
+  parseUrlDeepLink: () => void;
+  refreshGroups: () => void;
+  setWebReadOnly: (value: boolean) => void;
+  setSmallScreen: (value: boolean) => void;
+  showError: (message: string) => void;
+  setDirSuggestions: (suggestions: DirSuggestion[]) => void;
+  groupEditOpen: boolean;
+  addActorOpen: boolean;
+  editingActor: unknown;
+};
+
+type UseAppChromeResult = {
+  canManageGroups: boolean;
+  ccccHome: string;
+  fetchDirSuggestions: () => Promise<void>;
+  refreshWebAccessSession: () => Promise<boolean | null>;
+};
+
+export function useAppChrome({
+  parseUrlDeepLink,
+  refreshGroups,
+  setWebReadOnly,
+  setSmallScreen,
+  showError,
+  setDirSuggestions,
+  groupEditOpen,
+  addActorOpen,
+  editingActor,
+}: UseAppChromeOptions): UseAppChromeResult {
+  const [ccccHome, setCcccHome] = useState("");
+  const canAccessGlobalSettings = useUIStore((state) => state.canAccessGlobalSettings);
+  const setCanAccessGlobalSettings = useUIStore((state) => state.setCanAccessGlobalSettings);
+
+  const refreshWebAccessSession = useCallback(async () => {
+    try {
+      const resp = await api.fetchWebAccessSession();
+      if (
+        !resp.ok &&
+        !["unauthorized", "auth_required", "permission_denied"].includes(resp.error.code)
+      ) {
+        setCanAccessGlobalSettings(null);
+        return null;
+      }
+      const session = resp.ok ? (resp.result?.web_access_session ?? null) : null;
+      const allowed =
+        Boolean(session) &&
+        Boolean(session?.can_access_global_settings ?? !(session?.login_active ?? false));
+      setCanAccessGlobalSettings(allowed);
+      useObservabilityStore.getState().setRuntimeVisibilityFromSession(session);
+      return Boolean(session?.is_admin);
+    } catch {
+      setCanAccessGlobalSettings(null);
+      return null;
+    }
+  }, [setCanAccessGlobalSettings]);
+
+  useEffect(() => {
+    void refreshWebAccessSession();
+    const handleFocus = () => {
+      void refreshWebAccessSession();
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, [refreshWebAccessSession]);
+
+  // Run first-screen routing and capability probing once; function reference
+  // changes should not replay this bootstrap work.
+  useEffect(() => {
+    parseUrlDeepLink();
+    refreshGroups();
+    void api
+      .fetchPing()
+      .then((resp) => {
+        if (resp.ok) {
+          setWebReadOnly(Boolean(resp.result?.web?.read_only));
+        }
+      })
+      .catch(() => {
+        /* ignore */
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const mq = window.matchMedia(MOBILE_VIEWPORT_MEDIA_QUERY);
+    const update = () => setSmallScreen(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, [setSmallScreen]);
+
+  const ensureRuntimesLoaded = useCallback(async () => {
+    const state = useGroupStore.getState();
+    if (state.runtimeDetectionStatus === "idle") await state.refreshRuntimes();
+  }, []);
+
+  const fetchDirSuggestions = useCallback(async () => {
+    try {
+      const resp = await api.fetchDirSuggestions();
+      if (resp.ok) {
+        setDirSuggestions(resp.result.suggestions || []);
+        return;
+      }
+      showError(resp.error?.message || "Failed to load directories");
+    } catch {
+      showError("Failed to load directories");
+    }
+  }, [setDirSuggestions, showError]);
+
+  const loadCcccHome = useCallback(async () => {
+    if (ccccHome) return;
+    try {
+      const resp = await api.fetchPing({ includeHome: true });
+      if (resp.ok) {
+        setCcccHome(String(resp.result?.home || "").trim());
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [ccccHome]);
+
+  useEffect(() => {
+    if (!groupEditOpen) return;
+    void loadCcccHome();
+  }, [groupEditOpen, loadCcccHome]);
+
+  useEffect(() => {
+    if (!addActorOpen && !editingActor) return;
+    void ensureRuntimesLoaded();
+  }, [addActorOpen, editingActor, ensureRuntimesLoaded]);
+
+  return {
+    canManageGroups: canAccessGlobalSettings === true,
+    ccccHome,
+    fetchDirSuggestions,
+    refreshWebAccessSession,
+  };
+}

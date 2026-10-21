@@ -1,0 +1,537 @@
+use super::operation::{
+    Operation,
+    Policy::{GlobalWrite, Read, Write},
+};
+use cccc_contracts::{ActorRole, DaemonRequest, Event, utc_now};
+use cccc_core::{GroupStore, HomeLayout, ledger};
+use cccc_core::{assistant_state, voice_recording_lease};
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+use std::fs::OpenOptions;
+use std::io;
+use uuid::Uuid;
+mod document_reconcile;
+mod global_secretary;
+pub(super) use global_secretary::{
+    document_file as secretary_document_file, guidance as secretary_guidance,
+    project_result as secretary_project_result, target as secretary_target,
+    validate_document as secretary_validate_document,
+    validate_request as secretary_validate_request,
+};
+
+pub(super) fn secretary_global_inputs(home: &HomeLayout, group_id: &str) -> io::Result<Vec<Value>> {
+    voice_input::global_inputs(home, group_id)
+}
+mod voice_document_archive;
+mod voice_document_delete;
+mod voice_document_library;
+use voice_document_archive::archive;
+mod prompt_refine;
+mod voice_ask;
+mod voice_document_state;
+mod voice_document_status;
+mod voice_input;
+mod voice_input_dedupe;
+mod voice_input_delivery;
+mod voice_semantic_input;
+mod voice_session;
+mod voice_settings;
+mod voice_transcript_input;
+mod voice_transcript_revision;
+use crate::dispatch::{
+    OpError, OpResult, bool_arg, first_non_blank_arg, object, required_arg, string_arg,
+};
+use crate::ops::actor_delivery;
+
+const KEY: &str = "assistants";
+pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
+    Some(match request.op.as_str() {
+        "assistant_state" | "assistant_index"
+            if string_arg(request, "view").as_deref() == Some("voice_session") =>
+        {
+            Operation::new(Write, voice_session::view)
+        }
+        "assistant_state" | "assistant_index" => Operation::new(Write, voice_settings::index),
+        "assistant_voice_recording_lease" => Operation::new(GlobalWrite, recording_lease),
+        "assistant_voice_transcript_append" => Operation::new(Write, voice_input::append),
+        "assistant_voice_session_transcript_clear" => Operation::new(Write, |home, request| {
+            authorize_voice_session_mutation(home, request, "user")
+                .and_then(|_| voice_session::clear_transcript(home, request))
+        }),
+        "assistant_voice_session_update" => Operation::new(Write, |home, request| {
+            authorize_voice_session_mutation(home, request, "assistant:voice_secretary")
+                .and_then(|_| voice_session::update(home, request))
+        }),
+        "assistant_voice_document_list" => Operation::new(Read, documents),
+        "assistant_voice_document_select" => Operation::new(Write, select),
+        "assistant_voice_document_save" => Operation::new(Write, save),
+        "assistant_voice_document_instruction" => Operation::new(Write, voice_ask::input),
+        "assistant_voice_document_archive" => Operation::new(Write, archive),
+        "assistant_voice_document_delete" => Operation::new(Write, voice_document_delete::delete),
+        "assistant_voice_input_append"
+            if string_arg(request, "kind")
+                .or_else(|| string_arg(request, "input_kind"))
+                .as_deref()
+                == Some("voice_instruction") =>
+        {
+            Operation::new(Write, voice_ask::input)
+        }
+        "assistant_voice_input_append" => Operation::new(Write, prompt_refine::input),
+        "assistant_voice_prompt_draft_ack" => Operation::new(Write, prompt_refine::ack),
+        "assistant_voice_ask_requests_clear" => Operation::new(Write, voice_ask::clear),
+        _ => return voice_document_library::resolve(request),
+    })
+}
+
+fn recording_lease(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let group_id = required_arg(request, "group_id")?;
+    let store = GroupStore::new(home.clone()).map_err(OpError::io)?;
+    let group = store.load(&group_id).map_err(OpError::not_found)?;
+    let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
+    require_voice_status_permission(&group, &by)?;
+    let action = string_arg(request, "action").unwrap_or_else(|| "status".into());
+    let dispatch_target = string_arg(request, "dispatch_target").unwrap_or_default();
+    let state = group.extra.get(KEY).cloned().unwrap_or_else(|| json!({}));
+    let assistant = voice_settings::effective_assistant(&state);
+    let disabled_recording_allowed = match action.as_str() {
+        "acquire" => dispatch_target == "composer",
+        "heartbeat" if dispatch_target == "composer" => true,
+        "heartbeat" if dispatch_target.is_empty() => {
+            let owner_id = string_arg(request, "owner_id").unwrap_or_default();
+            let lease_id = string_arg(request, "lease_id").unwrap_or_default();
+            match voice_recording_lease::validate(home, &group_id, &owner_id, &lease_id) {
+                Ok(lease) => lease["dispatch_target"] == "composer",
+                Err(_) => true,
+            }
+        }
+        _ => false,
+    };
+    if !assistant["enabled"].as_bool().unwrap_or(false)
+        && matches!(action.as_str(), "acquire" | "heartbeat")
+        && !disabled_recording_allowed
+    {
+        return Err(OpError::new(
+            "assistant_disabled",
+            "voice_secretary is disabled",
+        ));
+    }
+    voice_recording_lease::update(
+        home,
+        &group_id,
+        &group.title,
+        &Value::Object(request.args.clone()),
+    )
+    .map_err(|error| {
+        let mut mapped = OpError::new(error.code, error.message);
+        mapped.details = error.details;
+        mapped
+    })
+    .and_then(object)
+}
+
+fn authorize_voice_session_mutation(
+    home: &HomeLayout,
+    request: &DaemonRequest,
+    default_by: &str,
+) -> Result<(), OpError> {
+    let group_id = required_arg(request, "group_id")?;
+    let group = GroupStore::new(home.clone())
+        .map_err(OpError::io)?
+        .load(&group_id)
+        .map_err(OpError::not_found)?;
+    let by = string_arg(request, "by").unwrap_or_else(|| default_by.into());
+    require_voice_status_permission(&group, &by)
+}
+
+fn require_voice_status_permission(group: &cccc_core::GroupDoc, by: &str) -> Result<(), OpError> {
+    let by = by.trim();
+    if by.is_empty() || by == "user" || by == "assistant:voice_secretary" {
+        return Ok(());
+    }
+    match cccc_core::actors::effective_role(group, by) {
+        Some(ActorRole::Foreman) => Ok(()),
+        Some(ActorRole::Peer) => Err(OpError::new(
+            "permission_denied",
+            format!("permission denied: {by}"),
+        )),
+        None => Err(OpError::new(
+            "permission_denied",
+            format!("unknown actor: {by}"),
+        )),
+    }
+}
+
+fn documents(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let group_id = required_arg(request, "group_id")?;
+    let value = document_reconcile::run(home, request)?;
+    let requested_path = string_arg(request, "document_path").unwrap_or_default();
+    let include_archived = bool_arg(request, "include_archived", false);
+    let documents = items(&value, "documents")
+        .iter()
+        .filter(|document| {
+            !voice_document_state::is_deleted(document)
+                && (include_archived || voice_document_state::is_active(document))
+                && (requested_path.is_empty() || document["document_path"] == requested_path)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    object(
+        json!({"group_id":group_id,"documents":documents,"active_document_id":value["active_document_id"],"active_document_path":value["active_document_path"]}),
+    )
+}
+fn select(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let group_id = required_arg(request, "group_id")?;
+    let path = document_path(request)?;
+    document_reconcile::run(home, request)?;
+    let document = voice_document_state::update(home, &group_id, |state| {
+        let document = array(state, "documents")
+            .iter()
+            .find(|item| item["document_path"] == path)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "document not found"))?;
+        if !voice_document_state::is_active(&document) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "voice document is not active",
+            ));
+        }
+        state.insert("active_document_id".into(), document["document_id"].clone());
+        state.insert("active_document_path".into(), json!(path));
+        Ok(document)
+    })
+    .map_err(OpError::io)?;
+    document_result(home, request, &group_id, document, "selected")
+}
+fn save(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let group_id = required_arg(request, "group_id")?;
+    let path = string_arg(request, "document_path")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("voice/{}.md", short_id()));
+    validate_path(&path)?;
+    let title = string_arg(request, "title").unwrap_or_default();
+    let content = string_arg(request, "content");
+    let group = GroupStore::new(home.clone())
+        .map_err(OpError::io)?
+        .load(&group_id)
+        .map_err(OpError::not_found)?;
+    let (storage_path, storage_kind) = document_storage_path(home, &group, &path)?;
+    let mut previous_file = None::<Option<Vec<u8>>>;
+    let mut attempted_content = None::<String>;
+    let result = voice_document_state::update(home, &group_id, |state| {
+        let docs = array(state, "documents");
+        let index = docs.iter().position(|item| item["document_path"] == path);
+        let is_new = index.is_none();
+        let old = index
+            .and_then(|index| docs.get(index))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        voice_document_status::ensure_writable(&old)?;
+        let text = if let Some(content) = content.as_deref() {
+            previous_file = Some(std::fs::read(&storage_path).ok());
+            write_document(&storage_path, content)?;
+            attempted_content = Some(content.to_owned());
+            content.to_owned()
+        } else if is_new {
+            let (text, created) = read_or_create_empty_document(&storage_path)?;
+            if created {
+                previous_file = Some(None);
+                attempted_content = Some(String::new());
+            }
+            text
+        } else {
+            old["content"].as_str().unwrap_or("").to_owned()
+        };
+        let created_at = old["created_at"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(utc_now);
+        let effective_title = if title.is_empty() {
+            old["title"].as_str().unwrap_or("Untitled document")
+        } else {
+            &title
+        };
+        let changed = is_new
+            || old["content"].as_str() != Some(text.as_str())
+            || old["title"].as_str() != Some(effective_title);
+        let document = json!({"document_id":old["document_id"].as_str().map(str::to_owned).unwrap_or_else(||format!("vdoc_{}",short_id())),"scope_key":group.active_scope_key,"folder_id":old["folder_id"].as_str().unwrap_or(""),"document_path":path,"workspace_path":path,"absolute_path":storage_path,"filename":path.rsplit('/').next().unwrap_or(&path),"assistant_id":"voice_secretary","title":effective_title,"status":old["status"].as_str().unwrap_or("active"),"storage_kind":storage_kind,"content":text,"content_sha256":format!("{:x}",Sha256::digest(text.as_bytes())),"content_chars":text.chars().count(),"revision_count":old["revision_count"].as_u64().unwrap_or(0)+u64::from(changed),"created_at":created_at,"updated_at":utc_now(),"created_by":string_arg(request,"by").unwrap_or_else(||"user".into())});
+        if let Some(index) = index {
+            docs[index] = document.clone();
+        } else {
+            docs.push(document.clone());
+        }
+        state.insert("active_document_id".into(), document["document_id"].clone());
+        state.insert("active_document_path".into(), json!(path));
+        Ok(document)
+    })
+    .map_err(OpError::io);
+    let document = match result {
+        Ok(document) => document,
+        Err(error) => {
+            if let Some(previous) = previous_file {
+                let current_matches_attempt =
+                    voice_document_state::load(home, &group_id)
+                        .ok()
+                        .is_some_and(|state| {
+                            attempted_content.as_deref().is_some_and(|text| {
+                                state["documents"].as_array().into_iter().flatten().any(
+                                    |document| {
+                                        document["document_path"] == path
+                                            && document["content"].as_str() == Some(text)
+                                    },
+                                )
+                            })
+                        });
+                let disk_matches_attempt = attempted_content.as_deref().is_some_and(|text| {
+                    std::fs::read(&storage_path)
+                        .ok()
+                        .is_some_and(|bytes| bytes == text.as_bytes())
+                });
+                let rollback = if current_matches_attempt || !disk_matches_attempt {
+                    Ok(())
+                } else if let Some(bytes) = previous.as_deref() {
+                    write_document_bytes(&storage_path, bytes)
+                } else if storage_path.exists() {
+                    std::fs::remove_file(&storage_path)
+                } else {
+                    Ok(())
+                };
+                if let Err(rollback_error) = rollback {
+                    return Err(OpError::new(
+                        "rollback_failed",
+                        format!(
+                            "{}; failed to reconcile voice document {path}: {rollback_error}",
+                            error.message
+                        ),
+                    ));
+                }
+            }
+            return Err(error);
+        }
+    };
+    document_result(home, request, &group_id, document, "saved")
+}
+
+fn document_storage_path(
+    home: &HomeLayout,
+    group: &cccc_core::GroupDoc,
+    relative: &str,
+) -> Result<(std::path::PathBuf, &'static str), OpError> {
+    validate_path(relative)?;
+    if let Some(scope) = group
+        .scopes
+        .iter()
+        .find(|scope| scope.scope_key == group.active_scope_key)
+        .or_else(|| group.scopes.first())
+    {
+        let root = std::path::Path::new(&scope.url)
+            .canonicalize()
+            .map_err(OpError::io)?;
+        reject_symlink_components(&root, relative)?;
+        return Ok((root.join(relative), "workspace"));
+    }
+    let root = home
+        .root()
+        .join("voice-secretary")
+        .join(&group.group_id)
+        .join("documents");
+    std::fs::create_dir_all(&root).map_err(OpError::io)?;
+    reject_symlink_components(&root, relative)?;
+    Ok((root.join(relative), "rust_home"))
+}
+
+fn write_document(path: &std::path::Path, content: &str) -> io::Result<()> {
+    write_document_bytes(path, content.as_bytes())
+}
+
+fn read_or_create_empty_document(path: &std::path::Path) -> io::Result<(String, bool)> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok((content, false)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| io::Error::other("document path has no parent"))?;
+            std::fs::create_dir_all(parent)?;
+            match OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(file) => {
+                    file.sync_all()?;
+                    Ok((String::new(), true))
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    std::fs::read_to_string(path).map(|content| (content, false))
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn write_document_bytes(path: &std::path::Path, content: &[u8]) -> io::Result<()> {
+    cccc_core::fs::atomic_write(path, content)
+}
+pub(super) fn confirm_secretary_handoff(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let group_id = required_arg(request, "group_id")?;
+    let text = first_non_blank_arg(request, &["text", "instruction", "request_text"])
+        .ok_or_else(|| OpError::new("invalid_args", "text is required"))?;
+    let store = GroupStore::new(home.clone()).map_err(OpError::io)?;
+    let group = store.load(&group_id).map_err(OpError::not_found)?;
+    let task_id = required_arg(request, "secretary_task_id")?;
+    if string_arg(request, "by").as_deref() != Some("user") {
+        return Err(OpError::new(
+            "permission_denied",
+            "Secretary proposals require user confirmation",
+        ));
+    }
+    if let Some(event) = ledger::read_all(&store.ledger_path(&group_id).map_err(OpError::io)?)
+        .map_err(OpError::io)?
+        .into_iter()
+        .find(|event| {
+            event.kind == "system.notify" && event.data["context"]["secretary_task_id"] == task_id
+        })
+    {
+        return object(json!({"group_id":group_id,"notify_event":event,"already_forwarded":true}));
+    }
+    let requested = string_arg(request, "target").unwrap_or_else(|| "@foreman".into());
+    let target = if requested == "@foreman" {
+        group
+            .actors
+            .iter()
+            .find(|actor| {
+                cccc_core::actors::effective_role(&group, &actor.id) == Some(ActorRole::Foreman)
+            })
+            .map(|actor| actor.id.clone())
+            .ok_or_else(|| OpError::new("foreman_not_found", "group has no foreman actor"))?
+    } else {
+        requested
+    };
+    if target == "user" || target == "@all" || target == "voice-secretary" {
+        return Err(OpError::new(
+            "invalid_target",
+            "Voice Secretary requests must target foreman or one concrete peer",
+        ));
+    }
+    if !group.actors.iter().any(|actor| actor.id == target) {
+        return Err(OpError::new(
+            "actor_not_found",
+            format!("actor not found: {target}"),
+        ));
+    }
+    let item = add_request(
+        home,
+        &group_id,
+        &text,
+        &string_arg(request, "document_path").unwrap_or_default(),
+        "peer_request",
+    )?;
+    let mut event = Event::new("system.notify", &group_id);
+    event.by = "user".into();
+    event.data=json!({"kind":"voice_secretary_request","title":"Voice Secretary request","text":text,"to":[target],"priority":string_arg(request,"priority").unwrap_or_else(||"normal".into()),"context":{"kind":"voice_secretary_action_request","request":item}}).as_object().cloned().unwrap_or_default();
+    event.data.get_mut("context").expect("context")["secretary_task_id"] = json!(task_id);
+    event.scope_key = string_arg(request, "scope_key").unwrap_or_default();
+    cccc_core::ledger::append(&store.ledger_path(&group_id).map_err(OpError::io)?, &event)
+        .map_err(OpError::io)?;
+    let delivery = actor_delivery::dispatch(home, &group, &event);
+    object(
+        json!({"group_id":group_id,"assistant":voice_settings::effective_assistant(&load(home,&group_id)?),"request":item,"notify_event":event,"event":event,"delivery":delivery}),
+    )
+}
+fn add_request(
+    home: &HomeLayout,
+    group_id: &str,
+    text: &str,
+    path: &str,
+    kind: &str,
+) -> Result<Value, OpError> {
+    update(home, group_id, |state| {
+        let item = json!({"request_id":format!("var_{}",short_id()),"kind":kind,"request_text":text,"document_path":path,"status":"pending","created_at":utc_now(),"updated_at":utc_now()});
+        array(state, "ask_requests").push(item.clone());
+        Ok(item)
+    })
+}
+fn document_result(
+    home: &HomeLayout,
+    request: &DaemonRequest,
+    group_id: &str,
+    document: Value,
+    action: &str,
+) -> OpResult {
+    let store = GroupStore::new(home.clone()).map_err(OpError::io)?;
+    let mut event = Event::new("assistant.voice.document", group_id);
+    event.by = string_arg(request, "by").unwrap_or_else(|| "user".into());
+    event.data = json!({"action":action,"assistant_id":"voice_secretary","document":document})
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    cccc_core::ledger::append(&store.ledger_path(group_id).map_err(OpError::io)?, &event)
+        .map_err(OpError::io)?;
+    object(json!({"group_id":group_id,"document":document,"event":event}))
+}
+fn load(home: &HomeLayout, group_id: &str) -> Result<Value, OpError> {
+    assistant_state::load(home, group_id).map_err(OpError::io)
+}
+fn update<T>(
+    home: &HomeLayout,
+    group_id: &str,
+    change: impl FnOnce(&mut Map<String, Value>) -> io::Result<T>,
+) -> Result<T, OpError> {
+    assistant_state::update(home, group_id, change).map_err(OpError::io)
+}
+fn array<'a>(state: &'a mut Map<String, Value>, key: &str) -> &'a mut Vec<Value> {
+    let value = state.entry(key).or_insert_with(|| json!([]));
+    if !value.is_array() {
+        *value = json!([]);
+    }
+    value.as_array_mut().expect("array initialized")
+}
+fn items<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+fn document_path(request: &DaemonRequest) -> Result<String, OpError> {
+    string_arg(request, "document_path")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| OpError::new("invalid_args", "document_path is required"))
+}
+fn validate_path(value: &str) -> Result<(), OpError> {
+    let path = std::path::Path::new(value);
+    (!path.is_absolute()
+        && !path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        && path.extension().and_then(|value| value.to_str()) == Some("md"))
+    .then_some(())
+    .ok_or_else(|| {
+        OpError::new(
+            "invalid_args",
+            "document_path must be a repository-relative Markdown path",
+        )
+    })
+}
+fn reject_symlink_components(root: &std::path::Path, relative: &str) -> Result<(), OpError> {
+    let mut current = root.to_path_buf();
+    for component in std::path::Path::new(relative).components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(OpError::new("invalid_args", "invalid document_path"));
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(OpError::new(
+                    "invalid_args",
+                    "document_path must not traverse symbolic links",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(OpError::io(error)),
+        }
+    }
+    Ok(())
+}
+fn short_id() -> String {
+    Uuid::new_v4().simple().to_string()[..16].into()
+}

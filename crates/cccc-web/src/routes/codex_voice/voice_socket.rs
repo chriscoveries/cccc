@@ -1,0 +1,647 @@
+use axum::extract::ws::{Message, WebSocket};
+use cccc_daemon::experimental_codex_voice::{
+    AnalystLifecycleEvent, CodexVoiceCall, VoiceDelegationAdmission, parse_provider_delegation,
+    realtime_greeting_commands, realtime_notice_commands,
+};
+use serde_json::{Value, json};
+use std::fmt::Display;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+
+use crate::AppState;
+
+const MAX_BROWSER_EVENT_BYTES: usize = 128 * 1024;
+const RECORDING_LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+struct RecordingLeaseHeartbeat {
+    failure: oneshot::Receiver<String>,
+    task: JoinHandle<()>,
+}
+
+impl RecordingLeaseHeartbeat {
+    fn start(call: Arc<CodexVoiceCall>, generation: String) -> Self {
+        Self::start_with(RECORDING_LEASE_HEARTBEAT_INTERVAL, move || {
+            call.heartbeat(&generation)
+        })
+    }
+
+    fn start_with<F, E>(interval: Duration, mut heartbeat: F) -> Self
+    where
+        F: FnMut() -> Result<(), E> + Send + 'static,
+        E: Display + Send + 'static,
+    {
+        let (failure_sender, failure) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if let Err(error) = heartbeat() {
+                    let _ = failure_sender.send(error.to_string());
+                    return;
+                }
+            }
+        });
+        Self { failure, task }
+    }
+
+    async fn failed(&mut self) -> String {
+        (&mut self.failure)
+            .await
+            .unwrap_or_else(|_| "recording lease heartbeat task stopped unexpectedly".to_owned())
+    }
+
+    async fn stop(mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
+}
+
+impl Drop for RecordingLeaseHeartbeat {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+pub(super) async fn serve(
+    mut socket: WebSocket,
+    state: AppState,
+    attachment: crate::codex_voice::SessionAttachment,
+    principal: crate::auth::Principal,
+) {
+    let started = Instant::now();
+    let session = Arc::clone(attachment.session());
+    let info = session.info();
+    let generation = info.generation.clone();
+    let call = Arc::clone(session.call());
+    let analyst = call.analyst();
+    let mut lifecycle_events = analyst.map(|analyst| analyst.subscribe_lifecycle());
+    let mut shutdown = state.shutdown.subscribe();
+    // Analyst admission can outlast the recording TTL, so renewal must not share its event loop.
+    let mut lease_heartbeat = RecordingLeaseHeartbeat::start(Arc::clone(&call), generation.clone());
+    let mut socket_heartbeat = tokio::time::interval(RECORDING_LEASE_HEARTBEAT_INTERVAL);
+    let mut control_tick = tokio::time::interval(Duration::from_millis(500));
+    let mut notification_status = session.notification_status();
+    control_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut output_failed = false;
+    socket_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    if !send_json(
+        &mut socket,
+        json!({"type":"ready","call":super::payload::info_value(info.clone())}),
+    )
+    .await
+    {
+        log_disconnect(
+            &generation,
+            info.analyst_generation.as_deref(),
+            "ready_write_failed",
+            started,
+            None,
+        );
+        lease_heartbeat.stop().await;
+        finish(&state, attachment).await;
+        return;
+    }
+    for command in realtime_greeting_commands(call.application_context()) {
+        if !send_provider_command(&mut socket, command).await {
+            log_disconnect(
+                &generation,
+                info.analyst_generation.as_deref(),
+                "greeting_write_failed",
+                started,
+                None,
+            );
+            lease_heartbeat.stop().await;
+            finish(&state, attachment).await;
+            return;
+        }
+    }
+
+    session.start_notifications(
+        state.home.clone(),
+        state.ledger_events.clone(),
+        principal.clone(),
+    );
+    let mut end_reason = "browser_write_failed";
+    let mut close_code = None;
+    'session: loop {
+        tokio::select! {
+            changed = notification_status.changed() => {
+                if changed.is_err() { end_reason = "notification_stream_closed"; break; }
+                let paused = *notification_status.borrow_and_update();
+                if !send_json(&mut socket, json!({"type":"notification_status", "paused":paused})).await { break; }
+            }
+            _ = control_tick.tick() => {
+                if !principal.current_admin(&state.home).unwrap_or(false) { end_reason = "authorization_lost"; break; }
+                if !session.info().connected { end_reason = "call_stopped"; break; }
+                if analyst.is_none() { continue; }
+                let runtime = session.analyst().expect("assistant call");
+                for (id, command) in runtime.manual_results_for_call(&generation) {
+                    if !send_provider_command(&mut socket, command).await { break 'session; }
+                    runtime.manual_result_projected(&id);
+                }
+                match send_notification_results(&mut socket, &state.home, &generation).await {
+                    Ok(()) => output_failed = false,
+                    Err(error) if !output_failed => {
+                        output_failed = true;
+                        tracing::warn!(%error, "Voice notification output failed; source references retained");
+                        let _ = send_error(&mut socket, "actor_result_return_failed", "A message update could not be returned. Its source message is retained.").await;
+                    }
+                    Err(_) => {}
+                }
+            }
+            _ = shutdown.recv() => { end_reason = "server_shutdown"; break; },
+            error = lease_heartbeat.failed() => {
+                end_reason = "recording_lease_lost";
+                tracing::warn!(%error, "Codex Voice recording lease heartbeat failed");
+                let _ = send_error(&mut socket, "recording_lease_lost", "The Codex Voice recording lease was lost.").await;
+                break;
+            }
+            _ = socket_heartbeat.tick() => {
+                // Keep proxy and browser stacks from reclaiming an otherwise idle connection.
+                if !send_json(&mut socket, json!({"type":"heartbeat"})).await { break; }
+            }
+            browser = socket.recv() => {
+                if !principal.current_admin(&state.home).unwrap_or(false) { end_reason = "authorization_lost"; break; }
+                let browser = match browser {
+                    Some(Ok(browser)) => browser,
+                    Some(Err(_)) => { end_reason = "browser_read_failed"; break; },
+                    None => { end_reason = "browser_stream_ended"; break; },
+                };
+                let text = match browser {
+                    Message::Text(text) => text,
+                    Message::Close(frame) => {
+                        end_reason = "browser_close";
+                        close_code = frame.map(|frame| frame.code);
+                        break;
+                    },
+                    _ => continue,
+                };
+                if text.len() > MAX_BROWSER_EVENT_BYTES {
+                    end_reason = "event_too_large";
+                    let _ = send_error(&mut socket, "event_too_large", "Codex Voice browser event is oversized.").await;
+                    break;
+                }
+                let value: Value = match serde_json::from_str(&text) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        if !send_error(&mut socket, "invalid_event", "Codex Voice browser event must be JSON.").await { break; }
+                        continue;
+                    }
+                };
+                match value["type"].as_str().unwrap_or_default() {
+                    "notification_output_submitted" if analyst.is_some() => {
+                        if let Some(id) = value["result_id"].as_str().filter(|id| id.len() <= 256)
+                            && let Err(error) = cccc_core::voice_notifications::output_submitted(&state.home, id, &generation)
+                        {
+                            tracing::warn!(%error, "invalid Voice output submission observation");
+                        } else if let Some(id) = value["result_id"].as_str().filter(|id| id.len() <= 256) {
+                            tracing::info!(%generation, result_id = id, "Voice notification submitted to provider");
+                        }
+                    }
+                    "notification_output_not_submitted" if analyst.is_some() => {
+                        if let Ok(ids) = serde_json::from_value::<Vec<String>>(value["result_ids"].clone())
+                            && let Err(error) = cccc_core::voice_notifications::output_not_submitted(&state.home, &ids, &generation)
+                        {
+                            tracing::warn!(%error, "invalid unsent Voice output observation");
+                        }
+                    }
+                    "provider_error" => {
+                        log_provider_error(&generation, &value["error"]);
+                    }
+                    "provider_receipt" => {
+                        // Browser transport diagnostics only: these counters neither
+                        // authorize Analyst work nor prove that every fact was spoken.
+                        tracing::info!(
+                            %generation,
+                            sent = value["sent"].as_u64(),
+                            acknowledged = value["acknowledged"].as_u64(),
+                            pending = value["pending"].as_u64(),
+                            speech_turns_completed = value["speech_turns_completed"].as_u64(),
+                            queued = value["queued"].as_u64(),
+                            buffered_bytes = value["buffered_bytes"].as_u64(),
+                            prepare_failures = value["prepare_failures"].as_u64(),
+                            blocked = value["blocked"].as_str().filter(|reason| matches!(*reason, "preparing" | "retrying" | "connection" | "backpressure")),
+                            "Codex Voice provider delivery receipt"
+                        );
+                    }
+                    "notification_output_submitted" | "notification_output_not_submitted" => {},
+                    "provider_event" => {
+                        if analyst.is_none() {
+                            // No payload parsing, logging or execution in a persona call.
+                            tracing::debug!(%generation, "Ignored provider event in persona call");
+                            continue;
+                        }
+                        let provider_event = &value["event"];
+                        let provider = match parse_provider_delegation(provider_event) {
+                            Ok(provider) => provider,
+                            Err(error) => {
+                                tracing::warn!(%error, "invalid Codex Realtime delegation event");
+                                if !send_error(&mut socket, "invalid_provider_event", "Codex Voice received an invalid delegation event.").await { break; }
+                                continue;
+                            }
+                        };
+                        if provider.is_none() { continue; }
+                        match call.route_provider_event(&generation, provider_event).await {
+                            Ok(Some(VoiceDelegationAdmission::NativeInput { delegation_id, text })) => {
+                                let delivery = session.analyst().expect("assistant call").submit_native_voice_input(&text).await;
+                                if !matches!(delivery, Ok(true)) {
+                                    let rolled_back = call
+                                        .reject_native_delegation(&generation, &delegation_id)
+                                        .await
+                                        .unwrap_or(true);
+                                    // A failing terminal write can race the Runtime's authoritative
+                                    // input echo. Once correlated, the delegation was accepted and
+                                    // must neither be rejected nor replayed.
+                                    if !rolled_back {
+                                        continue;
+                                    }
+                                    let error = match delivery {
+                                        Ok(false) => "the native Runtime terminal rejected the input".to_owned(),
+                                        Err(error) => error.to_string(),
+                                        Ok(true) => unreachable!(),
+                                    };
+                                    tracing::warn!(%error, %delegation_id, "Voice Analyst native input delivery failed");
+                                    for command in realtime_notice_commands(
+                                        "I couldn't deliver that investigation to the Voice Analyst. Please check its terminal in CCCC.",
+                                    ) {
+                                        if !send_provider_command(&mut socket, command).await { break 'session; }
+                                    }
+                                    if !send_error(
+                                        &mut socket,
+                                        "analyst_delivery_failed",
+                                        "The Voice Analyst did not accept that investigation.",
+                                    ).await { break; }
+                                }
+                            }
+                            Ok(Some(VoiceDelegationAdmission::Turn(_)
+                                | VoiceDelegationAdmission::NativeInputPending | VoiceDelegationAdmission::Queued{..}))
+                            | Ok(None) => {}
+                            Err(error) => {
+                                for command in realtime_notice_commands(
+                                    "I couldn't deliver that investigation to the Voice Analyst. Please check its terminal in CCCC.",
+                                ) {
+                                    if !send_provider_command(&mut socket, command).await { break 'session; }
+                                }
+                                tracing::warn!(%error, "Voice Analyst investigation delivery failed");
+                                if !send_error(
+                                    &mut socket,
+                                    "analyst_delivery_failed",
+                                    "The Voice Analyst did not accept that investigation.",
+                                ).await { break; }
+                            }
+                        }
+                    }
+                    "cancel_current" | "cancel" if analyst.is_none() => {},
+                    "cancel_current" | "cancel" => match call.cancel_current(&generation).await {
+                        Ok(true) => {
+                            if !send_json(&mut socket, json!({"type":"analyst_cancelling"})).await { break; }
+                        }
+                        Ok(false) => {
+                            if !send_error(&mut socket, "analyst_not_working", "The Voice Analyst has no active investigation.").await { break; }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "Voice Analyst cancellation failed");
+                            if !send_error(&mut socket, "cancel_failed", "The Voice Analyst could not cancel the current investigation.").await { break; }
+                        }
+                    },
+                    "heartbeat" => {
+                        if !send_json(&mut socket, json!({"type":"heartbeat"})).await { break; }
+                    }
+                    "stop" => { end_reason = "client_stop"; break; },
+                    _ => {
+                        if !send_error(&mut socket, "invalid_event", "Unknown Codex Voice browser event.").await { break; }
+                    }
+                }
+            }
+            lifecycle = async {
+                match lifecycle_events.as_mut() {
+                    Some(events) => events.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match lifecycle {
+                Ok(AnalystLifecycleEvent::Queued{delegation_id,position})=>{
+                    if !send_json(&mut socket,json!({"type":"analyst_queued","delegation_id":delegation_id,"position":position})).await { break; }
+                }
+                Ok(AnalystLifecycleEvent::Started { receipt, origin }) => {
+                    if origin.speakable() {
+                        call.follow_analyst_turn(&receipt).await;
+                    }
+                    if !send_json(&mut socket, json!({"type":"analyst_working"})).await { break; }
+                }
+                Ok(AnalystLifecycleEvent::Associated { receipt, origin }) => {
+                    if origin.speakable() {
+                        call.follow_analyst_turn(&receipt).await;
+                    }
+                    if !send_json(&mut socket, json!({"type":"analyst_working"})).await { break; }
+                }
+                Ok(AnalystLifecycleEvent::Progress { turn_id, text, speakable }) => {
+                    if speakable {
+                        if !send_json(&mut socket, json!({"type":"analyst_progress","text":text})).await { break; }
+                        match call.project_analyst_delta(&generation, &turn_id, &text).await {
+                            Ok(commands) => for command in commands {
+                                if !send_provider_command(&mut socket, command).await { break 'session; }
+                            },
+                            Err(error) => {
+                                tracing::warn!(%error, "Voice Analyst progress projection failed");
+                                end_reason = "analyst_projection_failed";
+                                let _ = send_error(&mut socket, "analyst_projection_failed", "The Voice Analyst result could not be returned to Realtime Voice.").await;
+                                break;
+                            }
+                        }
+                    }
+                }
+                Ok(AnalystLifecycleEvent::Completed { turn_id, delegation_id, delegation_ids, status, result, speakable, .. }) => {
+                    // Source-bearing turns take one durable path, including mixed user answers.
+                    // The warm monitor also records them after a call stops; insertion is idempotent.
+                    let has_sources = delegation_ids.iter().any(|id| id.starts_with("voice-result:"));
+                    if has_sources {
+                        let text = if status == "completed" { result.clone() } else {
+                            format!("The Analyst did not complete this update ({status}). Check the source messages; do not report the work as completed.")
+                        };
+                        if let Err(error) = cccc_core::voice_notifications::processed(&state.home, &delegation_ids, analyst.expect("assistant lifecycle").generation(), &turn_id, &text) {
+                            tracing::warn!(%error, "failed to persist source-bearing Voice result");
+                            let _ = send_error(&mut socket, "actor_result_return_failed", "The message result could not be retained. Check its source messages.").await;
+                        }
+                        let _ = call.settle_without_projection(&generation, &turn_id).await;
+                    }
+                    let speakable = speakable && !has_sources;
+                    if status == "completed" && !result.trim().is_empty() {
+                        if speakable {
+                            match call.take_final_projection(
+                                &generation, &delegation_id, &turn_id, &result,
+                            ).await {
+                                Ok(Some(projection)) => for command in projection.commands {
+                                    if !send_provider_command(&mut socket, command).await { break 'session; }
+                                },
+                                Ok(None) => {}
+                                Err(error) => {
+                                    tracing::warn!(%error, "Voice Analyst final projection failed");
+                                    end_reason = "analyst_projection_failed";
+                                    let _ = send_error(&mut socket, "analyst_projection_failed", "The Voice Analyst result could not be returned to Realtime Voice.").await;
+                                    break;
+                                }
+                            }
+                        }
+                        if !send_json(&mut socket, json!({"type":"analyst_result","text":result})).await { break; }
+                    } else {
+                        let _ = call.settle_without_projection(&generation, &turn_id).await;
+                        if status == "result_too_large" && !send_error(
+                            &mut socket,
+                            "analyst_result_too_large",
+                            "The Analyst result is too long for Voice. Read the full result in its terminal or ask for a shorter summary.",
+                        ).await { break; }
+                        if speakable {
+                            let notice = if status == "result_too_large" {
+                                "The Analyst finished, but the result is too long for Voice. Do not present earlier partial updates as the complete result. The full output is in the Analyst terminal; the user can ask for a shorter summary."
+                            } else {
+                                "The investigation did not complete. Please check the Voice Analyst status in CCCC."
+                            };
+                            for command in realtime_notice_commands(notice) {
+                                if !send_provider_command(&mut socket, command).await { break 'session; }
+                            }
+                        }
+                    }
+                    if !send_json(&mut socket, json!({"type":"analyst_terminal","status":status})).await { break; }
+                }
+                Ok(AnalystLifecycleEvent::NeedsAttention { code }) => {
+                    end_reason = "analyst_needs_attention";
+                    let _ = send_error(
+                        &mut socket, code,
+                        "The Voice Analyst encountered an incompatible approval or protocol request.",
+                    ).await;
+                    break;
+                }
+                Ok(AnalystLifecycleEvent::Disconnected) => {
+                    end_reason = "analyst_disconnected";
+                    let _ = send_error(&mut socket, "analyst_disconnected", "The Voice Analyst disconnected.").await;
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    end_reason = "analyst_event_gap";
+                    tracing::warn!(
+                        skipped,
+                        "Codex Voice WebSocket fell behind Analyst lifecycle; closing the unreplayable stream"
+                    );
+                    let _ = send_error(
+                        &mut socket,
+                        "analyst_event_gap",
+                        "The Voice Analyst event stream lost state and must reconnect.",
+                    ).await;
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => { end_reason = "analyst_stream_closed"; break; },
+            }
+        }
+    }
+    log_disconnect(
+        &generation,
+        info.analyst_generation.as_deref(),
+        end_reason,
+        started,
+        close_code,
+    );
+    lease_heartbeat.stop().await;
+    finish(&state, attachment).await;
+}
+
+fn log_disconnect(
+    generation: &str,
+    analyst_generation: Option<&str>,
+    code: &'static str,
+    started: Instant,
+    close_code: Option<u16>,
+) {
+    // One structural record per closed control stream, including normal closure,
+    // to distinguish browser loss from an earlier Analyst failure. Never log
+    // frame contents, peer close reasons, provider responses or credentials.
+    let diagnostic = json!({
+        "stage":"voice_control", "generation":generation, "analyst_generation":analyst_generation, "code":code,
+        "close_code":close_code, "elapsed_ms":started.elapsed().as_millis() as u64,
+        "time_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+    });
+    eprintln!("[cccc] Codex Voice control ended: {diagnostic}");
+}
+
+async fn finish(state: &AppState, attachment: crate::codex_voice::SessionAttachment) {
+    let info = attachment.session().info();
+    if let Err(error) = state.codex_voice.stop(&info.generation).await {
+        tracing::warn!(%error, generation = %info.generation, "Codex Voice connection cleanup failed");
+    }
+    drop(attachment);
+}
+
+async fn send_provider_command(socket: &mut WebSocket, command: Value) -> bool {
+    send_json(socket, json!({"type":"provider_command","message":command})).await
+}
+
+async fn send_notification_results(
+    socket: &mut WebSocket,
+    home: &cccc_core::HomeLayout,
+    generation: &str,
+) -> anyhow::Result<()> {
+    use cccc_core::voice_notifications as store;
+    for result in store::snapshot(home)?.results {
+        if result.output_call.is_some() {
+            continue;
+        }
+        let Some(result) = store::reserve_output(home, &result.id, generation)? else {
+            continue;
+        };
+        let Some(text) = store::prepare_output(home, &result.id, generation)? else {
+            continue;
+        };
+        if !send_json(socket, json!({"type":"provider_command","result_id":result.id,
+            "message":{"type":"session.context.append","channel":"speakable","content":[{"type":"input_text","text":text}]}})).await {
+            anyhow::bail!("browser did not accept Voice output command");
+        }
+        tracing::info!(%generation, result_id = %result.id, "Voice notification sent to browser");
+    }
+    Ok(())
+}
+
+fn log_provider_error(generation: &str, error: &Value) {
+    // Browser-reported transport diagnostics, not Analyst lifecycle authority.
+    // Never log the provider explanation: it can quote user input or secrets.
+    tracing::warn!(
+        %generation,
+        provider_code = provider_error_identifier(&error["code"]),
+        provider_error_type = provider_error_identifier(&error["type"]),
+        provider_event_id = provider_error_identifier(&error["event_id"]),
+        provider_param = provider_error_identifier(&error["param"]),
+        "Codex Realtime Voice provider error"
+    );
+}
+
+fn provider_error_identifier(value: &Value) -> &str {
+    let text = value.as_str().unwrap_or_default().trim();
+    if !text.is_empty()
+        && text.len() <= 128
+        && text.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'[' | b']' | b'-')
+        })
+    {
+        text
+    } else {
+        ""
+    }
+}
+
+async fn send_error(socket: &mut WebSocket, code: &str, message: &str) -> bool {
+    send_json(
+        socket,
+        json!({"type":"error","code":code,"message":message}),
+    )
+    .await
+}
+
+async fn send_json(socket: &mut WebSocket, value: Value) -> bool {
+    socket
+        .send(Message::Text(value.to_string().into()))
+        .await
+        .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Seek};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    #[test]
+    fn provider_error_log_has_call_identity_but_no_explanation_or_extra_payload() {
+        let mut output = tempfile::tempfile().expect("diagnostic capture");
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(output.try_clone().expect("capture writer"))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            log_provider_error(
+                "voice-call-1",
+                &json!({
+                    "code":"rate_limit_exceeded",
+                    "type":"invalid_request_error",
+                    "event_id":"event-1",
+                    "message":"private provider explanation",
+                    "authorization":"private-token"
+                }),
+            );
+        });
+        output.rewind().expect("rewind diagnostic");
+        let mut text = String::new();
+        output.read_to_string(&mut text).expect("read diagnostic");
+        for expected in [
+            "voice-call-1",
+            "rate_limit_exceeded",
+            "invalid_request_error",
+            "event-1",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        assert!(!text.contains("private"));
+    }
+
+    #[test]
+    fn provider_error_identifiers_are_bounded_and_cannot_inject_log_lines() {
+        for text in [
+            "rate_limit_exceeded",
+            "HTTP:429",
+            "content[0].text",
+            "event-ab_cd",
+        ] {
+            let value = json!(text);
+            assert_eq!(provider_error_identifier(&value), text);
+        }
+        for value in [
+            Value::Null,
+            json!({"code":"nested"}),
+            json!("x".repeat(129)),
+            json!("bad\ninjected"),
+            json!("Bearer private-value"),
+            json!("https://example.com/?token=private-value"),
+        ] {
+            assert_eq!(provider_error_identifier(&value), "");
+        }
+    }
+
+    #[tokio::test]
+    async fn recording_lease_heartbeat_keeps_running_while_socket_work_waits() {
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let reached_three_ticks = Arc::new(Notify::new());
+        let observed_ticks = Arc::clone(&ticks);
+        let observed_notification = Arc::clone(&reached_three_ticks);
+        let heartbeat = RecordingLeaseHeartbeat::start_with(
+            Duration::from_millis(5),
+            move || -> Result<(), &'static str> {
+                if observed_ticks.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+                    observed_notification.notify_one();
+                }
+                Ok(())
+            },
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), reached_three_ticks.notified())
+            .await
+            .expect("independent heartbeat must continue during long socket work");
+        assert!(ticks.load(Ordering::SeqCst) >= 3);
+        heartbeat.stop().await;
+    }
+
+    #[tokio::test]
+    async fn recording_lease_heartbeat_reports_real_lease_loss() {
+        let mut heartbeat = RecordingLeaseHeartbeat::start_with(
+            Duration::from_millis(1),
+            || -> Result<(), &'static str> { Err("lease lost") },
+        );
+
+        let failure = tokio::time::timeout(Duration::from_secs(1), heartbeat.failed())
+            .await
+            .expect("lease failure must be reported promptly");
+        assert_eq!(failure, "lease lost");
+        heartbeat.stop().await;
+    }
+}

@@ -1,0 +1,264 @@
+use super::*;
+use axum::Json;
+use axum::extract::ws::WebSocketUpgrade;
+use axum::extract::{Path, Query, State};
+use axum::response::Response;
+use cccc_daemon::experimental_codex_voice::{DEFAULT_REALTIME_VOICE, REALTIME_VOICES};
+use serde_json::{Value, json};
+
+use crate::AppState;
+use crate::api::{ApiError, ApiResult, success};
+use crate::codex_voice::StartOutcome;
+use crate::codex_voice::start_error::StartDiagnostic;
+
+mod attach_deadline;
+pub(super) mod notifications;
+mod settings;
+pub(super) use settings::{analyst_settings, update_analyst_settings};
+
+pub(super) async fn structured_control(
+    State(state): State<AppState>,
+    Path(generation): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    require_interactive_web(&state)?;
+    let action = body["action"]
+        .as_str()
+        .ok_or_else(|| ApiError::bad("action is required"))?;
+    let text = body["text"].as_str().unwrap_or_default();
+    let input_id = body["input_id"].as_str().unwrap_or_default();
+    let call_generation = match body.get("call_generation") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.is_empty() && value.len() <= 128 => {
+            Some(value.as_str())
+        }
+        _ => {
+            return Err(ApiError::bad(
+                "call_generation must be a nonempty string or null",
+            ));
+        }
+    };
+    let request_id = body["request_id"].as_str().unwrap_or_default();
+    if action == "input"
+        && (text.trim().is_empty()
+            || text.len() > 64 * 1024
+            || input_id.is_empty()
+            || input_id.len() > 128)
+    {
+        return Err(ApiError::bad(
+            "input_id and nonempty text up to 65536 bytes are required",
+        ));
+    }
+    if action == "permission" && (request_id.is_empty() || body["allow"].as_bool().is_none()) {
+        return Err(ApiError::bad("request_id and boolean allow are required"));
+    }
+    if action == "interaction" && (request_id.is_empty() || !body["response"].is_object()) {
+        return Err(ApiError::bad("request_id and response are required"));
+    }
+    state
+        .codex_voice
+        .structured_control(
+            &generation,
+            action,
+            input_id,
+            call_generation,
+            text,
+            request_id,
+            body["allow"].as_bool().unwrap_or(false),
+            body["response"].clone(),
+        )
+        .await
+        .map_err(|error| ApiError::unavailable("analyst_control_failed", error.to_string()))?;
+    let analyst = state
+        .codex_voice
+        .current()
+        .await
+        .analyst
+        .filter(|analyst| analyst.generation == generation)
+        .map(payload::analyst_info_value);
+    Ok(success(json!({"accepted":true, "analyst":analyst})))
+}
+
+pub(super) async fn active(State(state): State<AppState>) -> ApiResult {
+    require_interactive_web(&state)?;
+    let current = state.codex_voice.current().await;
+    let readiness = settings::codex_voice_readiness(&state.home).await;
+    Ok(success(json!({
+        "call":current.call.map(payload::info_value),
+        "analyst":current.analyst.map(payload::analyst_info_value),
+        "voices":REALTIME_VOICES,
+        "default_voice":DEFAULT_REALTIME_VOICE,
+        "readiness":readiness,
+    })))
+}
+
+pub(super) async fn start(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult {
+    require_interactive_web(&state)?;
+    let offer_sdp = body["offer_sdp"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ApiError::bad("offer_sdp is required"))?;
+    let client_session_id = body["client_session_id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ApiError::bad("client_session_id is required"))?;
+    let voice = body["voice"].as_str().unwrap_or(DEFAULT_REALTIME_VOICE);
+    let application_context = serde_json::from_value::<
+        Option<cccc_contracts::codex_voice::VoiceApplicationContext>,
+    >(body["application_context"].clone())
+    .map_err(|_| {
+        ApiError::bad(
+            "application_context must contain a valid id, mode and nonempty instructions up to 24576 UTF-8 bytes",
+        )
+    })?;
+    let started = std::time::Instant::now();
+    let outcome = state
+        .codex_voice
+        .start(
+            &state.home,
+            client_session_id,
+            offer_sdp,
+            voice,
+            application_context,
+        )
+        .await
+        .map_err(|error| {
+            let diagnostic =
+                StartDiagnostic::from_error(&error, started.elapsed().as_millis() as u64);
+            // The packaged cccc entrypoint has no tracing subscriber. Emit one
+            // safe line on failure without globally enabling unrelated logs.
+            eprintln!("[cccc] Codex Voice start failed: {}", diagnostic.details());
+            diagnostic.into_api_error()
+        })?;
+    match outcome {
+        StartOutcome::Busy(info) => Err(ApiError::conflict(
+            "codex_voice_busy",
+            "Another Codex Voice call is already active.",
+            json!({"call":payload::info_value(info)}),
+        )),
+        StartOutcome::Started(started) => {
+            let info = started.session.info();
+            if started.newly_created {
+                attach_deadline::spawn(state.clone(), info.clone());
+            }
+            Ok(success(json!({
+                "call":payload::info_value(info),
+                "analyst":started.session.analyst().map(|analyst| payload::analyst_info_value(analyst.info())),
+                "answer_sdp":started.answer_sdp,
+                "experimental":true,
+            })))
+        }
+    }
+}
+
+pub(super) async fn reset_analyst(
+    State(state): State<AppState>,
+    Path(generation): Path<String>,
+) -> ApiResult {
+    require_interactive_web(&state)?;
+    let analyst = state
+        .codex_voice
+        .reset_analyst(&state.home, &generation)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, %generation, "Voice Analyst reset failed");
+            ApiError::conflict(
+                "codex_voice_analyst_reset_failed",
+                "The Voice Analyst could not start a new session. Stop or cancel current work first.",
+                json!({"generation":generation}),
+            )
+        })?;
+    Ok(success(
+        json!({"analyst":payload::analyst_info_value(analyst)}),
+    ))
+}
+
+pub(super) async fn cancel_analyst(
+    State(state): State<AppState>,
+    Path(generation): Path<String>,
+) -> ApiResult {
+    require_interactive_web(&state)?;
+    let cancelled = state
+        .codex_voice
+        .cancel_analyst(&generation)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, %generation, "Voice Analyst cancellation failed");
+            ApiError::conflict(
+                "codex_voice_analyst_cancel_failed",
+                "The Voice Analyst could not cancel the current investigation.",
+                json!({"generation":generation}),
+            )
+        })?;
+    Ok(success(json!({"cancelled":cancelled})))
+}
+
+pub(super) async fn stop(
+    State(state): State<AppState>,
+    Path(generation): Path<String>,
+) -> ApiResult {
+    require_interactive_web(&state)?;
+    let stopped = state.codex_voice.stop(&generation).await.map_err(|error| {
+        tracing::warn!(%error, %generation, "Codex Voice stop failed");
+        ApiError::unavailable(
+            "codex_voice_stop_failed",
+            "Codex Voice could not release the live call cleanly.",
+        )
+    })?;
+    Ok(success(json!({"stopped":stopped})))
+}
+
+pub(super) async fn upgrade(
+    State(state): State<AppState>,
+    axum::Extension(principal): axum::Extension<crate::auth::Principal>,
+    Path(generation): Path<String>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    require_interactive_web(&state)?;
+    let attachment = state
+        .codex_voice
+        .attach(&generation)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, %generation, "Codex Voice call attach failed");
+            ApiError::conflict(
+                "codex_voice_not_attachable",
+                "This Codex Voice call can no longer accept a browser connection.",
+                json!({"generation":generation}),
+            )
+        })?;
+    Ok(ws.on_upgrade(move |socket| voice_socket::serve(socket, state, attachment, principal)))
+}
+
+pub(super) async fn upgrade_terminal(
+    State(state): State<AppState>,
+    axum::Extension(principal): axum::Extension<crate::auth::Principal>,
+    Path(generation): Path<String>,
+    Query(query): Query<TerminalQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    require_interactive_web(&state)?;
+    let session = state
+        .codex_voice
+        .terminal_session(&generation)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, %generation, "Voice Analyst terminal lookup failed");
+            ApiError::conflict(
+                "codex_voice_terminal_unavailable",
+                "The Voice Analyst terminal is not available yet.",
+                json!({"generation":generation}),
+            )
+        })?;
+    Ok(ws.on_upgrade(move |socket| terminal::serve(socket, state, session, query, principal)))
+}
+
+fn require_interactive_web(state: &AppState) -> Result<(), ApiError> {
+    if state.web_mode.is_read_only() {
+        return Err(ApiError::forbidden_code(
+            "read_only",
+            "Codex Voice is unavailable in read-only Web mode.",
+        ));
+    }
+    Ok(())
+}

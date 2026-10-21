@@ -1,0 +1,2010 @@
+import { loadedWebEntry, type RuntimeBuildInfo } from "../utils/runtimeBuildInfo";
+// SettingsModal renders the settings modal.
+import { GroupConnectionsPanel } from "../features/connect/GroupConnectionsControl";
+import { lazy, Suspense, useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useTranslation } from "react-i18next";
+import {
+  Actor,
+  GroupDoc,
+  GroupSettings,
+  IMStatus,
+  IMPlatform,
+  WebAccessSession,
+  WeixinLoginStatus,
+} from "../types";
+import * as api from "../services/api";
+import { useModalStore, useObservabilityStore } from "../stores";
+import {
+  DEFAULT_ASSISTANT_RUNTIME_VISIBILITY,
+  DEFAULT_PEER_RUNTIME_VISIBILITY,
+  normalizeRuntimeVisibilityMode,
+  type RuntimeVisibilityMode,
+} from "../utils/runtimeVisibility";
+import { SettingsScope, GroupTabId, GlobalTabId } from "./modals/settings/types";
+import {
+  readSettingsLastLocation,
+  writeSettingsLastLocation,
+} from "./modals/settings/settingsLastLocation";
+import { ModalFrame } from "./modals/ModalFrame";
+import { SettingsNavigation } from "./modals/settings/SettingsNavigation";
+import {
+  canStartIMBridge,
+  IMConfigDraft,
+  saveAndStartIMBridge,
+  saveIMConfigDraft,
+} from "./modals/settings/imBridgeConfig";
+import { shouldPollWeixinLogin } from "./modals/settings/weixinLoginPolling";
+import { useModalA11y } from "../hooks/useModalA11y";
+import { copyTextToClipboard } from "../utils/copy";
+
+const AutomationTab = lazy(() =>
+  import("./modals/settings/AutomationTab").then((module) => ({ default: module.AutomationTab })),
+);
+const DeliveryTab = lazy(() =>
+  import("./modals/settings/DeliveryTab").then((module) => ({ default: module.DeliveryTab })),
+);
+const MessagingTab = lazy(() =>
+  import("./modals/settings/MessagingTab").then((module) => ({ default: module.MessagingTab })),
+);
+const IMBridgeTab = lazy(() =>
+  import("./modals/settings/IMBridgeTab").then((module) => ({ default: module.IMBridgeTab })),
+);
+const TranscriptTab = lazy(() =>
+  import("./modals/settings/TranscriptTab").then((module) => ({ default: module.TranscriptTab })),
+);
+const GuidanceTab = lazy(() =>
+  import("./modals/settings/GuidanceTab").then((module) => ({ default: module.GuidanceTab })),
+);
+const VoiceSettingsTab = lazy(() =>
+  import("./modals/settings/VoiceSettingsTab").then((module) => ({
+    default: module.VoiceSettingsTab,
+  })),
+);
+const GroupSpaceTab = lazy(() =>
+  import("./modals/settings/GroupSpaceTab").then((module) => ({ default: module.GroupSpaceTab })),
+);
+const CopyGroupsTab = lazy(() =>
+  import("./modals/settings/CopyGroupsTab").then((module) => ({ default: module.CopyGroupsTab })),
+);
+const CapabilitiesTab = lazy(() =>
+  import("./modals/settings/CapabilitiesTab").then((module) => ({
+    default: module.CapabilitiesTab,
+  })),
+);
+const ActorProfilesTab = lazy(() =>
+  import("./modals/settings/ActorProfilesTab").then((module) => ({
+    default: module.ActorProfilesTab,
+  })),
+);
+const BrandingTab = lazy(() =>
+  import("./modals/settings/BrandingTab").then((module) => ({ default: module.BrandingTab })),
+);
+const AccountTab = lazy(() =>
+  import("./modals/settings/AccountTab").then((module) => ({ default: module.AccountTab })),
+);
+const WebAccessTab = lazy(() =>
+  import("./modals/settings/WebAccessTab").then((module) => ({ default: module.WebAccessTab })),
+);
+const WebModelConnectorsTab = lazy(() =>
+  import("./modals/settings/WebModelConnectorsTab").then((module) => ({ default: module.default })),
+);
+const DeveloperTab = lazy(() =>
+  import("./modals/settings/DeveloperTab").then((module) => ({ default: module.DeveloperTab })),
+);
+
+interface SettingsModalProps {
+  codexVoice: import("../features/codexVoice/useCodexVoiceShell").CodexVoiceShellState;
+  isOpen: boolean;
+  onClose: () => void;
+  settings: GroupSettings | null;
+  onUpdateSettings: (settings: Partial<GroupSettings>) => Promise<boolean | void>;
+  onRegistryChanged?: () => Promise<void> | void;
+  busy: boolean;
+  isDark: boolean;
+  groupId?: string;
+  groupDoc?: GroupDoc | null;
+}
+
+function SettingsTabFallback() {
+  return (
+    <div className="rounded-2xl border border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] p-5 text-sm text-[var(--color-text-secondary)]">
+      Loading...
+    </div>
+  );
+}
+
+export function SettingsModal({
+  codexVoice,
+  isOpen,
+  onClose,
+  settings,
+  onUpdateSettings,
+  onRegistryChanged,
+  busy,
+  isDark,
+  groupId,
+  groupDoc,
+}: SettingsModalProps) {
+  const { t } = useTranslation("settings");
+  const [voiceSection, setVoiceSection] = useState<"secretary" | "realtime">("secretary");
+  const [voiceAudioRequest, setVoiceAudioRequest] = useState(0);
+  const [voiceFeatureRequest, setVoiceFeatureRequest] = useState(0);
+  const [voiceAnalystRequest, setVoiceAnalystRequest] = useState(0);
+  const voiceBeforeLeave = useRef<() => boolean>(() => true);
+  const requestClose = () => {
+    if (voiceBeforeLeave.current()) onClose();
+  };
+  const initialVoiceFocus = useRef<HTMLElement | null>(null);
+  const { modalRef } = useModalA11y(isOpen, requestClose, { initialFocusRef: initialVoiceFocus });
+  const [initialLocation] = useState(() => readSettingsLastLocation(Boolean(groupId)));
+  const [scope, setScope] = useState<SettingsScope>(() => initialLocation.scope);
+  const [groupTab, setGroupTab] = useState<GroupTabId>(() => initialLocation.groupTab);
+  const [globalTab, setGlobalTab] = useState<GlobalTabId>(() => initialLocation.globalTab);
+  const [accountReturnToWebAccess, setAccountReturnToWebAccess] = useState(false);
+  const [focusReachOnOpen, setFocusReachOnOpen] = useState(false);
+  const [canAccessGlobalSettings, setCanAccessGlobalSettings] = useState<boolean | null>(null);
+  const [webAccessSession, setWebAccessSession] = useState<WebAccessSession | null>(null);
+  const [webModelProvider, setWebModelProvider] = useState<api.WebModelProvider>("chatgpt_web");
+  const settingsTarget = useModalStore((state) => state.settingsTarget);
+  const clearSettingsTarget = useModalStore((state) => state.clearSettingsTarget);
+
+  // Automation + delivery settings state
+  const [mailNoticeAfterSeconds, setMailNoticeAfterSeconds] = useState(1800);
+  const [mailNoticeIdleAfterSeconds, setMailNoticeIdleAfterSeconds] = useState(60);
+  const [replyNoticeAfterSeconds, setReplyNoticeAfterSeconds] = useState(900);
+  const [idleSeconds, setIdleSeconds] = useState(0);
+  const [keepaliveSeconds, setKeepaliveSeconds] = useState(120);
+  const [keepaliveMax, setKeepaliveMax] = useState(3);
+  const [silenceSeconds, setSilenceSeconds] = useState(0);
+  const [helpNudgeIntervalSeconds, setHelpNudgeIntervalSeconds] = useState(600);
+  const [helpNudgeMinMessages, setHelpNudgeMinMessages] = useState(10);
+
+  // Messaging policy
+  const [defaultSendTo, setDefaultSendTo] = useState<"foreman" | "broadcast">("foreman");
+
+  // Terminal transcript (group-scoped policy)
+  const [terminalVisibility, setTerminalVisibility] = useState<"off" | "foreman" | "all">(
+    "foreman",
+  );
+  const [terminalNotifyTail, setTerminalNotifyTail] = useState(false);
+  const [terminalNotifyLines, setTerminalNotifyLines] = useState(20);
+
+  // Terminal transcript tail viewer
+  const [tailActorId, setTailActorId] = useState("");
+  const [tailMaxChars, setTailMaxChars] = useState(8000);
+  const [tailStripAnsi, setTailStripAnsi] = useState(true);
+  const [tailCompact, setTailCompact] = useState(true);
+  const [tailText, setTailText] = useState("");
+  const [tailHint, setTailHint] = useState("");
+  const [tailErr, setTailErr] = useState("");
+  const [tailBusy, setTailBusy] = useState(false);
+  const [tailCopyInfo, setTailCopyInfo] = useState("");
+
+  // IM Bridge state
+  const [imStatus, setImStatus] = useState<IMStatus | null>(null);
+  const [imPlatform, setImPlatform] = useState<IMPlatform>("telegram");
+  const [imBotTokenEnv, setImBotTokenEnv] = useState("");
+  const [imAppTokenEnv, setImAppTokenEnv] = useState("");
+  const [imMattermostUrl, setImMattermostUrl] = useState("");
+  // Feishu fields
+  const [imFeishuDomain, setImFeishuDomain] = useState("https://open.feishu.cn");
+  const [imFeishuAppId, setImFeishuAppId] = useState("");
+  const [imFeishuAppSecret, setImFeishuAppSecret] = useState("");
+  // DingTalk fields
+  const [imDingtalkAppKey, setImDingtalkAppKey] = useState("");
+  const [imDingtalkAppSecret, setImDingtalkAppSecret] = useState("");
+  const [imDingtalkRobotCode, setImDingtalkRobotCode] = useState("");
+  // WeCom fields
+  const [imWecomBotId, setImWecomBotId] = useState("");
+  const [imWecomSecret, setImWecomSecret] = useState("");
+  // Weixin fields
+  const [imWeixinAccountId, setImWeixinAccountId] = useState("");
+  const [weixinLoginStatus, setWeixinLoginStatus] = useState<WeixinLoginStatus | null>(null);
+  const [imBusy, setImBusy] = useState(false);
+  const [imConfigError, setImConfigError] = useState<{ groupId: string; message: string } | null>(
+    null,
+  );
+  const imLoadSeq = useRef(0);
+  const imPlatformSelectionSeq = useRef(0);
+  const imMattermostEditSeq = useRef(0);
+  const imMattermostVisitSeq = useRef(0);
+  const imActionScope = useRef({ groupId, isOpen, platform: imPlatform });
+  const imCurrentPlatform = useRef(imPlatform);
+  const imMattermostBusy = useRef(false);
+  if (
+    imActionScope.current.groupId !== groupId ||
+    imActionScope.current.isOpen !== isOpen ||
+    imActionScope.current.platform !== imPlatform
+  ) {
+    if (imActionScope.current.platform === "mattermost" || imPlatform === "mattermost") {
+      imMattermostVisitSeq.current += 1;
+    }
+    imActionScope.current = { groupId, isOpen, platform: imPlatform };
+  }
+  imCurrentPlatform.current = imPlatform;
+  useEffect(
+    () => () => {
+      // AppModals unmounts settings on close; stale management continuations must not reload or start.
+      imActionScope.current = { ...imActionScope.current };
+    },
+    [],
+  );
+  // Only a login explicitly started in this modal may continue into bridge startup.
+  const weixinLoginOwner = useRef<{ scope: typeof imActionScope.current } | null>(null);
+  const imInitiallyLoaded = useRef(false);
+  const observabilityLoaded = useRef(false);
+  const imTabActive = !settingsTarget && scope === "group" && groupTab === "im";
+  const developerTabActive = !settingsTarget && scope === "global" && globalTab === "developer";
+  const contentScrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Weixin login and Mattermost mutations belong to the initiating Group and platform visit.
+  const currentIMAction = useCallback(() => {
+    const scope = imActionScope.current;
+    const edit = imMattermostEditSeq.current;
+    const visit = imMattermostVisitSeq.current;
+    if (imPlatform === "mattermost") imMattermostBusy.current = true;
+    const isCurrent = () =>
+      (imPlatform !== "mattermost" &&
+        imPlatform !== "weixin" &&
+        imCurrentPlatform.current !== "mattermost" &&
+        imMattermostVisitSeq.current === visit) ||
+      imActionScope.current === scope;
+    return {
+      isCurrent,
+      canReload: () =>
+        isCurrent() && (imPlatform !== "mattermost" || imMattermostEditSeq.current === edit),
+    };
+  }, [imPlatform]);
+
+  // IM config drafts cache (per-platform local edits, not yet saved to server)
+  const [imConfigDrafts, setImConfigDrafts] = useState<Partial<Record<IMPlatform, IMConfigDraft>>>(
+    {},
+  );
+
+  // Global observability (developer mode)
+  const [developerMode, setDeveloperMode] = useState(false);
+  const [logLevel, setLogLevel] = useState<"INFO" | "DEBUG">("INFO");
+  const [terminalBacklogMiB, setTerminalBacklogMiB] = useState(10);
+  const [terminalScrollbackLines, setTerminalScrollbackLines] = useState(8000);
+  const [peerRuntimeVisibility, setPeerRuntimeVisibility] =
+    useState<RuntimeVisibilityMode>("visible");
+  const [assistantRuntimeVisibility, setAssistantRuntimeVisibility] =
+    useState<RuntimeVisibilityMode>("hidden");
+  const [obsBusy, setObsBusy] = useState(false);
+
+  // Developer-mode debug views
+  const [devActors, setDevActors] = useState<Actor[]>([]);
+  useEffect(() => {
+    setDevActors([]);
+    setTailActorId("");
+  }, [groupId]);
+  const [debugSnapshot, setDebugSnapshot] = useState("");
+  const [debugSnapshotErr, setDebugSnapshotErr] = useState("");
+  const [debugSnapshotBusy, setDebugSnapshotBusy] = useState(false);
+  const [runtimeVersion, setRuntimeVersion] = useState("");
+  const [runtimeBuildInfo, setRuntimeBuildInfo] = useState<RuntimeBuildInfo>();
+  const [daemonVersion, setDaemonVersion] = useState("");
+  const [runtimeInfoErr, setRuntimeInfoErr] = useState("");
+
+  const [logComponent, setLogComponent] = useState<"daemon" | "web" | "im">("daemon");
+  const [logLines, setLogLines] = useState(200);
+  const [logText, setLogText] = useState("");
+  const [logErr, setLogErr] = useState("");
+  const [logBusy, setLogBusy] = useState(false);
+
+  // Registry maintenance (global)
+  const [registryBusy, setRegistryBusy] = useState(false);
+  const [registryErr, setRegistryErr] = useState("");
+  const [registryResult, setRegistryResult] = useState<api.RegistryReconcileResult | null>(null);
+
+  // ============ Effects ============
+
+  useEffect(() => {
+    setImConfigDrafts((drafts) => {
+      if (!drafts.mattermost) return drafts;
+      const next = { ...drafts };
+      delete next.mattermost;
+      return next;
+    });
+  }, [groupId]);
+
+  const previousSettings = useRef<{ groupId: string | undefined; value: GroupSettings } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!isOpen || !settings) {
+      previousSettings.current = null;
+      return;
+    }
+    const previous =
+      previousSettings.current && previousSettings.current.groupId === groupId
+        ? previousSettings.current.value
+        : null;
+    // Refresh clean fields; another section's save must not overwrite a local draft.
+    const sync = <T,>(current: T, before: T | undefined, next: T): T =>
+      previous === null || Object.is(current, before) ? next : current;
+    setMailNoticeAfterSeconds((current) =>
+      sync(
+        current,
+        previous?.mail_notice_after_seconds ?? 1800,
+        settings.mail_notice_after_seconds ?? 1800,
+      ),
+    );
+    setMailNoticeIdleAfterSeconds((current) =>
+      sync(
+        current,
+        previous?.mail_notice_idle_after_seconds ?? 60,
+        settings.mail_notice_idle_after_seconds ?? 60,
+      ),
+    );
+    setReplyNoticeAfterSeconds((current) =>
+      sync(
+        current,
+        previous?.reply_notice_after_seconds ?? 900,
+        settings.reply_notice_after_seconds ?? 900,
+      ),
+    );
+    setIdleSeconds((current) =>
+      sync(current, previous?.actor_idle_timeout_seconds, settings.actor_idle_timeout_seconds),
+    );
+    setKeepaliveSeconds((current) =>
+      sync(current, previous?.keepalive_delay_seconds, settings.keepalive_delay_seconds),
+    );
+    setKeepaliveMax((current) =>
+      sync(current, previous?.keepalive_max_per_actor ?? 3, settings.keepalive_max_per_actor ?? 3),
+    );
+    setSilenceSeconds((current) =>
+      sync(current, previous?.silence_timeout_seconds, settings.silence_timeout_seconds),
+    );
+    setHelpNudgeIntervalSeconds((current) =>
+      sync(
+        current,
+        previous?.help_nudge_interval_seconds ?? 600,
+        settings.help_nudge_interval_seconds ?? 600,
+      ),
+    );
+    setHelpNudgeMinMessages((current) =>
+      sync(
+        current,
+        previous?.help_nudge_min_messages ?? 10,
+        settings.help_nudge_min_messages ?? 10,
+      ),
+    );
+    setDefaultSendTo((current) =>
+      sync(current, previous?.default_send_to || "foreman", settings.default_send_to || "foreman"),
+    );
+    setTerminalVisibility((current) =>
+      sync(
+        current,
+        previous?.terminal_transcript_visibility || "foreman",
+        settings.terminal_transcript_visibility || "foreman",
+      ),
+    );
+    setTerminalNotifyTail((current) =>
+      sync(
+        current,
+        Boolean(previous?.terminal_transcript_notify_tail),
+        Boolean(settings.terminal_transcript_notify_tail),
+      ),
+    );
+    setTerminalNotifyLines((current) =>
+      sync(
+        current,
+        Number(previous?.terminal_transcript_notify_lines || 20),
+        Number(settings.terminal_transcript_notify_lines || 20),
+      ),
+    );
+    previousSettings.current = { groupId, value: settings };
+  }, [isOpen, groupId, settings]);
+
+  useEffect(() => {
+    if (imMattermostBusy.current || imPlatform === "mattermost") {
+      imMattermostBusy.current = false;
+      setImBusy(false);
+    }
+  }, [isOpen, groupId, imPlatform]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setScope(groupId ? "group" : "global");
+  }, [isOpen, groupId]);
+
+  useEffect(() => {
+    if (isOpen) return;
+    initialVoiceFocus.current = null;
+    setVoiceAudioRequest(0);
+    setVoiceFeatureRequest(0);
+    observabilityLoaded.current = false;
+    setAccountReturnToWebAccess(false);
+    setFocusReachOnOpen(false);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    const loadWebAccessSession = async () => {
+      try {
+        const resp = await api.fetchWebAccessSession();
+        if (cancelled) return;
+        const session = resp.ok ? (resp.result?.web_access_session ?? null) : null;
+        setWebAccessSession(session);
+        const allowed = Boolean(
+          session?.can_access_global_settings ?? !(session?.login_active ?? false),
+        );
+        setCanAccessGlobalSettings(allowed);
+        const allowGlobalScope = Boolean(allowed || session?.current_browser_signed_in);
+        if (!allowGlobalScope && groupId) setScope("group");
+      } catch {
+        if (!cancelled) {
+          setWebAccessSession(null);
+          setCanAccessGlobalSettings(true);
+        }
+      }
+    };
+    void loadWebAccessSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, groupId]);
+
+  const resetIMState = () => {
+    setImConfigError(null);
+    setImStatus(null);
+    setWeixinLoginStatus(null);
+    setImPlatform("telegram");
+    setImBotTokenEnv("");
+    setImAppTokenEnv("");
+    setImMattermostUrl("");
+    setImFeishuDomain("https://open.feishu.cn");
+    setImFeishuAppId("");
+    setImFeishuAppSecret("");
+    setImDingtalkAppKey("");
+    setImDingtalkAppSecret("");
+    setImDingtalkRobotCode("");
+    setImWecomBotId("");
+    setImWecomSecret("");
+    setImWeixinAccountId("");
+  };
+
+  const loadIMStatus = useCallback(
+    async (opts?: { isCurrent?: () => boolean; canReloadConfig?: () => boolean }) => {
+      const gid = String(groupId || "").trim();
+      const seq = ++imLoadSeq.current;
+      const selection = imPlatformSelectionSeq.current;
+      const edit = imMattermostEditSeq.current;
+      const isCurrent = (platform?: unknown) =>
+        seq === imLoadSeq.current &&
+        opts?.isCurrent?.() !== false &&
+        (platform !== "mattermost" || selection === imPlatformSelectionSeq.current);
+      // Editing a draft blocks configuration hydration, not authoritative runtime status.
+      const canReloadConfig = () =>
+        opts?.canReloadConfig?.() !== false && imMattermostEditSeq.current === edit;
+      if (!gid) return;
+      try {
+        const statusResp = await api.fetchIMStatus(gid);
+        if (!isCurrent(statusResp.ok ? statusResp.result.platform : undefined)) return;
+        if (statusResp.ok) {
+          setImStatus(statusResp.result);
+          if (canReloadConfig() && statusResp.result.platform) {
+            setImPlatform(statusResp.result.platform as IMPlatform);
+          }
+        }
+        if (!canReloadConfig()) return;
+        const configResp = await api.fetchIMConfig(gid);
+        if (
+          !isCurrent(configResp.ok ? configResp.result.im?.platform : undefined) ||
+          !canReloadConfig()
+        )
+          return;
+        if (configResp.ok && configResp.result.im) {
+          const im = configResp.result.im;
+          if (im.platform) setImPlatform(im.platform);
+          setImBotTokenEnv(im.bot_token_env || im.bot_token || im.token_env || im.token || "");
+          setImAppTokenEnv(im.app_token_env || im.app_token || "");
+          setImMattermostUrl(im.mattermost_url || "");
+          {
+            const raw = String(im.feishu_domain || "https://open.feishu.cn").trim();
+            const canon = raw
+              .replace(/\/+$/, "")
+              .replace(/\/open-apis$/, "")
+              .replace(/^open\.larksuite\.com$/i, "https://open.larkoffice.com")
+              .replace(/^https?:\/\/open\.larksuite\.com$/i, "https://open.larkoffice.com")
+              .replace(/^open\.larkoffice\.com$/i, "https://open.larkoffice.com");
+            setImFeishuDomain(canon);
+          }
+          setImFeishuAppId(im.feishu_app_id || im.feishu_app_id_env || "");
+          setImFeishuAppSecret(im.feishu_app_secret || im.feishu_app_secret_env || "");
+          setImDingtalkAppKey(im.dingtalk_app_key || im.dingtalk_app_key_env || "");
+          setImDingtalkAppSecret(im.dingtalk_app_secret || im.dingtalk_app_secret_env || "");
+          setImDingtalkRobotCode(im.dingtalk_robot_code || im.dingtalk_robot_code_env || "");
+          setImWecomBotId(im.wecom_bot_id || "");
+          setImWecomSecret(im.wecom_secret || "");
+          setImWeixinAccountId(im.weixin_account_id || "");
+        }
+      } catch (e) {
+        console.error("Failed to load IM status:", e);
+      }
+    },
+    [groupId],
+  );
+
+  useEffect(() => {
+    imInitiallyLoaded.current = false;
+    weixinLoginOwner.current = null;
+    setImBusy(false);
+    resetIMState();
+    return () => {
+      imLoadSeq.current += 1;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Reset once per settings opening/Group, not when revisiting a draft.
+  }, [isOpen, groupId]);
+
+  useEffect(() => {
+    if (!isOpen || !imTabActive || imInitiallyLoaded.current) return;
+    imInitiallyLoaded.current = true;
+    void loadIMStatus();
+  }, [isOpen, groupId, imTabActive, loadIMStatus]);
+
+  const toWeixinErrorStatus = useCallback(
+    (message: string): WeixinLoginStatus => ({
+      status: "error",
+      logged_in: false,
+      account_id: "",
+      qrcode_url: "",
+      qr_ascii: "",
+      error: String(message || "").trim(),
+      running: false,
+      pid: null,
+      updated_at: new Date().toISOString(),
+    }),
+    [],
+  );
+
+  useEffect(() => {
+    if (!isOpen || !groupId || imPlatform !== "weixin" || imBusy || imStatus?.group_id !== groupId)
+      return;
+    // A scan already in progress keeps completing across settings tabs.
+    const needsPoll = shouldPollWeixinLogin({
+      running: weixinLoginStatus?.running ?? false,
+      status: weixinLoginStatus?.status ?? "",
+    });
+    if (!imTabActive && !needsPoll) return;
+    let cancelled = false;
+    let loading = false;
+    const loadWeixinStatus = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const resp = await api.fetchWeixinLoginStatus(groupId);
+        if (cancelled) return;
+        if (resp.ok) {
+          setWeixinLoginStatus(resp.result ?? null);
+        } else {
+          setWeixinLoginStatus(
+            toWeixinErrorStatus(resp.error?.message || t("imBridge.weixinStatusLoadFailed")),
+          );
+        }
+      } catch {
+        if (!cancelled) {
+          setWeixinLoginStatus(toWeixinErrorStatus(t("imBridge.weixinStatusLoadFailed")));
+        }
+      } finally {
+        loading = false;
+      }
+    };
+    void loadWeixinStatus();
+    if (!needsPoll)
+      return () => {
+        cancelled = true;
+      };
+    const timer = window.setInterval(() => {
+      void loadWeixinStatus();
+    }, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    isOpen,
+    groupId,
+    imPlatform,
+    imBusy,
+    imStatus?.group_id,
+    imTabActive,
+    weixinLoginStatus?.running,
+    weixinLoginStatus?.status,
+    t,
+    toWeixinErrorStatus,
+  ]);
+
+  useEffect(() => {
+    if (
+      !isOpen ||
+      imPlatform !== "weixin" ||
+      weixinLoginOwner.current?.scope !== imActionScope.current
+    ) {
+      weixinLoginOwner.current = null;
+      return;
+    }
+    if (imBusy || !groupId) return;
+    if (!weixinLoginStatus?.logged_in) {
+      if (!shouldPollWeixinLogin(weixinLoginStatus)) weixinLoginOwner.current = null;
+      return;
+    }
+    // Saving QR login configuration leaves the bridge disabled. This explicit
+    // login intent, not that saved enabled flag, authorizes one subsequent start.
+    if (!imStatus?.configured || imStatus.platform !== "weixin" || imStatus.running) {
+      weixinLoginOwner.current = null;
+      return;
+    }
+    const owner = weixinLoginOwner.current;
+    const { isCurrent, canReload } = currentIMAction();
+    void (async () => {
+      setImBusy(true);
+      setImConfigError(null);
+      try {
+        await api.runIMManagement(groupId, false, async () => {
+          if (!isCurrent() || weixinLoginOwner.current !== owner) return;
+          weixinLoginOwner.current = null;
+          const resp = await api.startIMBridge(groupId);
+          if (!isCurrent()) return;
+          if (resp.ok) await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+          else
+            setImConfigError({
+              groupId,
+              message: resp.error?.message || t("imBridge.weixinBridgeStartFailed"),
+            });
+        });
+      } catch {
+        if (isCurrent())
+          setImConfigError({ groupId, message: t("imBridge.weixinBridgeStartFailed") });
+      } finally {
+        if (weixinLoginOwner.current === owner) weixinLoginOwner.current = null;
+        if (isCurrent()) setImBusy(false);
+      }
+    })();
+  }, [
+    isOpen,
+    groupId,
+    imPlatform,
+    imBusy,
+    imStatus,
+    loadIMStatus,
+    weixinLoginStatus,
+    currentIMAction,
+    t,
+  ]);
+
+  useEffect(() => {
+    if (
+      !isOpen ||
+      !developerTabActive ||
+      canAccessGlobalSettings !== true ||
+      observabilityLoaded.current
+    )
+      return;
+    observabilityLoaded.current = true;
+    void loadObservability();
+  }, [isOpen, developerTabActive, canAccessGlobalSettings]);
+
+  useEffect(() => {
+    if (
+      !isOpen ||
+      !groupId ||
+      settingsTarget ||
+      scope !== "group" ||
+      (groupTab !== "automation" && groupTab !== "transcript")
+    )
+      return;
+    let cancelled = false;
+    void api
+      .fetchActors(groupId, false)
+      .then((resp) => {
+        if (cancelled || !resp.ok) return;
+        const actors = Array.isArray(resp.result?.actors) ? resp.result.actors : [];
+        setDevActors(actors);
+        setTailActorId((current) =>
+          actors.some((actor) => actor.id === current) ? current : actors[0]?.id || "",
+        );
+      })
+      .catch((error) => {
+        if (!cancelled) console.error("Failed to load settings actor list:", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, groupId, settingsTarget, scope, groupTab]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    if (scope !== "global" || globalTab !== "developer") return;
+    void loadRegistryPreview();
+  }, [isOpen, scope, globalTab]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    if (scope !== "global" || globalTab !== "developer") return;
+    void loadRuntimeInfo();
+  }, [isOpen, scope, globalTab]);
+
+  useEffect(() => {
+    if (!isOpen || !developerMode) return;
+    if (scope !== "global" || globalTab !== "developer") return;
+    void loadLogTail();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Keep refresh tied to modal/view controls; callback identity is not meaningful here.
+  }, [developerMode, globalTab, groupId, isOpen, logComponent, logLines, scope]);
+
+  // ============ Data Loading ============
+
+  const loadObservability = async () => {
+    try {
+      const resp = await api.fetchObservability();
+      if (resp.ok && resp.result?.observability) {
+        const obs = resp.result.observability;
+        useObservabilityStore.getState().setFromObs(obs);
+        setDeveloperMode(Boolean(obs.developer_mode));
+        const lvl = String(obs.log_level || "INFO").toUpperCase();
+        setLogLevel(lvl === "DEBUG" ? "DEBUG" : "INFO");
+        const perActorBytes = Number(obs.terminal_transcript?.per_actor_bytes || 0);
+        if (Number.isFinite(perActorBytes) && perActorBytes > 0) {
+          setTerminalBacklogMiB(Math.max(1, Math.round(perActorBytes / (1024 * 1024))));
+        }
+        const scrollbackLines = Number(obs.terminal_ui?.scrollback_lines || 0);
+        if (Number.isFinite(scrollbackLines) && scrollbackLines > 0) {
+          setTerminalScrollbackLines(Math.max(1000, Math.round(scrollbackLines)));
+        }
+        setPeerRuntimeVisibility(
+          normalizeRuntimeVisibilityMode(
+            obs.runtime_visibility?.peer_runtime,
+            DEFAULT_PEER_RUNTIME_VISIBILITY,
+          ),
+        );
+        setAssistantRuntimeVisibility(
+          normalizeRuntimeVisibilityMode(
+            obs.runtime_visibility?.assistant_runtime,
+            DEFAULT_ASSISTANT_RUNTIME_VISIBILITY,
+          ),
+        );
+      }
+    } catch (e) {
+      console.error("Failed to load observability settings:", e);
+    }
+  };
+
+  // ============ Handlers ============
+
+  const [saveFeedback, setSaveFeedback] = useState<{
+    context: string;
+    error: boolean;
+    message: string;
+  } | null>(null);
+  const saveContext = JSON.stringify([
+    isOpen,
+    groupId,
+    scope,
+    scope === "group" ? groupTab : globalTab,
+    mailNoticeAfterSeconds,
+    mailNoticeIdleAfterSeconds,
+    replyNoticeAfterSeconds,
+    idleSeconds,
+    keepaliveSeconds,
+    keepaliveMax,
+    silenceSeconds,
+    helpNudgeIntervalSeconds,
+    helpNudgeMinMessages,
+    defaultSendTo,
+    terminalVisibility,
+    terminalNotifyTail,
+    terminalNotifyLines,
+  ]);
+  const saveContextRef = useRef(saveContext);
+  saveContextRef.current = saveContext;
+  useEffect(
+    () => () => {
+      saveContextRef.current = "";
+    },
+    [],
+  );
+  const saveGroupSettings = async (patch: Partial<GroupSettings>) => {
+    const context = saveContextRef.current;
+    setSaveFeedback(null);
+    try {
+      const result = await onUpdateSettings(patch);
+      if (saveContextRef.current === context) {
+        setSaveFeedback({
+          context,
+          error: result === false,
+          message: t(result === false ? "saveFeedback.failed" : "saveFeedback.saved"),
+        });
+      }
+    } catch (error) {
+      if (saveContextRef.current === context) {
+        setSaveFeedback({
+          context,
+          error: true,
+          message: error instanceof Error ? error.message : t("saveFeedback.failed"),
+        });
+      }
+    }
+  };
+
+  const handleSaveDeliverySettings = async () => {
+    await saveGroupSettings({
+      mail_notice_after_seconds: mailNoticeAfterSeconds,
+      mail_notice_idle_after_seconds: mailNoticeIdleAfterSeconds,
+      reply_notice_after_seconds: replyNoticeAfterSeconds,
+    });
+  };
+
+  const handleSaveAutomationSettings = async () => {
+    await saveGroupSettings({
+      actor_idle_timeout_seconds: idleSeconds,
+      keepalive_delay_seconds: keepaliveSeconds,
+      keepalive_max_per_actor: keepaliveMax,
+      silence_timeout_seconds: silenceSeconds,
+      help_nudge_interval_seconds: helpNudgeIntervalSeconds,
+      help_nudge_min_messages: helpNudgeMinMessages,
+    });
+  };
+
+  const handleResetAutomationSettingsDraft = () => {
+    setIdleSeconds(0);
+    setKeepaliveSeconds(120);
+    setKeepaliveMax(3);
+    setSilenceSeconds(0);
+    setHelpNudgeIntervalSeconds(600);
+    setHelpNudgeMinMessages(10);
+  };
+
+  const handleSaveTranscriptSettings = async () => {
+    await saveGroupSettings({
+      terminal_transcript_visibility: terminalVisibility,
+      terminal_transcript_notify_tail: terminalNotifyTail,
+      terminal_transcript_notify_lines: terminalNotifyLines,
+    });
+  };
+
+  const handleSaveMessagingSettings = async () => {
+    await saveGroupSettings({ default_send_to: defaultSendTo });
+  };
+
+  const copyTailLastLines = async (lineCount: number) => {
+    const n = Math.max(1, Math.min(200, Number(lineCount || 0) || 50));
+    const text = String(tailText || "");
+    if (!text.trim()) return;
+    const lines = text.split("\n");
+    const payload = lines
+      .slice(Math.max(0, lines.length - n))
+      .join("\n")
+      .trimEnd();
+    if (!payload) return;
+
+    const setToast = (msg: string) => {
+      setTailCopyInfo(msg);
+      window.setTimeout(() => setTailCopyInfo(""), 1200);
+    };
+
+    const ok = await copyTextToClipboard(payload);
+    setToast(ok ? t("automation.copiedLines", { n }) : t("common:copyFailed"));
+  };
+
+  const loadTerminalTail = async () => {
+    if (!groupId || !tailActorId) return;
+    setTailBusy(true);
+    setTailErr("");
+    try {
+      const resp = await api.fetchTerminalTail(
+        groupId,
+        tailActorId,
+        tailMaxChars || 8000,
+        tailStripAnsi,
+        tailCompact,
+      );
+      if (resp.ok) {
+        setTailText(String(resp.result?.text || ""));
+        setTailHint(String(resp.result?.hint || ""));
+      } else {
+        setTailText("");
+        setTailHint("");
+        setTailErr(resp.error?.message || t("automation.failedToLoadTranscript"));
+      }
+    } catch {
+      setTailText("");
+      setTailHint("");
+      setTailErr(t("automation.failedToLoadTranscript"));
+    } finally {
+      setTailBusy(false);
+    }
+  };
+
+  const clearTail = async () => {
+    if (!groupId || !tailActorId) return;
+    setTailBusy(true);
+    setTailErr("");
+    try {
+      const resp = await api.clearTerminalTail(groupId, tailActorId);
+      if (!resp.ok) {
+        setTailErr(resp.error?.message || t("automation.failedToClearTranscript"));
+        return;
+      }
+      setTailText("");
+      setTailHint("");
+    } catch {
+      setTailErr(t("automation.failedToClearTranscript"));
+    } finally {
+      setTailBusy(false);
+    }
+  };
+
+  // Get current IM config as a draft object
+  const getCurrentIMConfigDraft = (): IMConfigDraft => ({
+    botTokenEnv: imBotTokenEnv,
+    appTokenEnv: imAppTokenEnv,
+    mattermostUrl: imMattermostUrl,
+    feishuDomain: imFeishuDomain,
+    feishuAppId: imFeishuAppId,
+    feishuAppSecret: imFeishuAppSecret,
+    dingtalkAppKey: imDingtalkAppKey,
+    dingtalkAppSecret: imDingtalkAppSecret,
+    dingtalkRobotCode: imDingtalkRobotCode,
+    wecomBotId: imWecomBotId,
+    wecomSecret: imWecomSecret,
+    weixinAccountId: imWeixinAccountId,
+  });
+
+  // Apply a draft to current IM config fields
+  const applyIMConfigDraft = (draft: IMConfigDraft) => {
+    setImBotTokenEnv(draft.botTokenEnv);
+    setImAppTokenEnv(draft.appTokenEnv);
+    setImMattermostUrl(draft.mattermostUrl);
+    setImFeishuDomain(draft.feishuDomain);
+    setImFeishuAppId(draft.feishuAppId);
+    setImFeishuAppSecret(draft.feishuAppSecret);
+    setImDingtalkAppKey(draft.dingtalkAppKey);
+    setImDingtalkAppSecret(draft.dingtalkAppSecret);
+    setImDingtalkRobotCode(draft.dingtalkRobotCode);
+    setImWecomBotId(draft.wecomBotId);
+    setImWecomSecret(draft.wecomSecret);
+    setImWeixinAccountId(draft.weixinAccountId);
+  };
+
+  const getCurrentIMSaveRequest = () => ({
+    groupId: String(groupId || ""),
+    platform: imPlatform,
+    ...getCurrentIMConfigDraft(),
+  });
+
+  // Handle platform change with config caching
+  const handlePlatformChange = (newPlatform: IMPlatform) => {
+    if (newPlatform === imPlatform) return;
+    weixinLoginOwner.current = null;
+    if (imPlatform === "weixin" || newPlatform === "weixin") setImBusy(false);
+    // User selection invalidates stale Mattermost reads; programmatic hydration is not a user edit.
+    imPlatformSelectionSeq.current += 1;
+    if (imPlatform === "mattermost" || newPlatform === "mattermost") imLoadSeq.current += 1;
+    setImConfigError(null);
+
+    // 1. Save current platform config to drafts
+    setImConfigDrafts((prev) => ({ ...prev, [imPlatform]: getCurrentIMConfigDraft() }));
+
+    // 2. Load new platform's cached draft (if exists)
+    const cachedDraft = imConfigDrafts[newPlatform];
+    if (cachedDraft) {
+      applyIMConfigDraft(cachedDraft);
+    } else {
+      // Reset to empty if no cached draft (new platform)
+      setImBotTokenEnv("");
+      setImAppTokenEnv("");
+      setImMattermostUrl("");
+      setImFeishuDomain("https://open.feishu.cn");
+      setImFeishuAppId("");
+      setImFeishuAppSecret("");
+      setImDingtalkAppKey("");
+      setImDingtalkAppSecret("");
+      setImDingtalkRobotCode("");
+      setImWecomBotId("");
+      setImWecomSecret("");
+      setImWeixinAccountId("");
+    }
+
+    // 3. Set new platform
+    setImPlatform(newPlatform);
+  };
+
+  const handleSaveIMConfig = async () => {
+    if (!groupId) return;
+    const { isCurrent, canReload } = currentIMAction();
+    setImBusy(true);
+    setImConfigError(null);
+    try {
+      await api.runIMManagement(groupId, imPlatform === "mattermost", async () => {
+        if (!isCurrent()) return;
+        const resp = await saveIMConfigDraft(getCurrentIMSaveRequest());
+        if (!isCurrent()) return;
+        if (resp.ok) {
+          await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+        } else if (imPlatform === "mattermost") {
+          setImConfigError({
+            groupId,
+            message: resp.error?.message || t("imBridge.mattermostConfigFailed"),
+          });
+        }
+      });
+    } catch (e) {
+      if (!isCurrent()) return;
+      if (imPlatform === "mattermost") {
+        setImConfigError({ groupId, message: t("imBridge.mattermostConfigFailed") });
+      }
+      console.error("Failed to save IM config:", e);
+    } finally {
+      if (isCurrent()) {
+        imMattermostBusy.current = false;
+        setImBusy(false);
+      }
+    }
+  };
+
+  const handleRemoveIMConfig = async () => {
+    if (!groupId) return;
+    weixinLoginOwner.current = null;
+    const { isCurrent, canReload } = currentIMAction();
+    setImBusy(true);
+    setImConfigError(null);
+    try {
+      await api.runIMManagement(groupId, imPlatform === "mattermost", async () => {
+        if (!isCurrent()) return;
+        const resp = await api.unsetIMConfig(groupId);
+        if (!isCurrent()) return;
+        if (!resp.ok && imPlatform === "mattermost") {
+          setImConfigError({
+            groupId,
+            message: resp.error?.message || t("imBridge.mattermostConfigFailed"),
+          });
+        }
+        if (resp.ok) {
+          if (canReload()) {
+            setImBotTokenEnv("");
+            setImAppTokenEnv("");
+            setImMattermostUrl("");
+            setImFeishuDomain("https://open.feishu.cn");
+            setImFeishuAppId("");
+            setImFeishuAppSecret("");
+            setImDingtalkAppKey("");
+            setImDingtalkAppSecret("");
+            setImDingtalkRobotCode("");
+            setImWecomBotId("");
+            setImWecomSecret("");
+            setImWeixinAccountId("");
+          }
+          await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+        }
+      });
+    } catch (e) {
+      if (!isCurrent()) return;
+      if (imPlatform === "mattermost") {
+        setImConfigError({ groupId, message: t("imBridge.mattermostConfigFailed") });
+      }
+      console.error("Failed to remove IM config:", e);
+    } finally {
+      if (isCurrent()) {
+        imMattermostBusy.current = false;
+        setImBusy(false);
+      }
+    }
+  };
+
+  const handleStartBridge = async () => {
+    if (!groupId) return;
+    weixinLoginOwner.current = null;
+    if (!canStartIMBridge(imPlatform, !!weixinLoginStatus?.logged_in)) return;
+    const { isCurrent, canReload } = currentIMAction();
+    setImBusy(true);
+    setImConfigError(null);
+    try {
+      await api.runIMManagement(groupId, imPlatform === "mattermost", async () => {
+        if (!isCurrent()) return;
+        // Preserve the draft after a failed Mattermost save; reloading would replace it with the old platform/config.
+        if (imPlatform === "mattermost") {
+          const saved = await saveIMConfigDraft(getCurrentIMSaveRequest());
+          if (!isCurrent()) return;
+          if (!saved.ok) {
+            setImConfigError({
+              groupId,
+              message: saved.error?.message || t("imBridge.mattermostConfigFailed"),
+            });
+            return;
+          }
+        }
+        const resp =
+          imPlatform === "mattermost"
+            ? await api.startIMBridge(groupId)
+            : await saveAndStartIMBridge(getCurrentIMSaveRequest());
+        if (!isCurrent()) return;
+        await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+        if (!isCurrent()) return;
+        if (!resp.ok && imPlatform === "mattermost") {
+          setImConfigError({
+            groupId,
+            message: resp.error?.message || t("imBridge.mattermostConfigFailed"),
+          });
+        }
+        if (!resp.ok && imPlatform === "weixin") {
+          setImConfigError({
+            groupId,
+            message: resp.error?.message || t("imBridge.weixinBridgeStartFailed"),
+          });
+        }
+      });
+    } catch (e) {
+      if (!isCurrent()) return;
+      if (imPlatform === "mattermost") {
+        setImConfigError({ groupId, message: t("imBridge.mattermostConfigFailed") });
+      }
+      if (imPlatform === "weixin") {
+        setImConfigError({ groupId, message: t("imBridge.weixinBridgeStartFailed") });
+      } else {
+        console.error("Failed to start bridge:", e);
+      }
+    } finally {
+      if (isCurrent()) {
+        imMattermostBusy.current = false;
+        setImBusy(false);
+      }
+    }
+  };
+
+  const handleStopBridge = async () => {
+    if (!groupId) return;
+    weixinLoginOwner.current = null;
+    const { isCurrent, canReload } = currentIMAction();
+    setImBusy(true);
+    if (imPlatform === "mattermost") setImConfigError(null);
+    try {
+      await api.runIMManagement(groupId, imPlatform === "mattermost", async () => {
+        if (!isCurrent()) return;
+        const resp = await api.stopIMBridge(groupId);
+        if (!isCurrent()) return;
+        if (!resp.ok && imPlatform === "mattermost") {
+          setImConfigError({
+            groupId,
+            message: resp.error?.message || t("imBridge.mattermostConfigFailed"),
+          });
+          return;
+        }
+        await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+      });
+    } catch (e) {
+      if (!isCurrent()) return;
+      if (imPlatform === "mattermost") {
+        setImConfigError({ groupId, message: t("imBridge.mattermostConfigFailed") });
+      }
+      console.error("Failed to stop bridge:", e);
+    } finally {
+      if (isCurrent()) {
+        imMattermostBusy.current = false;
+        setImBusy(false);
+      }
+    }
+  };
+
+  const handleStartWeixinLogin = async () => {
+    if (!groupId) return;
+    weixinLoginOwner.current = null;
+    const { isCurrent, canReload } = currentIMAction();
+    setImBusy(true);
+    try {
+      await api.runIMManagement(groupId, false, async () => {
+        if (!isCurrent()) return;
+        const saveResp = await saveIMConfigDraft(getCurrentIMSaveRequest());
+        if (!isCurrent()) return;
+        if (!saveResp.ok) {
+          setWeixinLoginStatus(
+            toWeixinErrorStatus(saveResp.error?.message || t("imBridge.weixinStartFailed")),
+          );
+          return;
+        }
+        await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+        if (!isCurrent()) return;
+        const resp = await api.startWeixinLogin(groupId);
+        if (!isCurrent()) return;
+        if (resp.ok) {
+          weixinLoginOwner.current = { scope: imActionScope.current };
+          setWeixinLoginStatus(resp.result ?? null);
+        } else {
+          setWeixinLoginStatus(
+            toWeixinErrorStatus(resp.error?.message || t("imBridge.weixinStartFailed")),
+          );
+        }
+      });
+    } catch (e) {
+      if (!isCurrent()) return;
+      setWeixinLoginStatus(toWeixinErrorStatus(t("imBridge.weixinStartFailed")));
+      console.error("Failed to start weixin login:", e);
+    } finally {
+      if (isCurrent()) setImBusy(false);
+    }
+  };
+
+  const handleLogoutWeixin = async () => {
+    if (!groupId) return;
+    weixinLoginOwner.current = null;
+    const { isCurrent, canReload } = currentIMAction();
+    setImBusy(true);
+    try {
+      await api.runIMManagement(groupId, false, async () => {
+        if (!isCurrent()) return;
+        const resp = await api.logoutWeixin(groupId);
+        if (!isCurrent()) return;
+        if (resp.ok) {
+          setWeixinLoginStatus(resp.result ?? null);
+          await loadIMStatus({ isCurrent, canReloadConfig: canReload });
+        } else {
+          setWeixinLoginStatus(
+            toWeixinErrorStatus(resp.error?.message || t("imBridge.weixinLogoutFailed")),
+          );
+        }
+      });
+    } catch (e) {
+      if (!isCurrent()) return;
+      setWeixinLoginStatus(toWeixinErrorStatus(t("imBridge.weixinLogoutFailed")));
+      console.error("Failed to logout weixin:", e);
+    } finally {
+      if (isCurrent()) setImBusy(false);
+    }
+  };
+
+  const handleVerifyWeixin = async (verifyCode: string) => {
+    if (!groupId) return;
+    const { isCurrent } = currentIMAction();
+    setImBusy(true);
+    try {
+      await api.runIMManagement(groupId, false, async () => {
+        if (!isCurrent()) return;
+        const resp = await api.verifyWeixinLogin(groupId, verifyCode);
+        if (!isCurrent()) return;
+        if (resp.ok) {
+          setWeixinLoginStatus(resp.result ?? null);
+        } else {
+          setWeixinLoginStatus(
+            toWeixinErrorStatus(resp.error?.message || t("imBridge.weixinVerifyFailed")),
+          );
+        }
+      });
+    } catch (e) {
+      if (!isCurrent()) return;
+      setWeixinLoginStatus(toWeixinErrorStatus(t("imBridge.weixinVerifyFailed")));
+      console.error("Failed to verify weixin login:", e);
+    } finally {
+      if (isCurrent()) setImBusy(false);
+    }
+  };
+
+  const handleSaveObservability = async () => {
+    setObsBusy(true);
+    try {
+      const perActorBytes =
+        Math.max(1, Math.min(50, Number(terminalBacklogMiB || 0))) * 1024 * 1024;
+      const scrollbackLines = Math.max(
+        1000,
+        Math.min(200000, Number(terminalScrollbackLines || 0)),
+      );
+      const resp = await api.updateObservability({
+        developerMode,
+        logLevel,
+        terminalTranscriptPerActorBytes: perActorBytes,
+        terminalUiScrollbackLines: scrollbackLines,
+        peerRuntimeVisibility,
+        assistantRuntimeVisibility,
+      });
+      if (resp.ok && resp.result?.observability) {
+        const obs = resp.result.observability;
+        useObservabilityStore.getState().setFromObs(obs);
+        setDeveloperMode(Boolean(obs.developer_mode));
+        const lvl = String(obs.log_level || "INFO").toUpperCase();
+        setLogLevel(lvl === "DEBUG" ? "DEBUG" : "INFO");
+        const bytes = Number(obs.terminal_transcript?.per_actor_bytes || 0);
+        if (Number.isFinite(bytes) && bytes > 0) {
+          setTerminalBacklogMiB(Math.max(1, Math.round(bytes / (1024 * 1024))));
+        }
+        const lines = Number(obs.terminal_ui?.scrollback_lines || 0);
+        if (Number.isFinite(lines) && lines > 0) {
+          setTerminalScrollbackLines(Math.max(1000, Math.round(lines)));
+        }
+        setPeerRuntimeVisibility(
+          normalizeRuntimeVisibilityMode(
+            obs.runtime_visibility?.peer_runtime,
+            DEFAULT_PEER_RUNTIME_VISIBILITY,
+          ),
+        );
+        setAssistantRuntimeVisibility(
+          normalizeRuntimeVisibilityMode(
+            obs.runtime_visibility?.assistant_runtime,
+            DEFAULT_ASSISTANT_RUNTIME_VISIBILITY,
+          ),
+        );
+      } else if (resp.ok) {
+        await loadObservability();
+      }
+    } catch {
+      // ignore
+    } finally {
+      setObsBusy(false);
+    }
+  };
+
+  const loadDebugSnapshot = async () => {
+    if (!groupId) return;
+    setDebugSnapshotBusy(true);
+    setDebugSnapshotErr("");
+    try {
+      const resp = await api.fetchDebugSnapshot(groupId);
+      if (resp.ok) {
+        setDebugSnapshot(JSON.stringify(resp.result ?? {}, null, 2));
+      } else {
+        setDebugSnapshot("");
+        setDebugSnapshotErr(resp.error?.message || "Failed to load debug snapshot");
+      }
+    } catch {
+      setDebugSnapshot("");
+      setDebugSnapshotErr("Failed to load debug snapshot");
+    } finally {
+      setDebugSnapshotBusy(false);
+    }
+  };
+
+  const loadRuntimeInfo = async () => {
+    setRuntimeInfoErr("");
+    setRuntimeBuildInfo(undefined);
+    try {
+      const resp = await api.fetchPing();
+      if (!resp.ok) {
+        setRuntimeVersion("");
+        setDaemonVersion("");
+        setRuntimeInfoErr(resp.error?.message || "Failed to load runtime info");
+        return;
+      }
+      const result = resp.result || {};
+      const daemon =
+        result.daemon && typeof result.daemon === "object" && !Array.isArray(result.daemon)
+          ? (result.daemon as Record<string, unknown>)
+          : null;
+      setRuntimeVersion(String(result.version || "").trim());
+      setDaemonVersion(String(daemon?.version || "").trim());
+      setRuntimeBuildInfo({
+        webSource: String(result.build?.source_id || ""),
+        daemonSource: String(
+          (daemon?.build as { source_id?: string } | undefined)?.source_id || "",
+        ),
+        webAssets: String(result.web?.assets_id || ""),
+        servedEntry: String(result.web?.entry_script || ""),
+        loadedEntry: loadedWebEntry(),
+      });
+    } catch {
+      setRuntimeVersion("");
+      setDaemonVersion("");
+      setRuntimeInfoErr("Failed to load runtime info");
+    }
+  };
+
+  const loadLogTail = async () => {
+    if (logComponent === "im" && !groupId) {
+      setLogText("");
+      setLogErr(t("developer.imLogsRequireGroup"));
+      return;
+    }
+    setLogBusy(true);
+    setLogErr("");
+    try {
+      const resp = await api.fetchLogTail(logComponent, groupId || "", logLines || 200);
+      if (resp.ok) {
+        const lines = Array.isArray(resp.result?.lines) ? resp.result.lines : [];
+        setLogText(lines.join("\n"));
+      } else {
+        setLogText("");
+        setLogErr(resp.error?.message || "Failed to tail logs");
+      }
+    } catch {
+      setLogText("");
+      setLogErr("Failed to tail logs");
+    } finally {
+      setLogBusy(false);
+    }
+  };
+
+  const handleClearLogs = async () => {
+    if (!developerMode) return;
+    if (logComponent === "im" && !groupId) {
+      setLogErr(t("developer.imLogsRequireGroup"));
+      return;
+    }
+    setLogBusy(true);
+    setLogErr("");
+    try {
+      const resp = await api.clearLogs(logComponent, groupId || "");
+      if (!resp.ok) {
+        setLogErr(resp.error?.message || "Failed to clear logs");
+        return;
+      }
+      setLogText("");
+    } catch {
+      setLogErr("Failed to clear logs");
+    } finally {
+      setLogBusy(false);
+    }
+  };
+
+  const loadRegistryPreview = async () => {
+    setRegistryBusy(true);
+    setRegistryErr("");
+    try {
+      const resp = await api.previewRegistryReconcile();
+      if (resp.ok) {
+        setRegistryResult(resp.result);
+      } else {
+        setRegistryErr(resp.error?.message || "Failed to scan registry");
+      }
+    } catch {
+      setRegistryErr("Failed to scan registry");
+    } finally {
+      setRegistryBusy(false);
+    }
+  };
+
+  const handleReconcileRegistry = async () => {
+    const missingCount = registryResult?.missing_group_ids?.length || 0;
+    if (missingCount <= 0) {
+      await loadRegistryPreview();
+      return;
+    }
+    if (!window.confirm(t("automation.removeRegistryConfirm", { count: missingCount }))) {
+      return;
+    }
+    setRegistryBusy(true);
+    setRegistryErr("");
+    try {
+      const resp = await api.executeRegistryReconcile(true);
+      if (resp.ok) {
+        setRegistryResult(resp.result);
+        if (onRegistryChanged) {
+          await onRegistryChanged();
+        }
+        await loadRegistryPreview();
+      } else {
+        setRegistryErr(resp.error?.message || "Failed to clean registry");
+      }
+    } catch {
+      setRegistryErr("Failed to clean registry");
+    } finally {
+      setRegistryBusy(false);
+    }
+  };
+
+  // ============ Derived state (must be before early return to keep hooks stable) ============
+
+  const globalSettingsEnabled = canAccessGlobalSettings === true;
+  const currentBrowserSignedIn = Boolean(webAccessSession?.current_browser_signed_in);
+  const globalScopeEnabled = globalSettingsEnabled || currentBrowserSignedIn;
+
+  const globalTabs = useMemo<{ id: GlobalTabId; label: string }[]>(
+    () => [
+      ...(globalSettingsEnabled
+        ? [
+            { id: "account" as const, label: t("tabs.account") },
+            { id: "capabilities" as const, label: t("tabs.capabilities") },
+            { id: "actorProfiles" as const, label: t("tabs.actorProfiles") },
+            { id: "voice" as const, label: t("tabs.voice") },
+          ]
+        : []),
+      // Non-admin signed-in users see My Profiles; admin already has Actor Profiles covering all
+      ...(currentBrowserSignedIn && !globalSettingsEnabled
+        ? [{ id: "myProfiles" as const, label: t("tabs.myProfiles") }]
+        : []),
+      ...(globalSettingsEnabled
+        ? [
+            { id: "branding" as const, label: t("tabs.branding") },
+            { id: "webAccess" as const, label: t("tabs.webAccess") },
+            {
+              id: "webModels" as const,
+              label: t("tabs.webModels", { defaultValue: "ChatGPT Web Model" }),
+            },
+            { id: "developer" as const, label: t("tabs.developer") },
+          ]
+        : []),
+    ],
+    [globalSettingsEnabled, currentBrowserSignedIn, t],
+  );
+
+  useEffect(() => {
+    if (scope !== "global") return;
+    if (!globalTabs.length) return;
+    if (!globalTabs.some((tab) => tab.id === globalTab)) {
+      setGlobalTab(globalTabs[0].id);
+    }
+  }, [globalTab, globalTabs, scope]);
+
+  useEffect(() => {
+    if (!isOpen || !settingsTarget) return;
+    if (!voiceBeforeLeave.current()) {
+      clearSettingsTarget();
+      return;
+    }
+    const nextScope =
+      settingsTarget.scope === "global"
+        ? "global"
+        : settingsTarget.scope === "group"
+          ? "group"
+          : "";
+    const nextTab = String(settingsTarget.tab || "").trim();
+    if (nextScope === "global") {
+      setScope("global");
+      setAccountReturnToWebAccess(false);
+      setFocusReachOnOpen(false);
+      if (nextTab) setGlobalTab(nextTab as GlobalTabId);
+    } else if (nextScope === "group") {
+      setScope("group");
+      setAccountReturnToWebAccess(false);
+      setFocusReachOnOpen(false);
+      if (nextTab) setGroupTab(nextTab as GroupTabId);
+    }
+    if (settingsTarget.voiceSection) setVoiceSection(settingsTarget.voiceSection);
+    setVoiceAudioRequest(settingsTarget.voiceAudio ? settingsTarget.nonce : 0);
+    setVoiceAnalystRequest(settingsTarget.voiceAnalyst ? settingsTarget.nonce : 0);
+    setVoiceFeatureRequest(
+      settingsTarget.voiceSection && !settingsTarget.voiceAudio ? settingsTarget.nonce : 0,
+    );
+    if (settingsTarget.webModelProvider) setWebModelProvider(settingsTarget.webModelProvider);
+    clearSettingsTarget();
+  }, [clearSettingsTarget, isOpen, settingsTarget]);
+
+  const groupTabs: { id: GroupTabId; label: string }[] = [
+    { id: "guidance", label: t("tabs.guidance") },
+    { id: "automation", label: t("tabs.automation") },
+    { id: "delivery", label: t("tabs.delivery") },
+    { id: "space", label: t("tabs.space") },
+    { id: "messaging", label: t("tabs.messaging") },
+    { id: "im", label: t("tabs.im") },
+    ...(globalSettingsEnabled
+      ? [{ id: "connections" as const, label: t("layout:groupConnections.title") }]
+      : []),
+    { id: "transcript", label: t("tabs.transcript") },
+    { id: "copyGroups", label: t("tabs.copyGroups") },
+  ];
+  const tabs = scope === "group" ? groupTabs : globalScopeEnabled ? globalTabs : [];
+  const activeTab = scope === "group" ? groupTab : globalTab;
+  const setActiveTab = (tab: GroupTabId | GlobalTabId) => {
+    setAccountReturnToWebAccess(false);
+    setFocusReachOnOpen(false);
+    if (scope === "group") setGroupTab(tab as GroupTabId);
+    else setGlobalTab(tab as GlobalTabId);
+  };
+
+  const openAccountFromWebAccess = () => {
+    setAccountReturnToWebAccess(true);
+    setFocusReachOnOpen(false);
+    setGlobalTab("account");
+  };
+
+  const openWebAccessFromAccount = () => {
+    setAccountReturnToWebAccess(false);
+    setFocusReachOnOpen(true);
+    setGlobalTab("webAccess");
+  };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    writeSettingsLastLocation({ scope, groupTab, globalTab });
+  }, [globalTab, groupTab, isOpen, scope]);
+
+  useEffect(() => {
+    const el = contentScrollRef.current;
+    if (!isOpen || !el) return;
+    requestAnimationFrame(() => {
+      el.scrollTo({ top: 0, behavior: "auto" });
+    });
+  }, [isOpen, scope, activeTab]);
+
+  // ============ Render ============
+
+  if (!isOpen) return null;
+
+  const scopeRootUrl = (() => {
+    if (!groupDoc || String(groupDoc.group_id || "") !== String(groupId || "")) return "";
+    const scopes = Array.isArray(groupDoc.scopes) ? groupDoc.scopes : [];
+    const activeKey = String(groupDoc.active_scope_key || "");
+    const active = scopes.find(
+      (s) => String(s?.scope_key || "") === activeKey && String(s?.url || "").trim(),
+    );
+    const first = scopes.find((s) => String(s?.url || "").trim());
+    return String((active || first)?.url || "").trim();
+  })();
+
+  return (
+    <ModalFrame
+      isDark={isDark}
+      onClose={requestClose}
+      titleId="settings-modal-title"
+      surface="solid"
+      title={
+        <h2 className="truncate text-lg font-semibold text-[var(--color-text-primary)]">
+          {t("title")}
+        </h2>
+      }
+      closeAriaLabel={t("closeAriaLabel")}
+      panelClassName="w-full h-full sm:h-[min(90dvh,920px)] sm:max-w-[min(1280px,calc(100vw-2rem))] sm:max-h-[90dvh]"
+      modalRef={modalRef}
+    >
+      <div className="min-h-0 flex-1 flex flex-col sm:flex-row overflow-hidden">
+        <SettingsNavigation
+          isDark={isDark}
+          groupId={groupId}
+          groupTitle={groupDoc?.title}
+          scope={scope}
+          scopeRootUrl={scopeRootUrl}
+          globalEnabled={globalScopeEnabled}
+          tabs={tabs}
+          activeTab={activeTab}
+          onScopeChange={(nextScope) => {
+            if (nextScope !== scope && !voiceBeforeLeave.current()) return;
+            setAccountReturnToWebAccess(false);
+            setFocusReachOnOpen(false);
+            setScope(nextScope);
+          }}
+          onTabChange={(tab) => {
+            if (tab !== activeTab && !voiceBeforeLeave.current()) return;
+            setActiveTab(tab as GroupTabId | GlobalTabId);
+          }}
+        />
+
+        {/* Main Content Area */}
+        <div
+          ref={contentScrollRef}
+          className="min-h-0 min-w-0 flex-1 overflow-y-auto scrollbar-subtle flex flex-col [scrollbar-gutter:stable] bg-[var(--color-bg-primary)]"
+        >
+          <div className="px-4 pt-5 pb-4 sm:px-8 sm:pt-7 lg:px-10 space-y-6">
+            {scope === "global" && !globalSettingsEnabled && !currentBrowserSignedIn ? (
+              <div
+                className={`rounded-xl border p-6 ${isDark ? "border-amber-700/40 bg-amber-900/10 text-amber-200" : "border-amber-200 bg-amber-50 text-amber-800"}`}
+              >
+                <div className="text-sm font-semibold">{t("navigation.globalLockedTitle")}</div>
+                <div className="mt-2 text-sm leading-6">{t("navigation.globalLockedContent")}</div>
+                {groupId ? (
+                  <button
+                    type="button"
+                    onClick={() => setScope("group")}
+                    className="mt-4 px-3 py-2 rounded-lg text-xs font-medium border border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] text-[var(--color-text-primary)] hover:bg-[var(--glass-tab-bg-hover)] transition-all"
+                  >
+                    {t("navigation.thisGroup")}
+                  </button>
+                ) : null}
+              </div>
+            ) : !tabs.some((tab) => tab.id === activeTab) ? null : (
+              <Suspense fallback={<SettingsTabFallback />}>
+                {scope === "group" &&
+                  activeTab === "connections" &&
+                  groupId &&
+                  globalSettingsEnabled && (
+                    <section className="space-y-4">
+                      <div>
+                        <h3 className="text-base font-semibold">
+                          {t("layout:groupConnections.title")} ·{" "}
+                          {groupDoc?.group_id === groupId ? groupDoc.title || groupId : groupId}
+                        </h3>
+                        <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+                          {t("layout:groupConnections.description")}
+                        </p>
+                      </div>
+                      <GroupConnectionsPanel
+                        key={groupId}
+                        groupId={groupId}
+                        groupTitle={
+                          groupDoc?.group_id === groupId ? groupDoc.title || groupId : groupId
+                        }
+                        onOpenAccount={() => {
+                          setAccountReturnToWebAccess(false);
+                          setFocusReachOnOpen(false);
+                          setScope("global");
+                          setGlobalTab("account");
+                        }}
+                      />
+                    </section>
+                  )}
+                {activeTab === "automation" && (
+                  <AutomationTab
+                    isDark={isDark}
+                    groupId={groupId}
+                    devActors={devActors}
+                    busy={busy}
+                    idleSeconds={idleSeconds}
+                    setIdleSeconds={setIdleSeconds}
+                    keepaliveSeconds={keepaliveSeconds}
+                    setKeepaliveSeconds={setKeepaliveSeconds}
+                    keepaliveMax={keepaliveMax}
+                    setKeepaliveMax={setKeepaliveMax}
+                    silenceSeconds={silenceSeconds}
+                    setSilenceSeconds={setSilenceSeconds}
+                    helpNudgeIntervalSeconds={helpNudgeIntervalSeconds}
+                    setHelpNudgeIntervalSeconds={setHelpNudgeIntervalSeconds}
+                    helpNudgeMinMessages={helpNudgeMinMessages}
+                    setHelpNudgeMinMessages={setHelpNudgeMinMessages}
+                    onSavePolicies={handleSaveAutomationSettings}
+                    onResetPolicies={handleResetAutomationSettingsDraft}
+                  />
+                )}
+
+                {activeTab === "delivery" && (
+                  <DeliveryTab
+                    isDark={isDark}
+                    busy={busy}
+                    mailNoticeAfterSeconds={mailNoticeAfterSeconds}
+                    setMailNoticeAfterSeconds={setMailNoticeAfterSeconds}
+                    mailNoticeIdleAfterSeconds={mailNoticeIdleAfterSeconds}
+                    setMailNoticeIdleAfterSeconds={setMailNoticeIdleAfterSeconds}
+                    replyNoticeAfterSeconds={replyNoticeAfterSeconds}
+                    setReplyNoticeAfterSeconds={setReplyNoticeAfterSeconds}
+                    onSave={handleSaveDeliverySettings}
+                  />
+                )}
+
+                {activeTab === "messaging" && (
+                  <MessagingTab
+                    isDark={isDark}
+                    busy={busy}
+                    defaultSendTo={defaultSendTo}
+                    setDefaultSendTo={setDefaultSendTo}
+                    onSave={handleSaveMessagingSettings}
+                  />
+                )}
+
+                {activeTab === "im" && (
+                  <IMBridgeTab
+                    isDark={isDark}
+                    groupId={groupId}
+                    imStatus={imStatus}
+                    imConfigError={
+                      imConfigError && imConfigError.groupId === groupId
+                        ? imConfigError.message
+                        : undefined
+                    }
+                    imPlatform={imPlatform}
+                    onPlatformChange={handlePlatformChange}
+                    imBotTokenEnv={imBotTokenEnv}
+                    setImBotTokenEnv={(value) => {
+                      if (imPlatform === "mattermost") {
+                        imMattermostEditSeq.current += 1;
+                      }
+                      setImBotTokenEnv(value);
+                    }}
+                    imAppTokenEnv={imAppTokenEnv}
+                    setImAppTokenEnv={setImAppTokenEnv}
+                    imMattermostUrl={imMattermostUrl}
+                    setImMattermostUrl={(value) => {
+                      imMattermostEditSeq.current += 1;
+                      setImMattermostUrl(value);
+                    }}
+                    imFeishuAppId={imFeishuAppId}
+                    setImFeishuAppId={setImFeishuAppId}
+                    imFeishuAppSecret={imFeishuAppSecret}
+                    setImFeishuAppSecret={setImFeishuAppSecret}
+                    imFeishuDomain={imFeishuDomain}
+                    setImFeishuDomain={setImFeishuDomain}
+                    imDingtalkAppKey={imDingtalkAppKey}
+                    setImDingtalkAppKey={setImDingtalkAppKey}
+                    imDingtalkAppSecret={imDingtalkAppSecret}
+                    setImDingtalkAppSecret={setImDingtalkAppSecret}
+                    imDingtalkRobotCode={imDingtalkRobotCode}
+                    setImDingtalkRobotCode={setImDingtalkRobotCode}
+                    imWecomBotId={imWecomBotId}
+                    setImWecomBotId={setImWecomBotId}
+                    imWecomSecret={imWecomSecret}
+                    setImWecomSecret={setImWecomSecret}
+                    imWeixinAccountId={imWeixinAccountId}
+                    setImWeixinAccountId={setImWeixinAccountId}
+                    weixinLoginStatus={weixinLoginStatus}
+                    onStartWeixinLogin={handleStartWeixinLogin}
+                    onVerifyWeixin={handleVerifyWeixin}
+                    onLogoutWeixin={handleLogoutWeixin}
+                    imBusy={imBusy}
+                    onSaveConfig={handleSaveIMConfig}
+                    onRemoveConfig={handleRemoveIMConfig}
+                    onStartBridge={handleStartBridge}
+                    onStopBridge={handleStopBridge}
+                  />
+                )}
+
+                {activeTab === "transcript" && (
+                  <TranscriptTab
+                    isDark={isDark}
+                    busy={busy}
+                    groupId={groupId}
+                    devActors={devActors}
+                    terminalVisibility={terminalVisibility}
+                    setTerminalVisibility={setTerminalVisibility}
+                    terminalNotifyTail={terminalNotifyTail}
+                    setTerminalNotifyTail={setTerminalNotifyTail}
+                    terminalNotifyLines={terminalNotifyLines}
+                    setTerminalNotifyLines={setTerminalNotifyLines}
+                    onSaveTranscriptSettings={handleSaveTranscriptSettings}
+                    tailActorId={tailActorId}
+                    setTailActorId={setTailActorId}
+                    tailMaxChars={tailMaxChars}
+                    setTailMaxChars={setTailMaxChars}
+                    tailStripAnsi={tailStripAnsi}
+                    setTailStripAnsi={setTailStripAnsi}
+                    tailCompact={tailCompact}
+                    setTailCompact={setTailCompact}
+                    tailText={tailText}
+                    tailHint={tailHint}
+                    tailErr={tailErr}
+                    tailBusy={tailBusy}
+                    tailCopyInfo={tailCopyInfo}
+                    onLoadTail={loadTerminalTail}
+                    onCopyTail={copyTailLastLines}
+                    onClearTail={clearTail}
+                  />
+                )}
+
+                {activeTab === "guidance" && <GuidanceTab isDark={isDark} groupId={groupId} />}
+
+                {activeTab === "space" && (
+                  <GroupSpaceTab
+                    isDark={isDark}
+                    groupId={groupId}
+                    isActive={scope === "group" && activeTab === "space"}
+                  />
+                )}
+
+                {activeTab === "copyGroups" && (
+                  <CopyGroupsTab
+                    isDark={isDark}
+                    groupId={groupId}
+                    groupTitle={groupDoc?.title || ""}
+                  />
+                )}
+
+                {activeTab === "capabilities" && (
+                  <CapabilitiesTab
+                    isDark={isDark}
+                    isActive={scope === "global" && activeTab === "capabilities"}
+                    groupId={groupId}
+                  />
+                )}
+
+                {activeTab === "actorProfiles" && (
+                  <ActorProfilesTab
+                    isDark={isDark}
+                    isActive={scope === "global" && activeTab === "actorProfiles"}
+                    scope="global"
+                  />
+                )}
+
+                {activeTab === "voice" && scope === "global" && globalSettingsEnabled && (
+                  <VoiceSettingsTab
+                    voice={codexVoice}
+                    section={voiceSection}
+                    audioRequest={voiceAudioRequest}
+                    featureRequest={voiceFeatureRequest}
+                    // A fresh target wins on the first render after reopening;
+                    // the persisted request is updated by the parent effect.
+                    analystRequest={
+                      settingsTarget
+                        ? settingsTarget.voiceAnalyst
+                          ? settingsTarget.nonce
+                          : 0
+                        : voiceAnalystRequest
+                    }
+                    initialFocusRef={initialVoiceFocus}
+                    onSectionChange={setVoiceSection}
+                    isDark={isDark}
+                    isActive={isOpen}
+                    onBeforeLeaveChange={(guard) => {
+                      voiceBeforeLeave.current = guard;
+                    }}
+                  />
+                )}
+
+                {activeTab === "myProfiles" && (
+                  <ActorProfilesTab
+                    isDark={isDark}
+                    isActive={scope === "global" && activeTab === "myProfiles"}
+                    scope="my"
+                  />
+                )}
+
+                {activeTab === "branding" && (
+                  <BrandingTab
+                    isDark={isDark}
+                    isActive={scope === "global" && activeTab === "branding"}
+                  />
+                )}
+
+                {activeTab === "account" && (
+                  <AccountTab
+                    isDark={isDark}
+                    isActive={scope === "global" && activeTab === "account"}
+                    returnToWebAccess={accountReturnToWebAccess}
+                    onOpenWebAccess={openWebAccessFromAccount}
+                  />
+                )}
+
+                {activeTab === "webAccess" && (
+                  <WebAccessTab
+                    isDark={isDark}
+                    isActive={scope === "global" && activeTab === "webAccess"}
+                    focusReach={focusReachOnOpen}
+                    onOpenAccount={openAccountFromWebAccess}
+                  />
+                )}
+
+                {activeTab === "webModels" && (
+                  <WebModelConnectorsTab
+                    provider={webModelProvider}
+                    onProviderChange={setWebModelProvider}
+                    isDark={isDark}
+                    isActive={scope === "global" && activeTab === "webModels"}
+                    currentGroupId={groupId}
+                    onOpenWebAccess={() => setGlobalTab("webAccess")}
+                  />
+                )}
+
+                {activeTab === "developer" && (
+                  <DeveloperTab
+                    isDark={isDark}
+                    groupId={groupId}
+                    runtimeVersion={runtimeVersion}
+                    runtimeBuildInfo={runtimeBuildInfo}
+                    daemonVersion={daemonVersion}
+                    runtimeInfoErr={runtimeInfoErr}
+                    developerMode={developerMode}
+                    setDeveloperMode={setDeveloperMode}
+                    logLevel={logLevel}
+                    setLogLevel={setLogLevel}
+                    terminalBacklogMiB={terminalBacklogMiB}
+                    setTerminalBacklogMiB={setTerminalBacklogMiB}
+                    terminalScrollbackLines={terminalScrollbackLines}
+                    setTerminalScrollbackLines={setTerminalScrollbackLines}
+                    peerRuntimeVisibility={peerRuntimeVisibility}
+                    setPeerRuntimeVisibility={setPeerRuntimeVisibility}
+                    assistantRuntimeVisibility={assistantRuntimeVisibility}
+                    setAssistantRuntimeVisibility={setAssistantRuntimeVisibility}
+                    obsBusy={obsBusy}
+                    onSaveObservability={handleSaveObservability}
+                    debugSnapshot={debugSnapshot}
+                    debugSnapshotErr={debugSnapshotErr}
+                    debugSnapshotBusy={debugSnapshotBusy}
+                    onLoadDebugSnapshot={loadDebugSnapshot}
+                    onClearDebugSnapshot={() => {
+                      setDebugSnapshot("");
+                      setDebugSnapshotErr("");
+                    }}
+                    logComponent={logComponent}
+                    setLogComponent={setLogComponent}
+                    logLines={logLines}
+                    setLogLines={setLogLines}
+                    logText={logText}
+                    logErr={logErr}
+                    logBusy={logBusy}
+                    onLoadLogTail={loadLogTail}
+                    onClearLogs={handleClearLogs}
+                    registryBusy={registryBusy}
+                    registryErr={registryErr}
+                    registryResult={registryResult}
+                    onPreviewRegistry={loadRegistryPreview}
+                    onReconcileRegistry={handleReconcileRegistry}
+                  />
+                )}
+              </Suspense>
+            )}
+            {saveFeedback?.context === saveContext && (
+              <p
+                role={saveFeedback.error ? "alert" : "status"}
+                className={`text-sm ${saveFeedback.error ? "text-rose-700 dark:text-rose-300" : "text-[var(--color-accent-success)]"}`}
+              >
+                {saveFeedback.message}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </ModalFrame>
+  );
+}

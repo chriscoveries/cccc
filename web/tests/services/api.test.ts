@@ -1,0 +1,2458 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+const fetchMock = vi.fn();
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function makeStorage() {
+  const data = new Map<string, string>();
+  return {
+    getItem: vi.fn((key: string) => data.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => {
+      data.set(key, String(value));
+    }),
+    removeItem: vi.fn((key: string) => {
+      data.delete(key);
+    }),
+    clear: vi.fn(() => {
+      data.clear();
+    }),
+  };
+}
+
+const sessionStorageMock = makeStorage();
+
+vi.stubGlobal("fetch", fetchMock);
+vi.stubGlobal("window", { location: { search: "", protocol: "http:", host: "localhost" } });
+vi.stubGlobal("sessionStorage", sessionStorageMock);
+
+describe("api error normalization", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("window", { location: { search: "", protocol: "http:", host: "localhost" } });
+    vi.stubGlobal("sessionStorage", sessionStorageMock);
+  });
+
+  it("accepts the canonical success envelope and rejects malformed 200 payloads", async () => {
+    const { normalizeApiResponse } = await import("../../src/services/api/base");
+    const payload = { ok: true, result: { value: 1 } };
+    expect(normalizeApiResponse(payload)).toEqual(payload);
+    for (const payload of [
+      { result: { value: 1 } },
+      { ok: "true", result: { value: 1 } },
+      { ok: true },
+    ]) {
+      expect(normalizeApiResponse(payload)).toEqual({
+        ok: false,
+        error: { code: "PARSE_ERROR", message: "Invalid API response" },
+      });
+    }
+  });
+
+  it("keeps regular API errors unchanged", async () => {
+    const { formatApiErrorMessage } = await import("../../src/services/api");
+
+    expect(formatApiErrorMessage({ code: "permission_denied", message: "permission denied" })).toBe(
+      "permission denied",
+    );
+  });
+
+  it("summarizes daemon transport diagnostics into the message", async () => {
+    const { formatApiErrorMessage } = await import("../../src/services/api");
+
+    expect(
+      formatApiErrorMessage({
+        code: "daemon_unavailable",
+        message: "CCCC daemon unavailable",
+        details: {
+          transport: "tcp",
+          endpoint: { host: "127.0.0.1", port: 9001 },
+          phase: "connect",
+          reason: "os_error",
+        },
+      }),
+    ).toBe("CCCC daemon unavailable · tcp 127.0.0.1:9001 · connect os error");
+  });
+
+  it("normalizes daemon_unavailable messages from response bodies", async () => {
+    vi.stubGlobal("window", { location: { search: "" } });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              ok: false,
+              error: {
+                code: "daemon_unavailable",
+                message: "CCCC daemon unavailable",
+                details: {
+                  transport: "unix",
+                  endpoint: { path: "/tmp/ccccd.sock" },
+                  phase: "read",
+                  reason: "timeout",
+                },
+              },
+            }),
+            { status: 503, headers: { "content-type": "application/json" } },
+          ),
+        ),
+    );
+
+    const { apiJson } = await import("../../src/services/api");
+    const resp = await apiJson("/api/v1/ping");
+
+    expect(resp.ok).toBe(false);
+    if (resp.ok) {
+      throw new Error("expected error response");
+    }
+    expect(resp.error.message).toBe(
+      "CCCC daemon unavailable · unix /tmp/ccccd.sock · read timeout",
+    );
+    expect(resp.error.details).toEqual({
+      transport: "unix",
+      endpoint: { path: "/tmp/ccccd.sock" },
+      phase: "read",
+      reason: "timeout",
+    });
+  });
+});
+
+describe("api.fetchActors", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    sessionStorageMock.clear();
+  });
+
+  afterEach(async () => {
+    const api = await import("../../src/services/api");
+    api.clearAuthToken();
+  });
+
+  it("defaults to pure-read actors without unread query", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { actors: [] } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.fetchActors("g-demo");
+
+    expect(resp.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/actors",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "content-type": "application/json" }),
+      }),
+    );
+  });
+
+  it("keeps explicit unread requests on the slow path", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { actors: [] } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.fetchActors("g-demo", true);
+
+    expect(resp.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/actors?include_unread=true",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "content-type": "application/json" }),
+      }),
+    );
+  });
+});
+
+describe("api.listActorProfiles", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    sessionStorageMock.clear();
+  });
+
+  afterEach(async () => {
+    const api = await import("../../src/services/api");
+    api.clearAuthToken();
+  });
+
+  it("requests profiles through the server-side accessible view", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { profiles: [] } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.listActorProfiles();
+
+    expect(resp.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/profiles?view=accessible",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "content-type": "application/json" }),
+      }),
+    );
+  });
+});
+
+describe("api.fetchPresentation", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    sessionStorageMock.clear();
+  });
+
+  afterEach(async () => {
+    const api = await import("../../src/services/api");
+    api.clearAuthToken();
+  });
+
+  it("normalizes the presentation snapshot into four stable slots", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            presentation: {
+              v: 1,
+              updated_at: "2026-03-21T00:00:00Z",
+              highlight_slot_id: "slot-2",
+              slots: [
+                {
+                  slot_id: "slot-2",
+                  index: 2,
+                  card: {
+                    slot_id: "slot-2",
+                    title: "Report",
+                    card_type: "table",
+                    published_by: "peer-1",
+                    published_at: "2026-03-21T00:00:00Z",
+                    content: { mode: "inline", table: { columns: ["name"], rows: [["demo"]] } },
+                  },
+                },
+              ],
+            },
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.fetchPresentation("g-demo");
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect(resp.result.presentation.highlight_slot_id).toBe("slot-2");
+    expect(resp.result.presentation.slots).toHaveLength(4);
+    expect(resp.result.presentation.slots[0]?.slot_id).toBe("slot-1");
+    expect(resp.result.presentation.slots[1]?.card?.title).toBe("Report");
+    expect(resp.result.presentation.slots[1]?.card?.content.table?.rows).toEqual([["demo"]]);
+  });
+
+  it("builds cookie-authenticated asset urls without query secrets", async () => {
+    sessionStorageMock.setItem("cccc_dev_token", "dev-token");
+    const api = await import("../../src/services/api");
+    expect(api.getPresentationAssetUrl("g-demo", "slot-4")).toBe(
+      "/api/v1/groups/g-demo/presentation/slots/slot-4/asset",
+    );
+    expect(api.getPresentationAssetUrl("g-demo", "slot-4", "tick-2")).toBe(
+      "/api/v1/groups/g-demo/presentation/slots/slot-4/asset?v=tick-2",
+    );
+  });
+
+  it("builds cookie-authenticated blob urls only for group-scoped blob paths", async () => {
+    sessionStorageMock.setItem("cccc_dev_token", "dev-token");
+    const api = await import("../../src/services/api");
+    expect(api.getGroupBlobUrl("g-demo", "state/blobs/sha256_demo.jpg")).toBe(
+      "/api/v1/groups/g-demo/blobs/sha256_demo.jpg",
+    );
+    expect(api.getGroupBlobUrl("g-demo", "workspace/demo.jpg")).toBe("");
+  });
+
+  it("starts a browser-surface session and normalizes its state", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            browser_surface: {
+              active: true,
+              state: "ready",
+              message: "Browser surface ready.",
+              strategy: "playwright_chromium_cdp",
+              url: "http://127.0.0.1:3000",
+              width: 1440,
+              height: 900,
+              last_frame_seq: 2,
+              controller_attached: false,
+            },
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.startPresentationBrowserSurfaceSession("g-demo", {
+      slotId: "slot-2",
+      url: "http://127.0.0.1:3000",
+      width: 1440,
+      height: 900,
+    });
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect(resp.result.browser_surface.state).toBe("ready");
+    expect(resp.result.browser_surface.strategy).toBe("playwright_chromium_cdp");
+    expect(resp.result.browser_surface.width).toBe(1440);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/presentation/browser_surface/session",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          by: "user",
+          slot: "slot-2",
+          url: "http://127.0.0.1:3000",
+          width: 1440,
+          height: 900,
+        }),
+      }),
+    );
+  });
+
+  it("builds a cookie-authenticated websocket url without query secrets", async () => {
+    sessionStorageMock.setItem("cccc_dev_token", "dev-token");
+    vi.stubGlobal("window", { location: { search: "", protocol: "https:", host: "cccc.test" } });
+    const api = await import("../../src/services/api");
+    expect(api.getPresentationBrowserSurfaceWebSocketUrl("g-demo", "slot-3")).toBe(
+      "wss://cccc.test/api/v1/groups/g-demo/presentation/browser_surface/ws?slot=slot-3",
+    );
+  });
+
+  it("requests browser-surface session info for a specific slot", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: { group_id: "g-demo", browser_surface: { active: false, state: "idle" } },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.fetchPresentationBrowserSurfaceSession("g-demo", "slot-1");
+
+    expect(resp.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/presentation/browser_surface/session?slot=slot-1",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "content-type": "application/json" }),
+      }),
+    );
+  });
+
+  it("uploads a presentation ref snapshot and normalizes the stored blob metadata", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            snapshot: {
+              path: "state/blobs/sha256_demo.jpg",
+              mime_type: "image/jpeg",
+              bytes: 3210,
+              sha256: "sha256_demo",
+              width: 1440,
+              height: 900,
+              captured_at: "2026-03-22T12:00:00Z",
+              source: "browser_surface",
+            },
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const file = new File(["fake-image"], "snapshot.jpg", { type: "image/jpeg" });
+    const resp = await api.uploadPresentationReferenceSnapshot("g-demo", {
+      slotId: "slot-3",
+      file,
+      source: "browser_surface",
+      capturedAt: "2026-03-22T12:00:00Z",
+      width: 1440,
+      height: 900,
+    });
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect(resp.result.snapshot.path).toBe("state/blobs/sha256_demo.jpg");
+    expect(resp.result.snapshot.width).toBe(1440);
+    const [url, requestInit] = fetchMock.mock.calls[0] ?? [];
+    expect(url).toBe("/api/v1/groups/g-demo/presentation/ref_snapshot");
+    expect(requestInit).toEqual(
+      expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
+    );
+    const form = requestInit.body as FormData;
+    expect(form.get("slot")).toBe("slot-3");
+    expect(form.get("source")).toBe("browser_surface");
+    expect(form.get("captured_at")).toBe("2026-03-22T12:00:00Z");
+    expect(form.get("width")).toBe("1440");
+    expect(form.get("height")).toBe("900");
+    expect(form.get("file")).toBe(file);
+  });
+
+  it("publishes a presentation URL on the JSON endpoint", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            slot_id: "slot-2",
+            card: {
+              slot_id: "slot-2",
+              title: "Dashboard",
+              card_type: "web_preview",
+              published_by: "user",
+              published_at: "2026-03-21T00:00:00Z",
+              content: { mode: "reference", url: "https://example.com/dashboard" },
+            },
+            presentation: {
+              v: 1,
+              highlight_slot_id: "slot-2",
+              slots: [
+                {
+                  slot_id: "slot-2",
+                  index: 2,
+                  card: {
+                    slot_id: "slot-2",
+                    title: "Dashboard",
+                    card_type: "web_preview",
+                    published_by: "user",
+                    published_at: "2026-03-21T00:00:00Z",
+                    content: { mode: "reference", url: "https://example.com/dashboard" },
+                  },
+                },
+              ],
+            },
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.publishPresentationUrl("g-demo", {
+      slotId: "slot-2",
+      url: "https://example.com/dashboard",
+      title: "Dashboard",
+    });
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect(resp.result.slot_id).toBe("slot-2");
+    expect(resp.result.card?.card_type).toBe("web_preview");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/presentation/publish",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          by: "user",
+          slot: "slot-2",
+          url: "https://example.com/dashboard",
+          title: "Dashboard",
+          summary: "",
+        }),
+      }),
+    );
+  });
+
+  it("publishes a local file on the upload endpoint", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            slot_id: "slot-1",
+            card: {
+              slot_id: "slot-1",
+              title: "notes.md",
+              card_type: "markdown",
+              published_by: "user",
+              published_at: "2026-03-21T00:00:00Z",
+              content: { mode: "inline", markdown: "# notes" },
+            },
+            presentation: {
+              v: 1,
+              highlight_slot_id: "slot-1",
+              slots: [
+                {
+                  slot_id: "slot-1",
+                  index: 1,
+                  card: {
+                    slot_id: "slot-1",
+                    title: "notes.md",
+                    card_type: "markdown",
+                    published_by: "user",
+                    published_at: "2026-03-21T00:00:00Z",
+                    content: { mode: "inline", markdown: "# notes" },
+                  },
+                },
+              ],
+            },
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const file = new File(["# notes"], "notes.md", { type: "text/markdown" });
+    const resp = await api.publishPresentationUpload("g-demo", { slotId: "slot-1", file });
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect(resp.result.card?.title).toBe("notes.md");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/presentation/publish_upload",
+      expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
+    );
+  });
+
+  it("publishes a workspace file on the JSON endpoint", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            slot_id: "slot-3",
+            card: {
+              slot_id: "slot-3",
+              title: "report.md",
+              card_type: "markdown",
+              published_by: "user",
+              published_at: "2026-03-21T00:00:00Z",
+              content: {
+                mode: "workspace_link",
+                workspace_rel_path: "docs/report.md",
+                mime_type: "text/markdown",
+                file_name: "report.md",
+              },
+            },
+            presentation: {
+              v: 1,
+              highlight_slot_id: "slot-3",
+              slots: [
+                {
+                  slot_id: "slot-3",
+                  index: 3,
+                  card: {
+                    slot_id: "slot-3",
+                    title: "report.md",
+                    card_type: "markdown",
+                    published_by: "user",
+                    published_at: "2026-03-21T00:00:00Z",
+                    content: { mode: "workspace_link", workspace_rel_path: "docs/report.md" },
+                  },
+                },
+              ],
+            },
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.publishPresentationWorkspace("g-demo", {
+      slotId: "slot-3",
+      path: "docs/report.md",
+      title: "report.md",
+    });
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect(resp.result.card?.content.workspace_rel_path).toBe("docs/report.md");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/presentation/publish_workspace",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          by: "user",
+          slot: "slot-3",
+          path: "docs/report.md",
+          title: "report.md",
+          summary: "",
+        }),
+      }),
+    );
+  });
+
+  it("loads workspace listing for presentation pinning", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            root_path: "/workspace/demo",
+            path: "docs",
+            parent: "",
+            items: [
+              {
+                name: "report.md",
+                path: "docs/report.md",
+                is_dir: false,
+                mime_type: "text/markdown",
+              },
+              { name: "assets", path: "docs/assets", is_dir: true },
+            ],
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.fetchPresentationWorkspaceListing("g-demo", "docs");
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect(resp.result.root_path).toBe("/workspace/demo");
+    expect(resp.result.path).toBe("docs");
+    expect(resp.result.items[0]?.path).toBe("docs/report.md");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/presentation/workspace/list?path=docs",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "content-type": "application/json" }),
+      }),
+    );
+  });
+
+  it("clears a presentation slot on the mutation endpoint", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            cleared_slots: ["slot-4"],
+            presentation: { v: 1, highlight_slot_id: "", slots: [] },
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.clearPresentationSlot("g-demo", "slot-4");
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect(resp.result.cleared_slots).toEqual(["slot-4"]);
+    expect(resp.result.presentation.slots).toHaveLength(4);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/presentation/clear",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ by: "user", slot: "slot-4" }),
+      }),
+    );
+  });
+});
+
+describe("api assistant voice model helpers", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    sessionStorageMock.clear();
+  });
+
+  afterEach(async () => {
+    const api = await import("../../src/services/api");
+    api.clearAuthToken();
+  });
+
+  it("normalizes assistant state service models", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            assistant: {
+              assistant_id: "voice_secretary",
+              kind: "voice_secretary",
+              enabled: true,
+              lifecycle: "idle",
+              health: {
+                service: {
+                  ready: true,
+                  selected_model_id: "mock_asr",
+                  model: { model_id: "mock_asr", status: "ready", command_ready: true },
+                },
+              },
+              config: {
+                recognition_backend: "assistant_service_local_asr",
+                service_model_id: "mock_asr",
+              },
+            },
+            service_models: [
+              {
+                model_id: "mock_asr",
+                title: "Mock ASR",
+                status: "ready",
+                command_ready: true,
+                artifacts: [{ path: "adapter.py", size_bytes: 1234 }],
+              },
+            ],
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.fetchAssistant("g-demo", "voice_secretary");
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) throw new Error("expected ok response");
+    expect(resp.result.service_models_by_id?.mock_asr?.status).toBe("ready");
+    expect(resp.result.service_models?.[0]?.artifacts?.[0]?.size_bytes).toBe(1234);
+    expect(
+      (resp.result.assistant?.health?.service as Record<string, unknown>)?.selected_model_id,
+    ).toBe("mock_asr");
+  });
+
+  it("requests a matching voice prompt draft", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            assistant: {
+              assistant_id: "voice_secretary",
+              kind: "voice_secretary",
+              enabled: true,
+              lifecycle: "idle",
+            },
+            prompt_draft: {
+              request_id: "voice-prompt-1",
+              status: "pending",
+              operation: "replace_with_refined_prompt",
+              draft_text: "请审查当前代码优化方案，并按风险优先级给出可执行修改建议。",
+              composer_snapshot_hash: "snapshot-1",
+            },
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.fetchAssistant("g-demo", "voice_secretary", {
+      promptRequestId: "voice-prompt-1",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/assistants/voice_secretary?prompt_request_id=voice-prompt-1",
+      expect.anything(),
+    );
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) throw new Error("expected ok response");
+    expect(resp.result.prompt_draft).toMatchObject({
+      request_id: "voice-prompt-1",
+      operation: "replace_with_refined_prompt",
+    });
+  });
+
+  it("calls the install model endpoint and clears assistant cache", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            assistant: {
+              assistant_id: "voice_secretary",
+              kind: "voice_secretary",
+              enabled: true,
+              lifecycle: "idle",
+            },
+            model: { model_id: "mock_asr", status: "ready" },
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.installVoiceAssistantModel("g-demo", {
+      modelId: "mock_asr",
+      by: "user",
+    });
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) throw new Error("expected ok response");
+    expect(resp.result.model?.model_id).toBe("mock_asr");
+    expect(resp.result.model?.status).toBe("ready");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/assistants/voice_secretary/models/install",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ model_id: "mock_asr", by: "user", background: false }),
+      }),
+    );
+  });
+
+  it("preserves offline ASR model metadata in assistant state", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            assistant: {
+              assistant_id: "voice_secretary",
+              kind: "voice_secretary",
+              enabled: true,
+              lifecycle: "idle",
+            },
+            service_models: [
+              {
+                model_id: "sherpa_onnx_sense_voice_zh_en_ja_ko_yue_int8",
+                kind: "asr",
+                status: "not_installed",
+                offline_ready: false,
+                offline: { engine: "sense_voice" },
+              },
+            ],
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.fetchAssistant("g-demo", "voice_secretary");
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) throw new Error("expected ok response");
+    const model = resp.result.service_models_by_id?.sherpa_onnx_sense_voice_zh_en_ja_ko_yue_int8;
+    expect(model?.offline_ready).toBe(false);
+    expect(model?.offline).toEqual({ engine: "sense_voice" });
+  });
+
+  it("preserves built-in ASR readiness and version in assistant state", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            group_id: "g-demo",
+            assistant: {
+              assistant_id: "voice_secretary",
+              kind: "voice_secretary",
+              enabled: true,
+              lifecycle: "idle",
+            },
+            service_runtime: {
+              runtime_id: "sherpa_onnx_streaming",
+              status: "ready",
+              available: true,
+              installed: true,
+              installed_version: "1.13.4",
+            },
+          },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.fetchAssistant("g-demo", "voice_secretary");
+
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) throw new Error("expected ok response");
+    expect(resp.result.service_runtime).toMatchObject({
+      runtime_id: "sherpa_onnx_streaming",
+      status: "ready",
+      available: true,
+      installed: true,
+      installed_version: "1.13.4",
+    });
+  });
+});
+
+describe("api.message refs", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    sessionStorageMock.clear();
+  });
+
+  afterEach(async () => {
+    const api = await import("../../src/services/api");
+    api.clearAuthToken();
+  });
+
+  it("sends structured refs on the JSON send path", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { event_id: "evt-1" } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const refs = [
+      { kind: "presentation_ref", slot_id: "slot-2", locator: { viewer_scroll_top: 240 } },
+    ];
+    await api.sendMessage(
+      "g-demo",
+      "please review",
+      ["worker-1"],
+      undefined,
+      "send",
+      "client-1",
+      refs,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/send",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          text: "please review",
+          by: "user",
+          to: ["worker-1"],
+          path: "",
+          message_mode: "send",
+          client_id: "client-1",
+          refs,
+        }),
+      }),
+    );
+  });
+
+  it("dispatches slash skills through the hidden dispatch endpoint", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({ ok: true, result: { accepted: true, message_mode: "send" } }),
+    });
+
+    const api = await import("../../src/services/api");
+    await api.dispatchSlashSkill("g-demo", {
+      taskText: "开始执行",
+      command: "/using-superpowers",
+      capabilityId: "skill:agent_self_proposed:using-superpowers",
+      to: ["worker-1"],
+      clientId: "client-1",
+      replyTo: "evt-parent",
+      quoteText: "原始消息",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/slash_skill_dispatch",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          task_text: "开始执行",
+          command: "/using-superpowers",
+          capability_id: "skill:agent_self_proposed:using-superpowers",
+          to: ["worker-1"],
+          client_id: "client-1",
+          reply_to: "evt-parent",
+          quote_text: "原始消息",
+        }),
+      }),
+    );
+  });
+
+  it("sends cross-group messages through the source group endpoint with explicit dst_group_id", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: { src_event: { id: "src-1" }, dst_event: { id: "dst-1" } },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    await api.sendCrossGroupMessage("g-src", "g-dst", "route this", ["@foreman"], "request_reply");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-src/send_cross_group",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          text: "route this",
+          by: "user",
+          dst_group_id: "g-dst",
+          to: ["@foreman"],
+          message_mode: "request_reply",
+        }),
+      }),
+    );
+  });
+
+  it("preserves reply metadata on cross-group source sends", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { src_event: { id: "src-1" } } }),
+    });
+
+    const api = await import("../../src/services/api");
+    await api.sendCrossGroupMessage("g-src", "g-dst", "你好", ["@foreman"], "send", undefined, {
+      replyTo: "evt-original",
+      quoteText: "原消息",
+      clientId: "local-1",
+      remoteReplyToEventId: "evt-remote-original",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-src/send_cross_group",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          text: "你好",
+          by: "user",
+          dst_group_id: "g-dst",
+          to: ["@foreman"],
+          message_mode: "send",
+          reply_to: "evt-original",
+          quote_text: "原消息",
+          client_id: "local-1",
+          remote_reply_to_event_id: "evt-remote-original",
+        }),
+      }),
+    );
+  });
+
+  it("rejects unsupported local cross-group files before any HTTP request", async () => {
+    const api = await import("../../src/services/api");
+    const file = new File(["image"], "shot.png", { type: "image/png" });
+    const result = await api.sendCrossGroupMessage(
+      "g-src",
+      "g-dst",
+      "hello",
+      ["@foreman"],
+      "send",
+      [file],
+    );
+    expect(result).toMatchObject({ ok: false, error: { code: "attachments_not_supported" } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("sends tracked delegation payloads through the daemon endpoint", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { task_id: "T001" } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const refs = [{ kind: "presentation_ref", slot_id: "slot-2" }];
+    await api.trackedSendMessage("g-demo", {
+      title: "Review routing",
+      text: "Please review routing.",
+      to: ["reviewer"],
+      outcome: "Review evidence reported.",
+      checklist: [{ text: "Inspect code" }],
+      task_priority: "high",
+      idempotency_key: "req-1",
+      refs,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/g-demo/tracked_send",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          title: "Review routing",
+          text: "Please review routing.",
+          by: "user",
+          to: ["reviewer"],
+          outcome: "Review evidence reported.",
+          checklist: [{ text: "Inspect code" }],
+          assignee: "",
+          waiting_on: "actor",
+          handoff_to: "",
+          notes: "",
+          task_priority: "high",
+          idempotency_key: "req-1",
+          refs,
+        }),
+      }),
+    );
+  });
+
+  it("sends structured refs on the upload reply path", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { event_id: "evt-2" } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const refs = [
+      { kind: "presentation_ref", slot_id: "slot-3", locator: { url: "http://127.0.0.1:3000" } },
+    ];
+    const file = new File(["hello"], "note.txt", { type: "text/plain" });
+    await api.replyMessage(
+      "g-demo",
+      "see attached",
+      ["worker-2"],
+      "evt-parent",
+      [file],
+      "client-2",
+      refs,
+      "",
+      "mail",
+    );
+
+    const [url, requestInit] = fetchMock.mock.calls[0] ?? [];
+    expect(url).toBe("/api/v1/groups/g-demo/reply_upload");
+    expect(requestInit).toEqual(
+      expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
+    );
+    const form = requestInit.body as FormData;
+    expect(form.get("reply_to")).toBe("evt-parent");
+    expect(form.get("client_id")).toBe("client-2");
+    expect(form.get("refs_json")).toBe(JSON.stringify(refs));
+    expect(form.get("message_mode")).toBe("mail");
+    expect(form.get("files")).toBe(file);
+  });
+});
+
+describe("api.capability overview", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    sessionStorageMock.clear();
+  });
+
+  it("can request capability overview without source instance aggregation", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: { items: [], count: 0, total_count: 0, offset: 0, limit: 1, has_more: false },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    await api.fetchCapabilityOverview({
+      includeIndexed: true,
+      includeSourceInstances: false,
+      limit: 1,
+      kind: "skill",
+      groupId: "g-demo",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/capabilities/overview?limit=1&include_indexed=true&include_source_instances=false&kind=skill&group_id=g-demo",
+      expect.any(Object),
+    );
+  });
+});
+
+describe("copy groups api entrypoints", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    sessionStorageMock.clear();
+  });
+
+  afterEach(async () => {
+    const api = await import("../../src/services/api");
+    api.clearAuthToken();
+  });
+
+  it("exports group copies from the group-scoped zip endpoint", async () => {
+    const blob = new Blob(["zip"], { type: "application/zip" });
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      headers: {
+        get: (name: string) =>
+          name.toLowerCase() === "content-disposition" ? 'attachment; filename="copy.zip"' : null,
+      },
+      blob: async () => blob,
+    });
+
+    const api = await import("../../src/services/api");
+    const resp = await api.exportGroupCopy("g-demo");
+
+    expect(resp.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/groups/g-demo/copy/export");
+  });
+
+  it("keeps copy preview/import endpoints wired", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { applied: true } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const file = new File(["zip"], "copy.zip", { type: "application/zip" });
+
+    await api.previewGroupCopy(file);
+    await api.importGroupCopy({ file, uploadId: "upload-123" }, "/tmp/demo", "Demo");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/groups/copy/preview_import",
+      expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
+    );
+    const previewInit = fetchMock.mock.calls[0][1] as RequestInit;
+    const previewForm = previewInit.body as FormData;
+    expect(previewForm.get("file")).toBe(file);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/groups/copy/import",
+      expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
+    );
+    const importInit = fetchMock.mock.calls[1][1] as RequestInit;
+    const importForm = importInit.body as FormData;
+    expect(importForm.get("upload_id")).toBe("upload-123");
+    expect(importForm.get("file")).toBeNull();
+  });
+
+  it("can clean up staged group copy uploads", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { deleted: true } }),
+    });
+
+    const api = await import("../../src/services/api");
+
+    await api.cleanupGroupCopyUpload("upload-123");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/groups/copy/uploads/upload-123",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+});
+
+describe("api bootstrap read cache", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    sessionStorageMock.clear();
+  });
+
+  afterEach(async () => {
+    const api = await import("../../src/services/api");
+    api.clearAuthToken();
+  });
+
+  it("reuses a recent groups response inside the bootstrap window", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { groups: [{ group_id: "g-demo" }] } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const first = await api.fetchGroups();
+    const second = await api.fetchGroups();
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("invalidates the recent groups response before group writes", async () => {
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups" && method === "GET") {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              ok: true,
+              result: { groups: [{ group_id: `g-${fetchMock.mock.calls.length}` }] },
+            }),
+        });
+      }
+      if (path === "/api/v1/groups" && method === "POST") {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () => JSON.stringify({ ok: true, result: { group_id: "g-new" } }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    await api.fetchGroups();
+    await api.createGroup("New Group");
+    await api.fetchGroups();
+
+    const groupGets = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/groups" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(groupGets).toHaveLength(2);
+  });
+
+  it("normalizes the compatible nested group create response", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({ ok: true, result: { group: { group_id: "g-compatible" } } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const response = await api.createGroup("Compatible");
+
+    expect(response).toEqual({ ok: true, result: { group_id: "g-compatible" } });
+  });
+
+  it("rejects non-string or conflicting group ids in create responses", async () => {
+    const api = await import("../../src/services/api");
+    for (const result of [
+      { group_id: 42 },
+      { group: { group_id: null } },
+      { group_id: "g_top", group: { group_id: "g_nested" } },
+    ]) {
+      fetchMock.mockResolvedValueOnce({
+        status: 200,
+        ok: true,
+        text: async () => JSON.stringify({ ok: true, result }),
+      });
+      await expect(api.createGroup("Invalid")).resolves.toEqual({
+        ok: false,
+        error: { code: "invalid_response", message: "Invalid group create response" },
+      });
+    }
+  });
+
+  it("creates and attaches a group through one backend transaction", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { group_id: "g-attached" } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const response = await api.createGroupWithScope("Attached", "/tmp/project");
+
+    expect(response).toEqual({ ok: true, result: { group_id: "g-attached" } });
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/groups", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Attached", topic: "", path: "/tmp/project", by: "user" }),
+    });
+  });
+
+  it("rejects malformed filesystem success payloads instead of showing an empty directory", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { path: "/tmp", entries: [] } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const response = await api.fetchDirContents("/tmp");
+
+    expect(response).toEqual({
+      ok: false,
+      error: { code: "invalid_response", message: "Invalid filesystem list response" },
+    });
+  });
+
+  it("rejects malformed recent directory suggestions", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { suggestions: [{ path: "/tmp" }] } }),
+    });
+
+    const api = await import("../../src/services/api");
+    const response = await api.fetchDirSuggestions();
+
+    expect(response).toEqual({
+      ok: false,
+      error: { code: "invalid_response", message: "Invalid filesystem recent response" },
+    });
+  });
+
+  it("invalidates the recent groups response when auth token changes", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { groups: [{ group_id: "g-demo" }] } }),
+    });
+
+    const api = await import("../../src/services/api");
+    await api.fetchGroups();
+    api.setAuthToken("token-b");
+    await api.fetchGroups();
+
+    const groupGets = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/groups" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(groupGets).toHaveLength(2);
+  });
+
+  it("allows event-driven callers to bypass the recent groups response", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { groups: [{ group_id: "g-demo" }] } }),
+    });
+
+    const api = await import("../../src/services/api");
+    await api.fetchGroups();
+    api.invalidateGroupsRead();
+    await api.fetchGroups();
+
+    const groupGets = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/groups" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(groupGets).toHaveLength(2);
+  });
+
+  it("does not let an invalidated stale groups read repopulate the recent cache", async () => {
+    const staleRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups" && method === "GET") {
+        const callCount = fetchMock.mock.calls.filter(
+          ([calledPath, calledInit]) =>
+            calledPath === "/api/v1/groups" &&
+            String((calledInit as RequestInit | undefined)?.method || "GET").toUpperCase() ===
+              "GET",
+        ).length;
+        if (callCount === 1) {
+          return staleRead.promise;
+        }
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({ ok: true, result: { groups: [{ group_id: `g-${callCount}` }] } }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    const stalePromise = api.fetchGroups();
+    await Promise.resolve();
+
+    api.invalidateGroupsRead();
+    staleRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { groups: [{ group_id: "g-stale" }] } }),
+    });
+    await stalePromise;
+
+    await api.fetchGroups();
+    await api.fetchGroups();
+
+    const groupGets = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/groups" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(groupGets).toHaveLength(2);
+  });
+
+  it("reuses a recent ping response per query variant", async () => {
+    fetchMock.mockImplementation((path: string) => {
+      if (path === "/api/v1/ping") {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () => JSON.stringify({ ok: true, result: { version: "1.0.0" } }),
+        });
+      }
+      if (path === "/api/v1/ping?include_home=1") {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({ ok: true, result: { version: "1.0.0", home: "/tmp/cccc" } }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: GET ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    await api.fetchPing();
+    await api.fetchPing();
+    await api.fetchPing({ includeHome: true });
+    await api.fetchPing({ includeHome: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates the recent web access session response before token writes", async () => {
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/web_access/session" && method === "GET") {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              ok: true,
+              result: {
+                web_access_session: { can_access_global_settings: fetchMock.mock.calls.length > 1 },
+              },
+            }),
+        });
+      }
+      if (path === "/api/v1/access-tokens" && method === "POST") {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              ok: true,
+              result: {
+                access_token: {
+                  token_id: "tok-1",
+                  user_id: "user-1",
+                  is_admin: false,
+                  allowed_groups: [],
+                  created_at: "2026-03-19T00:00:00Z",
+                },
+              },
+            }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    await api.fetchWebAccessSession();
+    await api.createAccessToken("user-1", false, []);
+    await api.fetchWebAccessSession();
+
+    const sessionGets = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/web_access/session" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(sessionGets).toHaveLength(2);
+  });
+
+  it("invalidates the recent web access session response when auth token changes", async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: { web_access_session: { can_access_global_settings: true } },
+        }),
+    });
+
+    const api = await import("../../src/services/api");
+    await api.fetchWebAccessSession();
+    api.clearAuthToken();
+    await api.fetchWebAccessSession();
+
+    const sessionGets = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/web_access/session" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(sessionGets).toHaveLength(2);
+  });
+});
+
+describe("api.fetchGroupPrompts invalidation", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    sessionStorageMock.clear();
+  });
+
+  afterEach(async () => {
+    const api = await import("../../src/services/api");
+    api.clearAuthToken();
+  });
+
+  it("clears the shared read request before updateGroupPrompt", async () => {
+    const firstRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups/g-demo/prompts" && method === "GET") {
+        if (
+          fetchMock.mock.calls.filter(
+            ([calledPath, calledInit]) =>
+              calledPath === "/api/v1/groups/g-demo/prompts" &&
+              String((calledInit as RequestInit | undefined)?.method || "GET").toUpperCase() ===
+                "GET",
+          ).length === 1
+        ) {
+          return firstRead.promise;
+        }
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              ok: true,
+              result: {
+                preamble: {
+                  kind: "preamble",
+                  source: "builtin",
+                  filename: "AGENTS.md",
+                  content: "next-preamble",
+                },
+                help: {
+                  kind: "help",
+                  source: "builtin",
+                  filename: "AGENTS.help.md",
+                  content: "next-help",
+                },
+              },
+            }),
+        });
+      }
+      if (path === "/api/v1/groups/g-demo/prompts/help" && method === "PUT") {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              ok: true,
+              result: {
+                kind: "help",
+                source: "home",
+                filename: "AGENTS.help.md",
+                content: "updated-help",
+              },
+            }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    const staleRead = api.fetchGroupPrompts("g-demo");
+    await Promise.resolve();
+
+    await api.updateGroupPrompt("g-demo", "help", "updated-help");
+    await api.fetchGroupPrompts("g-demo");
+
+    const getCalls = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/groups/g-demo/prompts" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(getCalls).toHaveLength(2);
+
+    firstRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            preamble: {
+              kind: "preamble",
+              source: "builtin",
+              filename: "AGENTS.md",
+              content: "stale-preamble",
+            },
+            help: {
+              kind: "help",
+              source: "builtin",
+              filename: "AGENTS.help.md",
+              content: "stale-help",
+            },
+          },
+        }),
+    });
+    await staleRead;
+  });
+
+  it("clears the shared read request before resetGroupPrompt", async () => {
+    const firstRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups/g-demo/prompts" && method === "GET") {
+        if (
+          fetchMock.mock.calls.filter(
+            ([calledPath, calledInit]) =>
+              calledPath === "/api/v1/groups/g-demo/prompts" &&
+              String((calledInit as RequestInit | undefined)?.method || "GET").toUpperCase() ===
+                "GET",
+          ).length === 1
+        ) {
+          return firstRead.promise;
+        }
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              ok: true,
+              result: {
+                preamble: {
+                  kind: "preamble",
+                  source: "builtin",
+                  filename: "AGENTS.md",
+                  content: "builtin-preamble",
+                },
+                help: {
+                  kind: "help",
+                  source: "builtin",
+                  filename: "AGENTS.help.md",
+                  content: "builtin-help",
+                },
+              },
+            }),
+        });
+      }
+      if (path === "/api/v1/groups/g-demo/prompts/help?confirm=help" && method === "DELETE") {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              ok: true,
+              result: {
+                kind: "help",
+                source: "builtin",
+                filename: "AGENTS.help.md",
+                content: "builtin-help",
+              },
+            }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    const staleRead = api.fetchGroupPrompts("g-demo");
+    await Promise.resolve();
+
+    await api.resetGroupPrompt("g-demo", "help");
+    await api.fetchGroupPrompts("g-demo");
+
+    const getCalls = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/groups/g-demo/prompts" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(getCalls).toHaveLength(2);
+
+    firstRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            preamble: {
+              kind: "preamble",
+              source: "home",
+              filename: "AGENTS.md",
+              content: "stale-preamble",
+            },
+            help: {
+              kind: "help",
+              source: "home",
+              filename: "AGENTS.help.md",
+              content: "stale-help",
+            },
+          },
+        }),
+    });
+    await staleRead;
+  });
+});
+
+describe("api.fetchContext dedupe", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    sessionStorageMock.clear();
+  });
+
+  afterEach(async () => {
+    const api = await import("../../src/services/api");
+    api.clearAuthToken();
+  });
+
+  it("reuses the in-flight context request for the same group", async () => {
+    const firstRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups/g-demo/context" && method === "GET") {
+        return firstRead.promise;
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    const req1 = api.fetchContext("g-demo");
+    const req2 = api.fetchContext("g-demo");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    firstRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            coordination: { tasks: [] },
+            agent_states: [],
+            attention: null,
+            board: null,
+            tasks_summary: { total: 0, planned: 0, active: 0, done: 0, archived: 0 },
+            meta: {},
+          },
+        }),
+    });
+
+    const [resp1, resp2] = await Promise.all([req1, req2]);
+    expect(resp1.ok).toBe(true);
+    expect(resp2.ok).toBe(true);
+  });
+
+  it("clears the shared context request before contextSync", async () => {
+    const firstRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups/g-demo/context" && method === "GET") {
+        if (
+          fetchMock.mock.calls.filter(
+            ([calledPath, calledInit]) =>
+              calledPath === "/api/v1/groups/g-demo/context" &&
+              String((calledInit as RequestInit | undefined)?.method || "GET").toUpperCase() ===
+                "GET",
+          ).length === 1
+        ) {
+          return firstRead.promise;
+        }
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              ok: true,
+              result: {
+                coordination: { tasks: [] },
+                agent_states: [],
+                attention: null,
+                board: null,
+                tasks_summary: { total: 1, planned: 1, active: 0, done: 0, archived: 0 },
+                meta: {},
+              },
+            }),
+        });
+      }
+      if (path === "/api/v1/groups/g-demo/context" && method === "POST") {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () => JSON.stringify({ ok: true, result: { version: "next" } }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    const staleRead = api.fetchContext("g-demo");
+    await Promise.resolve();
+
+    await api.contextSync("g-demo", [
+      { op: "coordination.brief.update", current_focus: "updated" },
+    ]);
+    await api.fetchContext("g-demo");
+
+    const getCalls = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/groups/g-demo/context" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(getCalls).toHaveLength(2);
+
+    firstRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            coordination: { tasks: [] },
+            agent_states: [],
+            attention: null,
+            board: null,
+            tasks_summary: { total: 0, planned: 0, active: 0, done: 0, archived: 0 },
+            meta: {},
+          },
+        }),
+    });
+    await staleRead;
+  });
+
+  it("bypasses shared context inflight when fresh is requested", async () => {
+    const firstRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups/g-demo/context" && method === "GET") {
+        return firstRead.promise;
+      }
+      if (
+        typeof path === "string" &&
+        path.startsWith("/api/v1/groups/g-demo/context?fresh=1") &&
+        method === "GET"
+      ) {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              ok: true,
+              result: {
+                coordination: { tasks: [] },
+                agent_states: [],
+                attention: null,
+                board: null,
+                tasks_summary: { total: 1, planned: 1, active: 0, done: 0, archived: 0 },
+                meta: { version: "fresh" },
+              },
+            }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    const staleRead = api.fetchContext("g-demo");
+    await Promise.resolve();
+
+    const freshRead = await api.fetchContext("g-demo", { fresh: true });
+    expect(freshRead.ok).toBe(true);
+    expect(
+      fetchMock.mock.calls.filter(([path]) =>
+        String(path).startsWith("/api/v1/groups/g-demo/context"),
+      ),
+    ).toHaveLength(2);
+
+    firstRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            coordination: { tasks: [] },
+            agent_states: [],
+            attention: null,
+            board: null,
+            tasks_summary: { total: 0, planned: 0, active: 0, done: 0, archived: 0 },
+            meta: { version: "stale" },
+          },
+        }),
+    });
+    await staleRead;
+  });
+
+  it("invalidates the shared context read for external write notifications", async () => {
+    const firstRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups/g-demo/context" && method === "GET") {
+        if (
+          fetchMock.mock.calls.filter(
+            ([calledPath, calledInit]) =>
+              calledPath === "/api/v1/groups/g-demo/context" &&
+              String((calledInit as RequestInit | undefined)?.method || "GET").toUpperCase() ===
+                "GET",
+          ).length === 1
+        ) {
+          return firstRead.promise;
+        }
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              ok: true,
+              result: {
+                coordination: { tasks: [] },
+                agent_states: [],
+                attention: null,
+                board: null,
+                tasks_summary: { total: 1, planned: 1, active: 0, done: 0, archived: 0 },
+                meta: { version: "fresh-after-external-write" },
+              },
+            }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    const staleRead = api.fetchContext("g-demo");
+    await Promise.resolve();
+
+    api.invalidateContextRead("g-demo");
+    const freshRead = await api.fetchContext("g-demo");
+    expect(freshRead.ok).toBe(true);
+    if (freshRead.ok) {
+      expect(freshRead.result.meta?.version).toBe("fresh-after-external-write");
+    }
+
+    const getCalls = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/groups/g-demo/context" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(getCalls).toHaveLength(2);
+
+    firstRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            coordination: { tasks: [] },
+            agent_states: [],
+            attention: null,
+            board: null,
+            tasks_summary: { total: 0, planned: 0, active: 0, done: 0, archived: 0 },
+            meta: { version: "stale" },
+          },
+        }),
+    });
+    await staleRead;
+  });
+
+  it("reuses an in-flight fresh context request for follow-up reads", async () => {
+    const staleRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+    const freshRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups/g-demo/context" && method === "GET") {
+        return staleRead.promise;
+      }
+      if (
+        typeof path === "string" &&
+        path.startsWith("/api/v1/groups/g-demo/context?fresh=1") &&
+        method === "GET"
+      ) {
+        return freshRead.promise;
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    const stalePromise = api.fetchContext("g-demo");
+    await Promise.resolve();
+
+    const freshPromise = api.fetchContext("g-demo", { fresh: true });
+    await Promise.resolve();
+    const followerPromise = api.fetchContext("g-demo");
+
+    expect(
+      fetchMock.mock.calls.filter(([path]) =>
+        String(path).startsWith("/api/v1/groups/g-demo/context"),
+      ),
+    ).toHaveLength(2);
+
+    freshRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            coordination: { tasks: [] },
+            agent_states: [],
+            attention: null,
+            board: null,
+            tasks_summary: { total: 1, planned: 1, active: 0, done: 0, archived: 0 },
+            meta: { version: "fresh-shared" },
+          },
+        }),
+    });
+
+    const [freshResp, followerResp] = await Promise.all([freshPromise, followerPromise]);
+    expect(freshResp.ok).toBe(true);
+    expect(followerResp.ok).toBe(true);
+    if (followerResp.ok) {
+      expect(followerResp.result.meta?.version).toBe("fresh-shared");
+    }
+
+    staleRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            coordination: { tasks: [] },
+            agent_states: [],
+            attention: null,
+            board: null,
+            tasks_summary: { total: 0, planned: 0, active: 0, done: 0, archived: 0 },
+            meta: { version: "stale" },
+          },
+        }),
+    });
+    await stalePromise;
+  });
+
+  it("does not let an older request finally clear a newer shared mapping", async () => {
+    const staleRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+    const freshRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+    const postFreshRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups/g-demo/context" && method === "GET") {
+        const samePathCalls = fetchMock.mock.calls.filter(
+          ([calledPath, calledInit]) =>
+            calledPath === "/api/v1/groups/g-demo/context" &&
+            String((calledInit as RequestInit | undefined)?.method || "GET").toUpperCase() ===
+              "GET",
+        ).length;
+        if (samePathCalls === 1) return staleRead.promise;
+        if (samePathCalls === 2) return postFreshRead.promise;
+      }
+      if (
+        typeof path === "string" &&
+        path.startsWith("/api/v1/groups/g-demo/context?fresh=1") &&
+        method === "GET"
+      ) {
+        return freshRead.promise;
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    const stalePromise = api.fetchContext("g-demo");
+    await Promise.resolve();
+
+    const freshPromise = api.fetchContext("g-demo", { fresh: true });
+    await Promise.resolve();
+
+    staleRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            coordination: { tasks: [] },
+            agent_states: [],
+            attention: null,
+            board: null,
+            tasks_summary: { total: 0, planned: 0, active: 0, done: 0, archived: 0 },
+            meta: { version: "stale" },
+          },
+        }),
+    });
+    await stalePromise;
+
+    const afterStaleWhileFreshInFlight = api.fetchContext("g-demo");
+    expect(
+      fetchMock.mock.calls.filter(([path]) =>
+        String(path).startsWith("/api/v1/groups/g-demo/context"),
+      ),
+    ).toHaveLength(2);
+
+    freshRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            coordination: { tasks: [] },
+            agent_states: [],
+            attention: null,
+            board: null,
+            tasks_summary: { total: 1, planned: 1, active: 0, done: 0, archived: 0 },
+            meta: { version: "fresh" },
+          },
+        }),
+    });
+
+    const [freshResp, followerResp] = await Promise.all([
+      freshPromise,
+      afterStaleWhileFreshInFlight,
+    ]);
+    expect(freshResp.ok).toBe(true);
+    expect(followerResp.ok).toBe(true);
+    if (followerResp.ok) {
+      expect(followerResp.result.meta?.version).toBe("fresh");
+    }
+
+    const postFreshPromise = api.fetchContext("g-demo");
+    expect(
+      fetchMock.mock.calls.filter(([path]) =>
+        String(path).startsWith("/api/v1/groups/g-demo/context"),
+      ),
+    ).toHaveLength(3);
+
+    postFreshRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          result: {
+            coordination: { tasks: [] },
+            agent_states: [],
+            attention: null,
+            board: null,
+            tasks_summary: { total: 2, planned: 2, active: 0, done: 0, archived: 0 },
+            meta: { version: "post-fresh" },
+          },
+        }),
+    });
+
+    const postFreshResp = await postFreshPromise;
+    expect(postFreshResp.ok).toBe(true);
+    if (postFreshResp.ok) {
+      expect(postFreshResp.result.meta?.version).toBe("post-fresh");
+    }
+  });
+});
+
+describe("api.fetchActors invalidation", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    sessionStorageMock.clear();
+  });
+
+  afterEach(async () => {
+    const api = await import("../../src/services/api");
+    api.clearAuthToken();
+  });
+
+  it("clears the shared pure-read request before actor writes", async () => {
+    const firstRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups/g-demo/actors" && method === "GET") {
+        if (
+          fetchMock.mock.calls.filter(
+            ([calledPath, calledInit]) =>
+              calledPath === "/api/v1/groups/g-demo/actors" &&
+              String((calledInit as RequestInit | undefined)?.method || "GET").toUpperCase() ===
+                "GET",
+          ).length === 1
+        ) {
+          return firstRead.promise;
+        }
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () => JSON.stringify({ ok: true, result: { actors: [{ id: "peer-new" }] } }),
+        });
+      }
+      if (path === "/api/v1/groups/g-demo/actors/peer-1" && method === "POST") {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () => JSON.stringify({ ok: true, result: { actor: { id: "peer-1" } } }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    const staleRead = api.fetchActors("g-demo", false);
+    await Promise.resolve();
+
+    await api.updateActor("g-demo", "peer-1", "codex");
+    await api.fetchActors("g-demo", false);
+
+    const getCalls = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/groups/g-demo/actors" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(getCalls).toHaveLength(2);
+
+    firstRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { actors: [{ id: "peer-old" }] } }),
+    });
+    await staleRead;
+  });
+
+  it("clears the shared pure-read request before group lifecycle writes", async () => {
+    const firstRead = createDeferred<{
+      status: number;
+      ok: boolean;
+      text: () => Promise<string>;
+    }>();
+
+    fetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const method = String(init?.method || "GET").toUpperCase();
+      if (path === "/api/v1/groups/g-demo/actors" && method === "GET") {
+        if (
+          fetchMock.mock.calls.filter(
+            ([calledPath, calledInit]) =>
+              calledPath === "/api/v1/groups/g-demo/actors" &&
+              String((calledInit as RequestInit | undefined)?.method || "GET").toUpperCase() ===
+                "GET",
+          ).length === 1
+        ) {
+          return firstRead.promise;
+        }
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({ ok: true, result: { actors: [{ id: "peer-started" }] } }),
+        });
+      }
+      if (path === "/api/v1/groups/g-demo/start?by=user" && method === "POST") {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          text: async () => JSON.stringify({ ok: true, result: {} }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${path}`));
+    });
+
+    const api = await import("../../src/services/api");
+    const staleRead = api.fetchActors("g-demo", false);
+    await Promise.resolve();
+
+    await api.startGroup("g-demo");
+    await api.fetchActors("g-demo", false);
+
+    const getCalls = fetchMock.mock.calls.filter(
+      ([path, init]) =>
+        path === "/api/v1/groups/g-demo/actors" &&
+        String((init as RequestInit | undefined)?.method || "GET").toUpperCase() === "GET",
+    );
+    expect(getCalls).toHaveLength(2);
+
+    firstRead.resolve({
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ ok: true, result: { actors: [{ id: "peer-stale" }] } }),
+    });
+    await staleRead;
+  });
+});

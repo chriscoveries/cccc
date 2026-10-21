@@ -1,0 +1,274 @@
+use super::{ActiveTurn, Session, events};
+use serde_json::{Map, Value, json};
+
+pub(super) fn handle_message(session: &Session, message: Value) {
+    if message.get("id").is_some() {
+        if message.get("method").and_then(Value::as_str).is_some() {
+            respond_unsupported_server_request(session, &message);
+        }
+        return;
+    }
+    if session.managed.structured_only() {
+        project_structured_event(session, &message);
+    }
+    handle_announced_message(session, message);
+}
+
+// Reuse the existing headless journal and frontend projection. Store only the
+// normalized, selected event fields, never opaque protocol/configuration frames.
+fn project_structured_event(session: &Session, message: &Value) {
+    let params = &message["params"];
+    let turn_id = params["turnId"]
+        .as_str()
+        .or_else(|| params.pointer("/turn/id").and_then(Value::as_str))
+        .unwrap_or_default();
+    let stream_id = format!("{}:{turn_id}", session.managed.generation());
+    let mut data = Map::from_iter([
+        ("turn_id".into(), json!(turn_id)),
+        ("stream_id".into(), json!(stream_id)),
+    ]);
+    let kind = match message["method"].as_str().unwrap_or_default() {
+        "turn/started" => "headless.turn.started",
+        "turn/completed" => {
+            emit(session, "headless.message.completed", data.clone());
+            data.insert("status".into(), params["turn"]["status"].clone());
+            if params["turn"]["status"] == "failed" {
+                data.insert("error".into(), params["turn"]["error"].clone());
+                "headless.turn.failed"
+            } else {
+                "headless.turn.completed"
+            }
+        }
+        "item/agentMessage/delta" => {
+            data.insert("delta".into(), params["delta"].clone());
+            "headless.message.delta"
+        }
+        "cccc/approvalRequired" => {
+            data.insert("summary".into(), json!("Permission confirmation required"));
+            data.insert("kind".into(), json!("approval"));
+            "headless.activity.updated"
+        }
+        _ => return,
+    };
+    emit(session, kind, data);
+}
+
+fn respond_unsupported_server_request(session: &Session, message: &Value) {
+    let Some(id) = message.get("id") else {
+        return;
+    };
+    let method = message
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let _ = session.respond_error(
+        id.clone(),
+        json!({
+            "code":-32601,
+            "message":format!("CCCC headless does not support provider request: {method}")
+        }),
+    );
+}
+
+fn handle_announced_message(session: &Session, message: Value) {
+    // Codex sub-agents run on their own threads and announce their own turns.
+    // Those are not this Actor's terminal turn; treating one as an overlap
+    // would stop a healthy session the moment the model delegates work.
+    if is_foreign_thread(session.managed.thread_id(), &message) {
+        return;
+    }
+    if message.get("method").and_then(Value::as_str) == Some("turn/started") {
+        handle_managed_turn_started(session, &message);
+        return;
+    }
+    let completed = message.get("method").and_then(Value::as_str) == Some("turn/completed");
+    if completed {
+        complete_turn(session, &message);
+        return;
+    }
+    if message.get("method").and_then(Value::as_str) == Some("thread/status/changed") {
+        let flags = message
+            .pointer("/params/status/activeFlags")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let waiting = flags.iter().any(|flag| {
+            matches!(
+                flag.as_str(),
+                Some("waitingOnApproval" | "waitingOnUserInput")
+            )
+        });
+        let task = active_context(session);
+        if waiting {
+            session.set_status("waiting", task);
+        } else if message
+            .pointer("/params/status/type")
+            .and_then(Value::as_str)
+            == Some("active")
+            && task.is_some()
+            && session
+                .status
+                .lock()
+                .is_ok_and(|state| state.status == "waiting")
+        {
+            session.set_status("working", task);
+        }
+    }
+}
+
+/// True when the notification names a thread other than the session's own.
+/// Notifications without a `threadId` (non-Codex providers, lifecycle
+/// messages) always belong to the session.
+fn is_foreign_thread(session_thread_id: &str, message: &Value) -> bool {
+    !session_thread_id.is_empty()
+        && message
+            .pointer("/params/threadId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|thread_id| !thread_id.is_empty() && thread_id != session_thread_id)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartedTurnDisposition {
+    Adopted,
+    Matched,
+    Conflict,
+}
+
+fn handle_managed_turn_started(session: &Session, message: &Value) {
+    let turn_id = message
+        .pointer("/params/turn/id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(turn_id) = turn_id else { return };
+    match observe_started_turn(&session.active_turn, turn_id) {
+        StartedTurnDisposition::Adopted => {
+            session.set_status("working", Some(turn_id.to_owned()));
+        }
+        StartedTurnDisposition::Matched => {}
+        StartedTurnDisposition::Conflict => {
+            tracing::warn!(
+                group_id = %session.group_id,
+                actor_id = %session.actor_id,
+                turn_id,
+                "managed Actor reported an overlapping terminal turn; stopping the inconsistent session"
+            );
+            let _ = session.stop();
+        }
+    }
+}
+
+fn observe_started_turn(
+    active_turn: &std::sync::Mutex<Option<ActiveTurn>>,
+    turn_id: &str,
+) -> StartedTurnDisposition {
+    let Ok(mut active_turn) = active_turn.lock() else {
+        return StartedTurnDisposition::Conflict;
+    };
+    match active_turn.as_mut() {
+        Some(active) if active.turn_id == turn_id => StartedTurnDisposition::Matched,
+        Some(_) => StartedTurnDisposition::Conflict,
+        None => {
+            *active_turn = Some(ActiveTurn {
+                turn_id: turn_id.to_owned(),
+            });
+            StartedTurnDisposition::Adopted
+        }
+    }
+}
+
+fn complete_turn(session: &Session, message: &Value) {
+    let Ok(mut active_turn) = session.active_turn.lock() else {
+        return;
+    };
+    let Some(current) = active_turn.as_ref() else {
+        return;
+    };
+    let reported_turn_id = message
+        .pointer("/params/turn/id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !reported_turn_id.is_empty()
+        && !current.turn_id.is_empty()
+        && reported_turn_id != current.turn_id
+    {
+        return;
+    }
+    active_turn.take();
+    session.set_status("idle", None);
+}
+
+fn active_context(session: &Session) -> Option<String> {
+    session
+        .active_turn
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|turn| turn.turn_id.clone())
+}
+
+pub(super) fn emit(session: &Session, kind: &str, data: Map<String, Value>) {
+    if let Err(error) = events::append(
+        &session.home,
+        &session.group_id,
+        &session.actor_id,
+        kind,
+        data,
+    ) {
+        tracing::warn!(%error, group_id = %session.group_id, actor_id = %session.actor_id, "failed to append headless event");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_untracked_codex_turn_is_adopted_until_its_completion() {
+        let active_turn = std::sync::Mutex::new(None);
+
+        assert_eq!(
+            observe_started_turn(&active_turn, "turn-terminal"),
+            StartedTurnDisposition::Adopted
+        );
+        let active = active_turn.lock().expect("active turn");
+        let active = active.as_ref().expect("adopted turn");
+        assert_eq!(active.turn_id, "turn-terminal");
+    }
+
+    #[test]
+    fn only_turns_on_other_threads_are_foreign() {
+        let sub_agent = json!({
+            "method":"turn/started",
+            "params":{"threadId":"thread-sub-agent","turn":{"id":"turn-sub"}}
+        });
+        let own = json!({
+            "method":"turn/started",
+            "params":{"threadId":"thread-main","turn":{"id":"turn-main"}}
+        });
+        let untagged = json!({"method":"turn/completed","params":{"turn":{"id":"turn-main"}}});
+
+        assert!(is_foreign_thread("thread-main", &sub_agent));
+        assert!(!is_foreign_thread("thread-main", &own));
+        assert!(!is_foreign_thread("thread-main", &untagged));
+        // A session without a known thread cannot tell threads apart.
+        assert!(!is_foreign_thread("", &sub_agent));
+    }
+
+    #[test]
+    fn a_repeated_started_event_matches_the_active_turn_but_not_an_overlap() {
+        let active_turn = std::sync::Mutex::new(Some(ActiveTurn {
+            turn_id: "turn-terminal".into(),
+        }));
+
+        assert_eq!(
+            observe_started_turn(&active_turn, "turn-terminal"),
+            StartedTurnDisposition::Matched
+        );
+        assert_eq!(
+            observe_started_turn(&active_turn, "turn-overlap"),
+            StartedTurnDisposition::Conflict
+        );
+    }
+}

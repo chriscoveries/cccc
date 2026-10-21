@@ -1,0 +1,166 @@
+import { describe, expect, it } from "vite-plus/test";
+
+import type { GroupMeta } from "../types";
+import {
+  createComposerAgentMentionToken,
+  createComposerGroupMentionToken,
+  resolveSelectedComposerGroupMentionTargets,
+  pruneComposerAgentMentionTokens,
+  pruneComposerGroupMentionTokens,
+  resolveControlledComposerMentionContext,
+  resolveSelectedComposerGroupMention,
+} from "./composerGroupMentions";
+
+const groups = [
+  { group_id: "g_local", title: "Local" },
+  { group_id: "self-agent", title: "Self Agent" },
+] as unknown as GroupMeta[];
+
+describe("composer group mention tokens", () => {
+  it("keeps only menu-selected group tokens that still match the text range", () => {
+    const text = "ask #Self Agent to help";
+    const token = createComposerGroupMentionToken({
+      groupId: "self-agent",
+      token: "#Self Agent",
+      start: 4,
+    });
+    expect(token).not.toBeNull();
+    expect(pruneComposerGroupMentionTokens({ text, tokens: [token!] })).toEqual([token]);
+    expect(
+      pruneComposerGroupMentionTokens({ text: "ask #Self Agents to help", tokens: [token!] }),
+    ).toEqual([]);
+  });
+
+  it("resolves the last selected live group token", () => {
+    const text = "#Self Agent first #Self Agent second";
+    const first = createComposerGroupMentionToken({
+      groupId: "self-agent",
+      token: "#Self Agent",
+      start: 0,
+    })!;
+    const second = createComposerGroupMentionToken({
+      groupId: "self-agent",
+      token: "#Self Agent",
+      start: 18,
+    })!;
+    expect(
+      resolveSelectedComposerGroupMention({
+        text,
+        selectedGroupId: "g_local",
+        groups,
+        tokens: [first, second],
+      }),
+    ).toEqual(second);
+  });
+
+  it("resolves every selected live group token for multi-group delegation", () => {
+    const allGroups = [...groups, { group_id: "print", title: "钉钉打印" }] as GroupMeta[];
+    const text = "当前我们的 #Self Agent #钉钉打印 群发解析";
+    const first = createComposerGroupMentionToken({
+      groupId: "self-agent",
+      token: "#Self Agent",
+      start: text.indexOf("#Self Agent"),
+    })!;
+    const second = createComposerGroupMentionToken({
+      groupId: "print",
+      token: "#钉钉打印",
+      start: text.indexOf("#钉钉打印"),
+    })!;
+
+    expect(
+      resolveSelectedComposerGroupMentionTargets({
+        text,
+        selectedGroupId: "g_local",
+        groups: allGroups,
+        tokens: [first, second],
+      }),
+    ).toEqual([first, second]);
+  });
+
+  it("deduplicates repeated group delegation targets by first live occurrence", () => {
+    const text = "#Self Agent first #Self Agent second";
+    const first = createComposerGroupMentionToken({
+      groupId: "self-agent",
+      token: "#Self Agent",
+      start: 0,
+    })!;
+    const second = createComposerGroupMentionToken({
+      groupId: "self-agent",
+      token: "#Self Agent",
+      start: 18,
+    })!;
+
+    expect(
+      resolveSelectedComposerGroupMentionTargets({
+        text,
+        selectedGroupId: "g_local",
+        groups,
+        tokens: [first, second],
+      }),
+    ).toEqual([first]);
+  });
+
+  it("ignores copied or typed # text when it was never selected from the menu", () => {
+    expect(
+      resolveSelectedComposerGroupMention({
+        text: "copied #Self Agent text",
+        selectedGroupId: "g_local",
+        groups,
+        tokens: [],
+      }),
+    ).toBeNull();
+  });
+
+  it("returns the same token array when nothing needs pruning", () => {
+    const groupTokens = [{ token: "#alpha", groupId: "g_alpha", start: 0, end: 6 }];
+    expect(pruneComposerGroupMentionTokens({ text: "#alpha hi", tokens: groupTokens })).toBe(
+      groupTokens,
+    );
+    const empty: never[] = [];
+    expect(pruneComposerGroupMentionTokens({ text: "typing", tokens: empty })).toBe(empty);
+    const agentTokens = [
+      { token: "@peer", actorId: "peer", start: 0, end: 5, scope: "selected" as const },
+    ];
+    expect(pruneComposerAgentMentionTokens({ text: "@peer hi", tokens: agentTokens })).toBe(
+      agentTokens,
+    );
+  });
+
+  it("keeps only menu-selected agent tokens that still match the text range", () => {
+    const text = "ask @target to help";
+    const token = createComposerAgentMentionToken({
+      actorId: "target",
+      token: "@target",
+      start: 4,
+      scope: "selected",
+    });
+    expect(token).not.toBeNull();
+    expect(pruneComposerAgentMentionTokens({ text, tokens: [token!] })).toEqual([token]);
+    expect(
+      pruneComposerAgentMentionTokens({ text: "ask @targetx to help", tokens: [token!] }),
+    ).toEqual([]);
+  });
+
+  it("uses only selected # tokens to switch @ suggestions to destination scope", () => {
+    const text = "copied #Self Agent @local\nask #Self Agent @remote";
+    const selected = createComposerGroupMentionToken({
+      groupId: "self-agent",
+      token: "#Self Agent",
+      start: text.lastIndexOf("#Self Agent"),
+    })!;
+    expect(
+      resolveControlledComposerMentionContext({
+        text,
+        atIndex: text.indexOf("@local"),
+        tokens: [selected],
+      }),
+    ).toEqual({ scope: "selected", mentionTargetGroupId: "" });
+    expect(
+      resolveControlledComposerMentionContext({
+        text,
+        atIndex: text.indexOf("@remote"),
+        tokens: [selected],
+      }),
+    ).toEqual({ scope: "destination", mentionTargetGroupId: "self-agent" });
+  });
+});

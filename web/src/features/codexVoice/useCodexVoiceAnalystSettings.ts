@@ -1,0 +1,390 @@
+import { supportsAcpMode } from "../../types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import {
+  buildActorSecretSaveChanges,
+  emptyActorSecretChanges,
+  type ActorSecretChanges,
+} from "../../components/modals/actorSecretManagerModel";
+import {
+  copyVoiceAnalystPrivateEnvToProfile,
+  fetchCodexVoiceAnalystSettings,
+  listActorProfiles,
+} from "../../services/api";
+import type { ActorProfile } from "../../types";
+import { actorProfileIdentityKey, actorProfileMatchesRef } from "../../utils/actorProfiles";
+import type { RuntimeConfigurationMode } from "../../components/modals/RuntimeProfileControls";
+import type { CodexVoiceSessionController } from "./useCodexVoiceSessionController";
+import {
+  bindVoiceAnalystProfile,
+  defaultAnalystRuntimeCommand,
+  emptyVoiceAnalystSettings,
+  managedAnalystRuntimes,
+  normalizeVoiceAnalystSettings,
+  voiceAnalystIdentityChanged,
+  type VoiceAnalystDraftSettings,
+} from "./codexVoiceAnalystSettingsModel";
+import {
+  saveVoiceRuntimeProfile,
+  type VoiceProfileCheckpoint,
+} from "../voice/saveVoiceRuntimeProfile";
+import { saveVoiceAnalystSettingsWithConsent } from "./codexVoiceAnalystSettingsSave";
+
+export function useCodexVoiceAnalystSettings(
+  active: boolean,
+  controller: CodexVoiceSessionController,
+) {
+  const { t } = useTranslation("modals");
+  const { t: tActors } = useTranslation("actors");
+  const [settings, setSettings] = useState<VoiceAnalystDraftSettings>(emptyVoiceAnalystSettings);
+  const [loadedSettings, setLoadedSettings] =
+    useState<VoiceAnalystDraftSettings>(emptyVoiceAnalystSettings);
+  const [mode, setMode] = useState<RuntimeConfigurationMode>("custom");
+  const [profiles, setProfiles] = useState<ActorProfile[]>([]);
+  const [environmentKeys, setEnvironmentKeys] = useState<string[]>([]);
+  const [environmentChanges, setEnvironmentChangesState] =
+    useState<ActorSecretChanges>(emptyActorSecretChanges);
+  const [settingsLoadFailed, setSettingsLoadFailed] = useState(false);
+  const [profilesLoadFailed, setProfilesLoadFailed] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [environmentRefreshing, setEnvironmentRefreshing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
+  const profileSaveRef = useRef<VoiceProfileCheckpoint | null>(null);
+  const dirty = useRef(false);
+  const loadInFlight = useRef(false);
+
+  const settingsError = useCallback(
+    (code: string, detail: string) => {
+      if (code === "codex_voice_call_active") return t("codexVoiceAnalystSettingsCallActive");
+      if (code === "codex_voice_settings_busy") return t("codexVoiceAnalystSettingsWorkActive");
+      if (code === "codex_voice_settings_unavailable") {
+        return t("codexVoiceAnalystSettingsUnavailable");
+      }
+      if (code === "codex_voice_settings_invalid") {
+        return t("codexVoiceAnalystSettingsInvalid", { detail });
+      }
+      return detail;
+    },
+    [t],
+  );
+
+  const load = useCallback(
+    async (force = false) => {
+      if ((!force && (!active || dirty.current)) || loadInFlight.current) return;
+      loadInFlight.current = true;
+      setLoading(true);
+      try {
+        const [settingsResponse, profilesResponse] = await Promise.all([
+          fetchCodexVoiceAnalystSettings(),
+          listActorProfiles(),
+        ]);
+        if (settingsResponse.ok) {
+          // Secret values are write-only. A fresh source snapshot invalidates
+          // the copy checkpoint, but keeps the destination Profile for retry.
+          if (profileSaveRef.current) profileSaveRef.current.copied = false;
+          const nextSettings = normalizeVoiceAnalystSettings(settingsResponse.result.settings);
+          setSettings(nextSettings);
+          setLoadedSettings(nextSettings);
+          setMode(nextSettings.profile_id ? "profile" : "custom");
+          setEnvironmentKeys(settingsResponse.result.environment_keys);
+          setEnvironmentChangesState(emptyActorSecretChanges());
+          setSettingsLoadFailed(false);
+          setError("");
+        } else {
+          setSettingsLoadFailed(true);
+          setError(settingsError(settingsResponse.error.code, settingsResponse.error.message));
+        }
+        if (profilesResponse.ok) {
+          setProfiles(profilesResponse.result.profiles);
+          setProfilesLoadFailed(false);
+        } else {
+          setProfiles([]);
+          setProfilesLoadFailed(true);
+          if (settingsResponse.ok) setError(t("codexVoiceAnalystProfilesUnavailable"));
+        }
+      } catch {
+        setSettingsLoadFailed(true);
+        setError(t("codexVoiceAnalystSettingsUnavailable"));
+      } finally {
+        loadInFlight.current = false;
+        setLoading(false);
+      }
+    },
+    [active, settingsError, t],
+  );
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const compatibleProfiles = useMemo(
+    () =>
+      profiles.filter(
+        (profile) =>
+          managedAnalystRuntimes.has(String(profile.runtime).trim().toLowerCase()) &&
+          (!supportsAcpMode(profile.runtime) || profile.runtime_mode === "acp"),
+      ),
+    [profiles],
+  );
+  const profileIdentity = settings.profile_id
+    ? actorProfileIdentityKey({
+        id: settings.profile_id,
+        scope: settings.profile_scope,
+        owner_id: settings.profile_owner,
+      })
+    : "";
+  const selectedProfile = compatibleProfiles.find((profile) =>
+    actorProfileMatchesRef(profile, {
+      profileId: settings.profile_id,
+      profileScope: settings.profile_scope,
+      profileOwner: settings.profile_owner,
+    }),
+  );
+  const environmentSaveChanges = useMemo(
+    () => buildActorSecretSaveChanges(environmentChanges),
+    [environmentChanges],
+  );
+  const hasEnvironmentChanges =
+    mode === "custom" &&
+    (environmentSaveChanges.clear ||
+      environmentSaveChanges.unsetKeys.length > 0 ||
+      Object.keys(environmentSaveChanges.setVars).length > 0);
+  const hasChanges =
+    JSON.stringify(settings) !== JSON.stringify(loadedSettings) || hasEnvironmentChanges;
+  dirty.current = hasChanges;
+  const callActive = controller.isEngaged;
+  const analystBusy = controller.analyst?.phase === "working";
+  const editingDisabled = loading || saving || profileSaving;
+  const profileInvalid = mode === "profile" && (!selectedProfile || profilesLoadFailed);
+  const saveDisabled =
+    callActive || editingDisabled || settingsLoadFailed || profileInvalid || !hasChanges;
+
+  const changeMode = (nextMode: RuntimeConfigurationMode) => {
+    setMode(nextMode);
+    setSaved("");
+    setError("");
+    if (nextMode === "custom") {
+      setSettings((current) => bindVoiceAnalystProfile(current));
+      return;
+    }
+    setSettings((current) =>
+      bindVoiceAnalystProfile(current, selectedProfile || compatibleProfiles[0]),
+    );
+  };
+
+  const selectProfile = (identity: string) => {
+    const profile = compatibleProfiles.find(
+      (candidate) => actorProfileIdentityKey(candidate) === identity,
+    );
+    setSettings((current) => bindVoiceAnalystProfile(current, profile));
+    setSaved("");
+  };
+
+  const refreshEnvironment = async () => {
+    setEnvironmentRefreshing(true);
+    const response = await fetchCodexVoiceAnalystSettings();
+    if (response.ok) {
+      if (profileSaveRef.current) profileSaveRef.current.copied = false;
+      if (settingsLoadFailed) {
+        const nextSettings = normalizeVoiceAnalystSettings(response.result.settings);
+        setSettings(nextSettings);
+        setLoadedSettings(nextSettings);
+        setMode(nextSettings.profile_id ? "profile" : "custom");
+        setEnvironmentChangesState(emptyActorSecretChanges());
+        setSettingsLoadFailed(false);
+      }
+      setEnvironmentKeys(response.result.environment_keys);
+      setError("");
+    } else {
+      setError(settingsError(response.error.code, response.error.message));
+    }
+    setEnvironmentRefreshing(false);
+  };
+
+  const save = async () => {
+    if (saveDisabled) return;
+    const identityCandidates = environmentSaveChanges.clear
+      ? environmentKeys
+      : [...Object.keys(environmentSaveChanges.setVars), ...environmentSaveChanges.unsetKeys];
+    const changesAnalystIdentity = voiceAnalystIdentityChanged(
+      settings,
+      loadedSettings,
+      mode,
+      identityCandidates,
+      hasEnvironmentChanges,
+    );
+    setSaving(true);
+    setError("");
+    setSaved("");
+    const outcome = await saveVoiceAnalystSettingsWithConsent({
+      request: {
+        settings,
+        environmentSet: mode === "custom" ? environmentSaveChanges.setVars : {},
+        environmentUnset: mode === "custom" ? environmentSaveChanges.unsetKeys : [],
+        environmentClear: mode === "custom" && environmentSaveChanges.clear,
+      },
+      analystBusy,
+      identityConfirmationRequired:
+        changesAnalystIdentity && Boolean(controller.analyst?.tui_ready),
+      confirm: (message) => window.confirm(message),
+      discardConfirmation: t("codexVoiceAnalystSettingsDiscardConfirm"),
+      identityConfirmation: t("codexVoiceAnalystIdentityChangeConfirm"),
+    });
+    if (outcome.cancelled) {
+      setSaving(false);
+      return;
+    }
+    const response = outcome.response;
+    if (response.ok) {
+      // The source changed even if the subsequent reload fails.
+      if (profileSaveRef.current) profileSaveRef.current.copied = false;
+      setSaved(
+        response.result.discarded_work
+          ? t("codexVoiceAnalystSettingsDiscarded")
+          : response.result.started_new_session
+            ? t("codexVoiceAnalystSettingsNewSession")
+            : response.result.restarted
+              ? t("codexVoiceAnalystSettingsRestarted")
+              : t("codexVoiceAnalystSettingsSaved"),
+      );
+      await load(true);
+      await controller.refresh(false);
+    } else {
+      setError(settingsError(response.error.code, response.error.message));
+    }
+    setSaving(false);
+  };
+
+  const setCommand = (command: string) => {
+    setSettings((current) => ({ ...current, command }));
+    setSaved("");
+  };
+  const setRuntime = (runtime: string) => {
+    if (!managedAnalystRuntimes.has(runtime)) return;
+    setSettings((current) => {
+      const previousDefault = defaultAnalystRuntimeCommand(current.runtime);
+      const command =
+        !current.command.trim() || current.command.trim() === previousDefault
+          ? ""
+          : current.command;
+      return {
+        ...current,
+        runtime,
+        command,
+        runtime_mode: supportsAcpMode(runtime) ? "acp" : undefined,
+      };
+    });
+    setSaved("");
+    setError("");
+  };
+  const defaultCommand = defaultAnalystRuntimeCommand(settings.runtime);
+  // An empty command is the persisted "use the runtime default" sentinel.
+  // Once the user opts out, keep the copied default as an explicit editable
+  // command instead of inferring the checkbox state from string equality.
+  const useDefaultCommand = !settings.command.trim();
+  const setUseDefaultCommand = (enabled: boolean) => {
+    setCommand(enabled ? "" : settings.command.trim() || defaultCommand);
+  };
+
+  const saveAsProfile = async () => {
+    if (mode !== "custom" || editingDisabled || settingsLoadFailed) return;
+    const name =
+      profileSaveRef.current?.profile.name ||
+      window.prompt(tActors("profileNamePrompt"), "Voice Analyst");
+    if (!name?.trim()) return;
+    setProfileSaving(true);
+    setError("");
+    setSaved("");
+    try {
+      const profile = await saveVoiceRuntimeProfile(
+        name,
+        settings,
+        environmentSaveChanges,
+        profileSaveRef,
+        copyVoiceAnalystPrivateEnvToProfile,
+      );
+      setProfiles((current) => [
+        ...current.filter(
+          (candidate) => actorProfileIdentityKey(candidate) !== actorProfileIdentityKey(profile),
+        ),
+        profile,
+      ]);
+      profileSaveRef.current = null;
+      setMode("profile");
+      setSettings((current) => bindVoiceAnalystProfile(current, profile));
+      setEnvironmentChangesState(emptyActorSecretChanges());
+      setSaved(t("codexVoiceAnalystProfileCreated", { name: profile.name || name.trim() }));
+    } catch (error) {
+      setError(
+        t("codexVoiceAnalystProfileSaveFailed", {
+          detail: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+  const acceptProfile = (profile: ActorProfile) => {
+    setProfiles((current) => [
+      ...current.filter(
+        (candidate) => actorProfileIdentityKey(candidate) !== actorProfileIdentityKey(profile),
+      ),
+      profile,
+    ]);
+    setMode("profile");
+    setSettings((current) => bindVoiceAnalystProfile(current, profile));
+    setSaved("");
+    setError("");
+  };
+  const setEnvironmentChanges = (changes: ActorSecretChanges) => {
+    setEnvironmentChangesState(changes);
+    setSaved("");
+  };
+
+  const discard = () => {
+    profileSaveRef.current = null;
+    setSettings(loadedSettings);
+    setMode(loadedSettings.profile_id ? "profile" : "custom");
+    setEnvironmentChangesState(emptyActorSecretChanges());
+    setSaved("");
+    setError("");
+  };
+
+  return {
+    hasChanges,
+    discard,
+    settings,
+    mode,
+    compatibleProfiles,
+    profileIdentity,
+    selectedProfile,
+    acceptProfile,
+    environmentKeys,
+    environmentChanges,
+    loading,
+    environmentRefreshing,
+    settingsLoadFailed,
+    saving,
+    profileSaving,
+    error,
+    saved,
+    callActive,
+    analystBusy,
+    editingDisabled,
+    saveDisabled,
+    changeMode,
+    selectProfile,
+    refreshEnvironment,
+    setCommand,
+    setRuntime,
+    defaultCommand,
+    useDefaultCommand,
+    setUseDefaultCommand,
+    setEnvironmentChanges,
+    saveAsProfile,
+    save,
+  };
+}

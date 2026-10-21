@@ -1,0 +1,550 @@
+import React, { lazy, Suspense, useCallback, useEffect, useMemo } from "react";
+import { DropOverlay } from "./components/DropOverlay";
+const AppModals = lazy(() =>
+  import("./components/AppModals").then((m) => ({ default: m.AppModals })),
+);
+import { AppBackground } from "./components/app/AppBackground";
+import { AppFeedback } from "./components/app/AppFeedback";
+import { useCodexVoiceShell } from "./features/codexVoice/useCodexVoiceShell";
+import { AppShell } from "./components/app/AppShell";
+import { useTextScale } from "./hooks/useTextScale";
+import { useTheme } from "./hooks/useTheme";
+import { useActorActions } from "./hooks/useActorActions";
+import { useSelectedGroupRuntime } from "./hooks/useSelectedGroupRuntime";
+import { useSSE } from "./hooks/useSSE";
+import { useDragDrop } from "./hooks/useDragDrop";
+import { useGroupActions } from "./hooks/useGroupActions";
+import { useOrderedGroups } from "./hooks/useOrderedGroups";
+import { useSwipeNavigation } from "./hooks/useSwipeNavigation";
+import { useCrossGroupRecipients } from "./hooks/useCrossGroupRecipients";
+import { useDeepLink } from "./hooks/useDeepLink";
+import { useGlobalEvents } from "./hooks/useGlobalEvents";
+import {
+  VISUAL_VIEWPORT_BOX,
+  VISUAL_VIEWPORT_BOX_ATTRIBUTE,
+  useViewportHeight,
+} from "./hooks/useViewportHeight";
+import { useAppChrome } from "./hooks/useAppChrome";
+import { useAppGroupLifecycle } from "./hooks/useAppGroupLifecycle";
+import { useAppTabState } from "./hooks/useAppTabState";
+import {
+  useGroupStore,
+  useUIStore,
+  useModalStore,
+  useComposerStore,
+  useFormStore,
+  useObservabilityStore,
+} from "./stores";
+import { useChatOutboxStore } from "./stores/chatOutboxStore";
+import type { LedgerEvent } from "./types";
+import type { ComposerMentionKind } from "./pages/chat/chatMentionSuggestions";
+import { shouldMountAppModals } from "./utils/appLazyMount";
+import { publishCapabilityChanged } from "./utils/capabilityEvents";
+import { filterVisibleRuntimeActors } from "./utils/runtimeVisibility";
+import { getEffectiveComposerDestGroupId } from "./stores/useComposerStore";
+import { buildReplyComposerState } from "./utils/chatReply";
+import { useShallow } from "zustand/react/shallow";
+import { useConnectWorkbench } from "./features/connect/useConnectWorkbench";
+import { ConnectRemotePanel } from "./features/connect/ConnectRemotePanel";
+
+// ============ Main App Component ============
+
+export default function App({
+  connectEmbedded = false,
+  onOpenParentSidebar,
+  embeddedAccountLabel,
+}: {
+  connectEmbedded?: boolean;
+  embeddedAccountLabel?: string | null;
+  onOpenParentSidebar?: () => void;
+}) {
+  // Theme
+  const { theme, setTheme, isDark } = useTheme();
+  const { textScale, setTextScale } = useTextScale();
+
+  // Virtual keyboard viewport adjustment for mobile
+  useViewportHeight();
+
+  // Zustand stores
+  const groups = useGroupStore((state) => state.groups);
+  const archivedGroupIds = useGroupStore((state) => state.archivedGroupIds);
+  const selectedGroupId = useGroupStore((state) => state.selectedGroupId);
+  const groupDoc = useGroupStore((state) => state.groupDoc);
+  const actors = useGroupStore((state) => state.actors);
+  const internalRuntimeActorsByGroup = useGroupStore((state) => state.internalRuntimeActorsByGroup);
+  const groupContext = useGroupStore((state) => state.groupContext);
+  const groupSettings = useGroupStore((state) => state.groupSettings);
+  const selectedGroupActorsHydrating = useGroupStore((state) => state.selectedGroupActorsHydrating);
+  const selectedGroupActorStatusProvisional = useGroupStore(
+    (state) => state.selectedGroupActorStatusProvisional,
+  );
+  const setSelectedGroupId = useGroupStore((state) => state.setSelectedGroupId);
+  const refreshGroups = useGroupStore((state) => state.refreshGroups);
+  const refreshActors = useGroupStore((state) => state.refreshActors);
+  const refreshInternalRuntimeActors = useGroupStore((state) => state.refreshInternalRuntimeActors);
+  const loadGroup = useGroupStore((state) => state.loadGroup);
+  const warmGroup = useGroupStore((state) => state.warmGroup);
+  const openChatWindow = useGroupStore((state) => state.openChatWindow);
+  const closeChatWindow = useGroupStore((state) => state.closeChatWindow);
+  const reorderGroupsInSection = useGroupStore((state) => state.reorderGroupsInSection);
+  const archiveGroup = useGroupStore((state) => state.archiveGroup);
+  const restoreGroup = useGroupStore((state) => state.restoreGroup);
+
+  const busy = useUIStore((s) => s.busy);
+  const errorMsg = useUIStore((s) => s.errorMsg);
+  const notice = useUIStore((s) => s.notice);
+  const isTransitioning = useUIStore((s) => s.isTransitioning);
+  const sidebarOpen = useUIStore((s) => s.sidebarOpen);
+  const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed);
+  const sidebarWidth = useUIStore((s) => s.sidebarWidth);
+  const activeTab = useUIStore((s) => s.activeTab);
+  const isSmallScreen = useUIStore((s) => s.isSmallScreen);
+  const webReadOnly = useUIStore((s) => s.webReadOnly);
+  const showError = useUIStore((s) => s.showError);
+  const dismissError = useUIStore((s) => s.dismissError);
+  const dismissNotice = useUIStore((s) => s.dismissNotice);
+  const setSidebarOpen = useUIStore((s) => s.setSidebarOpen);
+  const toggleSidebarCollapsed = useUIStore((s) => s.toggleSidebarCollapsed);
+  const setSidebarWidth = useUIStore((s) => s.setSidebarWidth);
+  const setActiveTab = useUIStore((s) => s.setActiveTab);
+  const setShowScrollButton = useUIStore((s) => s.setShowScrollButton);
+  const setChatUnreadCount = useUIStore((s) => s.setChatUnreadCount);
+  const setSmallScreen = useUIStore((s) => s.setSmallScreen);
+  const setWebReadOnly = useUIStore((s) => s.setWebReadOnly);
+  const sseStatus = useUIStore((s) => s.sseStatus);
+
+  const openModal = useModalStore((s) => s.openModal);
+  const openSettingsTarget = useModalStore((s) => s.openSettingsTarget);
+  const groupEditOpen = useModalStore((s) => s.modals.groupEdit);
+  const addActorOpen = useModalStore((s) => s.modals.addActor);
+  const editingActor = useModalStore((s) => s.editingActor);
+  const shouldRenderAppModals = useModalStore((s) =>
+    shouldMountAppModals({
+      modals: s.modals,
+      recipientsEventId: s.recipientsEventId,
+      presentationViewer: s.presentationViewer,
+      presentationPin: s.presentationPin,
+      editingActor: s.editingActor,
+    }),
+  );
+  const peerRuntimeVisibility = useObservabilityStore((state) => state.peerRuntimeVisibility);
+  const assistantRuntimeVisibility = useObservabilityStore(
+    (state) => state.assistantRuntimeVisibility,
+  );
+
+  const {
+    activeGroupId,
+    destGroupId,
+    composerFiles,
+    replyTarget,
+    setDestGroupId,
+    setReplyTarget,
+    setReplyToText,
+  } = useComposerStore(
+    useShallow((s) => ({
+      activeGroupId: s.activeGroupId,
+      destGroupId: s.destGroupId,
+      composerFiles: s.composerFiles,
+      replyTarget: s.replyTarget,
+      setDestGroupId: s.setDestGroupId,
+      setReplyTarget: s.setReplyTarget,
+      setReplyToText: s.setReplyToText,
+    })),
+  );
+
+  const { setEditGroupTitle, setEditGroupTopic, setDirSuggestions } = useFormStore(
+    useShallow((s) => ({
+      setEditGroupTitle: s.setEditGroupTitle,
+      setEditGroupTopic: s.setEditGroupTopic,
+      setDirSuggestions: s.setDirSuggestions,
+    })),
+  );
+  const clearAllOutbox = useChatOutboxStore((state) => state.clearAll);
+
+  // Actor actions hook
+  const {
+    getTermEpoch,
+    toggleActorEnabled,
+    relaunchActor,
+    startNewActorSession,
+    editActor,
+    removeActor,
+    openActorInbox,
+  } = useActorActions(selectedGroupId);
+
+  const [showMentionMenu, setShowMentionMenu] = React.useState(false);
+  const [mentionFilter, setMentionFilter] = React.useState("");
+  const [mentionKind, setMentionKind] = React.useState<ComposerMentionKind>("agent");
+  const [mentionActorScope, setMentionActorScope] = React.useState<"selected" | "destination">(
+    "selected",
+  );
+  // Group whose actors feed the `@` destination menu (set when typing `#group @`).
+  // Decoupled from destGroupId so it never turns the message into a cross-send.
+  const [mentionTargetGroupId, setMentionTargetGroupId] = React.useState<string>("");
+  const [mentionSelectedIndex, setMentionSelectedIndex] = React.useState(0);
+  const internalRuntimeActors = useMemo(
+    () => internalRuntimeActorsByGroup[String(selectedGroupId || "").trim()] || [],
+    [internalRuntimeActorsByGroup, selectedGroupId],
+  );
+  const refreshRuntimeActors = useCallback(
+    async (groupIdArg?: string, opts?: { includeUnread?: boolean }) => {
+      const gid = String(groupIdArg || selectedGroupId || "").trim();
+      if (!gid) return;
+      await refreshActors(gid, opts);
+    },
+    [refreshActors, selectedGroupId],
+  );
+  const visibleRuntimeActors = useMemo(
+    () =>
+      filterVisibleRuntimeActors(
+        [
+          ...actors,
+          ...internalRuntimeActors.filter(
+            (actor) =>
+              !actors.some((existing) => String(existing.id || "") === String(actor.id || "")),
+          ),
+        ],
+        { peerRuntimeVisibility, assistantRuntimeVisibility },
+      ),
+    [actors, internalRuntimeActors, peerRuntimeVisibility, assistantRuntimeVisibility],
+  );
+
+  useEffect(() => {
+    const handlePageHide = () => clearAllOutbox();
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+      clearAllOutbox();
+    };
+  }, [clearAllOutbox]);
+
+  const {
+    composerRef,
+    fileInputRef,
+    eventContainerRef,
+    contentRef,
+    activeTabRef,
+    chatAtBottomRef,
+    actorsRef,
+    allTabs,
+    handleTabChange,
+  } = useAppTabState({
+    activeTab,
+    runtimeActors: visibleRuntimeActors,
+    selectedGroupId,
+    isSmallScreen,
+    setActiveTab,
+    setShowScrollButton,
+    setChatUnreadCount,
+  });
+
+  useEffect(() => {
+    if (activeTab === "chat") return;
+    if (visibleRuntimeActors.some((actor) => String(actor.id || "") === activeTab)) return;
+    setActiveTab("chat");
+  }, [activeTab, setActiveTab, visibleRuntimeActors]);
+
+  useEffect(() => {
+    const gid = String(selectedGroupId || "").trim();
+    if (!gid) {
+      return undefined;
+    }
+    // loadGroup already hydrates internal actors for a newly selected group.
+    // Keep this interval as a freshness poll instead of duplicating that initial read.
+    const interval = window.setInterval(() => {
+      void refreshInternalRuntimeActors(gid);
+    }, 60000);
+    return () => window.clearInterval(interval);
+  }, [selectedGroupId, refreshInternalRuntimeActors]);
+
+  // Custom hooks
+  const {
+    connectStream,
+    fetchContext,
+    cleanup: cleanupSSE,
+  } = useSSE({ activeTabRef, chatAtBottomRef, actorsRef });
+
+  const { dropOverlayOpen, handleAppendComposerFiles, resetDragDrop, WEB_MAX_FILE_MB } =
+    useDragDrop({ selectedGroupId });
+
+  const { handleStartGroup, handleGroupControl, handleDeleteGroup } = useGroupActions();
+
+  const computedSendGroupId = getEffectiveComposerDestGroupId(
+    destGroupId,
+    activeGroupId,
+    selectedGroupId,
+  );
+
+  const { recipientActors, recipientActorsBusy, destGroupScopeLabel } = useCrossGroupRecipients({
+    actors,
+    groupDoc,
+    selectedGroupId,
+    composerGroupId: activeGroupId,
+    sendGroupId: computedSendGroupId,
+    mentionTargetGroupId,
+    selectedGroupActorsHydrating,
+  });
+  const sendGroupId = computedSendGroupId;
+
+  const startReply = React.useCallback(
+    (ev: LedgerEvent) => {
+      const replyComposerState = buildReplyComposerState(
+        ev,
+        selectedGroupId,
+        actors,
+        groupSettings,
+      );
+      if (!replyComposerState) return;
+
+      if (replyComposerState.destGroupId) {
+        setDestGroupId(replyComposerState.destGroupId);
+      }
+      setReplyToText(replyComposerState.toText);
+      setReplyTarget(replyComposerState.replyTarget);
+      requestAnimationFrame(() => composerRef.current?.focus());
+    },
+    [
+      selectedGroupId,
+      actors,
+      composerRef,
+      groupSettings,
+      setDestGroupId,
+      setReplyTarget,
+      setReplyToText,
+    ],
+  );
+
+  const { parseUrlDeepLink, openMessageWindow } = useDeepLink({
+    groups,
+    selectedGroupId,
+    setSelectedGroupId,
+    setActiveTab,
+    openChatWindow,
+    showError,
+  });
+
+  useGlobalEvents({
+    refreshGroups,
+    refreshActors: refreshRuntimeActors,
+    selectedGroupId,
+    refreshCapabilities: (groupId) => {
+      publishCapabilityChanged(groupId);
+    },
+  });
+
+  const { canManageGroups, ccccHome, fetchDirSuggestions, refreshWebAccessSession } = useAppChrome({
+    parseUrlDeepLink,
+    refreshGroups,
+    setWebReadOnly,
+    setSmallScreen,
+    showError,
+    setDirSuggestions,
+    groupEditOpen,
+    addActorOpen,
+    editingActor,
+  });
+  const connect = useConnectWorkbench(!connectEmbedded && !webReadOnly, refreshWebAccessSession);
+  const remoteSelected = Boolean(connect.selected);
+
+  const { handleTouchStart, handleTouchEnd } = useSwipeNavigation({
+    tabs: allTabs,
+    activeTab,
+    onTabChange: handleTabChange,
+  });
+
+  const { selectedGroupRunning, selectedGroupRuntimeStatus } = useSelectedGroupRuntime({
+    groups,
+    selectedGroupId,
+    groupDoc,
+    actors,
+  });
+  const orderedGroups = useOrderedGroups();
+
+  const groupLabelById = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const g of groups || []) {
+      const gid = String(g.group_id || "").trim();
+      if (!gid) continue;
+      const title = String(g.title || "").trim();
+      out[gid] = title || gid;
+    }
+    return out;
+  }, [groups]);
+
+  const hasReplyTarget = !!replyTarget;
+  const hasComposerFiles = composerFiles.length > 0;
+
+  useAppGroupLifecycle({
+    selectedGroupId: remoteSelected ? "" : selectedGroupId,
+    destGroupId,
+    sendGroupId,
+    hasReplyTarget,
+    hasComposerFiles,
+    setDestGroupId,
+    fileInputRef,
+    resetDragDrop,
+    setActiveTab,
+    closeChatWindow,
+    loadGroup,
+    connectStream,
+    cleanupSSE,
+  });
+
+  const codexVoice = useCodexVoiceShell(!webReadOnly && canManageGroups && !connectEmbedded);
+
+  return (
+    <div
+      className="relative min-h-0 w-full overflow-hidden bg-[var(--color-body-bg)] text-[var(--color-text-primary)]"
+      style={VISUAL_VIEWPORT_BOX}
+      {...{ [VISUAL_VIEWPORT_BOX_ATTRIBUTE]: "" }}
+    >
+      <AppBackground isDark={isDark} />
+
+      <AppShell
+        codexVoice={codexVoice}
+        connectEmbedded={connectEmbedded}
+        connect={connectEmbedded ? undefined : connect}
+        remoteWorkspace={
+          remoteSelected ? (
+            <ConnectRemotePanel workbench={connect} onOpenSidebar={() => setSidebarOpen(true)} />
+          ) : undefined
+        }
+        canUseVoice={canManageGroups && !connectEmbedded}
+        onOpenVoiceSource={openMessageWindow}
+        orderedGroups={orderedGroups}
+        archivedGroupIds={archivedGroupIds}
+        selectedGroupId={selectedGroupId}
+        groupDoc={groupDoc}
+        groupContext={groupContext}
+        actors={actors}
+        runtimeActors={visibleRuntimeActors}
+        recipientActors={recipientActors}
+        recipientActorsBusy={recipientActorsBusy}
+        destGroupScopeLabel={destGroupScopeLabel}
+        activeTab={activeTab}
+        busy={busy}
+        isTransitioning={isTransitioning}
+        sidebarOpen={sidebarOpen}
+        sidebarCollapsed={sidebarCollapsed}
+        sidebarWidth={sidebarWidth}
+        isDark={isDark}
+        isSmallScreen={isSmallScreen}
+        webReadOnly={webReadOnly}
+        selectedGroupRunning={selectedGroupRunning}
+        selectedGroupRuntimeStatus={selectedGroupRuntimeStatus}
+        selectedGroupActorsHydrating={selectedGroupActorsHydrating}
+        selectedGroupActorStatusProvisional={selectedGroupActorStatusProvisional}
+        theme={theme}
+        textScale={textScale}
+        sseStatus={sseStatus}
+        groupLabelById={groupLabelById}
+        mentionFilter={mentionFilter}
+        mentionKind={mentionKind}
+        mentionActorScope={mentionActorScope}
+        mentionSelectedIndex={mentionSelectedIndex}
+        showMentionMenu={showMentionMenu}
+        composerRef={composerRef}
+        fileInputRef={fileInputRef}
+        eventContainerRef={eventContainerRef}
+        contentRef={contentRef}
+        chatAtBottomRef={chatAtBottomRef}
+        onThemeChange={setTheme}
+        onTextScaleChange={setTextScale}
+        onSelectGroup={(groupId) => {
+          connect.selectLocal();
+          setSelectedGroupId(groupId);
+        }}
+        onWarmGroup={(gid) => void warmGroup(gid)}
+        onCreateGroup={
+          !webReadOnly && canManageGroups
+            ? () => {
+                openModal("createGroup");
+                void fetchDirSuggestions();
+              }
+            : undefined
+        }
+        onCloseSidebar={() => setSidebarOpen(false)}
+        onToggleSidebar={toggleSidebarCollapsed}
+        onResizeSidebar={setSidebarWidth}
+        onReorderGroupsInSection={reorderGroupsInSection}
+        onArchiveGroup={archiveGroup}
+        onRestoreGroup={restoreGroup}
+        onControlGroup={handleGroupControl}
+        onDeleteGroup={handleDeleteGroup}
+        onOpenSidebar={onOpenParentSidebar || (() => setSidebarOpen(true))}
+        onOpenGroupEdit={
+          canManageGroups
+            ? () => {
+                if (groupDoc) {
+                  setEditGroupTitle(groupDoc.title || "");
+                  setEditGroupTopic(groupDoc.topic || "");
+                  openModal("groupEdit");
+                }
+              }
+            : undefined
+        }
+        onOpenSearch={() => openModal("search")}
+        onOpenContext={() => {
+          if (selectedGroupId && !groupContext) void fetchContext(selectedGroupId);
+          openModal("context");
+        }}
+        onStartGroup={handleStartGroup}
+        onOpenSettings={() => openModal("settings")}
+        canAccessAccount={canManageGroups}
+        accountLabel={connectEmbedded ? embeddedAccountLabel : connect.accountLabel}
+        onOpenAccount={() => openSettingsTarget({ scope: "global", tab: "account" })}
+        onOpenMobileMenu={() => openModal("mobileMenu")}
+        onTabChange={handleTabChange}
+        appendComposerFiles={handleAppendComposerFiles}
+        setMentionFilter={setMentionFilter}
+        setMentionKind={setMentionKind}
+        setMentionActorScope={setMentionActorScope}
+        setMentionTargetGroupId={setMentionTargetGroupId}
+        setMentionSelectedIndex={setMentionSelectedIndex}
+        setShowMentionMenu={setShowMentionMenu}
+        getTermEpoch={getTermEpoch}
+        onToggleActorEnabled={toggleActorEnabled}
+        onRelaunchActor={relaunchActor}
+        onNewActorSession={startNewActorSession}
+        onEditActor={editActor}
+        onRemoveActor={removeActor}
+        onOpenActorInbox={openActorInbox}
+        onRefreshActors={() => void refreshRuntimeActors(selectedGroupId)}
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+      />
+
+      <AppFeedback
+        isDark={isDark}
+        webReadOnly={webReadOnly}
+        errorMsg={errorMsg}
+        notice={notice}
+        dismissError={dismissError}
+        dismissNotice={dismissNotice}
+      />
+
+      {shouldRenderAppModals ? (
+        <Suspense fallback={null}>
+          <AppModals
+            codexVoice={codexVoice}
+            isDark={isDark}
+            theme={theme}
+            textScale={textScale}
+            readOnly={webReadOnly}
+            ccccHome={ccccHome}
+            composerRef={composerRef}
+            onStartReply={startReply}
+            onThemeChange={setTheme}
+            onTextScaleChange={setTextScale}
+            onDeleteGroup={handleDeleteGroup}
+            fetchContext={fetchContext}
+            canManageGroups={canManageGroups}
+            accountLabel={connectEmbedded ? embeddedAccountLabel : connect.accountLabel}
+          />
+        </Suspense>
+      ) : null}
+
+      <DropOverlay isOpen={dropOverlayOpen} isDark={isDark} maxFileMb={WEB_MAX_FILE_MB} />
+    </div>
+  );
+}

@@ -1,0 +1,82 @@
+# Local runtime home (vNext uses ~/.cccc; ignore repo-local .cccc if created)
+.cccc/**
+.cccc-rust/**
+
+# Python bytecode caches
+**/__pycache__/**
+*.pyc
+.pytest_cache/**
+.mypy_cache/**
+.tox/**
+.coverage
+/.project-harness/pre-commit-gate.ok
+
+# Local virtualenv
+/.venv/
+/.venv-qa/
+
+# uv lock file
+uv.lock
+
+# Build artifacts
+/dist/
+/build/
+/target/
+**/target/
+*.egg-info/
+
+# Web UI build/cache artifacts
+**/node_modules/
+/web/.vite/
+/web/dist/
+/crates/cccc-web/assets/web-dist/
+/space
+
+# Local/editor/platform noise
+.DS_Store
+.idea/
+.vscode/
+.env
+.tmp
+/tmp
+/voice/
+graphify-out
+
+# Local dev environments
+/venv-publish/
+
+# Docs: VitePress build artifacts
+/docs/.vitepress/cache/
+/docs/.vitepress/dist/
+/docs/public/install.sh
+/docs/public/install.ps1
+/docs/public/releases.json
+/docs/_archive_local/
+/docs/voice-secretary/**
+
+# Local iteration notes (not shipped)
+/docs/ITERATION_PLAN.md
+/docs/review/
+
+/docs/plan/
+/docs/superpowers/
+# Docs: legacy vnext - whitelist only what we ship
+/docs/vnext/*
+
+# Tests
+
+# Local agent guide (not committed)
+AGENTS.md
+.graphifyignore
+.claude/skills
+/.claude/worktrees/
+.shared/
+.agents/
+.codex/
+.windsurf/
+.factory/
+.antigravitycli/
+.omo/
+.github/*
+!.github/workflows/
+!.github/workflows/**

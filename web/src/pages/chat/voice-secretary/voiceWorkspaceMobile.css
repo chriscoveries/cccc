@@ -1,0 +1,111 @@
+@media (max-width: 639px) {
+  [data-voice-mobile-sheet].glass-modal {
+    padding: 12px 8px max(8px, env(safe-area-inset-bottom, 0px));
+  }
+  [data-voice-sheet-close] {
+    min-width: 44px;
+    min-height: 44px;
+    top: 4px;
+    right: 4px;
+  }
+  [data-voice-sheet-header] {
+    padding: 4px 4px 8px;
+  }
+  [data-voice-panel-views] > button,
+  [data-voice-workstage-toggle],
+  [data-voice-settings],
+  [data-voice-configure] {
+    min-height: 44px;
+  }
+  [data-voice-settings] {
+    min-width: 44px;
+  }
+  [data-voice-workspace-body] {
+    padding: 8px 0 0;
+  }
+  [data-voice-workspace-body][data-voice-body-mode="execution"] {
+    padding: 8px;
+  }
+  [data-voice-input-bar] button,
+  [data-voice-ask-item] button,
+  [data-voice-ask-item] a,
+  [data-voice-ask-thread] > div:first-child button {
+    min-height: 44px;
+  }
+  [data-voice-instruction-input] {
+    min-height: 44px;
+    max-height: 4.5rem;
+    padding: 10px 12px 4px;
+  }
+  [data-voice-document-panel] {
+    flex: 1;
+    min-width: 0;
+    padding: 8px;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+  }
+  [data-voice-document-header] {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 0 0 8px;
+  }
+  [data-voice-document-heading] {
+    flex: none;
+    width: 100%;
+  }
+  [data-voice-document-title] {
+    font-size: 1rem;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+  [data-voice-document-panel] button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  [data-voice-document-location] {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  [data-voice-document-actions] {
+    justify-content: flex-start;
+  }
+  [data-voice-document-panel] > .voice-document-content {
+    flex: 1 0 min(14rem, 40dvh);
+    min-height: 0;
+    margin-top: 8px;
+    padding: 12px;
+    overscroll-behavior-y: contain;
+    scroll-padding-block: 12px;
+  }
+  [data-voice-document-panel] > .voice-document-footer {
+    /* Keep the input in normal flow: a sticky footer can cover the entire
+       document on short screens when an error or readiness notice is shown. */
+    flex-shrink: 0;
+    padding-bottom: 8px;
+    background: var(--color-bg-primary);
+  }
+  [data-voice-document-panel] > .voice-document-content:has(> textarea) {
+    padding: 0;
+  }
+  [data-voice-document-panel] .voice-document-content textarea {
+    min-height: 0;
+    resize: none;
+    padding: 12px;
+  }
+  [data-voice-document-panel] .markdown-body {
+    font-size: 0.8125rem;
+    line-height: 1.65;
+  }
+  [data-voice-document-panel] .markdown-body h1 {
+    font-size: 1.25rem;
+    line-height: 1.4;
+  }
+  [data-voice-document-panel] .markdown-body h2 {
+    font-size: 1.0625rem;
+    line-height: 1.4;
+  }
+  [data-voice-document-panel] .markdown-body h3 {
+    font-size: 1rem;
+  }
+}

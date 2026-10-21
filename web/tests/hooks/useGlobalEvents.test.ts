@@ -1,0 +1,116 @@
+import { describe, expect, it } from "vite-plus/test";
+import {
+  getGlobalEventGroupId,
+  shouldRefreshCapabilitiesAfterGlobalEvent,
+  shouldRefreshCapabilitiesAfterGlobalEventsOpen,
+  shouldKeepGlobalEventsConnected,
+  shouldRefreshActorsAfterGlobalEvent,
+  shouldRefreshGroupsAfterGlobalEventsOpen,
+  shouldRefreshGroupsAfterGlobalEvent,
+} from "../../src/hooks/useGlobalEvents";
+
+describe("useGlobalEvents open refresh policy", () => {
+  it("requires catch-up refresh on the first successful open", () => {
+    expect(shouldRefreshGroupsAfterGlobalEventsOpen(false)).toBe(true);
+  });
+
+  it("requires catch-up refresh on reconnects too", () => {
+    expect(shouldRefreshGroupsAfterGlobalEventsOpen(true)).toBe(true);
+  });
+
+  it("requires capability catch-up on first connect and reconnect", () => {
+    expect(shouldRefreshCapabilitiesAfterGlobalEventsOpen(false)).toBe(true);
+    expect(shouldRefreshCapabilitiesAfterGlobalEventsOpen(true)).toBe(true);
+  });
+
+  it("refreshes groups for every supported lifecycle event name", () => {
+    for (const kind of [
+      "group.created",
+      "group.updated",
+      "group.deleted",
+      "group.state_changed",
+      "group.create",
+      "group.update",
+      "group.start",
+      "group.stop",
+      "group.set_state",
+    ]) {
+      expect(shouldRefreshGroupsAfterGlobalEvent({ kind, group_id: "g-demo" })).toBe(true);
+    }
+    expect(shouldRefreshGroupsAfterGlobalEvent({ kind: "chat.message" })).toBe(false);
+  });
+
+  it("releases the global SSE connection while the tab is hidden", () => {
+    expect(shouldKeepGlobalEventsConnected(false)).toBe(true);
+    expect(shouldKeepGlobalEventsConnected(true)).toBe(false);
+  });
+
+  it("extracts group id from top-level global events", () => {
+    expect(getGlobalEventGroupId({ kind: "actor.stop", group_id: "g-demo" })).toBe("g-demo");
+  });
+
+  it("extracts group id from nested event data as a fallback", () => {
+    expect(
+      getGlobalEventGroupId({ kind: "group.state_changed", data: { group_id: "g-demo" } }),
+    ).toBe("g-demo");
+  });
+
+  it("refreshes selected actors for matching lifecycle events", () => {
+    expect(
+      shouldRefreshActorsAfterGlobalEvent(
+        { kind: "actor.stop", group_id: "g-demo", data: { actor_id: "peer-1" } },
+        "g-demo",
+      ),
+    ).toBe(true);
+  });
+
+  it("refreshes selected actors for Rust group state ledger events", () => {
+    for (const kind of ["group.start", "group.stop", "group.set_state"]) {
+      expect(shouldRefreshActorsAfterGlobalEvent({ kind, group_id: "g-demo" }, "g-demo")).toBe(
+        true,
+      );
+    }
+  });
+
+  it("refreshes selected actors for actor removal events too", () => {
+    expect(
+      shouldRefreshActorsAfterGlobalEvent(
+        { kind: "actor.remove", group_id: "g-demo", data: { actor_id: "peer-1" } },
+        "g-demo",
+      ),
+    ).toBe(true);
+  });
+
+  it("ignores lifecycle events for other groups", () => {
+    expect(
+      shouldRefreshActorsAfterGlobalEvent(
+        { kind: "actor.stop", group_id: "g-other", data: { actor_id: "peer-1" } },
+        "g-demo",
+      ),
+    ).toBe(false);
+  });
+
+  it("ignores non-lifecycle global events for actor refresh", () => {
+    expect(
+      shouldRefreshActorsAfterGlobalEvent({ kind: "group.updated", group_id: "g-demo" }, "g-demo"),
+    ).toBe(false);
+  });
+
+  it("refreshes selected capability state after capability changes", () => {
+    expect(
+      shouldRefreshCapabilitiesAfterGlobalEvent(
+        { kind: "capability.changed", data: { group_id: "g-demo", capability_id: "skill:demo" } },
+        "g-demo",
+      ),
+    ).toBe(true);
+  });
+
+  it("ignores capability changes for other groups", () => {
+    expect(
+      shouldRefreshCapabilitiesAfterGlobalEvent(
+        { kind: "capability.changed", data: { group_id: "g-other", capability_id: "skill:demo" } },
+        "g-demo",
+      ),
+    ).toBe(false);
+  });
+});

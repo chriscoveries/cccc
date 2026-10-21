@@ -1,0 +1,278 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CodexVoiceBrowserSession } from "./codexVoiceSession";
+import { codexVoiceErrorText } from "./codexVoiceControllerText";
+import en from "../../i18n/locales/en/modals.json";
+import zh from "../../i18n/locales/zh/modals.json";
+import ja from "../../i18n/locales/ja/modals.json";
+import type { CodexVoiceCallInfo } from "../../services/api";
+
+const mocks = vi.hoisted(() => ({ start: vi.fn(), stop: vi.fn(), ice: vi.fn() }));
+vi.mock("../../services/api", () => ({
+  startCodexVoiceCall: mocks.start,
+  stopCodexVoiceCall: mocks.stop,
+  prepareCodexVoiceNotificationOutput: vi.fn(),
+  getCodexVoiceWebSocketUrl: () => "ws://fixture",
+}));
+vi.mock("./codexVoiceMedia", async (original) => ({
+  ...(await original<typeof import("./codexVoiceMedia")>()),
+  waitForIceGathering: mocks.ice,
+}));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function fixture(setSinkId = vi.fn(async () => {})) {
+  const track = { stop: vi.fn() };
+  const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
+  const getUserMedia = vi.fn(async () => stream);
+  vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
+  const wire = { close: vi.fn(), send: vi.fn(), readyState: "connecting", bufferedAmount: 0 };
+  const peer = {
+    addTrack: vi.fn(),
+    createDataChannel: () => wire,
+    createOffer: vi.fn(async () => ({ type: "offer", sdp: "fixture-sdp" })),
+    setLocalDescription: vi.fn(async () => {}),
+    setRemoteDescription: vi.fn(async () => {}),
+    localDescription: { sdp: "fixture-sdp" },
+    close: vi.fn(),
+    ontrack: null as null | ((event: RTCTrackEvent) => void),
+  };
+  vi.stubGlobal(
+    "RTCPeerConnection",
+    class {
+      constructor() {
+        return peer;
+      }
+    },
+  );
+  const audio = { pause: vi.fn(), play: vi.fn(async () => {}), setSinkId, srcObject: null };
+  const callbacks = {
+    onPhase: vi.fn(),
+    onCall: vi.fn(),
+    onAnalyst: vi.fn(),
+    onUserTranscript: vi.fn(),
+    onAssistantTranscript: vi.fn(),
+    onAnalystProgress: vi.fn(),
+    onAnalystResult: vi.fn(),
+    onPlaybackBlocked: vi.fn(),
+    onError: vi.fn(),
+  };
+  const session = new CodexVoiceBrowserSession({
+    audio: audio as unknown as HTMLAudioElement,
+    preferences: { voice: "cove", inputDeviceId: "", outputDeviceId: "" },
+    callbacks,
+  });
+  return { session, audio, callbacks, track, peer, wire, getUserMedia };
+}
+
+beforeEach(() => {
+  mocks.start.mockReset();
+  mocks.stop.mockReset().mockResolvedValue({ ok: true, result: { stopped: true } });
+  mocks.ice.mockReset().mockResolvedValue(undefined);
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("Voice startup cancellation", () => {
+  it.each(["assistant", "persona"] as const)(
+    "publishes the attached %s call from the real control socket before listening",
+    async (mode) => {
+      vi.stubGlobal("window", globalThis);
+      const socket = {
+        onmessage: null as ((event: { data: string }) => void) | null,
+        send: vi.fn(),
+        close: vi.fn(),
+        readyState: 1,
+      };
+      const opened = vi.fn();
+      vi.stubGlobal(
+        "WebSocket",
+        class {
+          static OPEN = 1;
+          constructor() {
+            opened();
+            return socket;
+          }
+        },
+      );
+      const call: CodexVoiceCallInfo = {
+        generation: "owned-call",
+        analyst_generation: mode === "assistant" ? "owned-analyst" : null,
+        connected: false,
+        mode,
+        voice: "cove",
+      };
+      mocks.start.mockResolvedValue({
+        ok: true,
+        result: { call, analyst: null, answer_sdp: "fixture-answer" },
+      });
+      const f = fixture();
+      const starting = f.session.start();
+      try {
+        await vi.waitFor(() => expect(opened).toHaveBeenCalledOnce());
+        expect(f.callbacks.onCall).toHaveBeenLastCalledWith(call);
+        f.wire.readyState = "open";
+        socket.onmessage?.({
+          data: JSON.stringify({ type: "ready", call: { ...call, connected: true } }),
+        });
+        await starting;
+        expect(f.callbacks.onPhase).toHaveBeenLastCalledWith("listening");
+        expect(f.callbacks.onCall.mock.calls).toEqual([[call], [{ ...call, connected: true }]]);
+
+        // Another generation cannot replace this browser's call identity.
+        socket.onmessage?.({
+          data: JSON.stringify({ type: "ready", call: { ...call, generation: "foreign-call" } }),
+        });
+        expect(f.callbacks.onCall).toHaveBeenCalledTimes(2);
+        await f.session.stop();
+        expect(mocks.stop).toHaveBeenCalledExactlyOnceWith(call.generation);
+        socket.onmessage?.({
+          data: JSON.stringify({ type: "ready", call: { ...call, connected: true } }),
+        });
+        expect(f.callbacks.onCall).toHaveBeenLastCalledWith(null);
+      } finally {
+        await f.session.stop();
+      }
+    },
+  );
+
+  it.each([
+    "codex_voice_setup_failed",
+    "codex_voice_analyst_start_failed",
+    "codex_voice_analyst_start_timeout",
+    "codex_voice_recording_busy",
+    "codex_voice_recording_failed",
+    "codex_voice_realtime_auth_failed",
+    "codex_voice_realtime_timeout",
+    "codex_voice_realtime_connection_failed",
+    "codex_voice_realtime_rate_limited",
+    "codex_voice_realtime_rejected",
+    "codex_voice_realtime_failed",
+  ])("preserves %s for localized feedback and releases media without retry", async (code) => {
+    mocks.start.mockResolvedValue({
+      ok: false,
+      error: { code, message: "private upstream detail", details: { stage: "realtime" } },
+    });
+    const f = fixture();
+    await expect(f.session.start()).rejects.toThrow(code);
+    expect(f.callbacks.onError).toHaveBeenCalledExactlyOnceWith(code);
+    expect(f.track.stop).toHaveBeenCalledOnce();
+    expect(f.peer.close).toHaveBeenCalledOnce();
+    expect(mocks.start).toHaveBeenCalledOnce();
+    expect(mocks.stop).not.toHaveBeenCalled();
+    for (const locale of [en, zh, ja]) {
+      const messages = locale.codexVoiceErrors as Record<string, string>;
+      const text = codexVoiceErrorText(
+        (key) => messages[key.replace("codexVoiceErrors.", "")],
+        code,
+      );
+      expect(text).toBeTruthy();
+      expect(text).not.toBe(messages.unknown);
+      expect(text).not.toContain("private upstream detail");
+    }
+  });
+
+  it("does not request the microphone after stopping during speaker setup", async () => {
+    const speaker = deferred<void>();
+    const f = fixture(vi.fn(() => speaker.promise));
+    const starting = f.session.start();
+    await f.session.stop();
+    speaker.resolve();
+    await starting;
+    expect(f.getUserMedia).not.toHaveBeenCalled();
+    expect(mocks.start).not.toHaveBeenCalled();
+  });
+
+  it("does not start a provider call after stopping during ICE gathering", async () => {
+    const ice = deferred<void>();
+    mocks.ice.mockReturnValue(ice.promise);
+    mocks.start.mockResolvedValue({ ok: false, error: { code: "unexpected_start" } });
+    const f = fixture();
+    const starting = f.session.start().catch(() => {});
+    await vi.waitFor(() => expect(mocks.ice).toHaveBeenCalledOnce());
+    await f.session.stop();
+    ice.resolve();
+    await starting;
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(f.callbacks.onPhase).toHaveBeenLastCalledWith("idle");
+  });
+
+  it("still reports a real startup failure and releases acquired media", async () => {
+    mocks.ice.mockRejectedValue(new Error("ICE failed"));
+    const f = fixture();
+    await expect(f.session.start()).rejects.toThrow("ICE failed");
+    expect(f.callbacks.onError).toHaveBeenCalledOnce();
+    expect(f.callbacks.onPhase).toHaveBeenLastCalledWith("failed");
+    expect(f.track.stop).toHaveBeenCalledOnce();
+    expect(f.peer.close).toHaveBeenCalledOnce();
+    expect(mocks.start).not.toHaveBeenCalled();
+  });
+
+  it("settles a cancelled startup quietly when an old asynchronous stage rejects", async () => {
+    let rejectIce!: (error: Error) => void;
+    mocks.ice.mockReturnValue(
+      new Promise<void>((_resolve, reject) => {
+        rejectIce = reject;
+      }),
+    );
+    const f = fixture();
+    const starting = f.session.start();
+    await vi.waitFor(() => expect(mocks.ice).toHaveBeenCalledOnce());
+    await f.session.stop();
+    rejectIce(new Error("late ICE failure"));
+    await expect(starting).resolves.toBeUndefined();
+    expect(f.callbacks.onError).not.toHaveBeenCalled();
+    expect(f.callbacks.onPhase).toHaveBeenLastCalledWith("idle");
+  });
+
+  it("does not publish a playback failure after the call was stopped", async () => {
+    let rejectPlay!: (error: Error) => void;
+    const f = fixture();
+    f.audio.play.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectPlay = reject;
+        }),
+    );
+    const playing = f.session.resumeAudio();
+    await f.session.stop();
+    rejectPlay(new Error("late playback failure"));
+    await playing;
+    expect(f.callbacks.onPlaybackBlocked.mock.calls).toEqual([[false]]);
+  });
+
+  it("releases the exact generation returned after stop even if HTTP abort loses the race", async () => {
+    const response = deferred<unknown>();
+    mocks.start.mockReturnValue(response.promise);
+    const f = fixture();
+    const starting = f.session.start();
+    await vi.waitFor(() => expect(mocks.start).toHaveBeenCalledOnce());
+    await f.session.stop();
+    response.resolve({ ok: true, result: { call: { generation: "cancelled-generation" } } });
+    await starting;
+    expect(mocks.stop).toHaveBeenCalledExactlyOnceWith("cancelled-generation");
+    expect(f.callbacks.onCall.mock.calls).toEqual([[null]]);
+  });
+
+  it("ignores a queued remote track after the call has stopped", async () => {
+    const ice = deferred<void>();
+    mocks.ice.mockReturnValue(ice.promise);
+    const f = fixture();
+    const starting = f.session.start().catch(() => {});
+    await vi.waitFor(() => expect(mocks.ice).toHaveBeenCalledOnce());
+    const ontrack = f.peer.ontrack;
+    await f.session.stop();
+    ontrack?.({ streams: [{}] } as RTCTrackEvent);
+    ice.resolve();
+    await starting;
+    expect(f.audio.srcObject).toBeNull();
+    expect(f.audio.play).not.toHaveBeenCalled();
+  });
+});

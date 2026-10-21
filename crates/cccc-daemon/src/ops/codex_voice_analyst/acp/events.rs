@@ -1,0 +1,388 @@
+use super::tool_results::{publish_mcp_result, remember_tool_call};
+use crate::ops::codex_voice_analyst::AnalystEvent;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use tokio::sync::broadcast;
+
+#[derive(Debug)]
+pub(super) struct ActiveTurn {
+    pub(super) turn_id: String,
+    pub(super) external: bool,
+    pub(super) admitted: bool,
+    /// Learned from live provider activity, never from a terminal broadcast.
+    pub(super) provider_prompt_id: Option<String>,
+    /// Grok's persisted user record precedes its first promptId-bearing activity.
+    pub(super) provider_start_sequence: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ToolCall {
+    pub(super) title: String,
+    pub(super) raw_input: Value,
+}
+
+pub(super) fn handle_notification(
+    method: &str,
+    message: &Value,
+    events: &broadcast::Sender<AnalystEvent>,
+    generation: &str,
+    session_id: &str,
+    active: &mut Option<ActiveTurn>,
+    tool_calls: &mut HashMap<String, ToolCall>,
+) {
+    if message
+        .pointer("/params/_meta/isReplay")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return;
+    }
+    if session_id.is_empty()
+        || message
+            .get("params")
+            .and_then(|params| params.get("sessionId"))
+            .and_then(Value::as_str)
+            != Some(session_id)
+    {
+        return;
+    }
+    if method == "session/update" {
+        let update = &message["params"]["update"];
+        let sequence = provider_sequence(message, session_id);
+        if let Some(turn) = active.as_mut().filter(|turn| turn.admitted) {
+            if turn
+                .provider_start_sequence
+                .zip(sequence)
+                .is_some_and(|(start, observed)| observed < start)
+            {
+                return;
+            }
+            if update["sessionUpdate"] == "user_message_chunk"
+                && turn.provider_start_sequence.is_none()
+            {
+                turn.provider_start_sequence = sequence;
+            }
+        }
+        if update["sessionUpdate"] != "turn_completed"
+            && let Some(turn) = active.as_mut().filter(|turn| turn.admitted)
+            && let Some(prompt_id) = message
+                .pointer("/params/_meta/promptId")
+                .and_then(Value::as_str)
+        {
+            if turn
+                .provider_prompt_id
+                .as_deref()
+                .is_some_and(|id| id != prompt_id)
+            {
+                // Delayed activity from another provider turn cannot become this
+                // turn's result (or overwrite its completion identity).
+                return;
+            }
+            turn.provider_prompt_id = Some(prompt_id.to_owned());
+        }
+        match update["sessionUpdate"].as_str().unwrap_or_default() {
+            "user_message_chunk" => {
+                if active.is_none() {
+                    let turn_id = format!("acp-tui-{}", uuid::Uuid::new_v4().simple());
+                    *active = Some(ActiveTurn {
+                        turn_id: turn_id.clone(),
+                        external: true,
+                        admitted: true,
+                        provider_prompt_id: message
+                            .pointer("/params/_meta/promptId")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        provider_start_sequence: sequence,
+                    });
+                    publish_started(events, generation, session_id, &turn_id, None);
+                }
+            }
+            "agent_message_chunk" => {
+                if active.as_ref().is_some_and(|turn| turn.admitted) {
+                    publish_agent_delta(update, events, generation, session_id, active.as_ref());
+                }
+            }
+            "tool_call" if active.as_ref().is_some_and(|turn| turn.admitted) => {
+                remember_tool_call(update, tool_calls);
+                publish_tool_activity(
+                    update,
+                    tool_calls,
+                    events,
+                    generation,
+                    session_id,
+                    active.as_ref(),
+                );
+            }
+            "tool_call_update" => {
+                if active.as_ref().is_some_and(|turn| turn.admitted) {
+                    remember_tool_call(update, tool_calls);
+                    publish_tool_activity(
+                        update,
+                        tool_calls,
+                        events,
+                        generation,
+                        session_id,
+                        active.as_ref(),
+                    );
+                    if update.get("status").and_then(Value::as_str) == Some("completed") {
+                        publish_mcp_result(
+                            update,
+                            tool_calls,
+                            events,
+                            generation,
+                            session_id,
+                            active.as_ref(),
+                        );
+                    }
+                }
+            }
+            "turn_completed" => settle_from_update(message, events, generation, session_id, active),
+            _ => {}
+        }
+        return;
+    }
+    if matches!(
+        method,
+        "_x.ai/session/update" | "_x.ai/session_notification" | "x.ai/session_notification"
+    ) {
+        let update = &message["params"]["update"];
+        if update["sessionUpdate"] == "turn_completed" {
+            settle_from_update(message, events, generation, session_id, active);
+        }
+    }
+    // Grok emits `prompt_complete` as a fire-and-forget duplicate of the
+    // persisted `turn_completed` update. It can arrive after the next turn has
+    // started and carries no CCCC turn id, so it must never settle `active`.
+}
+
+fn publish_tool_activity(
+    update: &Value,
+    tool_calls: &HashMap<String, ToolCall>,
+    events: &broadcast::Sender<AnalystEvent>,
+    generation: &str,
+    session_id: &str,
+    active: Option<&ActiveTurn>,
+) {
+    let Some(turn) = active else {
+        return;
+    };
+    let title = update["toolCallId"]
+        .as_str()
+        .and_then(|id| tool_calls.get(id))
+        .map(|call| call.title.as_str())
+        .unwrap_or_default();
+    if title.is_empty() {
+        return;
+    }
+    // Observation only. Do not expose arguments, results, or permission authority.
+    publish(
+        events,
+        generation,
+        json!({"method":"cccc/toolActivity","params":{"threadId":session_id,"turnId":turn.turn_id,"title":title.chars().take(400).collect::<String>()}}),
+    );
+}
+
+// Grok's persisted event IDs are session-scoped monotonically increasing
+// offsets. Use their causal order for a turn that ends before any promptId-
+// bearing activity, never wall-clock timing or an uncorrelated terminal.
+fn provider_sequence(message: &Value, session_id: &str) -> Option<u64> {
+    message
+        .pointer("/params/_meta/eventId")?
+        .as_str()?
+        .strip_prefix(session_id)?
+        .strip_prefix('-')?
+        .parse()
+        .ok()
+}
+
+fn publish_agent_delta(
+    update: &Value,
+    events: &broadcast::Sender<AnalystEvent>,
+    generation: &str,
+    session_id: &str,
+    active: Option<&ActiveTurn>,
+) {
+    let Some(turn) = active else { return };
+    let text = update
+        .get("content")
+        .and_then(|content| content.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !text.is_empty() {
+        publish(
+            events,
+            generation,
+            json!({
+                "method":"item/agentMessage/delta",
+                "params":{
+                    "threadId":session_id,
+                    "turnId":turn.turn_id,
+                    "itemId":format!("{}-message", turn.turn_id),
+                    "delta":text,
+                }
+            }),
+        );
+    }
+}
+
+fn settle_from_update(
+    message: &Value,
+    events: &broadcast::Sender<AnalystEvent>,
+    generation: &str,
+    session_id: &str,
+    active: &mut Option<ActiveTurn>,
+) {
+    // Grok send_now durably ends the old turn before echoing the new input.
+    // Its RPC response may arrive later, including during the next turn. A
+    // matching provider completion must release either kind of turn now;
+    // the late RPC remains fenced by its original local turn id.
+    let update = &message["params"]["update"];
+    let prompt_id = update.get("prompt_id").and_then(Value::as_str);
+    let sequence = provider_sequence(message, session_id);
+    let Some(turn_id) = active
+        .as_ref()
+        .filter(|turn| {
+            turn.admitted
+                && match (turn.provider_prompt_id.as_deref(), prompt_id) {
+                    (Some(expected), Some(observed)) => expected == observed,
+                    // An immediately cancelled/empty Grok turn can have no
+                    // activity. Its persisted terminal must follow the user
+                    // record; a duplicate from before that record cannot end it.
+                    (None, Some(_)) => turn
+                        .provider_start_sequence
+                        .zip(sequence)
+                        .is_some_and(|(start, end)| end > start),
+                    // Other ACP runtimes still settle their native turns by status.
+                    (None, None) => turn.external,
+                    _ => false,
+                }
+        })
+        .map(|turn| turn.turn_id.clone())
+    else {
+        return;
+    };
+    let reason = update
+        .get("stopReason")
+        .or_else(|| update.get("stop_reason"))
+        .and_then(Value::as_str);
+    let (status, error) = status_from_stop_reason(reason);
+    settle_turn(
+        events,
+        generation,
+        session_id,
+        &turn_id,
+        status,
+        error.as_deref(),
+        active,
+    );
+}
+
+pub(super) fn status_from_stop_reason(reason: Option<&str>) -> (&'static str, Option<String>) {
+    match reason
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "end_turn" | "completed" | "success" => ("completed", None),
+        "cancelled" | "canceled" | "interrupted" => ("cancelled", None),
+        "" => (
+            "failed",
+            Some("ACP turn ended without a stop reason".into()),
+        ),
+        other => ("failed", Some(format!("ACP turn stopped: {other}"))),
+    }
+}
+
+pub(super) fn settle_turn(
+    events: &broadcast::Sender<AnalystEvent>,
+    generation: &str,
+    session_id: &str,
+    expected_turn_id: &str,
+    status: &str,
+    error: Option<&str>,
+    active: &mut Option<ActiveTurn>,
+) {
+    if active
+        .as_ref()
+        .is_none_or(|turn| turn.turn_id != expected_turn_id)
+    {
+        return;
+    }
+    let turn = active.take().expect("checked active ACP turn");
+    publish(
+        events,
+        generation,
+        json!({
+            "method":"item/completed",
+            "params":{
+                "threadId":session_id,
+                "turnId":turn.turn_id,
+                "item":{
+                    "id":format!("{}-message", turn.turn_id),
+                    "type":"agentMessage",
+                    "text":"",
+                }
+            }
+        }),
+    );
+    publish(
+        events,
+        generation,
+        json!({
+            "method":"turn/completed",
+            "params":{
+                "threadId":session_id,
+                "turn":{
+                    "id":turn.turn_id,
+                    "status":status,
+                    "error":error,
+                }
+            }
+        }),
+    );
+}
+
+pub(super) fn publish_started(
+    events: &broadcast::Sender<AnalystEvent>,
+    generation: &str,
+    session_id: &str,
+    turn_id: &str,
+    delegation_id: Option<String>,
+) {
+    let _ = events.send(AnalystEvent {
+        generation: generation.to_owned(),
+        message: json!({
+            "method":"turn/started",
+            "params":{"threadId":session_id,"turn":{"id":turn_id}}
+        }),
+        requested_delegation_id: delegation_id,
+    });
+}
+
+pub(super) fn publish(events: &broadcast::Sender<AnalystEvent>, generation: &str, message: Value) {
+    let _ = events.send(AnalystEvent {
+        generation: generation.to_owned(),
+        message,
+        requested_delegation_id: None,
+    });
+}
+
+pub(super) fn publish_approval_required(
+    events: &broadcast::Sender<AnalystEvent>,
+    generation: &str,
+    session_id: &str,
+    runtime: &str,
+) {
+    publish(
+        events,
+        generation,
+        json!({
+            "method":"mcpServer/elicitation/request",
+            "params":{"threadId":session_id,"managedRuntime":runtime}
+        }),
+    );
+}
+
+#[cfg(test)]
+mod tests;

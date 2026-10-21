@@ -1,0 +1,142 @@
+use cccc_contracts::{DaemonRequest, utc_now};
+use cccc_core::{GroupStore, HomeLayout, assistant_state};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::io;
+use uuid::Uuid;
+
+use super::{voice_input, voice_input_delivery};
+use crate::dispatch::{OpError, OpResult, object, required_arg, string_arg};
+
+pub(super) fn append(
+    home: &HomeLayout,
+    request: &DaemonRequest,
+    kind: &str,
+    text: String,
+) -> OpResult {
+    append_with_state(home, request, kind, text, |_| Ok(()))
+}
+
+pub(super) fn append_with_state(
+    home: &HomeLayout,
+    request: &DaemonRequest,
+    kind: &str,
+    text: String,
+    prepare_state: impl FnOnce(&mut serde_json::Map<String, Value>) -> io::Result<()>,
+) -> OpResult {
+    let group_id = required_arg(request, "group_id")?;
+    let text = text.trim().to_owned();
+    if text.is_empty() {
+        return Err(OpError::new("empty_voice_input", "text cannot be empty"));
+    }
+    let store = GroupStore::new(home.clone()).map_err(OpError::io)?;
+    let state = assistant_state::load(home, &group_id).map_err(OpError::io)?;
+    let assistant = state
+        .get("assistant")
+        .cloned()
+        .or_else(|| state.get("voice_secretary").cloned())
+        .unwrap_or_else(voice_input::default_assistant);
+    if !assistant["enabled"].as_bool().unwrap_or(false) {
+        return Err(OpError::new(
+            "assistant_disabled",
+            "voice_secretary is disabled",
+        ));
+    }
+
+    let request_id = string_arg(request, "request_id").unwrap_or_default();
+    let input_append_id = requested_input_append_id(request);
+    let session_id = semantic_session_id(kind);
+    let segment_id = input_append_id
+        .as_deref()
+        .map(|key| idempotent_segment_id(kind, &request_id, key))
+        .unwrap_or_else(|| format!("input-{}", Uuid::new_v4().simple()));
+    let document_path = string_arg(request, "document_path")
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_default();
+    if !document_path.is_empty() {
+        voice_input::validate_document_path(&document_path)?;
+    }
+    let language = string_arg(request, "language").unwrap_or_default();
+    let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
+    let trigger = request.args.get("trigger").cloned().unwrap_or_else(|| {
+        json!({
+            "trigger_kind":if kind == "prompt_refine" { "prompt_refine" } else { "user_instruction" },
+            "capture_mode":if kind == "prompt_refine" { "prompt" } else { "instruction" },
+            "source":"user"
+        })
+    });
+    let now = utc_now();
+    assistant_state::update(home, &group_id, |root| prepare_state(root)).map_err(OpError::io)?;
+    let (candidate_input, input_created) = voice_input::append_input(
+        home,
+        &group_id,
+        json!({
+            "schema":1,
+            "input_id":format!("vin_{}",Uuid::new_v4().simple()),
+            "kind":kind,
+            "group_id":group_id,
+            "assistant_id":"voice_secretary",
+            "text":text,
+            "language":language,
+            "document_path":document_path,
+            "session_id":session_id,
+            "segment_id":segment_id,
+            "by":by,
+            "trigger":trigger,
+            "request_id":request_id,
+            "input_append_id":input_append_id,
+            "operation":string_arg(request,"operation").unwrap_or_default(),
+            "composer_snapshot_hash":string_arg(request,"composer_snapshot_hash").unwrap_or_default(),
+            "metadata":request.args.get("metadata").cloned().unwrap_or_else(||json!({})),
+            "created_at":now,
+            "updated_at":now
+        }),
+        super::voice_input_dedupe::Policy::Exact,
+    )
+    .map_err(OpError::io)?;
+    let delivery = voice_input_delivery::deliver(
+        home,
+        &store,
+        &group_id,
+        &session_id,
+        &segment_id,
+        &by,
+        candidate_input.as_ref(),
+    )?;
+    let current = assistant_state::load(home, &group_id).map_err(OpError::io)?;
+    object(json!({
+        "group_id":group_id,
+        "assistant":current.get("assistant").cloned().unwrap_or_else(voice_input::default_assistant),
+        "session_id":session_id,
+        "input_append_id":input_append_id,
+        "segment":Value::Null,
+        "segment_path":Value::Null,
+        "document":Value::Null,
+        "document_updated":false,
+        "input_event":candidate_input,
+        "input_event_created":input_created,
+        "event":delivery.event,
+        "secretary_processing_error":delivery.wake_error
+        ,"secretary_task_id":delivery.task_id,"secretary_processing_deferred":delivery.processing_deferred
+    }))
+}
+
+pub(super) fn requested_input_append_id(request: &DaemonRequest) -> Option<String> {
+    string_arg(request, "input_append_id")
+        .or_else(|| string_arg(request, "idempotency_key"))
+        .map(|value| value.trim().chars().take(256).collect::<String>())
+        .filter(|value| !value.is_empty())
+}
+
+fn idempotent_segment_id(kind: &str, request_id: &str, key: &str) -> String {
+    let digest = Sha256::digest(format!("{kind}\0{request_id}\0{key}").as_bytes());
+    format!("semantic-{digest:x}")
+}
+
+fn semantic_session_id(kind: &str) -> String {
+    match kind {
+        "prompt_refine" => "voice-secretary-prompt-refine".into(),
+        "voice_instruction" => "voice-secretary-user-instruction".into(),
+        _ => format!("voice-secretary-{kind}"),
+    }
+}

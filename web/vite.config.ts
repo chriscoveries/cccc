@@ -1,0 +1,143 @@
+import { defineConfig } from "vite-plus";
+import react from "@vitejs/plugin-react";
+import path from "node:path";
+
+function localProxyHost(host: string | undefined): string {
+  const value = String(host || "").trim();
+  if (!value || value === "0.0.0.0" || value === "::") return "127.0.0.1";
+  return value;
+}
+
+const backendHost = localProxyHost(process.env.CCCC_WEB_HOST);
+const backendPort = Number(process.env.CCCC_WEB_PORT || 8848) || 8848;
+const backendTarget = `http://${backendHost}:${backendPort}`;
+
+const MERMAID_DEPENDENCY_PATTERN =
+  /[\\/]node_modules[\\/](@braintree[\\/]sanitize-url|@iconify[\\/](utils|types)|@mermaid-js|@upsetjs[\\/]venn\.js|cytoscape(?:-cose-bilkent|-fcose)?|cose-base|layout-base|d3(?:-[^\\/]+)?|internmap|delaunator|robust-predicates|dagre-d3-es|lodash-es|dayjs|dompurify|es-toolkit|katex|khroma|marked|roughjs|hachure-fill|path-data-parser|points-on-curve|points-on-path|stylis|ts-dedent|uuid)[\\/]/;
+
+export default defineConfig({
+  plugins: [react()],
+  fmt: { ignorePatterns: ["dist/**"], objectWrap: "collapse" },
+  lint: {
+    ignorePatterns: ["dist/**", "node_modules/**"],
+    plugins: ["typescript", "react"],
+    options: { denyWarnings: true },
+    rules: {
+      // Preserve the previous ESLint baseline without broad product-code cleanup.
+      "unicorn/no-useless-length-check": "allow",
+      "unicorn/no-useless-fallback-in-spread": "allow",
+      "react/rules-of-hooks": "error",
+      "react/exhaustive-deps": "error",
+      "react/only-export-components": [
+        "error",
+        { allowConstantExport: true, customHOCs: ["createIcon", "createControlIcon"] },
+      ],
+      "no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
+      "typescript/no-explicit-any": "error",
+      "prefer-const": "error",
+      "no-console": ["error", { allow: ["warn", "error"] }],
+    },
+  },
+  base: "/ui/",
+  resolve: {
+    // Prefer the CJS build for xterm to avoid a minification bug that can break
+    // the ESM build's `requestMode` handler (seen as `ReferenceError: i is not defined`).
+    alias: [
+      { find: "@", replacement: path.resolve(__dirname, "./src") },
+      { find: /^@xterm\/xterm$/, replacement: "@xterm/xterm/lib/xterm.js" },
+    ],
+  },
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+    // Keep the warning meaningful after explicit app chunking; 500 kB is the
+    // default Vite threshold and is now too noisy for this bundle graph.
+    chunkSizeWarningLimit: 520,
+    rollupOptions: {
+      output: {
+        entryFileNames: "assets/[name]-[hash].js",
+        chunkFileNames: "assets/[name]-[hash].js",
+        assetFileNames: "assets/[name]-[hash][extname]",
+        // Split large deps into dedicated chunks to avoid oversized bundles.
+        manualChunks(id) {
+          const normalizedId = id.split(path.sep).join("/");
+
+          // Leave the complete voice feature graph to Rollup's dynamic-import
+          // splitter. A named manual chunk can become an entry dependency when
+          // it also owns shared modules, which eagerly downloads the feature.
+          if (
+            normalizedId.includes("/src/pages/chat/VoiceSecretaryComposerControl.tsx") ||
+            normalizedId.includes("/src/pages/chat/voice-secretary/")
+          ) {
+            return;
+          }
+
+          if (
+            normalizedId.includes("/src/pages/chat/") ||
+            normalizedId.includes("/src/components/messageBubble/") ||
+            normalizedId.includes("/src/components/MessageBubble.tsx") ||
+            normalizedId.includes("/src/components/VirtualMessageList.tsx") ||
+            normalizedId.includes("/src/hooks/useChatTab.ts") ||
+            normalizedId.includes("/src/hooks/useChatTab.tsx")
+          ) {
+            return "chat-core";
+          }
+
+          if (
+            normalizedId.includes("/src/components/app/AppBackground.tsx") ||
+            normalizedId.includes("/src/components/app/AppFeedback.tsx") ||
+            normalizedId.includes("/src/components/DropOverlay.tsx")
+          ) {
+            return "app-chrome";
+          }
+
+          if (!id.includes("node_modules")) return;
+          // Mermaid is loaded only when a message actually contains a Mermaid fence.
+          // Leave its graph to the dynamic import splitter instead of pulling it into
+          // the initial shared vendor chunk or one oversized manual chunk.
+          if (MERMAID_DEPENDENCY_PATTERN.test(id) || /[\\/]node_modules[\\/]mermaid[\\/]/.test(id))
+            return;
+          // Keep the read-only diff renderer and its private graph behind the viewer import.
+          if (
+            /[\\/]node_modules[\\/](react-diff-view|gitdiff-parser|diff-match-patch|lodash|shallow-equal|warning|classnames)[\\/]/.test(
+              id,
+            )
+          )
+            return;
+          // React core + libs that import react (must stay in the same chunk
+          // to avoid circular cross-chunk dependencies during initialisation)
+          if (/[\\/]node_modules[\\/](react|react-dom|zustand|@tanstack|scheduler)[\\/]/.test(id))
+            return "react-vendor";
+          // xterm terminal
+          if (/[\\/]node_modules[\\/]@xterm[\\/]/.test(id)) return "xterm";
+          // Markdown rendering
+          if (
+            /[\\/]node_modules[\\/](markdown-it|mdurl|uc\.micro|entities|linkify-it)[\\/]/.test(id)
+          )
+            return "markdown";
+          // i18n
+          if (/[\\/]node_modules[\\/](i18next|react-i18next)[\\/]/.test(id)) return "i18n";
+          // Drag-and-drop
+          if (/[\\/]node_modules[\\/]@dnd-kit[\\/]/.test(id)) return "dnd";
+          // Remaining third-party deps
+          return "vendor";
+        },
+      },
+    },
+  },
+  server: {
+    host: "127.0.0.1",
+    port: 5555,
+    strictPort: true,
+    hmr: { host: "127.0.0.1", protocol: "ws", clientPort: 5555 },
+    proxy: {
+      // Preserve the browser-facing Host so backend WebSocket Origin checks see
+      // the same origin as the page instead of Vite's internal target origin.
+      "/api": { target: backendTarget, changeOrigin: false, ws: true, xfwd: true },
+      "/ui/manifest.webmanifest": { target: backendTarget, changeOrigin: true },
+      "/pwa-icon.svg": { target: backendTarget, changeOrigin: true },
+      "/pwa-icon-maskable.svg": { target: backendTarget, changeOrigin: true },
+      "/apple-touch-icon.png": { target: backendTarget, changeOrigin: true },
+    },
+  },
+});

@@ -1,0 +1,540 @@
+mod actions;
+mod argument_normalization;
+mod bootstrap;
+mod code_mode;
+mod context_projection;
+mod cross_group;
+mod file_read;
+mod local_patch;
+mod local_sessions;
+mod local_tools;
+mod mapping;
+mod repo;
+mod repo_inspect;
+mod router;
+mod tools;
+
+#[cfg(test)]
+mod lib_tests;
+#[cfg(test)]
+mod repo_tests;
+
+use anyhow::Result;
+use cccc_client::DaemonClient;
+use cccc_core::{CORE_TOOL_NAMES, HomeLayout};
+use serde_json::{Map, Value, json};
+use std::fmt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+const SUPPORTED_LEGACY_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2024-11-05"];
+const DEFAULT_LEGACY_PROTOCOL_VERSION: &str = SUPPORTED_LEGACY_PROTOCOL_VERSIONS[0];
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ToolCallError {
+    code: String,
+    message: String,
+    details: Map<String, Value>,
+}
+
+impl ToolCallError {
+    fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: Map<String, Value>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            details,
+        }
+    }
+
+    fn from_message(message: impl Into<String>) -> Self {
+        let message = message.into();
+        let parsed = message
+            .split_once(": ")
+            .filter(|(code, _)| valid_error_code(code));
+        let (code, message) = parsed
+            .map(|(code, message)| (code.to_owned(), message.to_owned()))
+            .unwrap_or_else(|| ("tool_execution_error".into(), message));
+        Self {
+            code,
+            message,
+            details: Map::new(),
+        }
+    }
+
+    fn from_daemon(error: cccc_contracts::DaemonError) -> Self {
+        Self::new(error.code, error.message, error.details)
+    }
+
+    pub(crate) fn error_value(&self) -> Value {
+        let mut error = json!({"code":self.code,"message":self.message});
+        if !self.details.is_empty() {
+            error["details"] = Value::Object(self.details.clone());
+        }
+        error
+    }
+
+    fn payload(&self) -> Value {
+        json!({"error":self.error_value()})
+    }
+}
+
+impl From<String> for ToolCallError {
+    fn from(message: String) -> Self {
+        Self::from_message(message)
+    }
+}
+
+impl From<&str> for ToolCallError {
+    fn from(message: &str) -> Self {
+        Self::from_message(message)
+    }
+}
+
+impl fmt::Display for ToolCallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.code == "tool_execution_error" {
+            formatter.write_str(&self.message)
+        } else {
+            write!(formatter, "{}: {}", self.code, self.message)
+        }
+    }
+}
+
+fn valid_error_code(code: &str) -> bool {
+    !code.is_empty()
+        && code
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+pub async fn run_stdio(home: HomeLayout) -> Result<()> {
+    let result = run_stdio_loop(&home).await;
+    shutdown(&home).await;
+    result
+}
+
+async fn run_stdio_loop(home: &HomeLayout) -> Result<()> {
+    let client = DaemonClient::new(home.clone());
+    let mut input = BufReader::new(tokio::io::stdin()).lines();
+    let mut output = tokio::io::stdout();
+    while let Some(line) = input.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let request: Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(error) => {
+                write_response(&mut output, &json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":error.to_string()}})).await?;
+                continue;
+            }
+        };
+        if !request.is_object() {
+            let response = handle(home, &client, &request, None).await;
+            write_response(&mut output, &response).await?;
+            continue;
+        }
+        if request.get("id").is_none() {
+            continue;
+        }
+        let response = handle(home, &client, &request, None).await;
+        write_response(&mut output, &response).await?;
+    }
+    Ok(())
+}
+
+pub async fn shutdown(home: &HomeLayout) {
+    let command_home = home.clone();
+    let commands = tokio::task::spawn_blocking(move || local_sessions::shutdown(&command_home));
+    code_mode::shutdown(home).await;
+    match commands.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("[cccc] local command shutdown failed: {error}"),
+        Err(error) => eprintln!("[cccc] local command cleanup worker failed: {error}"),
+    }
+}
+
+pub async fn handle_request(home: &HomeLayout, request: &Value) -> Value {
+    let client = DaemonClient::new(home.clone());
+    handle(home, &client, request, None).await
+}
+
+pub async fn handle_request_for_actor(
+    home: &HomeLayout,
+    request: &Value,
+    group_id: &str,
+    actor_id: &str,
+) -> Value {
+    let client = DaemonClient::new(home.clone());
+    handle(
+        home,
+        &client,
+        request,
+        Some(RequestContext {
+            group_id,
+            actor_id,
+            binding: None,
+        }),
+    )
+    .await
+}
+
+/// Fixed shared-connector catalog; discovery must not depend on which Actor's
+/// conversation happens to make the request.
+pub fn web_model_catalog() -> Vec<Value> {
+    let mut catalog = tools::catalog()
+        .into_iter()
+        .filter(|t| {
+            t["name"]
+                .as_str()
+                .is_some_and(|name| cccc_core::web_model_tool_names().any(|n| n == name))
+        })
+        .collect();
+    hide_disabled_code_mode_tools(&mut catalog);
+    describe_paired_identity(&mut catalog);
+    catalog
+}
+
+pub(crate) fn describe_paired_identity(catalog: &mut [Value]) {
+    for tool in catalog {
+        let actor_is_target = tool["name"] == "cccc_actor";
+        if let Some(properties) = tool["inputSchema"]["properties"].as_object_mut() {
+            if let Some(group) = properties.get_mut("group_id") {
+                group["description"] = Value::String("The paired CCCC Group is supplied by the connector. Omit this field; a caller cannot change the Group with this argument.".into());
+            }
+            if !actor_is_target && let Some(actor) = properties.get_mut("actor_id") {
+                actor["description"] = Value::String("The paired CCCC Actor is supplied by the connector. Omit this field; a caller cannot change its identity with this argument.".into());
+            }
+        }
+    }
+}
+
+pub async fn handle_request_for_binding(
+    home: &HomeLayout,
+    request: &Value,
+    binding: &Value,
+) -> Value {
+    let client = DaemonClient::new(home.clone());
+    handle(
+        home,
+        &client,
+        request,
+        Some(RequestContext {
+            group_id: binding["group_id"].as_str().unwrap_or_default(),
+            actor_id: binding["actor_id"].as_str().unwrap_or_default(),
+            binding: Some(binding),
+        }),
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RequestContext<'a> {
+    group_id: &'a str,
+    actor_id: &'a str,
+    binding: Option<&'a Value>,
+}
+
+async fn handle(
+    home: &HomeLayout,
+    client: &DaemonClient,
+    request: &Value,
+    context: Option<RequestContext<'_>>,
+) -> Value {
+    if !request.is_object() {
+        return protocol_error(Value::Null, -32600, "Invalid Request");
+    }
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+    let result = match method {
+        "initialize" => json!({
+            "protocolVersion": negotiated_protocol_version(request),
+            "capabilities": {"tools": {"listChanged": false}},
+            "serverInfo": {"name": "cccc-mcp", "version": env!("CARGO_PKG_VERSION")},
+            "_meta": {"cccc/build": cccc_core::build_info::current()},
+        }),
+        "ping" => json!({}),
+        "tools/list" => {
+            json!({"tools": visible_tools_with_context(home, client, context).await})
+        }
+        "tools/call" => {
+            let Some(params) = request.get("params").and_then(Value::as_object) else {
+                return protocol_error(id, -32602, "tools/call params must be an object");
+            };
+            let Some(name) = params
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+            else {
+                return protocol_error(id, -32602, "tools/call name must be a non-empty string");
+            };
+            let arguments = match params.get("arguments") {
+                None => serde_json::Map::new(),
+                Some(Value::Object(arguments)) => arguments.clone(),
+                Some(_) => {
+                    return protocol_error(id, -32602, "tools/call arguments must be an object");
+                }
+            };
+            if !tools::contains(name)
+                && !visible_tools_with_context(home, client, context)
+                    .await
+                    .iter()
+                    .any(|tool| tool["name"].as_str() == Some(name))
+            {
+                return protocol_error(id, -32602, &format!("Unknown tool: {name}"));
+            }
+            return match router::call_with_context(home, client, name, arguments, context, false)
+                .await
+            {
+                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Err(error) => {
+                    json!({"jsonrpc":"2.0","id":id,"result":tool_error_result(&error)})
+                }
+            };
+        }
+        notification if notification.starts_with("notifications/") => return json!({}),
+        _ => return protocol_error(id, -32601, &format!("Method not found: {method}")),
+    };
+    json!({"jsonrpc":"2.0","id":id,"result":result})
+}
+
+fn protocol_error(id: Value, code: i64, message: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
+}
+
+fn tool_error_result(error: &ToolCallError) -> Value {
+    let payload = error.payload();
+    let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".into());
+    json!({
+        "content":[{"type":"text","text":text}],
+        "structuredContent":payload,
+        "isError":true
+    })
+}
+
+fn negotiated_protocol_version(request: &Value) -> &'static str {
+    let requested = request
+        .get("params")
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    SUPPORTED_LEGACY_PROTOCOL_VERSIONS
+        .iter()
+        .copied()
+        .find(|version| *version == requested)
+        .unwrap_or(DEFAULT_LEGACY_PROTOCOL_VERSION)
+}
+
+pub(crate) async fn visible_tools_for_actor(
+    home: &HomeLayout,
+    client: &DaemonClient,
+    group_id: &str,
+    actor_id: &str,
+) -> Vec<Value> {
+    visible_tools_with_context(
+        home,
+        client,
+        Some(RequestContext {
+            group_id,
+            actor_id,
+            binding: None,
+        }),
+    )
+    .await
+}
+
+pub(crate) fn secretary_task_mode() -> bool {
+    std::env::var("CCCC_MCP_TOOL_PROFILE")
+        .is_ok_and(|v| v.trim().eq_ignore_ascii_case("secretary-task"))
+        || std::env::var("CCCC_SECRETARY_TASK_TOKEN").is_ok_and(|v| !v.is_empty())
+        || std::env::var("CCCC_SECRETARY_TASK_TOKEN_FILE").is_ok_and(|v| !v.is_empty())
+}
+
+/// Task-owned bootstrap for providers that sanitize inherited MCP env. Never
+/// accept an arbitrary credential path or return file contents in an error.
+pub(crate) fn secretary_task_token(home: &HomeLayout) -> Option<String> {
+    let path = match std::env::var("CCCC_SECRETARY_TASK_TOKEN_FILE")
+        .ok()
+        .filter(|path| !path.is_empty())
+    {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            return std::env::var("CCCC_SECRETARY_TASK_TOKEN")
+                .ok()
+                .filter(|token| !token.is_empty());
+        }
+    };
+    let root = home.root().join("voice-secretary");
+    if path != root.join("session-grant") {
+        return None;
+    }
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() != 64 {
+        return None;
+    }
+    if path.canonicalize().ok()? != root.canonicalize().ok()?.join("session-grant") {
+        return None;
+    }
+    let token = std::fs::read_to_string(path).ok()?;
+    (token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(token)
+}
+
+async fn visible_tools_with_context(
+    home: &HomeLayout,
+    client: &DaemonClient,
+    context: Option<RequestContext<'_>>,
+) -> Vec<Value> {
+    let mut catalog = tools::catalog();
+    if secretary_task_mode() {
+        if secretary_task_token(home).is_none() {
+            return Vec::new();
+        }
+        return catalog
+            .into_iter()
+            .filter(|tool| tool["name"] == "cccc_voice_secretary_task")
+            .collect();
+    }
+    catalog.retain(|tool| tool["name"] != "cccc_voice_secretary_task");
+    if context.is_none()
+        && std::env::var("CCCC_MCP_TOOL_PROFILE")
+            .ok()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("full"))
+    {
+        hide_disabled_code_mode_tools(&mut catalog);
+        return catalog;
+    }
+    let group_id = context.map(|value| value.group_id.to_owned()).or_else(|| {
+        std::env::var("CCCC_GROUP_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| cccc_core::active::get(home).ok().flatten())
+    });
+    let actor_id = context.map(|value| value.actor_id.to_owned()).or_else(|| {
+        std::env::var("CCCC_ACTOR_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    });
+    let (Some(group_id), Some(actor_id)) = (group_id, actor_id) else {
+        return core_tools(catalog);
+    };
+    let response = client
+        .call(&capability_catalog_request(&group_id, &actor_id))
+        .await;
+    let Ok(response) = response else {
+        return actor_fallback_tools(home, catalog, &group_id, &actor_id);
+    };
+    if !response.ok {
+        return actor_fallback_tools(home, catalog, &group_id, &actor_id);
+    }
+    let visible = response
+        .result
+        .get("visible_tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut output = catalog
+        .into_iter()
+        .filter(|tool| {
+            tool["name"]
+                .as_str()
+                .is_some_and(|name| visible.contains(name))
+        })
+        .collect::<Vec<_>>();
+    hide_disabled_code_mode_tools(&mut output);
+    for tool in response
+        .result
+        .get("dynamic_tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if tool["name"]
+            .as_str()
+            .is_some_and(|name| visible.contains(name))
+        {
+            output.push(tool.clone());
+        }
+    }
+    output
+}
+
+fn capability_catalog_request(group_id: &str, actor_id: &str) -> cccc_contracts::DaemonRequest {
+    cccc_contracts::DaemonRequest {
+        v: 1,
+        op: "capability_state".into(),
+        args: serde_json::Map::from_iter([
+            ("group_id".into(), Value::String(group_id.into())),
+            ("actor_id".into(), Value::String(actor_id.into())),
+            ("by".into(), Value::String(actor_id.into())),
+            ("view".into(), Value::String("mcp_catalog".into())),
+        ]),
+    }
+}
+
+fn actor_fallback_tools(
+    home: &HomeLayout,
+    catalog: Vec<Value>,
+    group_id: &str,
+    actor_id: &str,
+) -> Vec<Value> {
+    let actor = cccc_core::GroupStore::new(home.clone())
+        .and_then(|store| store.load(group_id))
+        .ok()
+        .and_then(|group| group.actors.into_iter().find(|actor| actor.id == actor_id));
+    let base = cccc_core::actor_base_tool_names(actor_id, actor.as_ref())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut output = catalog
+        .into_iter()
+        .filter(|tool| {
+            tool["name"].as_str().is_some_and(|name| {
+                base.contains(name)
+                    || (actor_id == "user" && cccc_core::USER_CONTROL_TOOL_NAMES.contains(&name))
+            })
+        })
+        .collect::<Vec<_>>();
+    hide_disabled_code_mode_tools(&mut output);
+    output
+}
+
+fn hide_disabled_code_mode_tools(tools: &mut Vec<Value>) {
+    if code_mode::enabled() {
+        return;
+    }
+    tools.retain(|tool| {
+        !matches!(
+            tool["name"].as_str(),
+            Some("cccc_code_exec" | "cccc_code_wait")
+        )
+    });
+}
+
+fn core_tools(catalog: Vec<Value>) -> Vec<Value> {
+    catalog
+        .into_iter()
+        .filter(|tool| {
+            tool["name"]
+                .as_str()
+                .is_some_and(|name| CORE_TOOL_NAMES.contains(&name))
+        })
+        .collect()
+}
+
+fn is_core_tool(name: &str) -> bool {
+    CORE_TOOL_NAMES.contains(&name)
+}
+
+async fn write_response(output: &mut tokio::io::Stdout, response: &Value) -> Result<()> {
+    let mut bytes = serde_json::to_vec(response)?;
+    bytes.push(b'\n');
+    output.write_all(&bytes).await?;
+    output.flush().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod connect_tests;

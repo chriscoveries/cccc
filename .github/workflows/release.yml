@@ -1,0 +1,327 @@
+name: Release CCCC
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.19.0"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Verify shared release identity
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            python scripts/check_release_versions.py --tag "${GITHUB_REF_NAME}"
+          else
+            python scripts/check_release_versions.py
+          fi
+      - name: Build shared Web UI once
+        run: node scripts/prepare_rust_web_assets.mjs --install-deps
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-web-bundle
+          path: web/dist
+          if-no-files-found: error
+
+  build-linux:
+    needs: web
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container: quay.io/pypa/manylinux_2_28_x86_64:latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-web-bundle
+          path: web/dist
+      - name: Install native build dependencies
+        run: dnf install -y cmake perl-core
+      - name: Select Python 3.14
+        run: echo "/opt/python/cp314-cp314/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu-release
+      - name: Build the release executable once
+        run: |
+          touch web/dist/index.html
+          cargo build --release --locked --features standalone -p cccc --bin cccc
+          strip target/release/cccc
+          python scripts/check_release_versions.py --rust-binary target/release/cccc
+          python scripts/verify_standalone_binary.py --platform linux target/release/cccc
+      - name: Wrap the same executable for standalone and pip
+        run: |
+          python -m pip install -U pip "auditwheel==6.7.0" twine
+          python scripts/build_standalone_archive.py \
+            target/release/cccc \
+            --target x86_64-unknown-linux-gnu \
+            --output-dir dist
+          python scripts/build_native_wheel.py \
+            target/release/cccc \
+            --platform-tag manylinux_2_28_x86_64 \
+            --output-dir dist
+          wheel_path="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          python scripts/verify_native_wheel.py \
+            "$wheel_path" \
+            --platform-tag manylinux_2_28_x86_64 \
+            --binary target/release/cccc
+          auditwheel_output="$(auditwheel show "$wheel_path")"
+          printf '%s\n' "$auditwheel_output"
+          printf '%s\n' "$auditwheel_output" | \
+            grep -Fq 'platform tag: "manylinux_2_28_x86_64"'
+          python -m twine check "$wheel_path"
+      - name: Smoke the installed Rust-only wheel
+        timeout-minutes: 5
+        run: |
+          python scripts/tests/smoke_wheel_frontdoor.py \
+            dist/*.whl \
+            --binary target/release/cccc
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-target-x86_64-unknown-linux-gnu
+          path: |
+            dist/*.tar.gz
+            dist/*.whl
+          if-no-files-found: error
+
+  build-desktop:
+    needs: web
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary: target/aarch64-apple-darwin/release/cccc
+            platform_tag: macosx_11_0_arm64
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            binary: target/x86_64-pc-windows-msvc/release/cccc.exe
+            platform_tag: win_amd64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-web-bundle
+          path: web/dist
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-release
+      - name: Build the release executable once
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          touch web/dist/index.html
+          cargo build --release --locked --features standalone \
+            --target "${{ matrix.target }}" \
+            -p cccc --bin cccc
+          python scripts/check_release_versions.py --rust-binary "${{ matrix.binary }}"
+      - name: Strip and verify macOS executable
+        if: runner.os == 'macOS'
+        run: |
+          strip "${{ matrix.binary }}"
+          python scripts/verify_standalone_binary.py \
+            --platform macos \
+            "${{ matrix.binary }}"
+      - name: Smoke native executable
+        run: '"${{ matrix.binary }}" --version'
+      - name: Wrap the same executable for standalone and pip
+        run: |
+          python -m pip install -U pip twine
+          python scripts/build_standalone_archive.py \
+            "${{ matrix.binary }}" \
+            --target "${{ matrix.target }}" \
+            --output-dir dist
+          python scripts/build_native_wheel.py \
+            "${{ matrix.binary }}" \
+            --platform-tag "${{ matrix.platform_tag }}" \
+            --output-dir dist
+          wheel_path="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          python scripts/verify_native_wheel.py \
+            "$wheel_path" \
+            --platform-tag "${{ matrix.platform_tag }}" \
+            --binary "${{ matrix.binary }}"
+          python -m twine check "$wheel_path"
+      - name: Inspect Windows runtime dependencies
+        if: runner.os == 'Windows'
+        run: |
+          python -m pip install "delvewheel==1.13.0"
+          delvewheel show --analyze-existing-exes dist/*.whl
+      - name: Smoke the installed Rust-only wheel
+        timeout-minutes: 5
+        run: |
+          python scripts/tests/smoke_wheel_frontdoor.py \
+            dist/*.whl \
+            --binary "${{ matrix.binary }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-target-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.whl
+          if-no-files-found: error
+
+  prepare:
+    needs:
+      - build-linux
+      - build-desktop
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-target-*
+          path: artifacts
+          merge-multiple: true
+      - name: Prepare and verify the atomic release set
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          scripts/package_release_assets.sh artifacts "$version"
+          python scripts/verify_release_set.py artifacts
+          python -m pip install -U twine
+          python -m twine check artifacts/*.whl
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cccc-release-candidate
+          path: artifacts/*
+          if-no-files-found: error
+
+  verify:
+    needs: prepare
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            verifier: unix
+          - os: macos-14
+            target: aarch64-apple-darwin
+            verifier: unix
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            verifier: windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: cccc-release-candidate
+          path: artifacts
+      - name: Verify Unix release candidate
+        if: matrix.verifier == 'unix'
+        shell: bash
+        run: bash scripts/tests/verify_release_unix.sh artifacts "${{ matrix.target }}"
+      - name: Verify Windows release candidate
+        if: matrix.verifier == 'windows'
+        shell: pwsh
+        run: ./scripts/tests/verify_release_windows.ps1 -ArtifactDir artifacts -Target "${{ matrix.target }}"
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: actions/download-artifact@v8
+        with:
+          name: cccc-release-candidate
+          path: artifacts
+      - name: Verify final release identity
+        shell: bash
+        run: |
+          python scripts/check_release_versions.py --tag "${GITHUB_REF_NAME}"
+          python scripts/verify_release_set.py artifacts
+          version="${GITHUB_REF_NAME#v}"
+          notes_file="docs/release/v${version}_release_notes.md"
+          test -s "${notes_file}"
+      - name: Classify release channel
+        id: channel
+        shell: bash
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            *-alpha*|*-beta*|*-rc*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: Upload prerelease wheels to TestPyPI
+        if: steps.channel.outputs.prerelease == 'true'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: |
+          python -m pip install -U twine
+          python scripts/upload_wheel_release.py --repository testpypi artifacts/*.whl
+      - name: Upload stable wheels to PyPI
+        if: steps.channel.outputs.prerelease == 'false'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m pip install -U twine
+          python scripts/upload_wheel_release.py --repository pypi artifacts/*.whl
+      - name: Publish GitHub release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes_file="docs/release/v${version}_release_notes.md"
+          test -f "${notes_file}"
+          prerelease=()
+          case "${GITHUB_REF_NAME}" in
+            *-alpha*|*-beta*|*-rc*) prerelease=(--prerelease) ;;
+          esac
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" artifacts/* --clobber
+            gh release edit "${GITHUB_REF_NAME}" --notes-file "${notes_file}"
+          else
+            gh release create "${GITHUB_REF_NAME}" artifacts/* \
+              --verify-tag \
+              --title "CCCC ${version}" \
+              --notes-file "${notes_file}" \
+              "${prerelease[@]}"
+          fi

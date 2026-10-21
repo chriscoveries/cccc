@@ -1,0 +1,103 @@
+import { lazy, memo, Suspense, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import { Actor, AgentState } from "../types";
+
+const LazyAgentTab = lazy(() =>
+  import("../components/AgentTab").then((m) => ({ default: m.AgentTab })),
+);
+
+export interface ActorTabProps {
+  actor: Actor | null;
+  groupId: string;
+  agentState: AgentState | null;
+  termEpoch: number;
+  busy: string;
+  isDark: boolean;
+  isSmallScreen: boolean;
+  isVisible: boolean;
+  compact?: boolean;
+  onExpand?: () => void;
+  navigation?: ReactNode;
+  onPage?: (direction: -1 | 1) => void;
+  readOnly?: boolean;
+  actorStatusProvisional: boolean;
+  onToggleEnabled: (isRunning: boolean) => void;
+  onRelaunch: () => void;
+  onNewSession: () => void;
+  onEdit: () => void;
+  onRemove: () => void;
+  onInbox: () => void;
+  /** Called when actor status may have changed (e.g., process exited) */
+  onStatusChange?: () => void;
+}
+
+export const ActorTab = memo(function ActorTab({
+  actor,
+  groupId,
+  agentState,
+  termEpoch,
+  busy,
+  isDark,
+  isSmallScreen,
+  isVisible,
+  compact,
+  onExpand,
+  navigation,
+  onPage,
+  readOnly,
+  actorStatusProvisional,
+  onToggleEnabled,
+  onRelaunch,
+  onNewSession,
+  onEdit,
+  onRemove,
+  onInbox,
+  onStatusChange,
+}: ActorTabProps) {
+  const { t } = useTranslation("actors");
+
+  if (!actor) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-slate-500">
+        {t("agentNotFound")}
+      </div>
+    );
+  }
+
+  return (
+    <Suspense
+      fallback={
+        <div
+          className={`flex-1 flex items-center justify-center ${isDark ? "text-slate-400" : "text-gray-500"}`}
+        >
+          {t("loadingAgent")}
+        </div>
+      }
+    >
+      <LazyAgentTab
+        actor={actor}
+        groupId={groupId}
+        termEpoch={termEpoch}
+        agentState={agentState}
+        isVisible={isVisible}
+        compact={compact}
+        onExpand={onExpand}
+        navigation={navigation}
+        onPage={onPage}
+        readOnly={readOnly}
+        actorStatusProvisional={actorStatusProvisional}
+        onQuit={() => onToggleEnabled(true)}
+        onLaunch={() => onToggleEnabled(false)}
+        onRelaunch={onRelaunch}
+        onNewSession={onNewSession}
+        onEdit={onEdit}
+        onRemove={onRemove}
+        onInbox={onInbox}
+        busy={busy}
+        isDark={isDark}
+        isSmallScreen={isSmallScreen}
+        onStatusChange={isVisible ? onStatusChange : undefined}
+      />
+    </Suspense>
+  );
+});

@@ -1,0 +1,236 @@
+// useCrossGroupRecipients - Manage recipient actors for cross-group messaging
+// Extracts recipientActors, recipientActorsBusy, destGroupScopeLabel state and sync logic
+
+import { useEffect, useMemo, useState } from "react";
+import * as api from "../services/api";
+import type { Actor, GroupDoc } from "../types";
+
+interface UseCrossGroupRecipientsOptions {
+  /** Current group's actors */
+  actors: Actor[];
+  /** Current group's document */
+  groupDoc: GroupDoc | null;
+  /** Currently selected group ID */
+  selectedGroupId: string;
+  /** Group ID that the composer state currently belongs to */
+  composerGroupId: string;
+  /** Target group ID for sending (from useComposerStore.destGroupId) */
+  sendGroupId: string;
+  /** Group whose actors should populate the `@` destination mention menu. This
+   *  is decoupled from sendGroupId so `#group @` can show the target group's
+   *  actors WITHOUT making the message a direct cross-group send (T411/T400). */
+  mentionTargetGroupId?: string;
+  /** Whether the selected group's actors are currently hydrating */
+  selectedGroupActorsHydrating?: boolean;
+}
+
+interface UseCrossGroupRecipientsResult {
+  /** Actors in the target (destination) group for recipient validation */
+  recipientActors: Actor[];
+  /** Whether recipientActors is being fetched */
+  recipientActorsBusy: boolean;
+  /** Label for the target group's active scope */
+  destGroupScopeLabel: string;
+}
+
+const REMOTE_ACTORS_REFRESH_MS = 60000;
+
+export function getRemoteActorsFetchDecision({
+  canFetchRemoteRecipients,
+  hasCachedActors,
+  fetchedAtMs,
+  nowMs,
+}: {
+  canFetchRemoteRecipients: boolean;
+  hasCachedActors: boolean;
+  fetchedAtMs?: number;
+  nowMs: number;
+}): { shouldFetch: boolean; noCache: boolean } {
+  if (!canFetchRemoteRecipients) return { shouldFetch: false, noCache: false };
+  if (!hasCachedActors) return { shouldFetch: true, noCache: false };
+  const fetchedAt = Number(fetchedAtMs || 0);
+  if (!fetchedAt) return { shouldFetch: true, noCache: true };
+  const stale = nowMs - fetchedAt >= REMOTE_ACTORS_REFRESH_MS;
+  return { shouldFetch: stale, noCache: stale };
+}
+
+export function resolveRecipientActorsForComposer({
+  actors,
+  remoteActorsByGroup,
+  selectedGroupId,
+  composerGroupId,
+  sendGroupId,
+  selectedGroupActorsHydrating,
+}: {
+  actors: Actor[];
+  remoteActorsByGroup: Record<string, Actor[]>;
+  selectedGroupId: string;
+  composerGroupId: string;
+  sendGroupId: string;
+  selectedGroupActorsHydrating?: boolean;
+}): Actor[] {
+  if (selectedGroupActorsHydrating) return [];
+  const selectedGid = String(selectedGroupId || "").trim();
+  const composerGid = String(composerGroupId || "").trim();
+  const sendGid = String(sendGroupId || "").trim();
+  if (!sendGid) return [];
+  if (composerGid !== selectedGid) return [];
+  if (sendGid === selectedGid) return actors;
+  return remoteActorsByGroup[sendGid] ?? [];
+}
+
+function getActiveScopeLabel(doc: GroupDoc | null): string {
+  if (!doc) return "";
+  const key = String(doc.active_scope_key || "").trim();
+  if (!key) return "";
+  const scopes = Array.isArray(doc.scopes) ? doc.scopes : [];
+  const hit = scopes.find((s) => String(s?.scope_key || "").trim() === key);
+  const label = String(hit?.label || "").trim();
+  const url = String(hit?.url || "").trim();
+  return label || url;
+}
+
+export function useCrossGroupRecipients({
+  actors,
+  groupDoc,
+  selectedGroupId,
+  composerGroupId,
+  sendGroupId,
+  mentionTargetGroupId,
+  selectedGroupActorsHydrating,
+}: UseCrossGroupRecipientsOptions): UseCrossGroupRecipientsResult {
+  const selectedGid = String(selectedGroupId || "").trim();
+  const composerGid = String(composerGroupId || "").trim();
+  const sendGid = String(sendGroupId || "").trim();
+  // Recipient-actor source for the `@` menu: the explicit mention target group
+  // (when typing `#group @`) takes precedence over the send destination.
+  const recipientGid = String(mentionTargetGroupId || "").trim() || sendGid;
+  const canFetchRemoteRecipients =
+    !!recipientGid && !!selectedGid && recipientGid !== selectedGid && composerGid === selectedGid;
+
+  // Remote fetch caches (state drives re-render).
+  const [remoteActorsByGroup, setRemoteActorsByGroup] = useState<Record<string, Actor[]>>({});
+  const [remoteActorsFetchedAtByGroup, setRemoteActorsFetchedAtByGroup] = useState<
+    Record<string, number>
+  >({});
+  const [remoteGroupDocsByGroup, setRemoteGroupDocsByGroup] = useState<Record<string, GroupDoc>>(
+    {},
+  );
+  const [remoteActorsRefreshTick, setRemoteActorsRefreshTick] = useState(0);
+
+  const remoteDocForSend = canFetchRemoteRecipients ? remoteGroupDocsByGroup[sendGid] : undefined;
+  useEffect(() => {
+    if (!canFetchRemoteRecipients) return;
+    if (remoteDocForSend) return;
+
+    let cancelled = false;
+    void api.fetchGroup(sendGid).then((resp) => {
+      if (cancelled) return;
+      if (!resp.ok) return;
+      const doc = resp.result.group;
+      setRemoteGroupDocsByGroup((prev) => ({ ...prev, [sendGid]: doc }));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [canFetchRemoteRecipients, remoteDocForSend, sendGid]);
+
+  const remoteActorsForSend = canFetchRemoteRecipients
+    ? remoteActorsByGroup[recipientGid]
+    : undefined;
+  const remoteActorsFetchedAtForSend = canFetchRemoteRecipients
+    ? remoteActorsFetchedAtByGroup[recipientGid]
+    : undefined;
+
+  useEffect(() => {
+    if (!canFetchRemoteRecipients) return undefined;
+    const interval = window.setInterval(() => {
+      setRemoteActorsRefreshTick((value) => value + 1);
+    }, REMOTE_ACTORS_REFRESH_MS);
+    return () => window.clearInterval(interval);
+  }, [canFetchRemoteRecipients, recipientGid]);
+
+  useEffect(() => {
+    const decision = getRemoteActorsFetchDecision({
+      canFetchRemoteRecipients,
+      hasCachedActors: remoteActorsForSend !== undefined,
+      fetchedAtMs: remoteActorsFetchedAtForSend,
+      nowMs: Date.now(),
+    });
+    if (!decision.shouldFetch) return;
+
+    let cancelled = false;
+    void api
+      .fetchActors(recipientGid, false, decision.noCache ? { noCache: true } : undefined)
+      .then((resp) => {
+        if (cancelled) return;
+        const fetchedAt = Date.now();
+        if (!resp.ok) {
+          setRemoteActorsByGroup((prev) => {
+            if (Object.prototype.hasOwnProperty.call(prev, recipientGid)) return prev;
+            return { ...prev, [recipientGid]: [] };
+          });
+          setRemoteActorsFetchedAtByGroup((prev) => ({ ...prev, [recipientGid]: fetchedAt }));
+          return;
+        }
+        const next = resp.result.actors || [];
+        setRemoteActorsByGroup((prev) => ({ ...prev, [recipientGid]: next }));
+        setRemoteActorsFetchedAtByGroup((prev) => ({ ...prev, [recipientGid]: fetchedAt }));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    canFetchRemoteRecipients,
+    remoteActorsFetchedAtForSend,
+    remoteActorsForSend,
+    remoteActorsRefreshTick,
+    recipientGid,
+  ]);
+
+  const destGroupScopeLabel = useMemo(() => {
+    if (!sendGid) return "";
+    if (sendGid === selectedGid) return getActiveScopeLabel(groupDoc);
+    const doc = remoteGroupDocsByGroup[sendGid] ?? null;
+    return getActiveScopeLabel(doc);
+  }, [groupDoc, remoteGroupDocsByGroup, selectedGid, sendGid]);
+
+  const recipientActors = useMemo(() => {
+    return resolveRecipientActorsForComposer({
+      actors,
+      remoteActorsByGroup,
+      selectedGroupId: selectedGid,
+      composerGroupId: composerGid,
+      sendGroupId: recipientGid,
+      selectedGroupActorsHydrating,
+    });
+  }, [
+    actors,
+    composerGid,
+    remoteActorsByGroup,
+    selectedGid,
+    recipientGid,
+    selectedGroupActorsHydrating,
+  ]);
+
+  const recipientActorsBusy = useMemo(() => {
+    if (selectedGroupActorsHydrating) return true;
+    if (!recipientGid) return false;
+    if (!selectedGid) return false;
+    if (composerGid !== selectedGid) return true;
+    if (recipientGid === selectedGid) return false;
+    if (!canFetchRemoteRecipients) return false;
+    return !Object.prototype.hasOwnProperty.call(remoteActorsByGroup, recipientGid);
+  }, [
+    canFetchRemoteRecipients,
+    composerGid,
+    remoteActorsByGroup,
+    selectedGid,
+    recipientGid,
+    selectedGroupActorsHydrating,
+  ]);
+
+  return { recipientActors, recipientActorsBusy, destGroupScopeLabel };
+}

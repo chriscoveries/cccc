@@ -1,0 +1,1180 @@
+// ChatTab is the main chat page component.
+// Refactored to use useChatTab hook for business logic, reducing prop drilling.
+
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+  type RefObject,
+} from "react";
+import { InfoIcon } from "../../components/Icons";
+import {
+  Actor,
+  LedgerEvent,
+  PresentationMessageRef,
+  TaskMessageRef,
+  VoiceDocumentMessageRef,
+} from "../../types";
+import { VirtualMessageList } from "../../components/VirtualMessageList";
+import { classNames } from "../../utils/classNames";
+import { ChatComposer } from "./ChatComposer";
+import { GroupWorkArea, type RuntimeActorRenderer } from "./GroupWorkArea";
+import { RuntimeDock } from "./RuntimeDock";
+import { useChatTab } from "../../hooks/useChatTab";
+import { useTranslation } from "react-i18next";
+import { useComposerStore, useGroupStore, useModalStore, useUIStore } from "../../stores";
+import { getChatSession } from "../../stores/useUIStore";
+import { findPresentationSlot } from "../../utils/presentation";
+import { buildPresentationRefForSlot } from "../../utils/presentationRefs";
+import { clearPresentationSlot } from "../../services/api";
+import { ResizableSidePanel } from "../../components/layout/ResizableSidePanel";
+import { MOBILE_APP_HEADER_HEIGHT_PX } from "../../utils/responsiveLayout";
+import {
+  buildWebModelDeliveryStatusByEventId,
+  latestWebModelDeliveryStatusNeedingAppPermissionHint,
+} from "../../utils/webModelDeliveryStatus";
+import {
+  CHATGPT_APP_PERMISSION_HINT_DISMISSED_EVENT,
+  dismissChatGptAppPermissionHint,
+  readChatGptAppPermissionHintDismissed,
+} from "../../utils/chatGptAppPermissionHint";
+import { useRuntimeDockWorkCards } from "./useRuntimeDockWorkCards";
+import { type ComposerMentionKind } from "./chatMentionSuggestions";
+import { useWorkspaceFiles } from "../../components/workspace/useWorkspaceFiles";
+import { WorkspaceFilesTrigger } from "../../components/workspace/WorkspaceFilesTrigger";
+import { useSidePanelSelection } from "../../hooks/useSidePanelSelection";
+import { ensurePresentation } from "../../utils/presentation";
+import { PresentationTrigger } from "../../components/presentation/PresentationTrigger";
+import { MobilePresentationSurface } from "../../components/presentation/MobilePresentationSurface";
+
+const PresentationRail = lazy(() =>
+  import("../../components/presentation/PresentationRail").then((module) => ({
+    default: module.PresentationRail,
+  })),
+);
+const PresentationViewerSplitPanel = lazy(() =>
+  import("../../components/presentation/PresentationViewerModal").then((module) => ({
+    default: module.PresentationViewerSplitPanel,
+  })),
+);
+const WorkspaceFilesPanel = lazy(() =>
+  import("../../components/workspace/WorkspaceFilesPanel").then((module) => ({
+    default: module.WorkspaceFilesPanel,
+  })),
+);
+const WorkspaceViewer = lazy(() =>
+  import("../../components/workspace/WorkspaceViewer").then((module) => ({
+    default: module.WorkspaceViewer,
+  })),
+);
+const SetupChecklist = lazy(() =>
+  import("./SetupChecklist").then((module) => ({ default: module.SetupChecklist })),
+);
+
+const EMPTY_PRESENTATION_ATTENTION: Record<string, boolean> = {};
+function ChatLazyFallback({ className }: { className?: string }) {
+  return <div className={classNames("min-h-0", className)} />;
+}
+
+function ChatGptAppPermissionNotice({
+  isDark,
+  onDismiss,
+}: {
+  isDark: boolean;
+  onDismiss: () => void;
+}) {
+  const { t } = useTranslation("chat");
+  return (
+    <div className="flex-shrink-0 px-2 pb-1.5 sm:px-2.5">
+      <div
+        className={classNames(
+          "mx-auto flex max-w-5xl items-start gap-2 rounded-md border px-3 py-2 text-xs leading-5 shadow-sm",
+          isDark
+            ? "border-amber-400/25 bg-amber-500/10 text-amber-100"
+            : "border-amber-200 bg-amber-50 text-amber-800",
+        )}
+        role="status"
+        aria-live="polite"
+      >
+        <InfoIcon size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+        <div className="min-w-0 flex-1">{t("webModelDelivery.permissionHint")}</div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className={classNames(
+            "inline-flex min-h-7 shrink-0 items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-current",
+            isDark ? "hover:bg-white/10" : "hover:bg-amber-100",
+          )}
+          aria-label={t("webModelDelivery.permissionHintDismiss")}
+          title={t("webModelDelivery.permissionHintDismiss")}
+        >
+          {t("webModelDelivery.permissionHintDismiss")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export interface ChatTabProps {
+  // UI configuration
+  isDark: boolean;
+  isSmallScreen: boolean;
+  readOnly?: boolean;
+  mobileAppHeaderReserved?: boolean;
+
+  // Core data (must be passed from App)
+  selectedGroupId: string;
+  selectedGroupRunning: boolean;
+  selectedGroupActorsHydrating: boolean;
+  selectedGroupActorStatusProvisional: boolean;
+  groupLabelById: Record<string, string>;
+  actors: Actor[];
+  runtimeActors: Actor[];
+  activeRuntimeActorId?: string;
+  renderRuntimeActor: RuntimeActorRenderer;
+  workControlsHost?: HTMLElement | null;
+  sidePanelControlsHost?: HTMLElement | null;
+
+  // Recipient actors for cross-group messaging
+  recipientActors: Actor[];
+  recipientActorsBusy?: boolean;
+  destGroupScopeLabel?: string;
+  mentionFilter?: string;
+  mentionKind?: ComposerMentionKind;
+  mentionActorScope?: "selected" | "destination";
+
+  // Refs (shared with App for external interactions)
+  scrollRef: MutableRefObject<HTMLDivElement | null>;
+  composerRef: RefObject<HTMLTextAreaElement | null>;
+  fileInputRef: RefObject<HTMLInputElement | null>;
+
+  // Refs for scroll state (shared with App)
+  chatAtBottomRef?: MutableRefObject<boolean>;
+
+  // File handling (from useDragDrop)
+  appendComposerFiles: (files: File[]) => void;
+
+  // Group actions (from useGroupActions)
+  onStartGroup: () => void;
+  onOpenRuntimeActor: (actorId: string) => void;
+
+  // Mention menu state (local state in App)
+  showMentionMenu: boolean;
+  setShowMentionMenu: React.Dispatch<React.SetStateAction<boolean>>;
+  mentionSelectedIndex: number;
+  setMentionSelectedIndex: React.Dispatch<React.SetStateAction<number>>;
+  setMentionFilter: React.Dispatch<React.SetStateAction<string>>;
+  setMentionKind: React.Dispatch<React.SetStateAction<ComposerMentionKind>>;
+  setMentionActorScope: React.Dispatch<React.SetStateAction<"selected" | "destination">>;
+  setMentionTargetGroupId: React.Dispatch<React.SetStateAction<string>>;
+}
+
+export function ChatTab({
+  isDark,
+  isSmallScreen,
+  readOnly,
+  mobileAppHeaderReserved = false,
+  selectedGroupId,
+  selectedGroupRunning,
+  selectedGroupActorsHydrating,
+  selectedGroupActorStatusProvisional,
+  groupLabelById,
+  actors,
+  runtimeActors,
+  activeRuntimeActorId,
+  renderRuntimeActor,
+  workControlsHost = null,
+  sidePanelControlsHost = null,
+  recipientActors,
+  recipientActorsBusy,
+  destGroupScopeLabel,
+  mentionFilter,
+  mentionKind,
+  mentionActorScope,
+  scrollRef,
+  composerRef,
+  fileInputRef,
+  chatAtBottomRef,
+  appendComposerFiles,
+  onStartGroup,
+  onOpenRuntimeActor,
+  showMentionMenu,
+  setShowMentionMenu,
+  mentionSelectedIndex,
+  setMentionSelectedIndex,
+  setMentionFilter,
+  setMentionKind,
+  setMentionActorScope,
+  setMentionTargetGroupId,
+}: ChatTabProps) {
+  // Use the refactored hook for business logic
+  const {
+    // Chat state
+    chatMessages,
+    suggestionSourceMessages,
+    liveWorkEvents,
+    hasAnyChatMessages,
+    chatFilter,
+    setChatFilter,
+    chatViewKey,
+    chatWindowProps,
+    chatInitialScrollTargetId,
+    chatInitialScrollAnchorId,
+    chatInitialScrollAnchorOffsetPx,
+    chatInitialScrollOffsetPx,
+    chatHighlightEventId,
+    isLoadingHistory,
+    hasMoreHistory,
+    loadMoreHistory,
+    chatEmptyState,
+
+    // UI state
+    busy,
+    showScrollButton,
+    chatUnreadCount,
+    sendScrollRequest,
+    consumeSendScrollRequest,
+
+    // Setup checklist
+    showSetupCard,
+    needsScope,
+    needsActors,
+    needsStart,
+
+    // Composer state
+    setComposerText,
+    composerGroupMentionTokens,
+    setComposerGroupMentionTokens,
+    composerAgentMentionTokens,
+    setComposerAgentMentionTokens,
+    composerFiles,
+    removeComposerFile,
+    replyTarget,
+    quotedPresentationRef,
+    quotedVoiceDocumentRef,
+    cancelReply,
+    clearQuotedPresentationRef,
+    setQuotedVoiceDocumentRef,
+    clearQuotedVoiceDocumentRef,
+    toTokens,
+    toggleRecipient,
+    clearRecipients,
+    messageMode,
+    setMessageMode,
+    destGroupId,
+    setDestGroupId,
+    composerGroupSettled,
+    composerRouteGroups,
+    mentionSuggestions,
+    connectMentionStatus,
+    slashCommands,
+
+    // Agent state
+    agentStates,
+    taskById,
+
+    // Actions
+    sendMessage,
+    copyMessageLink,
+    copyMessageText,
+    startReply,
+    showRecipients,
+    relayMessage,
+    openSourceMessage,
+    exitChatWindow,
+    handleScrollButtonClick,
+    handleScrollChange,
+    handleScrollSnapshot,
+    addAgent,
+  } = useChatTab({
+    selectedGroupId,
+    selectedGroupRunning,
+    actors,
+    recipientActors,
+    showMentionMenu: showMentionMenu && !readOnly,
+    mentionFilter,
+    mentionKind,
+    mentionActorScope,
+    composerRef,
+    fileInputRef,
+    chatAtBottomRef,
+    scrollRef,
+  });
+
+  const messageGroupLabelById = groupLabelById;
+
+  const { t } = useTranslation("chat");
+  const groupPresentation = useGroupStore((state) => state.groupPresentation);
+  const setGroupPresentation = useGroupStore((state) => state.setGroupPresentation);
+  const presentationViewer = useModalStore((state) => state.presentationViewer);
+  const setPresentationViewer = useModalStore((state) => state.setPresentationViewer);
+  const setPresentationPin = useModalStore((state) => state.setPresentationPin);
+  const clearPresentationSlotAttention = useModalStore(
+    (state) => state.clearPresentationSlotAttention,
+  );
+  const openContextTask = useModalStore((state) => state.openContextTask);
+  const mobileSurface = useUIStore((state) =>
+    selectedGroupId
+      ? getChatSession(selectedGroupId, state.chatSessions).mobileSurface
+      : "messages",
+  );
+  const presentationDisplayMode = useUIStore((state) =>
+    selectedGroupId
+      ? getChatSession(selectedGroupId, state.chatSessions).presentationDisplayMode
+      : "modal",
+  );
+  const setChatFilesPanelOpen = useUIStore((state) => state.setChatFilesPanelOpen);
+  const setChatMobileSurface = useUIStore((state) => state.setChatMobileSurface);
+  const setChatPresentationDockOpen = useUIStore((state) => state.setChatPresentationDockOpen);
+  const setChatPresentationDisplayMode = useUIStore(
+    (state) => state.setChatPresentationDisplayMode,
+  );
+  const showError = useUIStore((state) => state.showError);
+  const setQuotedPresentationRef = useComposerStore((state) => state.setQuotedPresentationRef);
+  const setComposerDestGroupId = useComposerStore((state) => state.setDestGroupId);
+  const liveWorkBucket = useGroupStore(
+    (state) => state.chatByGroup[String(selectedGroupId || "").trim()],
+  );
+  const presentationAttention = useModalStore((state) =>
+    selectedGroupId
+      ? state.presentationAttention[selectedGroupId] || EMPTY_PRESENTATION_ATTENTION
+      : EMPTY_PRESENTATION_ATTENTION,
+  );
+  const webModelDeliveryStatusByEventId = useMemo(
+    () =>
+      buildWebModelDeliveryStatusByEventId([
+        ...(liveWorkBucket?.events || []),
+        ...(liveWorkBucket?.chatWindow?.events || []),
+      ]),
+    [liveWorkBucket?.chatWindow?.events, liveWorkBucket?.events],
+  );
+  const [appPermissionHintDismissed, setAppPermissionHintDismissed] = useState(
+    readChatGptAppPermissionHintDismissed,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const handleDismissed = () => setAppPermissionHintDismissed(true);
+    window.addEventListener(CHATGPT_APP_PERMISSION_HINT_DISMISSED_EVENT, handleDismissed);
+    return () =>
+      window.removeEventListener(CHATGPT_APP_PERMISSION_HINT_DISMISSED_EVENT, handleDismissed);
+  }, []);
+  const appPermissionHintStatus = useMemo(
+    () =>
+      latestWebModelDeliveryStatusNeedingAppPermissionHint(
+        webModelDeliveryStatusByEventId,
+        appPermissionHintDismissed,
+      ),
+    [appPermissionHintDismissed, webModelDeliveryStatusByEventId],
+  );
+  const showAppPermissionNotice = !readOnly && !!appPermissionHintStatus;
+  const dismissAppPermissionNotice = useCallback(() => {
+    setAppPermissionHintDismissed(true);
+    dismissChatGptAppPermissionHint();
+  }, []);
+
+  const isHydratingEmptyState = chatMessages.length === 0 && chatEmptyState === "hydrating";
+  const isBusinessEmptyState = chatMessages.length === 0 && chatEmptyState === "business_empty";
+  const isFilteredEmptyState = chatMessages.length === 0 && chatEmptyState === "filtered_empty";
+  const listIsLoadingHistory = isLoadingHistory || isHydratingEmptyState;
+  const listHasMoreHistory = hasMoreHistory || isHydratingEmptyState;
+  const liveWorkCards = useRuntimeDockWorkCards({
+    actors: runtimeActors,
+    events: liveWorkEvents,
+    bucket: liveWorkBucket,
+  });
+
+  const preferredPresentationSurface =
+    !isSmallScreen && presentationDisplayMode === "split" ? "split" : "modal";
+  const splitPresentationViewer =
+    !isSmallScreen &&
+    presentationViewer?.groupId === selectedGroupId &&
+    presentationViewer.surface === "split"
+      ? presentationViewer
+      : null;
+  // One right-hand column, two surfaces. The activity rail selects which one occupies it.
+  const { activeSidePanel, selectSidePanel } = useSidePanelSelection(selectedGroupId);
+  const showSplitFiles = !isSmallScreen && activeSidePanel === "files";
+  const showSplitPresentation = !isSmallScreen && activeSidePanel === "presentation";
+  const showSplitSurface = showSplitPresentation || showSplitFiles;
+  // A phone has no room for a side column, so the tree becomes its own full-screen surface.
+  const showMobileFiles = isSmallScreen && mobileSurface === "files" && !!selectedGroupId;
+  // The tree lives in the right column while the opened file takes the main area, so the
+  // controller is owned here rather than inside the panel.
+  const workspaceScope = useGroupStore((state) =>
+    state.groupDoc?.group_id === selectedGroupId
+      ? state.groupDoc.scopes?.find((scope) => scope.scope_key === state.groupDoc?.active_scope_key)
+      : undefined,
+  );
+  const workspaceFiles = useWorkspaceFiles(
+    selectedGroupId,
+    showSplitFiles || showMobileFiles,
+    workspaceScope?.scope_key || "",
+    workspaceScope?.url || "",
+  );
+  const hasWorkspaceViewer =
+    workspaceFiles.mode === "changes" ? !!workspaceFiles.changes.selection : !!workspaceFiles.file;
+  const showWorkspaceFileViewer = showSplitFiles && hasWorkspaceViewer;
+  const setWorkspaceFileViewerGroupId = useUIStore((state) => state.setWorkspaceFileViewerGroupId);
+  useLayoutEffect(() => {
+    if (!showWorkspaceFileViewer) return;
+    // The editor covers the message area. Do not mark hidden messages as viewed
+    // or suppress their Voice notifications while that overlay is present.
+    setWorkspaceFileViewerGroupId(selectedGroupId);
+    return () => setWorkspaceFileViewerGroupId("");
+  }, [selectedGroupId, showWorkspaceFileViewer, setWorkspaceFileViewerGroupId]);
+
+  const showMobilePresentationViewer =
+    isSmallScreen &&
+    presentationViewer?.groupId === selectedGroupId &&
+    presentationViewer.surface !== "split";
+  const splitLayoutRef = useRef<HTMLDivElement | null>(null);
+
+  const openPresentationSlot = useCallback(
+    (slotId: string) => {
+      if (!selectedGroupId || !slotId) return;
+      if (preferredPresentationSurface === "split") {
+        setChatPresentationDockOpen(selectedGroupId, true);
+        setChatFilesPanelOpen(selectedGroupId, false);
+      }
+      setPresentationViewer({
+        groupId: selectedGroupId,
+        slotId,
+        surface: preferredPresentationSurface,
+      });
+    },
+    [
+      preferredPresentationSurface,
+      selectedGroupId,
+      setChatFilesPanelOpen,
+      setChatPresentationDockOpen,
+      setPresentationViewer,
+    ],
+  );
+
+  const openPresentationRef = useCallback(
+    (ref: PresentationMessageRef, event: LedgerEvent) => {
+      if (!selectedGroupId) return;
+      const slotId = String(ref.slot_id || "").trim();
+      if (!slotId) return;
+      if (preferredPresentationSurface === "split") {
+        setChatPresentationDockOpen(selectedGroupId, true);
+        setChatFilesPanelOpen(selectedGroupId, false);
+      }
+      setPresentationViewer({
+        groupId: selectedGroupId,
+        slotId,
+        surface: preferredPresentationSurface,
+        focusRef: ref,
+        focusEventId: String(event.id || "").trim() || null,
+      });
+    },
+    [
+      preferredPresentationSurface,
+      selectedGroupId,
+      setChatFilesPanelOpen,
+      setChatPresentationDockOpen,
+      setPresentationViewer,
+    ],
+  );
+
+  const openTaskRef = useCallback(
+    (ref: TaskMessageRef, _event?: LedgerEvent) => {
+      const taskId = String(ref.task_id || "").trim();
+      if (!taskId) return;
+      openContextTask(taskId);
+    },
+    [openContextTask],
+  );
+
+  const pinPresentationSlot = useCallback(
+    (slotId: string) => {
+      if (!selectedGroupId || !slotId || readOnly) return;
+      setPresentationPin({ groupId: selectedGroupId, slotId });
+    },
+    [readOnly, selectedGroupId, setPresentationPin],
+  );
+
+  /** Drops a workspace-relative path into the composer so the next message can name the file. */
+  const attachWorkspacePath = useCallback(
+    (path: string) => {
+      const reference = `\`${path}\``;
+      setComposerText((previous) => {
+        const trimmed = previous.replace(/\s+$/, "");
+        return trimmed ? `${trimmed} ${reference} ` : `${reference} `;
+      });
+      composerRef.current?.focus();
+    },
+    [composerRef, setComposerText],
+  );
+
+  const pinWorkspacePath = useCallback(
+    (path: string) => {
+      if (!selectedGroupId || readOnly) return;
+      const slots = ensurePresentation(groupPresentation).slots;
+      const target = slots.find((slot) => !slot.card) || slots[0];
+      if (!target) return;
+      setPresentationPin({ groupId: selectedGroupId, slotId: target.slot_id, workspacePath: path });
+    },
+    [groupPresentation, readOnly, selectedGroupId, setPresentationPin],
+  );
+
+  const closeMobileFiles = useCallback(() => {
+    const gid = String(selectedGroupId || "").trim();
+    if (!gid) return;
+    setChatMobileSurface(gid, "messages");
+  }, [selectedGroupId, setChatMobileSurface]);
+
+  const closeMobilePresentation = useCallback(() => {
+    const gid = String(selectedGroupId || "").trim();
+    if (!gid) return;
+    setChatMobileSurface(gid, "messages");
+    window.setTimeout(() => {
+      document.querySelector<HTMLButtonElement>("[data-mobile-presentation-trigger]")?.focus();
+    }, 0);
+  }, [selectedGroupId, setChatMobileSurface]);
+
+  const handleQuotePresentationReference = useCallback(
+    (payload: { slotId: string; ref?: PresentationMessageRef | null }) => {
+      const gid = String(selectedGroupId || "").trim();
+      const normalizedSlotId = String(payload.slotId || "").trim();
+      if (!gid || !normalizedSlotId) return;
+      const slot = findPresentationSlot(groupPresentation, normalizedSlotId);
+      const ref = payload.ref || buildPresentationRefForSlot(slot);
+      if (!ref) {
+        showError(
+          t("presentationMissingCard", { defaultValue: "This presentation slot is empty." }),
+        );
+        return;
+      }
+      setQuotedPresentationRef(ref);
+      setComposerDestGroupId(gid);
+      setChatMobileSurface(gid, "messages");
+      setPresentationViewer(null);
+      window.setTimeout(() => composerRef.current?.focus(), 0);
+    },
+    [
+      composerRef,
+      groupPresentation,
+      selectedGroupId,
+      setChatMobileSurface,
+      setComposerDestGroupId,
+      setPresentationViewer,
+      setQuotedPresentationRef,
+      showError,
+      t,
+    ],
+  );
+
+  const handleQuoteVoiceDocumentReference = useCallback(
+    (ref: VoiceDocumentMessageRef) => {
+      const gid = String(selectedGroupId || "").trim();
+      if (!gid || ref.group_id !== gid || !String(ref.document_path || "").trim()) return;
+      setQuotedVoiceDocumentRef(ref);
+      setComposerDestGroupId(gid);
+      setChatMobileSurface(gid, "messages");
+      window.setTimeout(() => composerRef.current?.focus(), 0);
+    },
+    [
+      composerRef,
+      selectedGroupId,
+      setChatMobileSurface,
+      setComposerDestGroupId,
+      setQuotedVoiceDocumentRef,
+    ],
+  );
+
+  const handleOpenPresentationWindow = useCallback(() => {
+    const gid = String(selectedGroupId || "").trim();
+    if (!gid || !splitPresentationViewer) return;
+    setChatPresentationDisplayMode(gid, "modal");
+    setPresentationViewer({ ...splitPresentationViewer, surface: "modal" });
+  }, [
+    selectedGroupId,
+    setChatPresentationDisplayMode,
+    setPresentationViewer,
+    splitPresentationViewer,
+  ]);
+
+  const handleSplitReplaceSlot = useCallback(
+    (slotId: string) => {
+      const gid = String(selectedGroupId || "").trim();
+      if (!gid || !slotId) return;
+      setPresentationViewer(null);
+      setPresentationPin({ groupId: gid, slotId });
+    },
+    [selectedGroupId, setPresentationPin, setPresentationViewer],
+  );
+
+  const handleSplitClearSlot = useCallback(
+    async (slotId: string) => {
+      const gid = String(selectedGroupId || "").trim();
+      const normalized = String(slotId || "").trim();
+      if (!gid || !normalized) return;
+      const confirmed = window.confirm(
+        t("presentationClearConfirm", {
+          index: Number(normalized.replace("slot-", "") || 0) || normalized,
+          defaultValue: `Clear ${normalized}?`,
+        }),
+      );
+      if (!confirmed) return;
+      const resp = await clearPresentationSlot(gid, normalized);
+      if (!resp.ok) {
+        showError(`${resp.error.code}: ${resp.error.message}`);
+        return;
+      }
+      setGroupPresentation(resp.result.presentation);
+      setPresentationViewer(null);
+      setPresentationPin(null);
+      clearPresentationSlotAttention(gid, normalized);
+    },
+    [
+      clearPresentationSlotAttention,
+      selectedGroupId,
+      setGroupPresentation,
+      setPresentationPin,
+      setPresentationViewer,
+      showError,
+      t,
+    ],
+  );
+
+  const filterOptions: Array<["all" | "user" | "mail" | "request_reply", string]> = [
+    ["all", t("filterAll")],
+    ["user", t("filterUser")],
+    ["mail", t("filterMail")],
+    ["request_reply", t("filterNeedReply")],
+  ];
+  const showMessageFilters = !readOnly && !chatWindowProps && hasAnyChatMessages;
+  const showSetupNotice = !readOnly && (needsScope || needsActors) && chatMessages.length > 0;
+
+  return (
+    <div className="flex flex-col h-full w-full overflow-hidden bg-transparent">
+      {/* Group work view and the secondary side panel. */}
+      <main className="flex flex-1 min-h-0 flex-col">
+        <div ref={splitLayoutRef} className="relative flex min-h-0 flex-1">
+          {!isSmallScreen || mobileSurface === "messages" ? (
+            <section
+              className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+              style={{
+                paddingTop:
+                  isSmallScreen && !mobileAppHeaderReserved
+                    ? MOBILE_APP_HEADER_HEIGHT_PX
+                    : undefined,
+              }}
+            >
+              <div className="relative flex min-h-0 flex-1 flex-col" data-chat-work-surface>
+                {(chatWindowProps || showSetupNotice) && (
+                  <div
+                    className="shrink-0"
+                    inert={showWorkspaceFileViewer || undefined}
+                    aria-hidden={showWorkspaceFileViewer || undefined}
+                    data-chat-notices
+                  >
+                    {/* Jump-to window banner */}
+                    {chatWindowProps && (
+                      <div className="px-4 pt-4">
+                        <div
+                          className={classNames(
+                            "flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 shadow-sm",
+                            isDark
+                              ? "border-slate-700/50 bg-slate-900/40"
+                              : "border-gray-200 bg-white/70",
+                          )}
+                          role="status"
+                          aria-label={t("viewingMessage")}
+                        >
+                          <div className="min-w-0">
+                            <div
+                              className={classNames(
+                                "text-sm font-semibold",
+                                isDark ? "text-slate-200" : "text-gray-800",
+                              )}
+                            >
+                              {t("viewingMessage")}
+                            </div>
+                            <div
+                              className={classNames(
+                                "text-xs mt-0.5",
+                                isDark ? "text-slate-400" : "text-gray-600",
+                              )}
+                            >
+                              {isLoadingHistory
+                                ? t("loadingContext")
+                                : chatWindowProps.hasMoreBefore || chatWindowProps.hasMoreAfter
+                                  ? t("contextTruncated")
+                                  : t("contextLoaded")}
+                            </div>
+                          </div>
+                          {!readOnly && (
+                            <button
+                              type="button"
+                              className={classNames(
+                                "flex-shrink-0 text-xs font-semibold px-3 py-1.5 min-h-[36px] flex items-center rounded-full border transition-colors",
+                                isDark
+                                  ? "border-slate-600 text-slate-200 hover:bg-slate-800/60"
+                                  : "border-gray-200 text-gray-800 hover:bg-gray-100",
+                              )}
+                              onClick={exitChatWindow}
+                            >
+                              {t("returnToLatest")}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Compact setup card */}
+                    {showSetupNotice && (
+                      <div className="px-4 pt-3 pb-2">
+                        <Suspense fallback={<ChatLazyFallback />}>
+                          <SetupChecklist
+                            isDark={isDark}
+                            selectedGroupId={selectedGroupId}
+                            busy={busy}
+                            needsScope={needsScope}
+                            needsActors={needsActors}
+                            needsStart={false}
+                            onAddAgent={addAgent}
+                            onStartGroup={onStartGroup}
+                            variant="compact"
+                          />
+                        </Suspense>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <GroupWorkArea
+                  covered={showWorkspaceFileViewer}
+                  availableGroupIds={Object.keys(groupLabelById)}
+                  readOnly={readOnly}
+                  groupId={selectedGroupId}
+                  actors={runtimeActors}
+                  activeActorId={activeRuntimeActorId}
+                  isDark={isDark}
+                  isVisible={!isSmallScreen || mobileSurface === "messages"}
+                  loading={selectedGroupActorsHydrating}
+                  onInspectActor={onOpenRuntimeActor}
+                  renderActor={renderRuntimeActor}
+                  workControlsHost={workControlsHost}
+                  sidePanelControlsHost={sidePanelControlsHost}
+                  isSmallScreen={isSmallScreen}
+                  sidePanelControls={
+                    !selectedGroupId ? undefined : !isSmallScreen ? (
+                      <>
+                        <WorkspaceFilesTrigger
+                          active={activeSidePanel === "files"}
+                          onToggle={() => selectSidePanel("files")}
+                        />
+                        <PresentationTrigger
+                          presentation={groupPresentation}
+                          attentionSlots={presentationAttention}
+                          isDark={isDark}
+                          isOpen={activeSidePanel === "presentation"}
+                          onOpen={() => selectSidePanel("presentation")}
+                        />
+                      </>
+                    ) : !chatWindowProps ? (
+                      <PresentationTrigger
+                        mobile
+                        presentation={groupPresentation}
+                        attentionSlots={presentationAttention}
+                        isDark={isDark}
+                        isOpen={mobileSurface === "presentation"}
+                        onOpen={() => setChatMobileSurface(selectedGroupId, "presentation")}
+                      />
+                    ) : undefined
+                  }
+                >
+                  {showMessageFilters && (
+                    <div
+                      className="shrink-0 border-b border-[var(--glass-border-subtle)] px-4"
+                      data-message-filters
+                    >
+                      <div
+                        className="chat-reading-width flex h-11 items-stretch gap-5 overflow-x-auto scrollbar-hide"
+                        role="group"
+                        aria-label={t("chatFilters")}
+                      >
+                        {filterOptions.map(([key, label]) => {
+                          const active = chatFilter === key;
+                          return (
+                            <button
+                              key={key}
+                              type="button"
+                              className={classNames(
+                                "shrink-0 px-0.5 text-[13px] whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--color-text-secondary)]",
+                                active
+                                  ? "font-semibold text-[var(--color-text-primary)] shadow-[inset_0_-2px_0_var(--color-text-primary)]"
+                                  : "font-medium text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]",
+                              )}
+                              onClick={() => setChatFilter(key)}
+                              aria-pressed={active}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {isBusinessEmptyState && showSetupCard ? (
+                    <div
+                      ref={scrollRef}
+                      className="flex-1 min-h-0 overflow-auto px-4 py-4 relative"
+                      role="log"
+                      aria-label={t("chatMessages")}
+                    >
+                      <div className="flex h-full flex-col items-center justify-center text-center pb-20">
+                        <div
+                          className={classNames(
+                            "w-full max-w-md",
+                            isDark ? "text-slate-200" : "text-gray-800",
+                          )}
+                        >
+                          {readOnly ? (
+                            <div
+                              className={classNames(
+                                "text-sm",
+                                isDark ? "text-slate-400" : "text-gray-600",
+                              )}
+                            >
+                              {t("noMessagesYet")}
+                            </div>
+                          ) : (
+                            <Suspense fallback={<ChatLazyFallback />}>
+                              <SetupChecklist
+                                isDark={isDark}
+                                selectedGroupId={selectedGroupId}
+                                busy={busy}
+                                needsScope={needsScope}
+                                needsActors={needsActors}
+                                needsStart={needsStart}
+                                onAddAgent={addAgent}
+                                onStartGroup={onStartGroup}
+                                variant="full"
+                              />
+                            </Suspense>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <VirtualMessageList
+                      messages={chatMessages}
+                      actors={actors}
+                      agentStates={agentStates}
+                      taskById={taskById}
+                      isDark={isDark}
+                      readOnly={readOnly}
+                      groupId={selectedGroupId}
+                      groupLabelById={messageGroupLabelById}
+                      webModelDeliveryStatusByEventId={webModelDeliveryStatusByEventId}
+                      viewKey={chatViewKey}
+                      followOnViewChangeKey={chatFilter}
+                      initialScrollTargetId={chatInitialScrollTargetId}
+                      initialScrollAnchorId={chatInitialScrollAnchorId}
+                      initialScrollAnchorOffsetPx={chatInitialScrollAnchorOffsetPx}
+                      initialScrollOffsetPx={chatInitialScrollOffsetPx}
+                      highlightEventId={chatHighlightEventId}
+                      scrollRef={scrollRef}
+                      onReply={startReply}
+                      onShowRecipients={showRecipients}
+                      onCopyLink={copyMessageLink}
+                      onCopyContent={copyMessageText}
+                      onRelay={relayMessage}
+                      onOpenSource={openSourceMessage}
+                      onOpenPresentationRef={openPresentationRef}
+                      onOpenTaskRef={openTaskRef}
+                      showScrollButton={showScrollButton}
+                      onScrollButtonClick={handleScrollButtonClick}
+                      chatUnreadCount={chatUnreadCount}
+                      sendScrollRequest={sendScrollRequest}
+                      onSendScrollRequestConsumed={consumeSendScrollRequest}
+                      onScrollChange={handleScrollChange}
+                      onScrollSnapshot={handleScrollSnapshot}
+                      isLoadingHistory={listIsLoadingHistory}
+                      hasMoreHistory={listHasMoreHistory}
+                      isFilteredEmpty={isFilteredEmptyState}
+                      onLoadMore={loadMoreHistory}
+                    />
+                  )}
+
+                  {!chatWindowProps && runtimeActors.length > 0 ? (
+                    <div className="pointer-events-none absolute inset-x-0 bottom-1 z-20 sm:bottom-2">
+                      <RuntimeDock
+                        groupId={selectedGroupId}
+                        runtimeActors={runtimeActors}
+                        liveWorkCards={liveWorkCards}
+                        runtimeEvents={liveWorkBucket?.rawHeadlessEventsByActorId}
+                        activeRuntimeActorId={activeRuntimeActorId}
+                        isDark={isDark}
+                        isSmallScreen={isSmallScreen}
+                        readOnly={readOnly}
+                        actorStatusProvisional={selectedGroupActorStatusProvisional}
+                        onAddAgent={!readOnly ? addAgent : undefined}
+                        onOpenRuntimeActor={onOpenRuntimeActor}
+                      />
+                    </div>
+                  ) : null}
+                </GroupWorkArea>
+
+                {/* `--color-chat-bg` is a 75% glass tint, so it alone would let the chat
+                  underneath show through. The overlay composites it over the opaque page
+                  background to match the chat surface exactly while staying fully opaque. */}
+                {showWorkspaceFileViewer ? (
+                  <div
+                    className="absolute inset-0 z-20 flex min-h-0 flex-col"
+                    style={{
+                      backgroundColor: "var(--color-bg-primary)",
+                      backgroundImage:
+                        "linear-gradient(var(--color-chat-bg), var(--color-chat-bg))",
+                    }}
+                    data-workspace-file-viewer="true"
+                  >
+                    <Suspense fallback={<ChatLazyFallback className="flex-1" />}>
+                      <WorkspaceViewer
+                        files={workspaceFiles}
+                        isDark={isDark}
+                        readOnly={!!readOnly}
+                        onAttach={attachWorkspacePath}
+                      />
+                    </Suspense>
+                  </div>
+                ) : null}
+              </div>
+              {!readOnly && (
+                <>
+                  {showAppPermissionNotice ? (
+                    <ChatGptAppPermissionNotice
+                      isDark={isDark}
+                      onDismiss={dismissAppPermissionNotice}
+                    />
+                  ) : null}
+                  <ChatComposer
+                    isDark={isDark}
+                    isSmallScreen={isSmallScreen}
+                    selectedGroupId={selectedGroupId}
+                    actors={actors}
+                    recipientActorsBusy={recipientActorsBusy}
+                    selectedGroupActorsHydrating={selectedGroupActorsHydrating}
+                    destGroupId={destGroupId}
+                    setDestGroupId={setDestGroupId}
+                    composerGroupSettled={composerGroupSettled}
+                    composerRouteGroups={composerRouteGroups}
+                    destGroupScopeLabel={destGroupScopeLabel}
+                    busy={busy}
+                    recentMessages={chatMessages}
+                    suggestionSourceMessages={suggestionSourceMessages}
+                    replyTarget={replyTarget}
+                    onCancelReply={cancelReply}
+                    quotedPresentationRef={quotedPresentationRef}
+                    onClearQuotedPresentationRef={clearQuotedPresentationRef}
+                    quotedVoiceDocumentRef={quotedVoiceDocumentRef}
+                    onQuoteVoiceDocumentRef={handleQuoteVoiceDocumentReference}
+                    onClearQuotedVoiceDocumentRef={clearQuotedVoiceDocumentRef}
+                    toTokens={toTokens}
+                    onToggleRecipient={toggleRecipient}
+                    onClearRecipients={clearRecipients}
+                    composerFiles={composerFiles}
+                    onRemoveComposerFile={removeComposerFile}
+                    appendComposerFiles={appendComposerFiles}
+                    fileInputRef={fileInputRef}
+                    composerRef={composerRef}
+                    setComposerText={setComposerText}
+                    composerGroupMentionTokens={composerGroupMentionTokens}
+                    setComposerGroupMentionTokens={setComposerGroupMentionTokens}
+                    composerAgentMentionTokens={composerAgentMentionTokens}
+                    setComposerAgentMentionTokens={setComposerAgentMentionTokens}
+                    messageMode={messageMode}
+                    setMessageMode={setMessageMode}
+                    onSendMessage={sendMessage}
+                    showMentionMenu={showMentionMenu}
+                    setShowMentionMenu={setShowMentionMenu}
+                    mentionSuggestions={mentionSuggestions}
+                    connectMentionStatus={
+                      mentionKind === "group" ? connectMentionStatus : undefined
+                    }
+                    mentionSelectedIndex={mentionSelectedIndex}
+                    setMentionSelectedIndex={setMentionSelectedIndex}
+                    setMentionFilter={setMentionFilter}
+                    setMentionKind={setMentionKind}
+                    setMentionActorScope={setMentionActorScope}
+                    setMentionTargetGroupId={setMentionTargetGroupId}
+                    slashCommands={slashCommands}
+                  />
+                </>
+              )}
+            </section>
+          ) : null}
+
+          {showSplitSurface && activeSidePanel ? (
+            <ResizableSidePanel
+              groupId={selectedGroupId}
+              surface={activeSidePanel}
+              viewing={!!splitPresentationViewer}
+              container={splitLayoutRef}
+              isDark={isDark}
+            >
+              {({ compact, toggleCompact }) =>
+                showSplitFiles ? (
+                  <Suspense fallback={<ChatLazyFallback className="flex-1" />}>
+                    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                      <WorkspaceFilesPanel
+                        files={workspaceFiles}
+                        isDark={isDark}
+                        readOnly={!!readOnly}
+                        // Routed through the selector so closing clears the column instead of
+                        // letting the other surface pop up in its place.
+                        onClose={() => selectSidePanel("files")}
+                        onAttachPath={attachWorkspacePath}
+                        onPinPath={pinWorkspacePath}
+                      />
+                    </div>
+                  </Suspense>
+                ) : splitPresentationViewer && !compact ? (
+                  <Suspense fallback={<ChatLazyFallback className="flex-1" />}>
+                    <PresentationViewerSplitPanel
+                      key={`${selectedGroupId}:${splitPresentationViewer.slotId}`}
+                      isDark={isDark}
+                      readOnly={readOnly}
+                      groupId={selectedGroupId}
+                      slotId={splitPresentationViewer.slotId}
+                      presentation={groupPresentation}
+                      focusRef={splitPresentationViewer.focusRef || null}
+                      focusEventId={splitPresentationViewer.focusEventId || null}
+                      onQuoteInChat={handleQuotePresentationReference}
+                      onReplaceSlot={handleSplitReplaceSlot}
+                      onClearSlot={(slotId) => {
+                        void handleSplitClearSlot(slotId);
+                      }}
+                      onOpenWindow={handleOpenPresentationWindow}
+                      onSelectSlot={(slotId) =>
+                        setPresentationViewer({
+                          groupId: selectedGroupId,
+                          slotId,
+                          surface: "split",
+                        })
+                      }
+                      onPinSlot={pinPresentationSlot}
+                      onCollapse={() => {
+                        toggleCompact();
+                        requestAnimationFrame(() =>
+                          document
+                            .querySelector<HTMLButtonElement>(
+                              '[data-presentation-density="compact"] button',
+                            )
+                            ?.focus(),
+                        );
+                      }}
+                      onClose={() => selectSidePanel("presentation")}
+                    />
+                  </Suspense>
+                ) : (
+                  // Presentation with no slot opened: the slot list that phones already use.
+                  <Suspense fallback={<ChatLazyFallback className="flex-1" />}>
+                    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                      <PresentationRail
+                        groupId={selectedGroupId}
+                        compact={compact}
+                        onToggleCompact={() => {
+                          toggleCompact();
+                          if (compact) {
+                            const slots = ensurePresentation(groupPresentation);
+                            const slot =
+                              slots.slots.find(
+                                (item) => item.slot_id === slots.highlight_slot_id && item.card,
+                              ) || slots.slots.find((item) => item.card);
+                            if (slot)
+                              setPresentationViewer({
+                                groupId: selectedGroupId,
+                                slotId: slot.slot_id,
+                                surface: "split",
+                              });
+                          }
+                        }}
+                        presentation={groupPresentation}
+                        isDark={isDark}
+                        readOnly={readOnly}
+                        attentionSlots={presentationAttention}
+                        onOpenSlot={openPresentationSlot}
+                        onPinSlot={pinPresentationSlot}
+                        onClose={() => selectSidePanel("presentation")}
+                      />
+                    </div>
+                  </Suspense>
+                )
+              }
+            </ResizableSidePanel>
+          ) : null}
+
+          <MobilePresentationSurface
+            isOpen={showMobileFiles}
+            isDark={isDark}
+            surface="files"
+            label={t("workspaceFilesTitle", { defaultValue: "Files" })}
+            onClose={closeMobileFiles}
+          >
+            <Suspense fallback={<ChatLazyFallback className="flex-1" />}>
+              <div className="flex min-h-0 flex-1 flex-col">
+                {hasWorkspaceViewer ? (
+                  <WorkspaceViewer
+                    files={workspaceFiles}
+                    isDark={isDark}
+                    readOnly
+                    onAttach={(path) => {
+                      attachWorkspacePath(path);
+                      closeMobileFiles();
+                    }}
+                  />
+                ) : (
+                  <WorkspaceFilesPanel
+                    files={workspaceFiles}
+                    isDark={isDark}
+                    readOnly
+                    onClose={closeMobileFiles}
+                    onAttachPath={(path) => {
+                      attachWorkspacePath(path);
+                      closeMobileFiles();
+                    }}
+                  />
+                )}
+              </div>
+            </Suspense>
+          </MobilePresentationSurface>
+
+          <MobilePresentationSurface
+            isOpen={
+              isSmallScreen && mobileSurface === "presentation" && !showMobilePresentationViewer
+            }
+            isDark={isDark}
+            label={t("presentationSectionLabel", { defaultValue: "Presentation" })}
+            onClose={closeMobilePresentation}
+          >
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <Suspense fallback={<ChatLazyFallback className="flex-1" />}>
+                <PresentationRail
+                  groupId={selectedGroupId}
+                  presentation={groupPresentation}
+                  isDark={isDark}
+                  readOnly={readOnly}
+                  onClose={closeMobilePresentation}
+                  attentionSlots={presentationAttention}
+                  onOpenSlot={openPresentationSlot}
+                  onPinSlot={pinPresentationSlot}
+                />
+              </Suspense>
+            </div>
+          </MobilePresentationSurface>
+        </div>
+      </main>
+    </div>
+  );
+}
