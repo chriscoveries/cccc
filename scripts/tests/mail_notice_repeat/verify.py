@@ -17,6 +17,7 @@ expected = {
         'automation::mail_notice_repeat_tests::mail_notice_repeat_stops_at_exact_batch_max_and_resets_for_later_mail',
         'automation::mail_notice_repeat_tests::mail_notice_repeat_prunes_claims_across_many_intervals_and_rebuilds',
         'automation::mail_notice_repeat_tests::mail_notice_repeat_captured_later_boundary_read_closes_earlier_mail',
+        'automation::mail_notice_repeat_tests::mail_notice_repeat_generation_change_keeps_new_batch_cap',
     },
     'daemon': {
         'ops::automation_runtime::mail_notice_repeat_tests::mail_notice_repeat_daemon_accepts_repeat_with_later_mail',

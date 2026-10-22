@@ -17,15 +17,15 @@ jobs:
       matrix:
         include:
           - label: candidate
-            source: deeda3135050713282e9a27809a351498fc19f9c
+            source: 95e78e61a6f032ba2895ddb892032d4be0348996
             candidate: "--candidate"
             test_mode: "--candidate"
           - label: reference
-            source: b0b461116eeb9c7b0bd5cea263054f7df0c60b19
+            source: 33a98cb3afa93eee1b541ba0f808eafca4f35e4c
             candidate: ""
             test_mode: ""
           - label: generation-reference
-            source: bbf343f0cbf733a38243411d99dab40f6a2e1d52
+            source: 51d57b0bd8bce2062d8c29f6c1fa3dc9f1bf1afb
             candidate: "--candidate"
             test_mode: "--generation-reference"
     steps:
