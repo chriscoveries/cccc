@@ -60,6 +60,25 @@ export async function fetchGroup(groupId: string, init?: RequestInit & { noCache
   return apiJson<{ group: GroupDoc }>(`/api/v1/groups/${encodeURIComponent(groupId)}`, init);
 }
 
+export type GroupHealth = {
+  group_id: string;
+  rss_mib: number | null;
+  pss_mib: number | null;
+  actors_running: number;
+  actors_sampled: number;
+  host_mem_total_mib: number | null;
+  host_mem_available_mib: number | null;
+  host_loadavg_1m: number | null;
+  host_loadavg_5m: number | null;
+  host_loadavg_15m: number | null;
+  host_cpu_count: number | null;
+  sampled_at: string | null;
+};
+
+export async function fetchGroupHealth(groupId: string) {
+  return apiJson<GroupHealth>(`/api/v1/groups/${encodeURIComponent(groupId)}/health`);
+}
+
 export function assistantStateRequestKey(groupId: string): string {
   return `assistants:${String(groupId || "").trim()}`;
 }
