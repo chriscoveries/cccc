@@ -48,6 +48,7 @@ pub mod mail_pending;
 pub mod membership;
 pub mod memory;
 pub mod models;
+#[cfg(test)]
 pub mod models_tests;
 pub mod nomcp;
 pub mod path_input;
