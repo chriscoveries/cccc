@@ -32,6 +32,7 @@ pub(crate) mod connect_outbound;
 mod connect_peer;
 mod context;
 mod direct;
+pub(crate) mod host_health;
 pub(crate) use connect::ConnectService;
 mod context_projection;
 mod deepseek_runtime;
