@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { ChevronLeft } from "lucide-react";
 import { apiJson } from "../../services/api/base";
 import { Button } from "../../components/ui/button";
+import { DirectConnectionStart } from "./DirectConnectionStart";
 import { DirectConnectionRow } from "./DirectConnectionRow";
 import { DirectInvitationShare, DirectJoinForm, DirectReceiveForm } from "./DirectPairingForms";
 import {
@@ -12,22 +13,24 @@ import {
   type DirectStatus,
 } from "./directConnectionModel";
 
+import { useDirectStatus } from "./useDirectStatus";
 import { prepareDirectInvitation } from "./prepareDirectInvitation";
 
 export function DirectConnectionsPanel({
   groupId,
   groupTitle = groupId,
+  fill = false,
 }: {
   groupId: string;
   groupTitle?: string;
+  fill?: boolean;
 }) {
   const { t } = useTranslation("layout");
-  const [status, setStatus] = useState<DirectStatus | null>(null);
   const [error, setError] = useState("");
   const [submittedId, setSubmittedId] = useState<string | null>(null);
-  const [pollFailed, setPollFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
+  const { status, setStatus, pollFailed } = useDirectStatus(groupId, revision);
   const [task, setTask] = useState<"invite" | "join" | "settings" | null>(null);
   const [incoming, setIncoming] = useState("");
   // Invitations stay only in this open panel, never in browser storage or polling.
@@ -57,54 +60,21 @@ export function DirectConnectionsPanel({
     [],
   );
   useEffect(() => {
-    let disposed = false;
-    let controller: AbortController | null = null;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const poll = async () => {
-      const request = new AbortController();
-      controller = request;
-      const deadline = setTimeout(() => request.abort(), 10000);
-      const result = await apiJson<DirectStatus>(
-        `/api/v1/connect/direct?group_id=${encodeURIComponent(groupId)}`,
-        { signal: request.signal },
-      );
-      clearTimeout(deadline);
-      if (disposed) return;
-      setPollFailed(!result.ok);
-      if (result.ok) {
-        setStatus(result.result);
-        setSubmittedId((id) => (result.result.relations.some((r) => r.id === id) ? null : id));
-        setInvitations((previous) =>
-          Object.fromEntries(
-            Object.entries(previous).filter(([id]) => {
-              const relation = result.result.relations.find((r) => r.id === id);
-              const seen = observedInvitations.current.has(id);
-              if (relation) observedInvitations.current.add(id);
-              return relation
-                ? relation.state === "invited" && relation.current && !relation.expired
-                : !seen;
-            }),
-          ),
-        );
-      } else
-        setStatus((previous) =>
-          previous
-            ? {
-                ...previous,
-                runtime: null,
-                relations: previous.relations.map((r) => ({ ...r, online: false })),
-              }
-            : null,
-        );
-      timer = setTimeout(() => void poll(), 3000);
-    };
-    void poll();
-    return () => {
-      disposed = true;
-      controller?.abort();
-      clearTimeout(timer);
-    };
-  }, [groupId, revision]);
+    if (!status) return;
+    setSubmittedId((id) => (status.relations.some((r) => r.id === id) ? null : id));
+    setInvitations((previous) =>
+      Object.fromEntries(
+        Object.entries(previous).filter(([id]) => {
+          const relation = status.relations.find((r) => r.id === id);
+          const seen = observedInvitations.current.has(id);
+          if (relation) observedInvitations.current.add(id);
+          return relation
+            ? relation.state === "invited" && relation.current && !relation.expired
+            : !seen;
+        }),
+      ),
+    );
+  }, [status]);
 
   const act = async (action: string, extra: Record<string, unknown> = {}): Promise<boolean> => {
     if (actionRequest.current) return false;
@@ -177,7 +147,7 @@ export function DirectConnectionsPanel({
       );
       if (task === "settings") setTask(null);
     }
-    if ((action === "remove" || action === "revoke") && typeof extra.id === "string") {
+    if (action === "revoke" && typeof extra.id === "string") {
       setInvitations((previous) => {
         const next = { ...previous };
         delete next[String(extra.id)];
@@ -198,7 +168,6 @@ export function DirectConnectionsPanel({
   };
   const relations = status?.relations || [];
   const current = relations.filter((r) => !directRelationClosed(r));
-  const history = relations.filter((r) => !current.includes(r));
   const rows = (items: typeof relations) => (
     <ul className="space-y-2">
       {items.map((r) => (
@@ -214,10 +183,10 @@ export function DirectConnectionsPanel({
   );
 
   return (
-    <div ref={panel} className="space-y-4 text-sm">
-      {!task && current.length === 0 && (
-        <p className="text-[var(--color-text-secondary)]">{t("direct.description")}</p>
-      )}
+    <div
+      ref={panel}
+      className={fill ? "flex min-h-full flex-col gap-4 text-sm" : "space-y-4 text-sm"}
+    >
       {(error || pollFailed) && (
         <p role="alert" className="break-words text-[var(--color-danger)]">
           {error || t("direct.statusUnavailable")}
@@ -235,14 +204,6 @@ export function DirectConnectionsPanel({
         ))}
       {/* Live relations stay visible in a task: approvals and uncertain outcomes surface here. */}
       {current.length > 0 && rows(current)}
-      {!task && history.length > 0 && (
-        <details>
-          <summary className="cursor-pointer text-[var(--color-text-secondary)]">
-            {t("direct.history", { count: history.length })}
-          </summary>
-          <div className="pt-3">{rows(history)}</div>
-        </details>
-      )}
       {task ? (
         <section
           className={
@@ -251,11 +212,11 @@ export function DirectConnectionsPanel({
               : "space-y-3"
           }
         >
-          <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <Button
               size="sm"
               variant="ghost"
-              className="-ml-3 gap-1"
+              className="-ml-3 shrink-0 gap-1"
               disabled={busy}
               onClick={closeTask}
             >
@@ -319,28 +280,16 @@ export function DirectConnectionsPanel({
           )}
         </section>
       ) : (
-        <div className="space-y-2">
-          <div className="flex flex-wrap gap-2">
-            <Button
-              data-direct-start="invite"
-              disabled={busy || !status || pollFailed}
-              onClick={() => start("invite")}
-            >
-              {t("direct.inviteGroup")}
-            </Button>
-            <Button
-              variant="outline"
-              data-direct-start="join"
-              disabled={busy || !status || pollFailed}
-              onClick={() => start("join")}
-            >
-              {t("direct.useInvite")}
-            </Button>
-          </div>
-          {current.length === 0 && (
-            <p className="text-xs text-[var(--color-text-secondary)]">{t("direct.chooseHint")}</p>
-          )}
-        </div>
+        <DirectConnectionStart
+          empty={
+            !!status &&
+            current.length === 0 &&
+            !submittedId &&
+            Object.keys(invitations).length === 0
+          }
+          disabled={busy || !status || pollFailed}
+          onStart={start}
+        />
       )}
       {status?.listener && task !== "settings" && task !== "invite" && (
         <div className="border-t border-[var(--glass-border-subtle)] pt-3">

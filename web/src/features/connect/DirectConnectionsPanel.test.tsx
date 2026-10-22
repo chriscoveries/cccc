@@ -37,7 +37,6 @@ afterEach(async () => {
   host.remove();
   vi.useRealTimers();
 });
-
 it("clears a recovered polling error and treats cached online status as unconfirmed on failure", async () => {
   vi.useFakeTimers();
   value.relations = [
@@ -135,9 +134,10 @@ it("approves the requesting pair in one click and never presents pending as conn
   ]);
 });
 it("shows the setup explanation only until a Group pair is connected", async () => {
+  vi.useFakeTimers();
   await render();
-  expect(host.textContent).toContain("direct.description");
-  expect(host.textContent).toContain("direct.chooseHint");
+  expect(host.textContent).toContain("direct.startTitle");
+  expect(host.textContent).toContain("direct.startHint");
   value.relations = [
     {
       id: "direct-id",
@@ -151,15 +151,17 @@ it("shows the setup explanation only until a Group pair is connected", async () 
       error: null,
     },
   ];
-  await render();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3000);
+  });
   expect(host.textContent).toContain("direct.states.online");
-  expect(host.textContent).not.toContain("direct.description");
-  expect(host.textContent).not.toContain("direct.chooseHint");
+  expect(host.textContent).not.toContain("direct.startTitle");
+  expect(host.textContent).not.toContain("direct.startHint");
   // Starting another pairing stays available once the explanation is gone.
   expect(button("direct.inviteGroup")).toBeDefined();
   expect(button("direct.useInvite")).toBeDefined();
 });
-it("offers removal for expired invitations but cannot approve a replaced Group", async () => {
+it("automatically removes expired invitations without approving a replaced Group", async () => {
   value.relations = [
     {
       id: "direct-id",
@@ -172,11 +174,11 @@ it("offers removal for expired invitations but cannot approve a replaced Group",
     },
   ];
   await render();
-  expect(host.textContent).toContain("direct.states.replaced");
+  expect(host.textContent).not.toContain("direct.states.replaced");
   expect(button("direct.approve")).toBeUndefined();
-  expect(button("direct.remove")).toBeDefined();
+  expect(button("direct.remove")).toBeUndefined();
+  expect(postBodies()).toEqual([{ action: "remove", group_id: "group-a", id: "direct-id" }]);
 });
-
 function invitation(expires = Date.now() + 1800000) {
   return `cccc-direct:${btoa(
     String.fromCharCode(
@@ -227,7 +229,6 @@ const postBodies = () =>
   mocks.request.mock.calls
     .filter(([, init]) => init?.method === "POST")
     .map(([, init]) => JSON.parse(init.body));
-
 it("keeps an expired pending join visible until the receiver confirms a decision", async () => {
   vi.useFakeTimers();
   value.relations = [relation({ state: "pending", initiated: true, expired: true })];
@@ -247,13 +248,12 @@ it("keeps an expired pending join visible until the receiver confirms a decision
   await act(async () => {
     await vi.advanceTimersByTimeAsync(3000);
   });
-  expect(host.textContent).toContain("direct.states.expired");
-  expect(host.textContent).toContain("direct.history");
-  expect(button("direct.remove")).toBeDefined();
+  expect(host.textContent).not.toContain("direct.states.expired");
+  expect(host.textContent).not.toContain("direct.history");
+  expect(button("direct.remove")).toBeUndefined();
   expect(button("direct.cancelRequest")).toBeUndefined();
-  expect(postBodies()).toEqual([]);
+  expect(postBodies()).toEqual([{ action: "remove", group_id: "group-a", id: "direct-fixture" }]);
 });
-
 it("shows initial loading without asserting that receiving is off", async () => {
   mocks.request.mockImplementation(() => new Promise(() => {}));
   await render();
@@ -313,7 +313,9 @@ it("previews the invited pair, blocks expired content and joins without configur
   expect(button("direct.request").disabled).toBe(true);
   const text = invitation();
   await fill(input, text);
-  expect(host.textContent).toContain("group-a ↔ 办公室 · Review");
+  expect(host.textContent).toContain(
+    "groupConnections.localGroupgroup-adirect.invitingGroupReview办公室",
+  );
   expect(host.textContent).toContain("office.test:8847");
   expect(postBodies()).toHaveLength(0);
   await act(async () => button("direct.request").click());
@@ -339,7 +341,7 @@ it("keeps a confirmed invitation copyable on a failed refresh and retires the co
   await act(async () => button("direct.create").click());
   expect(host.querySelector<HTMLTextAreaElement>("textarea[readonly]")?.value).toBe(text);
   await act(async () => button("direct.copy").click());
-  expect(mocks.copy).toHaveBeenCalledWith(text);
+  expect(mocks.copy).toHaveBeenCalledWith(text, host.querySelector("textarea[readonly]"));
   expect(host.textContent).toContain("direct.copied");
   failPoll = false;
   value.relations = [relation()];
@@ -385,7 +387,6 @@ it("does not keep the saved-request notice after authoritative approval", async 
   });
   expect(host.textContent).not.toContain("direct.requestSubmitted");
 });
-
 it("expires a pasted invitation while the panel remains open", async () => {
   vi.useFakeTimers();
   await render();
@@ -454,7 +455,6 @@ it("keeps the invitation available when clipboard permission is denied", async (
   expect(host.textContent).toContain("direct.copyFailed");
   expect(host.querySelector<HTMLTextAreaElement>("textarea[readonly]")?.value).toBe(text);
 });
-
 it("retains a saved forwarded address instead of replacing it with local suggestions", async () => {
   value.listener = { bind: "0.0.0.0:8847", address: "gateway.example:14447" };
   await render();
