@@ -36,6 +36,8 @@ mod native_input;
 mod opencode;
 mod pi_rpc;
 #[cfg(test)]
+pub(crate) use claude::replay_captured_usage_turn as replay_captured_claude_usage_turn;
+#[cfg(test)]
 pub(crate) use pi_rpc::{
     CAPTURED_LENGTH_STOP as CAPTURED_PI_LENGTH_STOP, CAPTURED_TOOL_TURN as CAPTURED_PI_TOOL_TURN,
     replay_captured_turn as replay_captured_pi_turn,
@@ -433,6 +435,16 @@ fn required_value<'a>(value: &'a str, name: &str) -> io::Result<&'a str> {
 
 #[cfg(all(test, unix))]
 impl AnalystSession {
+    pub(crate) fn for_usage_test(
+        config: &std::path::Path,
+        runtime: ActorRuntime,
+        thread: &str,
+    ) -> Self {
+        let mut session = Self::claude_for_shutdown_test(config, thread, Vec::new(), true);
+        session.runtime = runtime;
+        session
+    }
+
     /// Exercise Actor output using the existing inert shutdown transport. The
     /// selected runtime only chooses the actual structured projection branch.
     pub(crate) fn for_output_test(

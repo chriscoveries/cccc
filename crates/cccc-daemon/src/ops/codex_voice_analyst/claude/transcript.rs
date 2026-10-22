@@ -57,7 +57,7 @@ struct ActiveTurn {
     turn_id: String,
     prompt_ids: HashSet<String>,
     text: String,
-    usage: Option<Value>,
+    usage: crate::ops::turn_usage::Accumulator,
     error: Option<String>,
     tools: HashMap<String, ToolCall>,
 }
@@ -262,24 +262,7 @@ impl TranscriptState {
             self.open_turn(format!("claude-{first}"), prompt_ids, None);
         }
         let active = self.active.as_mut().expect("active turn");
-        if let Some(usage) = record.pointer("/message/usage") {
-            let active_usage = &mut active.usage;
-            if let Some(existing) = active_usage.as_mut() {
-                // Sum per-turn across multiple assistant records.
-                for key in [
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_creation_input_tokens",
-                    "cache_read_input_tokens",
-                ] {
-                    let add = usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-                    let cur = existing.get(key).and_then(Value::as_u64).unwrap_or(0);
-                    existing[key] = json!(cur + add);
-                }
-            } else {
-                *active_usage = Some(usage.clone());
-            }
-        }
+        active.usage.claude(record);
         let content = record.pointer("/message/content").unwrap_or(&Value::Null);
         for block in content.as_array().into_iter().flatten() {
             match block.get("type").and_then(Value::as_str) {
@@ -388,7 +371,7 @@ impl TranscriptState {
             turn_id: turn_id.clone(),
             prompt_ids,
             text: String::new(),
-            usage: None,
+            usage: crate::ops::turn_usage::Accumulator::new(),
             error: None,
             tools: HashMap::new(),
         });
@@ -469,6 +452,7 @@ impl TranscriptState {
         } else {
             requested_status
         };
+        let usage = active.usage.summary("claude_transcript");
         self.publish(
             json!({
                 "method":"item/completed",
@@ -480,7 +464,7 @@ impl TranscriptState {
                         "type":"agentMessage",
                         "text":active.text,
                     },
-                    "usage":active.usage,
+                    "usage":usage,
                 }
             }),
             None,
@@ -494,6 +478,7 @@ impl TranscriptState {
                         "id":active.turn_id,
                         "status":status,
                         "error":error,
+                        "usage":usage,
                     }
                 }
             }),
@@ -554,9 +539,55 @@ fn invalid<T>(message: impl Into<String>) -> io::Result<T> {
     Err(io::Error::new(io::ErrorKind::InvalidData, message.into()))
 }
 
+/// Real assistant metadata and settlement marker; prompt/content fields are omitted.
+#[cfg(test)]
+pub(crate) fn replay_captured_usage_turn() -> Vec<Value> {
+    let records = include_str!("captured_turn_usage.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("captured Claude metadata"))
+        .collect::<Vec<_>>();
+    let (events, mut receiver) = broadcast::channel(records.len() * 4);
+    let session = records[0]["sessionId"].as_str().expect("captured session");
+    let mut state = TranscriptState::new("generation".into(), session.into(), events);
+    // Establish only the harness's turn boundary; no prompt or assistant content is invented.
+    state.open_turn(
+        format!("claude-{}", records[0]["uuid"].as_str().expect("record id")),
+        HashSet::new(),
+        None,
+    );
+    for record in records {
+        state
+            .ingest(&record, None)
+            .expect("captured metadata accepted");
+    }
+    std::iter::from_fn(|| receiver.try_recv().ok())
+        .map(|event| event.message)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_claude_turn_usage_sums_distinct_messages_not_content_snapshots() {
+        let events = replay_captured_usage_turn();
+        let completions = events
+            .iter()
+            .filter(|v| v["method"] == "turn/completed")
+            .collect::<Vec<_>>();
+        assert_eq!(completions.len(), 1);
+        let usage = &completions[0]["params"]["turn"]["usage"];
+        assert_eq!(
+            usage["usage_samples"], 7,
+            "14 real records repeat seven provider messages"
+        );
+        assert_eq!(usage["input_tokens"], 14);
+        assert_eq!(usage["output_tokens"], 4698);
+        assert_eq!(usage["cache_read_tokens"], 1521929);
+        assert_eq!(usage["cache_write_tokens"], 9321);
+        assert_eq!(usage["model_id"], "claude-opus-5-5");
+    }
 
     pub(super) fn harness() -> (TranscriptState, broadcast::Receiver<AnalystEvent>) {
         let (events, receiver) = broadcast::channel(32);
