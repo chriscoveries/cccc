@@ -16,7 +16,8 @@ import { HoverTooltip } from "../HoverTooltip";
 import { InfoIcon, RefreshIcon, SettingsIcon } from "../Icons";
 import { ProjectedBrowserSurfacePanel } from "../browser/ProjectedBrowserSurfacePanel";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
-import { WebModelConnectionStatus } from "./WebModelConnectionStatus";
+import { WebModelConnectionStatus, WebModelManagedConnection } from "./WebModelConnectionStatus";
+import { Button } from "../ui/button";
 
 interface WebModelRuntimePanelProps {
   groupId: string;
@@ -25,7 +26,9 @@ interface WebModelRuntimePanelProps {
   isDark: boolean;
   isVisible: boolean;
   readOnly?: boolean;
+  canAccessConnection?: boolean;
   compact?: boolean;
+  onOpenSharedSettings?: () => void;
 }
 
 function iconButtonClass(primary = false): string {
@@ -38,6 +41,7 @@ function iconButtonClass(primary = false): string {
 }
 
 export function WebModelRuntimePanel(props: WebModelRuntimePanelProps) {
+  if (props.canAccessConnection === false) return <WebModelManagedConnection />;
   // A runtime change owns a different browser and must retire pending UI requests.
   return (
     <RuntimePanel key={`${props.groupId}/${props.actor.id}/${props.actor.runtime}`} {...props} />
@@ -52,22 +56,23 @@ function RuntimePanel({
   isVisible,
   readOnly,
   compact = false,
+  onOpenSharedSettings,
 }: WebModelRuntimePanelProps) {
   const { t } = useTranslation("chat");
-  const grok = actor.runtime === "grok_web_model";
   const openActorEditor = useModalStore((state) => state.openActorEditor);
   const [pairing, setPairing] = useState<WebModelPairing>();
   const [session, setSession] = useState<WebModelBrowserSession | null>(null);
   const [error, setError] = useState("");
   const [busyAction, setBusyAction] = useState("");
   const [surfaceRestartNonce, setSurfaceRestartNonce] = useState(0);
+  // Odd revisions reserve status for an explicit inspection. Cached polling
+  // must not overwrite that result with a read started before the check.
+  const statusRevisionRef = useRef(0);
   const currentSelectionRef = useRef({ groupId, actorId: String(actor.id || "").trim() });
   const actorId = String(actor.id || "").trim();
   currentSelectionRef.current = { groupId, actorId };
   const queuedCount = Math.max(0, Number(actor.web_model_queued_count || 0));
-  const canControlSurface = Boolean(
-    isVisible && isRunning && !readOnly && groupId && actorId && (!grok || pairing?.url),
-  );
+  const canControlSurface = Boolean(isVisible && isRunning && !readOnly && groupId && actorId);
 
   useEffect(() => {
     if (!isVisible || !groupId || !actorId) {
@@ -83,12 +88,13 @@ function RuntimePanel({
     setBusyAction("load");
     let loading = false;
     const load = (initial: boolean) => {
-      if (loading) return;
+      if (loading || statusRevisionRef.current % 2 !== 0) return;
+      const revision = statusRevisionRef.current;
       loading = true;
       void api
         .fetchWebModelBrowserSession(groupId, actorId, { inspect: false })
         .then((resp) => {
-          if (cancelled) return;
+          if (cancelled || statusRevisionRef.current !== revision) return;
           if (!resp.ok) {
             setError(resp.error?.message || t("webModelDelivery.statusFailed"));
             return;
@@ -98,7 +104,8 @@ function RuntimePanel({
           setError("");
         })
         .catch(() => {
-          if (!cancelled) setError(t("webModelDelivery.statusFailed"));
+          if (!cancelled && statusRevisionRef.current === revision)
+            setError(t("webModelDelivery.statusFailed"));
         })
         .finally(() => {
           loading = false;
@@ -147,6 +154,27 @@ function RuntimePanel({
     openActorEditor(actor, "chatgpt");
   };
 
+  const checkPage = async () => {
+    if (readOnly || busyAction || !session?.active) return;
+    statusRevisionRef.current += 1;
+    setBusyAction("check");
+    try {
+      const response = await api.fetchWebModelBrowserSession(groupId, actorId, { inspect: true });
+      if (!matchesWebModelActorSelection(currentSelectionRef.current, groupId, actorId)) return;
+      if (!response.ok) throw new Error(response.error.message);
+      setSession(response.result.browser_session);
+      setPairing(response.result.pairing);
+      setError("");
+    } catch {
+      if (matchesWebModelActorSelection(currentSelectionRef.current, groupId, actorId))
+        setError(t("webModelDelivery.statusFailed"));
+    } finally {
+      statusRevisionRef.current += 1;
+      if (matchesWebModelActorSelection(currentSelectionRef.current, groupId, actorId))
+        setBusyAction("");
+    }
+  };
+
   const updateDeliveryMode = async (mode: WebModelDeliveryMode) => {
     if (!groupId || !actorId || readOnly || busyAction) return;
     if ((session?.delivery_mode || "standard") === mode) return;
@@ -171,8 +199,14 @@ function RuntimePanel({
   };
 
   const loadBrowserSurfaceSession = useCallback(async () => {
+    const revision = statusRevisionRef.current;
     const resp = await api.fetchWebModelBrowserSurfaceSession(groupId, actorId, { inspect: false });
-    if (!matchesWebModelActorSelection(currentSelectionRef.current, groupId, actorId)) return resp;
+    if (
+      !matchesWebModelActorSelection(currentSelectionRef.current, groupId, actorId) ||
+      revision % 2 !== 0 ||
+      statusRevisionRef.current !== revision
+    )
+      return resp;
     if (resp.ok) {
       setSession(resp.result.browser_session || {});
       setPairing(resp.result.pairing);
@@ -218,6 +252,9 @@ function RuntimePanel({
 
   const deliveryState =
     session?.health_snapshot?.delivery?.state || session?.last_delivery_status || "";
+  const browserNeedsAttention = session?.ready === false || session?.active === false;
+  const connectionNeedsSetup =
+    pairing && !["bound", "waiting", "awaiting_confirmation"].includes(pairing.state);
   const deliveryNeedsAttention = ["ambiguous", "blocked", "failed"].includes(deliveryState);
   const activity = deliveryNeedsAttention
     ? t(`webModelDelivery.activity.${deliveryState}`)
@@ -234,16 +271,14 @@ function RuntimePanel({
       ? t("webModelDelivery.browserReadOnly")
       : !isRunning
         ? t("webModelDelivery.actorStoppedSurface")
-        : grok && !pairing?.url
-          ? t(pairing ? "settings:grokActor.urlRequired" : "settings:webModelActor.states.loading")
-          : "";
+        : "";
   const deliveryMode: WebModelDeliveryMode =
     session?.delivery_mode === "image_compat" ? "image_compat" : "standard";
   const deliveryModeDisabled = Boolean(readOnly || busyAction);
 
   const configurationControls = (
     <>
-      {!grok && (
+      {
         <>
           <fieldset
             className={classNames(
@@ -367,15 +402,15 @@ function RuntimePanel({
             </PopoverContent>
           </Popover>
         </>
-      )}
-      {!readOnly && (
+      }
+      {!readOnly && compact && (
         <button
           type="button"
           className="glass-btn px-3 py-2 inline-flex items-center gap-2"
           onClick={openSettings}
         >
           <SettingsIcon size={17} aria-hidden="true" />
-          {t(grok ? "settings:grokActor.title" : "settings:webModelActor.title")}
+          {t("settings:webModelActor.title")}
         </button>
       )}
     </>
@@ -388,7 +423,7 @@ function RuntimePanel({
         compact ? "gap-0" : "gap-3",
         isDark ? "text-slate-100" : "text-[rgb(35,36,37)]",
       )}
-      aria-label={grok ? "Grok Bot Web Model runtime" : "ChatGPT Web Model runtime"}
+      aria-label="ChatGPT Web Model runtime"
     >
       <div
         className={classNames(
@@ -406,11 +441,28 @@ function RuntimePanel({
           }
         >
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 px-1">
-            <WebModelConnectionStatus
-              pairing={pairing}
-              session={session}
-              provider={grok ? "grok_web" : "chatgpt_web"}
-            />
+            <WebModelConnectionStatus pairing={pairing} session={session} />
+            {!readOnly && browserNeedsAttention && onOpenSharedSettings && (
+              <Button type="button" variant="outline" size="sm" onClick={onOpenSharedSettings}>
+                {t("settings:webModelActor.sharedLogin")}
+              </Button>
+            )}
+            {!readOnly && session?.active && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={Boolean(busyAction)}
+                onClick={() => void checkPage()}
+              >
+                {t("settings:webModelActor.checkPage")}
+              </Button>
+            )}
+            {!readOnly && !compact && connectionNeedsSetup && (
+              <Button type="button" variant="outline" size="sm" onClick={openSettings}>
+                {t("settings:webModelActor.configureConnection")}
+              </Button>
+            )}
             {activity && (
               <span
                 className={classNames(
@@ -426,7 +478,7 @@ function RuntimePanel({
           </div>
           <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-1.5 @min-[880px]/web-model:justify-end">
             {compact ? (
-              !grok || !readOnly ? (
+              !readOnly ? (
                 <Popover>
                   <PopoverTrigger asChild>
                     <button
@@ -477,7 +529,7 @@ function RuntimePanel({
             loadSession={loadBrowserSurfaceSession}
             startSession={startBrowserSurfaceSession}
             webSocketUrl={api.getWebModelBrowserSurfaceWebSocketUrl(groupId, actorId)}
-            fallbackUrl={grok ? pairing?.url : "https://chatgpt.com/"}
+            fallbackUrl="https://chatgpt.com/"
           />
         </div>
       ) : surfaceDisabledMessage ? (

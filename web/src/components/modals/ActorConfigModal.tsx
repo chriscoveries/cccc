@@ -842,12 +842,8 @@ function EditActorConfigModal({
     openSettingsTarget({
       scope: "global",
       tab: "webModels",
-      webModelProvider:
-        conversationRuntime === "grok_web_model"
-          ? "grok_web"
-          : conversationRuntime === "chatgpt_dots"
-            ? "dots"
-            : "chatgpt_web",
+      webModelProvider: conversationRuntime === "grok_web_model" ? "grok_web" : "chatgpt_web",
+      webModelSection: conversationRuntime === "web_model" ? "login" : "connector",
     });
   };
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
@@ -864,6 +860,7 @@ function EditActorConfigModal({
   const [grokBotUrl, setGrokBotUrl] = useState<string | undefined>();
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [connectionEnabled, setConnectionEnabled] = useState<boolean | undefined>();
+  const [connectionUnresolved, setConnectionUnresolved] = useState(false);
   const baseline = useRef({
     identity: "",
     title,
@@ -904,6 +901,7 @@ function EditActorConfigModal({
     setGrokBotUrl(undefined);
     setConnectionBusy(false);
     setConnectionEnabled(undefined);
+    setConnectionUnresolved(false);
   }, [groupId, actorId, isOpen]);
   const [localNotice, setLocalNotice] = useState("");
   const [avatarBusy, setAvatarBusy] = useState<"" | "upload" | "clear">("");
@@ -1269,6 +1267,13 @@ function EditActorConfigModal({
       setSecretsError(t("settings:grokActor.invalidUrl"));
       return;
     }
+    if (
+      applyRunningTarget &&
+      !stagingGrok &&
+      !restart &&
+      !window.confirm(t("applyWebModelTargetConfirm", { label: actorId }))
+    )
+      return;
 
     if (editMode === "profile") {
       const profileId = String(attachProfileId || "").trim();
@@ -1350,6 +1355,7 @@ function EditActorConfigModal({
     secretsRefreshing ||
     actorNotesBusy ||
     (grokTargetChanged && !grokBotUrl?.trim()) ||
+    (grokTargetChanged && connectionUnresolved) ||
     (editMode === "custom" && effectiveLinked) ||
     (editMode === "custom" && requireCommand && !command.trim()) ||
     (editMode === "profile" && !String(attachProfileId || "").trim());
@@ -1426,7 +1432,9 @@ function EditActorConfigModal({
             <Button
               type="button"
               className="w-full sm:w-auto font-semibold transition-all ease-spring duration-300"
-              onClick={() => (hasChanges ? void submit(applyRunningTarget) : closeEdit())}
+              onClick={() =>
+                hasChanges ? void submit(applyRunningTarget && stagingGrok) : closeEdit()
+              }
               disabled={
                 hasChanges ? saveDisabled : busy === "actor-update" || secretsBusy || connectionBusy
               }
@@ -1710,6 +1718,9 @@ function EditActorConfigModal({
                     : "settings:webModelActor.title",
               )}
             >
+              <p className="mb-3 text-xs text-[var(--color-text-muted)]">
+                {t("settings:webModelActor.immediateHint")}
+              </p>
               {conversationRuntime === "chatgpt_dots" ? (
                 <DotsActorPanel
                   key={`${groupId}/${actorId}/dots`}
@@ -1726,6 +1737,7 @@ function EditActorConfigModal({
               ) : conversationRuntime === "grok_web_model" ? (
                 <GrokActorSetup
                   key={`${groupId}/${actorId}/grok`}
+                  canAccessConnection={canAccessGlobalSettings}
                   groupId={groupId}
                   actorId={actorId}
                   isDark={isDark}
@@ -1734,6 +1746,7 @@ function EditActorConfigModal({
                   draftUrl={grokBotUrl}
                   onDraftChange={setGrokBotUrl}
                   onEnabledChange={setConnectionEnabled}
+                  onUnresolvedChange={setConnectionUnresolved}
                   onBusyChange={setConnectionBusy}
                   saving={secretsBusy || busy === "actor-update"}
                 />
@@ -1744,6 +1757,7 @@ function EditActorConfigModal({
                   actorId={actorId}
                   isDark={isDark}
                   isVisible={!suspended}
+                  canAccessConnection={canAccessGlobalSettings}
                   onOpenSharedSettings={openSharedSettings}
                   onBusyChange={setConnectionBusy}
                   saving={secretsBusy || busy === "actor-update"}
