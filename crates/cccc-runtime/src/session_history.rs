@@ -3,6 +3,7 @@ use crate::output::{HistoryPage, OutputBuffer};
 use crate::terminal_snapshot::TerminalStateMirror;
 use crate::transcript_archive::{HistoryConfig, TranscriptArchive};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::watch;
 
 mod subscription;
@@ -14,6 +15,18 @@ struct SessionHistoryState {
     archive_writable: bool,
     accepting_output: bool,
     terminal: TerminalStateMirror,
+    last_output: Option<(Instant, SystemTime)>,
+}
+
+/// When a live terminal session's process last wrote output. This is an
+/// observation only: output neither proves nor disproves that the process is
+/// working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputObservation {
+    /// Wall-clock time of the last output, for display.
+    pub last_output_at: SystemTime,
+    /// Time since the last output, measured on the monotonic clock.
+    pub quiet_for: Duration,
 }
 
 #[derive(Clone)]
@@ -77,6 +90,7 @@ impl SessionHistory {
                 archive_writable,
                 accepting_output: true,
                 terminal: TerminalStateMirror::new(cols, rows),
+                last_output: None,
             })),
             changes,
         })
@@ -108,6 +122,9 @@ impl SessionHistory {
                 terminal_responses: Vec::new(),
                 archive_error: None,
             });
+        }
+        if !data.is_empty() {
+            state.last_output = Some((Instant::now(), SystemTime::now()));
         }
         let responses = state.terminal.process(data);
         state.output.push(data);
@@ -255,6 +272,20 @@ impl SessionHistory {
             closed: true,
         });
         Ok(())
+    }
+
+    /// When the process last wrote to its terminal, or `None` before its first
+    /// output in this session.
+    pub(crate) fn last_output(&self) -> Result<Option<OutputObservation>, RuntimeError> {
+        self.state
+            .lock()
+            .map_err(|_| RuntimeError::Poisoned)
+            .map(|state| {
+                state.last_output.map(|(at, wall)| OutputObservation {
+                    last_output_at: wall,
+                    quiet_for: at.elapsed(),
+                })
+            })
     }
 
     pub(crate) fn bracketed_paste_enabled(&self) -> Result<bool, RuntimeError> {
