@@ -1,9 +1,18 @@
 use cccc_contracts::{Actor, Event, GroupState};
 use cccc_core::{GroupStore, HomeLayout, ledger};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::dispatch::OpError;
 use crate::dispatch_concurrency::DispatchLocks;
 use crate::ops::{actor_delivery, actor_runtime};
+
+static SETTLED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the startup restore of running runtimes has finished (or failed).
+/// Until then an Actor that is enabled but not yet running is not down.
+pub(crate) fn settled() -> bool {
+    SETTLED.load(Ordering::Acquire)
+}
 
 pub fn spawn(home: HomeLayout, locks: DispatchLocks) {
     let result = std::thread::Builder::new()
@@ -12,9 +21,11 @@ pub fn spawn(home: HomeLayout, locks: DispatchLocks) {
             if let Err(error) = restore_running_serialized(&home, &locks) {
                 tracing::warn!(message = %error.message, "failed to restore running runtimes");
             }
+            SETTLED.store(true, Ordering::Release);
         });
     if let Err(error) = result {
         tracing::warn!(%error, "failed to spawn runtime restore worker");
+        SETTLED.store(true, Ordering::Release);
     }
 }
 

@@ -119,6 +119,16 @@ impl DispatchLocks {
             })
     }
 
+    /// A Group read permit only if no operation holds or awaits the Group now.
+    pub(crate) fn try_group_read(&self, group_id: &str) -> Option<DispatchPermit> {
+        let global = self.global.clone().try_read_owned().ok()?;
+        let group = self.group(group_id).try_read_owned().ok()?;
+        Some(DispatchPermit::GroupRead {
+            _global: global,
+            _group: group,
+        })
+    }
+
     pub async fn group_write(&self, group_id: &str) -> DispatchPermit {
         let global = self.global.clone().read_owned().await;
         let group = self.group(group_id).write_owned().await;

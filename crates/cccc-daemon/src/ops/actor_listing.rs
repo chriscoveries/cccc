@@ -64,12 +64,21 @@ pub(super) fn list(
                         .pid
                         .map_or(Value::Null, |pid| Value::from(u64::from(pid))),
                 );
-                object.extend(super::working_state::runtime_actor_fields(
+                let working = super::working_state::runtime_actor_fields(
                     home,
                     &actor,
                     &group.group_id,
                     status.running,
+                );
+                object.extend(super::actor_health::row_fields(
+                    group,
+                    &actor,
+                    status.running,
+                    working
+                        .get("effective_working_reason")
+                        .and_then(Value::as_str),
                 ));
+                object.extend(working);
                 if actor.runtime.is_web_model() {
                     object.extend(web_model_queue_fields(home, group, &actor)?);
                 }

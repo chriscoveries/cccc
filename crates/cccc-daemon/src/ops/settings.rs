@@ -30,6 +30,11 @@ const SECTION_SETTING_KEYS: &[(&str, &str, &str)] = &[
         "reply_notice_after_seconds",
     ),
     (
+        "ignored_delivery_after_seconds",
+        "delivery",
+        "ignored_delivery_after_seconds",
+    ),
+    (
         "terminal_transcript_visibility",
         "terminal_transcript",
         "visibility",
