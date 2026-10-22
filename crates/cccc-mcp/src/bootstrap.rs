@@ -1156,4 +1156,31 @@ mod tests {
         assert!(payload.get("group").is_none());
         assert!(payload.get("context").is_none());
     }
+    #[test]
+    fn bootstrap_task_preview_keeps_the_recorded_task_revision() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = cccc_core::HomeLayout::from_path(temp.path()).expect("home");
+        let groups = cccc_core::GroupStore::new(home.clone()).expect("groups");
+        let group = groups.create("task preview", "").expect("group");
+        let directory = groups
+            .group_dir(&group.group_id)
+            .expect("group dir")
+            .join("context/tasks");
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../cccc-core/tests/fixtures/task-revision/tasks.json"
+        ))
+        .expect("recording");
+        for task in tasks {
+            cccc_core::fs::write_yaml(
+                &directory.join(format!("{}.yaml", task["id"].as_str().expect("id"))),
+                &task,
+            )
+            .expect("recorded task");
+        }
+        let loaded = cccc_core::context::ContextStore::new(home)
+            .expect("contexts")
+            .load(&group.group_id)
+            .expect("read");
+        assert_eq!(slim_task(&loaded.tasks[0])["rev"], 0);
+    }
 }
