@@ -21,6 +21,10 @@ pub(super) fn create(doc: &mut ContextDoc, op: &Map<String, Value>, by: &str) ->
         "free"
     });
     let waiting_on = enum_value(op, "waiting_on", WAITING_ON)?;
+    let decision_request = decision_request(op)?;
+    if op.contains_key("decision") {
+        return Err(io::Error::other("decision is recorded by task.decide"));
+    }
     let mut task = op
         .iter()
         .filter(|(key, _)| key.as_str() != "op")
@@ -42,6 +46,10 @@ pub(super) fn create(doc: &mut ContextDoc, op: &Map<String, Value>, by: &str) ->
     if let Some(value) = waiting_on {
         task.insert("waiting_on".into(), Value::String(value.into()));
     }
+    match decision_request {
+        Some(request) => task.insert("decision_request".into(), request),
+        None => task.remove("decision_request"),
+    };
     task.insert("created_by".into(), Value::String(by.into()));
     task.insert("created_at".into(), Value::String(utc_now()));
     task.insert("updated_at".into(), Value::String(utc_now()));
@@ -69,6 +77,15 @@ pub(super) fn update(doc: &mut ContextDoc, op: &Map<String, Value>) -> io::Resul
     }
     let waiting_on = enum_value(op, "waiting_on", WAITING_ON)?;
     let task_type = enum_value(op, "task_type", TASK_TYPES)?;
+    let decision_request = op
+        .contains_key("decision_request")
+        .then(|| decision_request(op))
+        .transpose()?;
+    if decision_request.is_some() && find(doc, &task_id)?.contains_key("decision") {
+        return Err(io::Error::other(format!(
+            "task {task_id} is already decided"
+        )));
+    }
     let task = find_mut(doc, &task_id)?;
     let allowed = [
         "title",
@@ -103,8 +120,78 @@ pub(super) fn update(doc: &mut ContextDoc, op: &Map<String, Value>) -> io::Resul
     if let Some(value) = task_type {
         task.insert("task_type".into(), Value::String(value.into()));
     }
+    if let Some(request) = decision_request {
+        match request {
+            Some(request) => task.insert("decision_request".into(), request),
+            None => task.remove("decision_request"),
+        };
+    }
     task.insert("updated_at".into(), Value::String(utc_now()));
     Ok(())
+}
+
+/// Answers a task's decision request: records the decision, sets waiting_on
+/// to none and moves the task to done. Returns the coordination decision note
+/// that keeps the answer (`summary` and `task_id`).
+pub(super) fn decide(
+    doc: &mut ContextDoc,
+    op: &Map<String, Value>,
+    by: &str,
+) -> io::Result<Map<String, Value>> {
+    let task_id = required(op, "task_id")?.trim().to_owned();
+    let choice = required(op, "choice")?.trim().to_owned();
+    let text = nullable_id(op, "text")?;
+    let source = nullable_id(op, "source")?;
+    let task = find_mut(doc, &task_id)?;
+    if task.contains_key("decision") {
+        return Err(io::Error::other(format!(
+            "task {task_id} is already decided"
+        )));
+    }
+    if task.get("status").and_then(Value::as_str) == Some("archived") {
+        return Err(io::Error::other(format!("task {task_id} is archived")));
+    }
+    let request = task
+        .get("decision_request")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other(format!("task {task_id} has no decision request")))?;
+    let options = request
+        .get("options")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if !options.is_empty()
+        && !options
+            .iter()
+            .any(|option| option.as_str() == Some(choice.as_str()))
+    {
+        return Err(io::Error::other(
+            "choice must be one of the decision request's options",
+        ));
+    }
+    let question = request
+        .get("question")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let summary = format!("{question} — {choice}");
+    let mut decision = Map::new();
+    decision.insert("choice".into(), Value::String(choice));
+    if let Some(text) = text {
+        decision.insert("text".into(), Value::String(text));
+    }
+    if let Some(source) = source {
+        decision.insert("source".into(), Value::String(source));
+    }
+    decision.insert("by".into(), Value::String(by.into()));
+    decision.insert("at".into(), Value::String(utc_now()));
+    task.insert("decision".into(), Value::Object(decision));
+    task.insert("waiting_on".into(), Value::String("none".into()));
+    task.insert("status".into(), Value::String("done".into()));
+    task.insert("updated_at".into(), Value::String(utc_now()));
+    let mut note = Map::new();
+    note.insert("summary".into(), Value::String(summary));
+    note.insert("task_id".into(), Value::String(task_id));
+    Ok(note)
 }
 
 pub(super) fn move_task(doc: &mut ContextDoc, op: &Map<String, Value>) -> io::Result<()> {
@@ -251,6 +338,49 @@ fn nullable_id(op: &Map<String, Value>, key: &str) -> io::Result<Option<String>>
         }
         Some(_) => Err(io::Error::other(format!("{key} must be a string or null"))),
     }
+}
+
+/// The op's `decision_request`, checked and trimmed: a question, optionally
+/// the options to choose from and a recommendation. `None` when it is absent
+/// or null.
+fn decision_request(op: &Map<String, Value>) -> io::Result<Option<Value>> {
+    let request = match op.get("decision_request") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Object(request)) => request,
+        Some(_) => {
+            return Err(io::Error::other(
+                "decision_request must be an object or null",
+            ));
+        }
+    };
+    let question = required(request, "question")
+        .map_err(|_| io::Error::other("decision_request.question is required"))?;
+    let options = match request.get("options") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(options) => options
+            .as_array()
+            .and_then(|options| {
+                options
+                    .iter()
+                    .map(|option| {
+                        let option = option.as_str()?.trim();
+                        (!option.is_empty()).then(|| Value::String(option.to_owned()))
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .ok_or_else(|| {
+                io::Error::other("decision_request.options must be non-empty strings")
+            })?,
+    };
+    let mut checked = Map::new();
+    checked.insert("question".into(), Value::String(question.trim().to_owned()));
+    if !options.is_empty() {
+        checked.insert("options".into(), Value::Array(options));
+    }
+    if let Some(recommendation) = nullable_id(request, "recommendation")? {
+        checked.insert("recommendation".into(), Value::String(recommendation));
+    }
+    Ok(Some(Value::Object(checked)))
 }
 
 fn enum_value<'a>(

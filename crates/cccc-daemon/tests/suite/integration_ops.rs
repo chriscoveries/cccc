@@ -1341,6 +1341,112 @@ fn rust_daemon_provider_auth_mutations_do_not_report_synthetic_lifecycle() {
     assert_eq!(invalid.error.expect("invalid action").code, "invalid_args");
 }
 
+#[test]
+fn only_the_user_and_the_approvers_it_names_answer_decision_requests() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"decisions"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    for actor_id in ["lead", "peer1"] {
+        call(
+            &home,
+            "actor_add",
+            json!({
+                "group_id":group_id,
+                "actor_id":actor_id,
+                "runtime":"custom",
+                "command":["sh"],
+                "enabled":false,
+                "by":"user"
+            }),
+        );
+    }
+    call(
+        &home,
+        "context_sync",
+        json!({
+            "group_id":group_id,
+            "by":"lead",
+            "ops":[
+                {"op":"task.create","title":"release day","waiting_on":"user",
+                    "decision_request":{"question":"Ship on Friday?","options":["yes","no"]}},
+                {"op":"task.create","title":"hotfix","waiting_on":"user",
+                    "decision_request":{"question":"Patch tonight?"}},
+            ],
+        }),
+    );
+    let summary = call(
+        &home,
+        "context_get",
+        json!({"group_id":group_id,"detail":"summary"}),
+    );
+    assert_eq!(
+        summary.result["coordination"]["tasks"][0]["decision_request"]["question"],
+        "Ship on Friday?"
+    );
+    let decide = |by: &str, task_id: &str, choice: &str| {
+        raw_call(
+            &home,
+            "context_sync",
+            json!({
+                "group_id":group_id,
+                "by":by,
+                "ops":[{"op":"task.decide","task_id":task_id,"choice":choice}],
+            }),
+        )
+    };
+    for actor_id in ["lead", "peer1"] {
+        let refused = decide(actor_id, "T001", "yes");
+        assert_eq!(
+            refused.error.expect("not an approver").code,
+            "permission_denied"
+        );
+    }
+    let self_named = raw_call(
+        &home,
+        "group_settings_update",
+        json!({"group_id":group_id,"by":"lead","patch":{"task_approvers":["lead"]}}),
+    );
+    let error = self_named.error.expect("only the user names approvers");
+    assert_eq!(error.code, "permission_denied");
+    call(
+        &home,
+        "group_settings_update",
+        json!({"group_id":group_id,"by":"user","patch":{"task_approvers":["peer1"]}}),
+    );
+    let by_peer = decide("peer1", "T001", "yes");
+    assert!(by_peer.ok, "{:?}", by_peer.error);
+    assert!(decide("lead", "T002", "tonight").error.is_some());
+    let by_user = decide("user", "T002", "tonight");
+    assert!(by_user.ok, "{:?}", by_user.error);
+
+    let context = cccc_core::context::ContextStore::new(home.clone())
+        .expect("context store")
+        .load(group_id)
+        .expect("context");
+    for (task, by, choice) in [(0, "peer1", "yes"), (1, "user", "tonight")] {
+        assert_eq!(context.tasks[task]["status"], "done");
+        assert_eq!(context.tasks[task]["waiting_on"], "none");
+        assert_eq!(context.tasks[task]["decision"]["by"], by);
+        assert_eq!(context.tasks[task]["decision"]["choice"], choice);
+    }
+    let notes = context.coordination["recent_decisions"]
+        .as_array()
+        .expect("decision notes");
+    assert_eq!(
+        notes
+            .iter()
+            .map(|note| (note["task_id"].clone(), note["by"].clone()))
+            .collect::<Vec<_>>(),
+        [
+            (json!("T001"), json!("peer1")),
+            (json!("T002"), json!("user"))
+        ]
+    );
+}
+
 fn call(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
     let response = raw_call(home, op, args);
     assert!(response.ok, "{op}: {:?}", response.error);
