@@ -197,6 +197,10 @@ pub struct Actor {
     /// people and tools; launching does not read it. Empty when unset.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_cost_usd_per_mtok: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_strength: Option<u8>,
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
@@ -250,6 +254,8 @@ impl Actor {
             role: None,
             title: String::new(),
             model: String::new(),
+            model_cost_usd_per_mtok: None,
+            model_strength: None,
             command: Vec::new(),
             env: BTreeMap::new(),
             default_scope_key: String::new(),
