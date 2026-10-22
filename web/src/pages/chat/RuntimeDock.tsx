@@ -12,6 +12,7 @@ import { hasManagedRuntimeOutput } from "../../utils/headlessRuntimeSupport";
 import type { LiveWorkCard } from "./liveWorkCards";
 import { RuntimeDockTicker } from "./RuntimeDockTicker";
 import { buildRuntimeDockTickerEntries } from "./runtimeDockTickerEntries";
+import { HarnessRamTable } from "./HarnessRamTable";
 import { buildRuntimeDockItems, type RuntimeDockItem } from "./runtimeDockItems";
 import { getRuntimeRingTone, type RuntimeRingTone } from "./runtimeDockRingTone";
 
@@ -432,6 +433,7 @@ export function RuntimeDock({
               </button>
             ) : null}
           </div>
+          <HarnessRamTable groupId={groupId} isDark={isDark} />
         </div>
       </div>
     </div>
