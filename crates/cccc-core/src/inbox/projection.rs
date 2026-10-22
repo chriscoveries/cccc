@@ -334,6 +334,7 @@ pub(crate) fn due(
     home: &HomeLayout,
     group: &GroupDoc,
     eligible: &[&cccc_contracts::Actor],
+    not_running: &[&cccc_contracts::Actor],
     mail_delays: crate::automation::MailDelays<'_>,
     reply_after: i64,
     digest: &crate::automation::Digest,
@@ -343,6 +344,7 @@ pub(crate) fn due(
         Ok(projection.notices.due(
             group,
             eligible,
+            not_running,
             &projection.cursors,
             &mail_delays,
             reply_after,

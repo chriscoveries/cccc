@@ -247,10 +247,12 @@ impl NoticeState {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn due(
         &self,
         group: &GroupDoc,
         eligible: &[&cccc_contracts::Actor],
+        not_running: &[&cccc_contracts::Actor],
         cursors: &BTreeMap<String, String>,
         mail_delays: &crate::automation::MailDelays<'_>,
         reply_after: i64,
@@ -284,7 +286,11 @@ impl NoticeState {
                 });
             [read, reply, delivered].into_iter().flatten().min()
         };
-        for actor in eligible {
+        let actors = eligible
+            .iter()
+            .map(|actor| (*actor, true))
+            .chain(not_running.iter().map(|actor| (*actor, false)));
+        for (actor, running) in actors {
             let after = mail_delays.for_actor(&actor.id);
             let generation = self.generations.get(&actor.id).copied().unwrap_or(0);
             let cursor = cursors
@@ -322,6 +328,25 @@ impl NoticeState {
                         replies.push(source);
                     }
                 }
+            }
+            // Not running, so no notice will go out: once its Mail has waited
+            // `mail_overdue`, the foreman should hear of it instead.
+            if !running {
+                if let Some(oldest) = mail.first() {
+                    let waited = now - timestamp(&oldest.ts, now);
+                    if waited >= digest.mail_overdue {
+                        problems.push((
+                            format!("waiting:{}:{}", actor.id, oldest.id),
+                            format!(
+                                "{}: {} Mail item(s) waiting, the oldest for {}, and it is not running to read them.",
+                                actor.id,
+                                mail.len(),
+                                duration_text(waited)
+                            ),
+                        ));
+                    }
+                }
+                continue;
             }
             // Announced and still unread long after: the foreman should hear of it.
             if digest.interval > 0
