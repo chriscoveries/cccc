@@ -1,0 +1,98 @@
+name: Recorded API probes
+
+on:
+  push:
+    branches: [test/api-guard-filter-probes]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  daemon-api:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: stock
+            source: 8b708d8c4f29245a547cb0779e0b32d08eb5395b
+            features: "task-revision ledger-search-filters"
+            candidate: ""
+          - label: main
+            source: 3d3d10cb3906dc353a7d421541b6c6ec98a6d04d
+            features: "task-revision ledger-search-filters"
+            candidate: ""
+          - label: task-revision
+            source: be5814ef311f62b3ac764395b906c5e486b03897
+            features: "task-revision"
+            candidate: "--candidate"
+          - label: ledger-search-filters
+            source: 564c46be46907e5e1ff68bf74f471835926e9108
+            features: "ledger-search-filters"
+            candidate: "--candidate"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: harness
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.source }}
+          path: source
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.19.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source
+          key: api-probe-${{ matrix.label }}
+      - name: Assert source and build the daemon binary
+        env:
+          EXPECTED_SOURCE: ${{ matrix.source }}
+        run: |
+          test "$(git -C source rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          npm ci --prefix source/web
+          npm -C source/web run build
+          cd source
+          cargo build --locked --package cccc --bin cccc
+      - name: Run recorded API probes
+        env:
+          EXPECTED_SOURCE: ${{ matrix.source }}
+          FEATURES: ${{ matrix.features }}
+          CANDIDATE: ${{ matrix.candidate }}
+          LABEL: ${{ matrix.label }}
+        run: |
+          mkdir -p evidence
+          sha256sum source/target/debug/cccc | tee evidence/binary.sha256
+          uname -a > evidence/host.txt
+          lscpu >> evidence/host.txt
+          rustc --version >> evidence/host.txt
+          for feature in $FEATURES; do
+            fixture=tasks.json
+            if [ "$feature" = ledger-search-filters ]; then fixture=events.json; fi
+            set +e
+            python3 harness/scripts/tests/api_probes/probe.py \
+              --binary source/target/debug/cccc \
+              --sha256 "$(sha256sum source/target/debug/cccc | cut -d' ' -f1)" \
+              --source "$EXPECTED_SOURCE" --feature "$feature" \
+              --fixture "harness/scripts/tests/api_probes/$fixture" \
+              --output "evidence/$feature"
+            probe_exit=$?
+            set -e
+            printf '%s\n' "$probe_exit" > "evidence/$feature/probe.exit"
+            if [ -n "$CANDIDATE" ]; then test "$probe_exit" = 0; else test "$probe_exit" = 1; fi
+            python3 harness/scripts/tests/api_probes/verify.py \
+              --report "evidence/$feature/report.json" \
+              --source "$EXPECTED_SOURCE" $CANDIDATE | tee "evidence/$feature/verdict.json"
+          done
+      - name: Preserve raw RPC evidence and binary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-probe-${{ matrix.label }}
+          path: |
+            evidence
+            source/target/debug/cccc
+          if-no-files-found: error
