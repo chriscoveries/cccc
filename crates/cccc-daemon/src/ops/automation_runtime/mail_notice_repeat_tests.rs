@@ -12,6 +12,10 @@ struct Replay {
 
 impl Replay {
     fn captured(notice_age: i64, repeat: Option<i64>) -> Self {
+        Self::captured_fixture(notice_age, repeat, false)
+    }
+
+    fn captured_fixture(notice_age: i64, repeat: Option<i64>, read_stop: bool) -> Self {
         let temp = tempfile::tempdir().expect("private replay");
         let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
         let response = request(&home, "group_create", json!({"title":"notice replay"}));
@@ -53,11 +57,19 @@ impl Replay {
             .expect("captured notice replay invariant")
             .created_at
             .clone();
-        let mut events: Vec<Event> = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../cccc-core/tests/fixtures/mail_notice_history.json"
-        )))
-        .expect("captured notice replay invariant");
+        let fixture = if read_stop {
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../cccc-core/tests/fixtures/mail_notice_read_history.json"
+            ))
+        } else {
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../cccc-core/tests/fixtures/mail_notice_history.json"
+            ))
+        };
+        let mut events: Vec<Event> =
+            serde_json::from_str(fixture).expect("captured notice replay invariant");
         let captured_at = DateTime::parse_from_rfc3339(
             &events
                 .iter()
@@ -87,6 +99,22 @@ impl Replay {
                     json!(actor_created_at);
             }
             cccc_core::ledger::append(&path, event).expect("captured notice replay invariant");
+        }
+        if let Some(read) = events.iter().find(|event| event.kind == "mail.read") {
+            // Replay the cursor half of the captured read via the actual daemon.
+            let consumed = request(
+                &home,
+                "inbox_read",
+                json!({"group_id":group_id,"actor_id":"recipient","by":"recipient"}),
+            );
+            assert_eq!(
+                consumed["messages"]
+                    .as_array()
+                    .expect("captured read messages")
+                    .last()
+                    .expect("captured read boundary")["id"],
+                read.data["event_id"]
+            );
         }
         // The real actor.start still begins its normal one-second Mail window.
         std::thread::sleep(Duration::from_millis(1200));
@@ -285,7 +313,7 @@ fn mail_notice_repeat_daemon_accepts_repeat_with_later_mail() {
 
 #[test]
 fn mail_notice_repeat_daemon_preserves_interval_and_default() {
-    for (age, repeat) in [(3590, Some(3600)), (86400, None), (86400, Some(0))] {
+    for (age, repeat) in [(3590, Some(3600)), (3610, None), (3610, Some(0))] {
         let replay = Replay::captured(age, repeat);
         replay.expect_no_repeat();
     }
@@ -348,24 +376,43 @@ fn mail_notice_repeat_daemon_stops_after_actor_generation_change() {
 
 #[test]
 fn mail_notice_repeat_daemon_stops_at_configured_max() {
-    let replay = Replay::captured(3610, Some(1));
-    let settings = request(
-        &replay.home,
-        "group_settings_update",
-        json!({"group_id":replay.group_id,"by":"user","patch":{"mail_notice_repeat_max":2}}),
-    );
-    assert_eq!(settings["settings"]["mail_notice_repeat_max"], 2);
-    replay.repeat(); // Initial notice for the two-Mail pending batch.
-    for _ in 0..2 {
+    for replaced in [false, true] {
+        let replay = Replay::captured(3610, Some(1));
+        let settings = request(
+            &replay.home,
+            "group_settings_update",
+            json!({"group_id":replay.group_id,"by":"user","patch":{"mail_notice_repeat_max":2}}),
+        );
+        assert_eq!(settings["settings"]["mail_notice_repeat_max"], 2);
+        if replaced {
+            // Keep a warm cache across removal/re-addition of the same Actor ID.
+            replay.repeat();
+            replay.resolve("generation");
+            request(
+                &replay.home,
+                "send",
+                json!({"group_id":replay.group_id,"by":"user","to":["recipient"],"text":"New generation Mail","message_mode":"mail"}),
+            );
+            std::thread::sleep(Duration::from_millis(1200));
+            let before = replay.notices().len();
+            replay.tick();
+            let notices = replay.notices();
+            assert_eq!(notices.len(), before + 1);
+            replay.accepted(&notices.last().expect("new generation initial").id);
+        } else {
+            replay.repeat(); // Initial notice for the two-Mail pending batch.
+        }
+        for _ in 0..2 {
+            std::thread::sleep(Duration::from_millis(1200));
+            let before = replay.notices().len();
+            replay.tick();
+            let notices = replay.notices();
+            assert_eq!(notices.len(), before + 1);
+            replay.accepted(&notices.last().expect("bounded repeat").id);
+        }
         std::thread::sleep(Duration::from_millis(1200));
-        let before = replay.notices().len();
-        replay.tick();
-        let notices = replay.notices();
-        assert_eq!(notices.len(), before + 1);
-        replay.accepted(&notices.last().expect("bounded repeat").id);
+        replay.expect_no_repeat();
     }
-    std::thread::sleep(Duration::from_millis(1200));
-    replay.expect_no_repeat();
 }
 
 #[test]
@@ -379,6 +426,18 @@ fn mail_notice_repeat_daemon_continues_after_restart_and_new_session() {
             .clone();
         request(
             &replay.home,
+            "group_settings_update",
+            json!({"group_id":replay.group_id,"by":"user","patch":{"mail_notice_repeat_seconds":1,"mail_notice_repeat_max":1}}),
+        );
+        // Bind the new settings to a warm projection before the lifecycle op,
+        // without issuing a notice while its one-second claim may expire.
+        request(
+            &replay.home,
+            "inbox_peek",
+            json!({"group_id":replay.group_id,"actor_id":"recipient","by":"recipient"}),
+        );
+        request(
+            &replay.home,
             op,
             json!({"group_id":replay.group_id,"actor_id":"recipient","by":"user"}),
         );
@@ -387,11 +446,7 @@ fn mail_notice_repeat_daemon_continues_after_restart_and_new_session() {
             created,
             "runtime lifecycle is not a new Actor generation"
         );
-        request(
-            &replay.home,
-            "group_settings_update",
-            json!({"group_id":replay.group_id,"by":"user","patch":{"mail_notice_repeat_seconds":1}}),
-        );
+
         std::thread::sleep(Duration::from_millis(1200));
         let before = replay.notices().len();
         replay.tick();
@@ -407,5 +462,24 @@ fn mail_notice_repeat_daemon_continues_after_restart_and_new_session() {
             json!(replay.mail_ids)
         );
         replay.accepted(&notice.id);
+        std::thread::sleep(Duration::from_millis(1200));
+        replay.expect_no_repeat(); // A reset budget would allow another notice.
     }
+}
+
+#[test]
+fn mail_notice_repeat_daemon_captured_later_boundary_read_stops_before_repeat() {
+    let replay = Replay::captured_fixture(3610, Some(3600), true);
+    replay.expect_no_repeat();
+    let inbox = request(
+        &replay.home,
+        "inbox_peek",
+        json!({"group_id":replay.group_id,"actor_id":"recipient","by":"recipient"}),
+    );
+    assert!(
+        inbox["messages"]
+            .as_array()
+            .expect("captured read Inbox")
+            .is_empty()
+    );
 }
