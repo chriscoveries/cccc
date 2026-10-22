@@ -506,7 +506,15 @@ mod tests {
             .unwrap_or_else(|| panic!("{busiest} is in the report"));
 
         assert_eq!(row["mode"], "headless");
-        assert_eq!(row["samples"].as_u64(), Some(observed.len() as u64));
+        assert_eq!(
+            row["pss_samples"].as_u64(),
+            Some(observed.len() as u64),
+            "every census reading of {busiest} is counted"
+        );
+        assert_eq!(
+            row["samples"], 0,
+            "the census records PSS, not RSS, so no RSS sample was taken"
+        );
         assert_eq!(
             row["peak_pss_mib"].as_u64(),
             observed.iter().copied().max(),
@@ -606,6 +614,14 @@ mod tests {
             series[0]["avg_rss_mib"].as_u64(),
             Some(3),
             "the window starts three hours in"
+        );
+        // The report drops old hours from the window on its own, so a prune that
+        // never happens would still read correctly and only grow the store. The
+        // store itself is what must stay bounded.
+        assert_eq!(
+            trend.series[0].hours.len(),
+            WINDOW_HOURS as usize,
+            "seventy-five recorded hours leave seventy-two kept, not seventy-five retained"
         );
     }
 
