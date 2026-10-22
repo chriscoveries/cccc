@@ -154,6 +154,7 @@ Manage actors.
 
 ```bash
 cccc actor list                    # List actors
+cccc actor memory                  # Harness RAM over the last 72 hours
 cccc actor add <actor_id> --scope /path/to/project
 cccc actor start <actor_id>        # Start actor
 cccc actor stop <actor_id>         # Stop actor
