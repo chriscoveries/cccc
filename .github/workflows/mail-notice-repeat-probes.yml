@@ -17,10 +17,10 @@ jobs:
       matrix:
         include:
           - label: candidate
-            source: 4787b06d3d4413eb1bf58911e7fa24be592d289b
+            source: 3eab6a1ca1ac0632dfad3780362d3b68015d8170
             candidate: "--candidate"
           - label: reference
-            source: 7c6457cde9c4e57852f0558abf901368769a16ba
+            source: 8d4d99700d935eda4859f7b04b9e78d6756c3625
             candidate: ""
     steps:
       - uses: actions/checkout@v7
@@ -49,14 +49,14 @@ jobs:
           uname -a > evidence/host.txt
           lscpu >> evidence/host.txt
           rustc --version >> evidence/host.txt
-      - name: Run and verify every new test, including isolated warm projection
+      - name: Run and verify every new test, including normal-CI warm projection
         env:
           CANDIDATE: ${{ matrix.candidate }}
         shell: bash
         run: |
           set -euo pipefail
           set +e
-          cargo test --manifest-path source/Cargo.toml --locked --package cccc-pair-core --lib mail_notice_repeat_tests:: -- --include-ignored --test-threads=1 > evidence/core.log 2>&1
+          cargo test --manifest-path source/Cargo.toml --locked --package cccc-pair-core --lib mail_notice_repeat_tests:: -- --test-threads=1 > evidence/core.log 2>&1
           printf '%s\n' "$?" > evidence/core.exit
           cargo test --manifest-path source/Cargo.toml --locked --package cccc-pair-daemon --lib mail_notice_repeat_tests:: -- --test-threads=1 > evidence/daemon.log 2>&1
           printf '%s\n' "$?" > evidence/daemon.exit

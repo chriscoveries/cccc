@@ -12,6 +12,8 @@ expected = {
     'core': {
         'automation::mail_notice_repeat_tests::mail_notice_repeat_carries_both_captured_pending_mail',
         'automation::mail_notice_repeat_tests::mail_notice_repeat_warm_projection_does_not_replay_history',
+        'automation::mail_notice_repeat_tests::mail_notice_repeat_stops_at_exact_batch_max_and_resets_for_later_mail',
+        'automation::mail_notice_repeat_tests::mail_notice_repeat_prunes_claims_across_many_intervals_and_rebuilds',
     },
     'daemon': {
         'ops::automation_runtime::mail_notice_repeat_tests::mail_notice_repeat_daemon_accepts_repeat_with_later_mail',
@@ -19,9 +21,11 @@ expected = {
         'ops::automation_runtime::mail_notice_repeat_tests::mail_notice_repeat_daemon_stops_after_reply',
         'ops::automation_runtime::mail_notice_repeat_tests::mail_notice_repeat_daemon_stops_after_mail_delivery',
         'ops::automation_runtime::mail_notice_repeat_tests::mail_notice_repeat_daemon_stops_after_actor_generation_change',
+        'ops::automation_runtime::mail_notice_repeat_tests::mail_notice_repeat_daemon_stops_at_configured_max',
+        'ops::automation_runtime::mail_notice_repeat_tests::mail_notice_repeat_daemon_continues_after_restart_and_new_session',
     },
 }
-for target, count in [('core', 4), ('daemon', 6)]:
+for target, count in [('core', 6), ('daemon', 8)]:
     log = (args.logs / f'{target}.log').read_text()
     code = int((args.logs / f'{target}.exit').read_text())
     summary = re.findall(r'test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;', log)
