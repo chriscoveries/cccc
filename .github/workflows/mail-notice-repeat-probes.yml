@@ -17,10 +17,10 @@ jobs:
       matrix:
         include:
           - label: candidate
-            source: 2dcd47b4325fe73b235821616e529a0a208274d5
+            source: e27cf004979147bde0689c280837d28cd9915184
             candidate: "--candidate"
           - label: reference
-            source: c5c7243b29759f255ef35515037df0af5182f7eb
+            source: b3ff9f01c37b50ef68141484d0d5a4f7679a620c
             candidate: ""
     steps:
       - uses: actions/checkout@v7
