@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   daemon-api:
@@ -36,27 +37,59 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: harness
-      - uses: actions/checkout@v7
+      - name: Check the immutable build run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LABEL: ${{ matrix.label }}
+        run: |
+          gh api "repos/$GH_REPO/actions/runs/39758031417" > build-run.json
+          gh api "repos/$GH_REPO/actions/runs/39758031417/jobs?per_page=100" > build-jobs.json
+          python3 - <<'PYTHON'
+          import json, os
+          run = json.load(open('build-run.json'))
+          assert run['head_sha'] == '57d2aaf7111e3d269970366211537e2bd84811c3'
+          assert run['status'] == 'completed'
+          assert run['repository']['full_name'] == 'chriscoveries/cccc'
+          jobs = json.load(open('build-jobs.json'))['jobs']
+          job = next(job for job in jobs if job['name'].startswith('daemon-api ('+os.environ['LABEL']+','))
+          build = next(step for step in job['steps'] if step['name'] == 'Assert source and build the daemon binary')
+          assert build['conclusion'] == 'success'
+          PYTHON
+      - name: Download the source-bound built binary
+        uses: actions/download-artifact@v8
         with:
-          ref: ${{ matrix.source }}
-          path: source
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24.19.0"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: source
-          key: api-probe-${{ matrix.label }}
-      - name: Assert source and build the daemon binary
+          name: api-probe-${{ matrix.label }}
+          path: prior-build
+          run-id: 39758031417
+          github-token: ${{ github.token }}
+      - name: Verify and preserve the original binary binding
         env:
           EXPECTED_SOURCE: ${{ matrix.source }}
         run: |
-          test "$(git -C source rev-parse HEAD)" = "$EXPECTED_SOURCE"
-          npm ci --prefix source/web
-          npm -C source/web run build
-          cd source
-          cargo build --locked --package cccc --bin cccc
+          python3 - <<'PYTHON'
+          import hashlib, json, os, pathlib, shutil
+          prior = pathlib.Path('prior-build')
+          binary = prior/'source/target/debug/cccc'
+          sha = hashlib.sha256(binary.read_bytes()).hexdigest()
+          recorded_sha = (prior/'evidence/binary.sha256').read_text().split()[0]
+          assert sha == recorded_sha
+          reports = list((prior/'evidence').glob('*/report.json'))
+          assert reports
+          for path in reports:
+              report = json.loads(path.read_text())
+              assert report['source'] == os.environ['EXPECTED_SOURCE']
+              assert report['sha256'] == sha
+          destination = pathlib.Path('source/target/debug/cccc')
+          destination.parent.mkdir(parents=True)
+          shutil.copyfile(binary, destination)
+          destination.chmod(0o755)
+          pathlib.Path('evidence').mkdir()
+          shutil.copyfile('build-run.json', 'evidence/build-run.json')
+          shutil.copyfile('build-jobs.json', 'evidence/build-jobs.json')
+          binding = {'build_run': 39758031417, 'build_run_head': '57d2aaf7111e3d269970366211537e2bd84811c3', 'source': os.environ['EXPECTED_SOURCE'], 'binary_sha256': sha, 'prior_reports': [str(p) for p in reports]}
+          pathlib.Path('evidence/reused-build.json').write_text(json.dumps(binding, indent=2)+'\n')
+          PYTHON
       - name: Run recorded API probes
         env:
           EXPECTED_SOURCE: ${{ matrix.source }}
@@ -64,11 +97,11 @@ jobs:
           CANDIDATE: ${{ matrix.candidate }}
           LABEL: ${{ matrix.label }}
         run: |
+          set -euo pipefail
           mkdir -p evidence
           sha256sum source/target/debug/cccc | tee evidence/binary.sha256
           uname -a > evidence/host.txt
           lscpu >> evidence/host.txt
-          rustc --version >> evidence/host.txt
           for feature in $FEATURES; do
             fixture=tasks.json
             if [ "$feature" = ledger-search-filters ]; then fixture=events.json; fi
@@ -85,7 +118,8 @@ jobs:
             if [ -n "$CANDIDATE" ]; then test "$probe_exit" = 0; else test "$probe_exit" = 1; fi
             python3 harness/scripts/tests/api_probes/verify.py \
               --report "evidence/$feature/report.json" \
-              --source "$EXPECTED_SOURCE" $CANDIDATE | tee "evidence/$feature/verdict.json"
+              --source "$EXPECTED_SOURCE" $CANDIDATE > "evidence/$feature/verdict.json"
+            cat "evidence/$feature/verdict.json"
           done
       - name: Preserve raw RPC evidence and binary
         if: always()
@@ -96,3 +130,4 @@ jobs:
             evidence
             source/target/debug/cccc
           if-no-files-found: error
+          retention-days: 3

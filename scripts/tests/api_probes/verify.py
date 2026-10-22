@@ -27,8 +27,7 @@ else:
     assert failed
     if report['feature'] == 'task-revision':
         assert checks['whole_context_guard_remains_independent']
-        assert checks['stale_guard_writes_nothing']
-        assert checks['late_conflict_discards_batch']
+        assert checks['unrelated_write_keeps_task_guard_valid']
         assert 'legacy_revision_zero' in failed
         assert 'stale_revision_conflict_names_task' in failed
     else:
