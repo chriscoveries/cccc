@@ -10,11 +10,11 @@ pub struct ActorActivityService {
 }
 
 impl ActorActivityService {
-    pub fn start(home: HomeLayout) -> Self {
+    pub fn start(home: HomeLayout, locks: crate::dispatch_concurrency::DispatchLocks) -> Self {
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
         let task = tokio::spawn(async move {
-            let mut publisher = crate::ops::actor_activity::Publisher::default();
+            let mut publisher = crate::ops::actor_activity::Publisher::with_locks(locks.clone());
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             while !worker_cancelled.load(Ordering::Acquire) {
@@ -30,7 +30,9 @@ impl ActorActivityService {
                     publisher
                 })
                 .await
-                .unwrap_or_default();
+                .unwrap_or_else(|_| {
+                    crate::ops::actor_activity::Publisher::with_locks(locks.clone())
+                });
             }
         });
         Self { cancelled, task }

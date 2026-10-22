@@ -23,6 +23,19 @@ pub fn runtime_actor_fields(
     fields(home, actor, group_id, running, runner_effective)
 }
 
+/// Whether `effective_working_reason` comes from the runtime reporting its
+/// own state, rather than from the daemon's fallback when it has none.
+pub(super) fn reports_state(reason: &str) -> bool {
+    !matches!(
+        reason,
+        "runner_not_running"
+            | "managed_agent_session_pending"
+            | "dots_state_unavailable"
+            | "headless_running"
+            | "pty_running_state_unknown"
+    )
+}
+
 pub(super) fn fields(
     home: &HomeLayout,
     actor: &Actor,

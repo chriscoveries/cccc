@@ -1857,7 +1857,9 @@ Patch keys used by CCCC include:
 - Messaging: `default_send_to`
 - Delivery: `mail_notice_after_seconds` (default 1800, zero disables all Mail notices),
   `mail_notice_idle_after_seconds` (default 60, zero disables only the early idle notice),
-  `reply_notice_after_seconds` (default 900, zero disables)
+  `reply_notice_after_seconds` (default 900, zero disables),
+  `ignored_delivery_after_seconds` (default 1800, zero disables the
+  `ignored_deliveries_48h` count on actor rows)
 - Automation: `actor_idle_timeout_seconds`, `keepalive_delay_seconds`,
   `keepalive_max_per_actor`,
   `silence_timeout_seconds`, `help_nudge_interval_seconds`,
@@ -3361,6 +3363,27 @@ Result:
 ```ts
 { actors: Array<Record<string, unknown>> } // includes at least id/title/runtime/enabled + role/running
 ```
+
+Each row also carries the Actor's health over the last 48 hours:
+- `down_episodes_48h`: how often its process exited without being stopped.
+- `ignored_deliveries_48h`: deliveries accepted (or left `ambiguous`, once per
+  message) while its managed runtime reported idle that it neither started work
+  on nor answered by writing anything within
+  `delivery.ignored_delivery_after_seconds` (default 1800).
+  Present while the runtime reports its working state, or once a delivery was
+  found ignored; absent, not 0, when the state is unknown (for example
+  `pty_running_state_unknown`) or the setting is 0, since nothing can be
+  counted then.
+- `health`: present while the Actor is enabled in a running Group. `down` when
+  it is not running; otherwise `unhealthy` with three or more down episodes and
+  ignored deliveries together, `degraded` with one or two, else `healthy`.
+
+The daemon keeps these counts in memory as events arrive (at most 64 per Actor
+and fact) and rebuilds them at startup from at most the last 32 MiB and 48 hours
+of each Group's active ledger file. When the bucket of an enabled Actor in a
+running Group changes, it appends `actor.health` (`actor_id`, `health`,
+`previous`, `down_episodes_48h`, and `ignored_deliveries_48h` when known); not
+while runtimes are still being restored at startup, and never per tick.
 
 #### `actor_add`
 
