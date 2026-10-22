@@ -44,7 +44,6 @@ impl ModelRegistry {
         };
         toml::from_str(&text).unwrap_or_default()
     }
-}
 
     pub fn get(&self, model: &str) -> Option<&ModelSpec> {
         if model.is_empty() {
@@ -61,5 +60,4 @@ impl ModelRegistry {
             None => (None, None),
         }
     }
-}
 }
