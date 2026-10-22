@@ -57,6 +57,7 @@ struct ActiveTurn {
     turn_id: String,
     prompt_ids: HashSet<String>,
     text: String,
+    usage: Option<Value>,
     error: Option<String>,
     tools: HashMap<String, ToolCall>,
 }
@@ -261,6 +262,19 @@ impl TranscriptState {
             self.open_turn(format!("claude-{first}"), prompt_ids, None);
         }
         let active = self.active.as_mut().expect("active turn");
+        if let Some(usage) = record.pointer("/message/usage") {
+            let active_usage = &mut active.usage;
+            if let Some(existing) = active_usage.as_mut() {
+                // Sum per-turn across multiple assistant records.
+                for key in ["input_tokens","output_tokens","cache_creation_input_tokens","cache_read_input_tokens"] {
+                    let add = usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+                    let cur = existing.get(key).and_then(Value::as_u64).unwrap_or(0);
+                    existing[key] = json!(cur + add);
+                }
+            } else {
+                *active_usage = Some(usage.clone());
+            }
+        }
         let content = record.pointer("/message/content").unwrap_or(&Value::Null);
         for block in content.as_array().into_iter().flatten() {
             match block.get("type").and_then(Value::as_str) {
@@ -369,6 +383,7 @@ impl TranscriptState {
             turn_id: turn_id.clone(),
             prompt_ids,
             text: String::new(),
+            usage: None,
             error: None,
             tools: HashMap::new(),
         });
@@ -459,7 +474,8 @@ impl TranscriptState {
                         "id":format!("{}-message", active.turn_id),
                         "type":"agentMessage",
                         "text":active.text,
-                    }
+                    },
+                    "usage":active.usage,
                 }
             }),
             None,
