@@ -1,6 +1,7 @@
 pub(crate) mod access_token_support;
 mod access_tokens;
 mod actor_assets;
+mod actor_memory;
 mod actor_profiles;
 mod actors;
 mod assistants;
@@ -92,6 +93,7 @@ pub fn router() -> Router<AppState> {
         .merge(groups::routes())
         .merge(group_copy::routes())
         .merge(actors::routes())
+        .merge(actor_memory::routes())
         .merge(assistants::routes())
         .merge(voice_secretary::routes())
         .merge(group_space::routes())

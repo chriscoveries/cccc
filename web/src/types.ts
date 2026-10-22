@@ -1988,3 +1988,31 @@ export function supportsAcpMode(runtime?: string | null): boolean {
     "droid",
   ].includes(runtime || "");
 }
+
+/// One (harness, mode) row of the 72-hour harness RAM trend.
+export type HarnessRamHour = {
+  hour: string;
+  peak_rss_mib: number | null;
+  avg_rss_mib: number | null;
+  samples: number;
+};
+
+export type HarnessRamKey = {
+  harness: string;
+  mode: string;
+  peak_rss_mib: number | null;
+  avg_rss_mib: number | null;
+  samples: number;
+  peak_pss_mib?: number | null;
+  avg_pss_mib?: number | null;
+  pss_samples?: number;
+  hours_observed: number;
+  series: HarnessRamHour[];
+};
+
+export type HarnessRamReport = {
+  window_hours: number;
+  bucket_seconds: number;
+  as_of: string;
+  keys: HarnessRamKey[];
+};
