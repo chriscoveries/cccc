@@ -1,0 +1,97 @@
+name: Host disk diagnostic checks
+
+on:
+  push:
+    branches: [check/host-disk-diagnostic-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: candidate
+            source: 33798b2111c1f7d279ec7372de2a0df0dc43a98f
+          - variant: stock-reference
+            source: 2c298bc5c92442fa4971bc53630ac9eb6ca664cd
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.source }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.19.0"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Prepare bundled Web assets
+        run: |
+          npm ci --prefix web
+          npm -C web run build
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Bind source and runner
+        run: |
+          mkdir -p diagnostic-receipts
+          git rev-parse HEAD > diagnostic-receipts/source.txt
+          cat /etc/os-release > diagnostic-receipts/os-release.txt
+          rustc -Vv > diagnostic-receipts/rustc.txt
+      - name: Policy and independent sampler cases
+        if: matrix.variant == 'candidate'
+        shell: bash
+        run: |
+          set +e
+          cargo test --package cccc-pair-daemon --lib --locked server_host_disk::tests:: -- --test-threads=1 > diagnostic-receipts/unit.log 2>&1
+          status=$?
+          echo "$status" > diagnostic-receipts/unit.exit
+          cat diagnostic-receipts/unit.log
+          exit "$status"
+      - name: Actual daemon missing-feature check
+        shell: bash
+        run: |
+          set +e
+          cargo test --package cccc --test integration --locked host_disk_diagnostic_ -- --test-threads=1 > diagnostic-receipts/daemon.log 2>&1
+          status=$?
+          echo "$status" > diagnostic-receipts/daemon.exit
+          cat diagnostic-receipts/daemon.log
+          exit "$status"
+      - name: Validate exact result
+        if: always()
+        env:
+          VARIANT: ${{ matrix.variant }}
+          SOURCE: ${{ matrix.source }}
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,re
+          p=pathlib.Path('diagnostic-receipts')
+          expected={'daemon_self_launch::host_disk_diagnostic_is_sampled_without_any_group','daemon_self_launch::host_disk_diagnostic_status_polling_does_not_resample'}
+          assert (p/'source.txt').read_text().strip()==os.environ['SOURCE']
+          log=(p/'daemon.log').read_text()
+          code=int((p/'daemon.exit').read_text())
+          passes=set(re.findall(r'^test (\S+) \.\.\. ok$',log,re.M))
+          failures=set(re.findall(r'^test (\S+) \.\.\. FAILED$',log,re.M))
+          reference=os.environ['VARIANT']=='stock-reference'
+          if reference:
+              assert code==101 and failures==expected and not passes,(code,passes,failures)
+              assert re.search(r'test result: FAILED\. 0 passed; 2 failed;',log)
+          else:
+              assert code==0 and passes==expected and not failures,(code,passes,failures)
+              unit=(p/'unit.log').read_text()
+              assert (p/'unit.exit').read_text().strip()=='0'
+              assert re.search(r'test result: ok\. 6 passed; 0 failed;',unit)
+          report={'source':os.environ['SOURCE'],'variant':os.environ['VARIANT'],'verdict':'EXPECTED_RED' if reference else 'PASS','daemon_exit':code,'passed':sorted(passes),'failed':sorted(failures),'log_sha256':hashlib.sha256(log.encode()).hexdigest()}
+          (p/'result.json').write_text(json.dumps(report,indent=2)+'\n')
+          print(json.dumps(report))
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: host-disk-${{ matrix.variant }}
+          path: diagnostic-receipts
+          if-no-files-found: error
