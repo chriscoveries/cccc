@@ -1156,4 +1156,19 @@ mod tests {
         assert!(payload.get("group").is_none());
         assert!(payload.get("context").is_none());
     }
+
+    #[test]
+    fn a_task_whose_blockers_are_done_is_not_shown_as_blocked() {
+        let tasks = [
+            json!({"id":"T1","title":"schema","status":"done"}),
+            json!({"id":"T2","title":"release","status":"planned","blocked_by":["T1"]}),
+            json!({"id":"T3","title":"docs","status":"planned","blocked_by":["T1","T9"]}),
+        ];
+        let (_, attention) = task_slice(&tasks, "peer1");
+        let ids = attention
+            .iter()
+            .map(|task| task["id"].as_str().expect("id"))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["T3"]);
+    }
 }
