@@ -646,4 +646,25 @@ mod tests {
         assert_eq!(op, "reply");
         assert_eq!(args["by"], "backend");
     }
+    #[test]
+    fn task_revision_guard_is_preserved_once_in_compound_updates() {
+        for arguments in [
+            json!({"action":"update","task_id":"T792","waiting_on":"none","status":"active","if_task_rev":0}),
+            json!({"action":"update","task_id":"T792","status":"active","if_task_rev":0}),
+            json!({"action":"move","task_id":"T792","status":"active","if_task_rev":0}),
+            json!({"action":"restore","task_id":"T792","if_task_rev":0}),
+            json!({"action":"delete","task_id":"T792","if_task_rev":0}),
+        ] {
+            let (_, args) = daemon_call("cccc_task", arguments.as_object().expect("args").clone())
+                .expect("mapping");
+            let operations = args["ops"].as_array().expect("ops");
+            assert_eq!(operations[0]["if_task_rev"], 0);
+            assert!(
+                operations
+                    .iter()
+                    .skip(1)
+                    .all(|op| op.get("if_task_rev").is_none())
+            );
+        }
+    }
 }
