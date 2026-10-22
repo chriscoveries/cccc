@@ -738,3 +738,96 @@ fn mail_left_unread_after_its_notice_reaches_the_foreman_in_a_digest() {
     std::thread::sleep(std::time::Duration::from_millis(2_100));
     assert!(tick().notifications.is_empty());
 }
+
+/// An Actor whose runtime reports an error while it is the assignee of an open
+/// task: that work has stopped until someone looks. The daemon passes the
+/// errors its managed sessions report; the foreman's digest names the Actor,
+/// the reason and the open tasks it holds (not the done ones), once.
+#[test]
+fn an_actor_in_error_while_holding_a_task_reaches_the_foreman() {
+    use std::collections::BTreeMap;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("error digest", "").expect("group");
+    store
+        .mutate(&group.group_id, |group| {
+            group.state = GroupState::Active;
+            actors::add(group, Actor::new("lead"))?;
+            actors::add(group, Actor::new("peer"))?;
+            actors::add(group, Actor::new("idle"))?;
+            group.extra.insert(
+                "delivery".into(),
+                json!({"mail_notice_after_seconds":60, "health_digest_interval_seconds":1}),
+            );
+            Ok(())
+        })
+        .expect("delivery settings");
+    let operation = |value: serde_json::Value| value.as_object().cloned().expect("operation");
+    cccc_core::context::ContextStore::new(home.clone())
+        .expect("contexts")
+        .sync(
+            &group.group_id,
+            &[
+                operation(json!({"op":"task.create","title":"migrate","assignee":"peer"})),
+                operation(json!({"op":"task.create","title":"notes","assignee":"peer"})),
+                operation(json!({"op":"task.move","task_id":"T002","status":"done"})),
+                operation(json!({"op":"task.create","title":"review","assignee":"lead"})),
+            ],
+            None,
+            "user",
+            false,
+        )
+        .expect("tasks");
+    let running = HashSet::from(["lead".to_owned(), "peer".to_owned(), "idle".to_owned()]);
+    // The reason the Pi runtime reports when its provider fails a turn; an
+    // Actor in error that holds nothing is not a problem.
+    let errors = BTreeMap::from([
+        (
+            "peer".to_owned(),
+            "Pi provider turn failed; check the selected provider configuration".to_owned(),
+        ),
+        (
+            "idle".to_owned(),
+            "Pi provider turn failed; check the selected provider configuration".to_owned(),
+        ),
+    ]);
+    let tick = |errors: &BTreeMap<String, String>| {
+        automation::tick_group_with_runtime_errors(
+            &home,
+            &group.group_id,
+            true,
+            &running,
+            &HashSet::new(),
+            errors,
+        )
+        .expect("tick")
+    };
+
+    let digest = tick(&errors);
+    assert_eq!(digest.notifications.len(), 1);
+    let digest = &digest.notifications[0];
+    assert_eq!(digest.data["kind"], "health_digest");
+    assert_eq!(digest.data["target_actor_id"], "lead");
+    assert_eq!(
+        digest.data["context"]["problem_keys"],
+        json!(["error:peer:T001"])
+    );
+    let message = digest.data["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(
+            "peer: in error (Pi provider turn failed; check the selected provider configuration) while it holds T001."
+        ),
+        "{message}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    assert!(
+        tick(&errors).notifications.is_empty(),
+        "a listed problem is not sent again"
+    );
+    assert!(
+        tick(&BTreeMap::new()).notifications.is_empty(),
+        "no error, no problem"
+    );
+}
