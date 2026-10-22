@@ -1857,7 +1857,8 @@ Patch keys used by CCCC include:
 - Messaging: `default_send_to`
 - Delivery: `mail_notice_after_seconds` (default 1800, zero disables all Mail notices),
   `mail_notice_idle_after_seconds` (default 60, zero disables only the early idle notice),
-  `reply_notice_after_seconds` (default 900, zero disables)
+  `reply_notice_after_seconds` (default 900, zero disables),
+  `task_assigned_notice` (default false; true sends the task assignment notice)
 - Automation: `actor_idle_timeout_seconds`, `keepalive_delay_seconds`,
   `keepalive_max_per_actor`,
   `silence_timeout_seconds`, `help_nudge_interval_seconds`,
@@ -3394,7 +3395,7 @@ Notes:
 - Multiple ChatGPT (`web_model`) and Grok Bot (`grok_web_model`) Actors MAY coexist, including linked Profiles and Group imports/resets. Runtime configuration does not grant connector authority. Conversation bindings MUST identify the exact Group, Actor and generation; copied/imported Actors MUST be unpaired.
 - `chatgpt_dots` is a headless event-driven Runtime sharing the `chatgpt_web` connector. One Dot binding per connector MAY authorize exactly one Group/Actor/generation. Profiles, copies and imports carry Runtime configuration, never that binding or cloud-task authority. It MUST NOT use browser message delivery or browser receipt verification. Its host conversation is paired explicitly during native task setup.
 - A new actor generation MUST NOT inherit Web Model delivery preferences or persisted runner/turn status left by an earlier generation with the same actor id.
-- For a Web Model actor, successful add MUST establish the current generation's missing browser target as canonical empty state. A legacy actor-scoped browser shadow MUST NOT populate the new generation merely because it uses the same actor id.
+- For a ChatGPT browser Actor, successful add MUST establish the current generation's missing browser target as canonical empty state. A legacy actor-scoped browser shadow MUST NOT populate the new generation merely because it uses the same actor id.
 - Adding an enabled actor to an `active` or `idle` group MAY start it immediately and transition the group's runtime to running. Adding one to a `paused` or `stopped` group MUST only persist the actor and MUST NOT change the group lifecycle state.
 - When immediate startup is attempted, startup capability baselines follow the same rules as `actor_start` below.
 
@@ -3457,6 +3458,8 @@ Args:
 ```
 
 Notes:
+- A foreman MAY remove a peer but MUST NOT remove itself; a peer MAY remove itself. User and system removal remain allowed. In CCCC, the first visible Actor is the foreman, so removing it promotes the next visible Actor, if any. The daemon emits `group.foreman_change` with `{from: actor_id, to: successor_id | null}` after the committed removal; the actor list remains the authority for role selection.
+- Planned and active tasks assigned to the removed Actor are released by clearing `assignee`, preserving their status and content. Finished and archived task ownership remains historical. The release is recorded as `context.sync`; failure of this post-commit cleanup is logged without undoing the Actor removal.
 - Removing an actor ends that actor id's current generation. Actor-generation-scoped browser target, bootstrap, delivery receipt, delivery preference, and persisted runner/turn state MUST be retired before the operation reports success. A shared provider login profile MAY remain.
 - Every Web Model binding and pending pairing belonging to the removed Actor generation MUST be retired before success. Shared connector credentials and other Actors remain intact. Re-adding the same Actor ID MUST NOT restore an earlier generation’s authority.
 
@@ -4601,6 +4604,23 @@ active/idle enabled actor may receive one content-free
 `system.notify(kind="reply_notice")`. It never repeats or escalates. Failed,
 blocked, or ambiguous delivery does not nudge the recipient.
 
+When the Group delivery setting `task_assigned_notice` is true, a committed,
+non-dry-run `context_sync` that names an Actor as a task's `assignee` or
+`handoff_to` sends that Actor one `system.notify(kind="task_assigned")`, with
+`target_actor_id` set to it. A field counts when its value after the batch
+differs from its value before it, so rewriting the same assignee, clearing a
+field, or assigning within a batch and back again sends nothing. The writer
+(`by`) is never told about its own writes, and only enabled, visible Actors of
+the Group receive the notice. One notice per Actor covers every task the batch
+named it on: `context.task_ids` lists them in task order,
+`context.assigned_by` is the writer and `context.source_event_ids` holds the
+batch's `context.sync` event, which is also `related_event_id`. The notice is
+ordinary Push work: it is delivered like other Actor-targeted notifications and
+is not held back like Mail notices. It never repeats. Task writes that do not go
+through `context_sync`, such as `tracked_send` (whose message already reaches
+its recipients) and the release of a removed Actor's tasks, send no notice. The
+setting defaults to false, so existing Groups see no new delivery traffic.
+
 Paused, stopped, or disabled actors are never woken for either notice. Pending
 Mail is surfaced at the next start/resume bootstrap and begins a fresh notice
 window. Explicit start/resume may recover only blocked Push work from the
@@ -4629,6 +4649,17 @@ Actor-generation boundaries without materializing a persistent full-ledger index
 merely to count unread Mail. A reverse scan MAY stop at the cursor or generation
 boundary; segment discovery and reads MUST share the ledger reader boundary so
 concurrent rotation cannot hide events. These reads MUST NOT advance the cursor.
+
+Native Inbox snapshots retain the active ledger descriptor across rotation and
+validate sealed archive identities when opening them on demand. Simultaneous
+file descriptors do not grow with the number of archive segments; decoding
+runs outside the append lock. Page reads batch selected records by segment,
+decoding each selected gzip prefix once while preserving request order and
+shared-recipient duplicates. A changed sealed archive, incompatible active
+prefix or cursor invalidates the captured page before publication. Ordinary
+active-ledger appends do not delay publication of that prefix; subsequent reads
+catch up from its committed offsets. Unchanged read errors are returned rather
+than hidden by retries.
 
 Args:
 ```ts
@@ -4727,7 +4758,15 @@ read-only and MUST NOT append `mail.read` or mutate any delivery state.
 
 Args:
 ```ts
-{ group_id: string; detail?: "overview" | "summary" | "full" }
+{
+  group_id: string
+  detail?: "overview" | "summary" | "full"
+  limit?: number          // 1..500 tasks per page; default 100 once paging
+  cursor?: string         // next_cursor of the previous page
+  max_bytes?: number      // >= 4096; the page shrinks until the answer,
+                          // rendered as pretty JSON, fits
+  include_archived?: boolean // paging only; default true
+}
 ```
 
 Result:
@@ -4735,6 +4774,8 @@ Result:
 {
   version: string
   tasks_version: string
+  truncated?: boolean     // paging only: more tasks follow
+  next_cursor?: string | null
   coordination: {
     brief: {
       objective: string
@@ -4793,6 +4834,18 @@ Result:
 
 Notes:
 - Task objects returned in `coordination.tasks`, `board`, or `task_list` include `task_type`.
+- Paging starts when `limit`, `cursor` or `max_bytes` is present; without them
+  the snapshot stays complete. A page holds at most `limit` tasks numbered
+  after `cursor` in `coordination.tasks` (and, for `full`, in `board`), halved
+  until the whole answer fits `max_bytes`, and never fewer than one task. A
+  task too large for the page on its own has its longest free text (notes,
+  outcome, title or a checklist item) cut to fit, ending in
+  `… [clipped to fit the page]`; `task_list` returns it whole. If even that
+  page does not fit, the call fails with `invalid_args` and names the size of
+  the smallest page.
+  `attention` becomes counts and `tasks_summary` still counts every task;
+  `task_list` pages the attention tasks themselves. `cccc_context_get` always
+  pages, at most 100 tasks and 256 KiB per answer.
 - Daemon IPC defaults `detail` to `full`; the Web HTTP route defaults it to
   `summary` for routine refreshes.
 - `detail="overview"` does not read task files and omits `coordination.tasks`,
@@ -5205,6 +5258,18 @@ outcome: `headless.turn.completed`, `headless.turn.failed`, or
 `headless.turn.cancelled`. Native terminal sessions retain their existing
 successful-turn projection; published failures or cancellations MUST NOT create
 duplicate turn terminals.
+For Pi RPC sessions, identified `tool_execution_start` and
+`tool_execution_end` events project to `headless.activity.started` and
+`headless.activity.completed` under one turn-scoped `activity_id`. Failed
+calls finish that activity with a failure summary; they do not themselves
+fail the model turn. Anonymous titles and streaming tool-result updates stay
+transient. The journal retains the tool name and category, with at most a
+bounded program/subcommand or file basename after private-value redaction;
+command arguments, directories, tool inputs and results are not copied.
+Only simple shell commands receive a program/subcommand detail; commands with
+shell substitutions or control syntax retain just the tool name, because word
+splitting alone cannot safely identify their executable.
+
 Headless journal snapshots restore historical output only; replay MUST NOT
 overwrite current Actor or Group runtime state. Independent live streams can
 also deliver an older journal event after newer daemon-owned status; clients
@@ -7658,7 +7723,7 @@ These IPC operations use the daemon global write permit and require `by=user`; n
 | `web_model_pairing_confirm` | `connector_id`, `group_id`, `actor_id`, `pairing_id`, `url`; current generation, accepted unexpired pairing and verified stable ChatGPT URL. Recheck the persisted automatic lifecycle condition (or stopped Actor for manual replacement). Bind atomically; reject session/URL collisions. |
 | `web_model_pairing_cancel` | `connector_id`, `group_id`, `actor_id`, `pairing_id`; cancel only the named incomplete candidate without changing an existing binding; retain the cancellation to prevent automatic retries. |
 | `web_model_pairing_fail` | `connector_id`, `group_id`, `actor_id`, `pairing_id`, `error_code`; retire the named incomplete attempt, reject later acceptance/confirmation, preserve existing bindings and display the failure. A late failure MUST NOT alter a replacement or committed attempt. |
-| `web_model_grok_bind` | `connector_id`, `group_id`, `actor_id`, `url`; user-only, stopped Grok Actor and matching Grok connector. Canonical HTTPS `grok.com/bot/<UUID>` URL, unique within the connector. Saving the same current-generation URL is idempotent. A changed URL requires no unresolved delivery. |
+| `web_model_grok_bind` | `connector_id`, `group_id`, `actor_id`, `url`; user-only, no active turn and matching Grok connector. The exclusive daemon operation preserves enabled state. Canonical HTTPS `grok.com/bot/<UUID>` URL, unique within the connector. Saving the same current-generation URL is idempotent. A changed URL requires no canonical active turn. |
 | `web_model_binding_remove` | `connector_id`, `group_id`, `actor_id`; stopped Actor with no unresolved delivery; remove only its binding/pairing. |
 
 Normal Actor startup authorizes one initial automatic setup exchange for an enabled, unbound Actor in a running Group. The Web supervisor prepares its owned window; no business delivery is claimed until a binding is verified. An existing current-generation attempt, including expired, failed, cancelled or orphaned attempts, MUST prevent another automatic send. Unrelated Actor setup MUST NOT prune these attempt fences.
@@ -7678,19 +7743,35 @@ The ChatGPT remote MCP entrance advertises one fixed tool schema. Connector-leve
 Code-mode nested calls MUST recheck captured Actor generation and binding revision before executing. Request context fixes the caller (`by`) and Group; `cccc_actor.actor_id` remains the explicit management target and MUST NOT be replaced with the caller. Other identity-bearing tools continue to use the bound Actor. Command stdin/output and code cells MUST remain scoped to their original Actor/binding; re-pairing MUST NOT transfer access to retained work. Credential rotation invalidates the old credential without reassigning conversations; revocation and Actor/Group removal invalidate affected routes. These checks cannot undo an already executed command.
 
 
-### Grok Bot routing and provider isolation
+### Grok Bot native Webhook execution
 
-`grok_web_model` uses a headless Actor and the same browser queue, exact user-message receipts, review/recovery controls and draft/attachment protection as `web_model`. It has no CLI command and no ChatGPT pairing exchange. The private Web port owns a separate shared Grok profile, with one persistent Page/window per Actor. Provider settings MUST NOT rotate another provider's connector or close another provider's browser. The version-3 connector store preserves existing version-2 ChatGPT credentials, bindings and correlation salt.
+`grok_web_model` is a headless Actor using native Bot Webhook Routines and the existing remote MCP connector. There is no browser delivery, shared Grok login, browser credential or mode selection. All Grok browser-session, browser pairing and shared-browser endpoints MUST reject this Runtime/provider. ChatGPT browser behavior remains separate. A configured Bot link MAY open the provider page manually; it grants no task authority.
 
-Opening a Grok Actor window requires its current binding's canonical Bot URL. The Web port MUST reject an unconfigured Actor with `grok_bot_url_required` before creating a browser surface; it MUST NOT fall back to the Grok homepage or a new conversation. The shared login window is separate and MAY open the provider homepage. An Actor viewer MUST complete the owned-window open operation before attaching, rather than treating a registered surface during initialization as a completed open.
+The canonical HTTPS `grok.com/bot/<UUID>` URL belongs to the Actor, including linked Profile Actors, and MUST be unique within its Grok connector. Saving an unchanged current-generation native URL is idempotent. Replacing the route or changing Routine credentials requires no canonical active turn; the daemon MUST check this and commit the change under the same exclusive dispatch permit that fences task admission. These native configuration writes preserve the Actor's enabled state and MUST NOT stop/restart it or interrupt accepted work. Removing the route still requires a stopped Actor and no canonical active turn. Local setup drafts MAY be edited while work is active, but MUST NOT apply automatically when work completes. Browser-only integration leftovers MUST NOT block native setup. Old unowned claims on another transport settle as ambiguous, never replay or cause repeated empty wakes. Actors without native configuration project `unconfigured`; there is no browser fallback or inferred default Actor. Provider settings MUST NOT rotate another provider's credentials.
 
-The Bot URL belongs to the Actor, including when its runtime comes from a linked Profile. A private Web binding save MUST align an already-open, idle Actor page with the saved Bot URL before reporting success. It MUST verify the page's provider and Actor generation before reuse. A stale page is retired only after checking for drafts and in-progress responses, then replaced through the current provider's shared profile; the new window follows the navigation-start availability rule above. Navigation failure leaves the Actor stopped and the same URL can be retried. This alignment belongs to the save operation, not status GETs or viewer opening.
+Grok's MCP path does not prove a host Bot identity. Native business calls MUST include the current claim's execution `actor_token`, an opaque credential selecting connector, Group, Actor generation, binding revision, epoch and task. Possession grants that Actor's authority; sharing lends that authority. Group/Actor names, transport sessions, progress tokens and connector names MUST NOT substitute for it. `cccc_connector_status` MAY check connector connectivity without selecting an Actor. Grok MUST NOT advertise `cccc_pair`. The Web MCP boundary removes credentials before dispatch; nested code-mode calls inherit and revalidate the captured execution context while preserving explicit management targets. Credentials MUST NOT enter ledger events, public snapshots, ordinary tool output or diagnostics.
 
-Grok Bot URL saving is routing configuration authorized in the private CCCC UI. It proves no host-provided Bot identity. Grok business-tool requests MUST include `actor_token`, an opaque credential selecting an existing Group/Actor/generation/binding revision within the authenticated Grok connector. Possession grants that Actor's configured authority; intentional sharing lends that same authority. Missing, invalid, revoked, stopped or stale routes MUST be rejected. Model-supplied Group/Actor names, progress tokens, transport sessions and connector names MUST NOT substitute for this credential. `cccc_connector_status` MAY report connector connectivity without a token but MUST NOT select a default Actor. Grok MUST NOT advertise `cccc_pair`.
+Private configuration is keyed by Group/Actor in `web_model_connectors.yaml` (`grok_webhooks`) and contains the native Bot Routine POST URL, Bearer key, epoch, current wake/execution and last completed execution. It is not Group state, a Profile field or an exported binding. Only HTTPS `api2.cursor.sh/automations/webhook/<id>` without credentials, port, query or fragment is accepted. The Web port does not follow redirects or expose provider response bodies. This is the native Bot Routine Bearer/200 surface, not the separate signed Grok Automations API.
 
-The Web MCP boundary removes `actor_token` before dispatch. Nested code-mode calls inherit and revalidate the captured binding, preserving explicit management targets. Browser delivery reconstructs a stable credential using the private provider signing key and binding identity; it adds the credential only to the rendered task prompt. Canonical ledger events, runtime turns, public settings, binding snapshots, tool output and activity diagnostics MUST NOT expose it. Stop/start and unchanged URL saves retain the binding; unbind, URL replacement, provider/runtime changes and Actor/Group removal retire affected authority. Copy/import/reset MUST NOT copy it.
+A wake POST contains `{event:"cccc.grok.ready",event_id,actor_token}`. The credential is an opaque HMAC over connector, binding identity/revision, epoch, wake and claim domain. It authorizes only `cccc_runtime_wait_next_turn`; it grants no business tools. A successful `grok_work_claim` calls the existing `runtime_wait_next_turn` with `transport="web_model_pull"`, commits its private projection, and returns a distinct execution `actor_token` bound additionally to the admitted turn. Canonical active-turn ownership fences duplicate claims, including a crash with missing private projection. Competing claims return `turn_in_progress` without task body or credentials. A used wake cannot claim later inputs.
 
-Grok delivery uses `standard` mode only. `image_compat` is ChatGPT-specific and MUST be rejected for Grok. An enabled Submit control alone is not evidence that Grok is idle: Bot working indicators fence later delivery. Only a batch marker inside a Grok user-message element can settle an uncertain handoff; assistant echoes do not count. Host tool approval or safety rejection is reported rather than bypassed or retried blindly.
+Native execution capabilities and captured code-mode contexts MUST be revalidated against current epoch and canonical active turn, including after waits and under daemon operation permits. After completion, only an exact completion retry may use the previous execution capability; all other business calls fail. At the daemon completion boundary, the requested turn MUST equal the credential's captured turn before any receipt lookup or append. The existing receipt/active-turn checks MUST then enforce that same turn's exact ordered event IDs; a completion-only credential cannot acknowledge a newer task even when its IDs are supplied. The existing exact turn/event completion receipt and append order remain authoritative. The next wake is eligible only after completion releases canonical ownership.
+
+The Web network worker owns only I/O. The daemon leases each attempt for 30 seconds and persists attempt outcomes; HTTP 200 records `delivered`, never business `accepted` or completion. Transient network/429/5xx failures retry the same wake at most three times with 2s/4s backoff. Other HTTP results are terminal for automatic delivery. A delivered wake is not automatically resent; after 120 seconds without a claim it projects `unclaimed`. Explicit retry reuses its identity/capability and cannot replay accepted work. Multiple Web workers share the daemon lease. Network sends are bounded to 15 seconds and independent Actors may progress concurrently.
+
+Actor stop/restart/new-session and Group pause/stop retire native epoch authority. Accepted unfinished work remains canonical, is shown as interrupted, and MUST NOT be automatically replayed. A stopped Actor's user may explicitly resolve its exact active turn/event IDs, preserving an already committed completion or appending cancelled completion. Claimed inputs with uncertain handoff are settled ambiguous. This is retirement of CCCC authority, not cancellation of provider cloud work. Disconnect, URL replacement, runtime/provider replacement, Actor/Group removal, copy/reset and connector revocation retire private configuration with the binding. Revocation MUST NOT hide an accepted unfinished turn: canonical ownership keeps the recovery view available even without the old connector. An unchanged native URL save retains the configuration.
+
+| Private daemon operation | Inputs and behavior |
+| --- | --- |
+| `grok_webhook_status` | `group_id`, `actor_id`; read-only connected/bound/configured flags, phase, queued count, active IDs and sanitized last completion. No Webhook URL/key/capability and no runtime work; the viewer may receive the canonical Bot URL. |
+| `grok_webhook_configure` | user only; `group_id`, `actor_id`, `url`, `key`. No active turn; check and write under one exclusive permit, preserving enabled state. A `transport` field is rejected. |
+| `grok_webhook_retry` | user only; Group/Actor; only failed/unclaimed wake, active Actor, no accepted task. Reuses the current wake. |
+| `grok_webhook_next_delivery` | user-owned Web worker only; no selectors required; atomically lease one eligible wake, returning private URL/key/body/epoch/attempt for I/O. |
+| `grok_webhook_delivery_record` | user-owned Web worker only; connector/Group/Actor, event_id, epoch, attempt, http_status or null. Late/stale outcomes do not overwrite claims or newer epochs. |
+| `grok_work_claim` | bound Actor only; captured claim authority from the authenticated Web MCP port. Runtime wait MUST NOT bypass this path for any Grok Actor. |
+| `grok_work_resolve` | user only; stopped Actor, exact active turn_id and event_ids; no replay or provider cancellation. |
+
+Private Web `GET /api/v1/web-model/grok-webhook` returns the native state directly from the daemon. POST accepts `instructions`, `bind`, `disconnect`, `configure`, `retry`, or `resolve`. `bind` and `disconnect` call the existing provider-isolated binding operations; `configure` accepts only URL/key, with no delivery mode. Instructions are credential-free and describe creating/updating one native Routine, not a timed poll. The desktop Routine URL/key belong only in the private setup UI. The native viewer MUST NOT use browser-session status or open a browser surface. Setup/connection controls require the same private administrator access as Dots. Routine permissions, provider limits and provider-side pauses remain external constraints.
 
 ### ChatGPT Dots event execution
 
@@ -7784,6 +7865,10 @@ Webhook acceptance is transport handoff, not task completion. Completion uses
 the existing exact turn ID/event-ID receipt and never advances the Mail cursor.
 After completion, the execution credential authorizes only an idempotent retry of
 that same completion; it cannot claim more work or keep using business tools.
+The daemon MUST match the requested turn to the captured credential's turn before
+receipt lookup or append, then enforce its exact ordered event IDs through the
+existing receipt/active-turn checks. A previous completion credential MUST NOT
+complete a newer turn, including when the caller supplies that newer turn's IDs.
 Stop, restart, reset and explicit unbinding MUST retire old execution authority
 even when the Actor generation and pending turn IDs remain unchanged. Uncertain
 wake/execution facts are retained; lifecycle transitions do not prove that
