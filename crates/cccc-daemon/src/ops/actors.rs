@@ -23,6 +23,7 @@ const RUNTIME_STATES_KEY: &str = "runtime_states";
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "actor_list" => Operation::new(Read, list),
+        "actor_memory_report" => Operation::new(Read, memory_report),
         "actor_prompt" => Operation::new(Read, prompt),
         "actor_add" => Operation::new(Write, add),
         "actor_update" => Operation::new(Write, update),
@@ -58,6 +59,18 @@ fn prompt(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         "actor_id":actor_id,
         "prompt":cccc_core::system_prompt::render_session(home, &group, actor)
     }))
+}
+
+/// The harness RAM trend: what each `(harness, mode)` cost over the last 72
+/// hours. Read only — nothing in the daemon acts on it.
+fn memory_report(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let group = load(home, request)?;
+    authorize(&group, request, ActorAction::List, "")?;
+    object(super::actor_memory_trend::report(
+        home,
+        &group.group_id,
+        chrono::Utc::now().timestamp(),
+    ))
 }
 
 fn list(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
