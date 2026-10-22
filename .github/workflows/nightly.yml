@@ -29,6 +29,8 @@ jobs:
         run: python3 -c 'import os,subprocess; assert subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()==os.environ["SOURCE_REF"]'
       - name: Lint the workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Verify the turn probe and managed-authority controls
+        run: cargo test --workspace --lib --locked turn_probe
       - uses: actions/setup-node@v7
         with:
           node-version: "24.19.0"
