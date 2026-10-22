@@ -18,6 +18,7 @@ pub(super) struct Turn {
     pub cancelling: bool,
     pub admission: Option<oneshot::Sender<io::Result<String>>>,
     final_text: String,
+    pub usage: Option<Value>,
     failure: Option<&'static str>,
     message: u64,
     tools: BTreeMap<String, Value>,
@@ -39,6 +40,7 @@ impl Turn {
             cancelling: false,
             admission: Some(admission),
             final_text: String::new(),
+            usage: None,
             failure: None,
             message: 0,
             tools: BTreeMap::new(),
@@ -130,6 +132,7 @@ impl Turn {
             "message_end" if record["message"]["role"] == "assistant" => {
                 // Authoritative snapshots replace the streamed reconstruction.
                 self.final_text = message_text(&record["message"]);
+                self.usage = record["message"].get("usage").cloned();
                 self.failure = match record["message"]["stopReason"].as_str() {
                     Some("error" | "aborted") => Some(PROVIDER_FAILED),
                     // The model's context or output budget ran out before it
@@ -143,7 +146,7 @@ impl Turn {
                     sender,
                     generation,
                     None,
-                    json!({"method":"item/completed","params":{"threadId":session,"turnId":self.id,"item":{"id":format!("pi-message-{}",self.message),"type":"agentMessage","text":self.final_text}}}),
+                    json!({"method":"item/completed","params":{"threadId":session,"turnId":self.id,"item":{"id":format!("pi-message-{}",self.message),"type":"agentMessage","text":self.final_text},"usage":self.usage}}),
                 );
             }
             "auto_retry_end" if record["success"] == false => self.failure = Some(PROVIDER_FAILED),
