@@ -72,7 +72,7 @@ try:
     history = json.loads(Path(args.fixture).read_text())
     original = next(event for event in history if event['kind'] == 'system.notify')
     original_at = datetime.fromisoformat(original['ts'].replace('Z', '+00:00'))
-    anchor = datetime.now(timezone.utc) - timedelta(seconds=3590)
+    anchor = datetime.now(timezone.utc) - timedelta(seconds=3570)
     ids = []
     for event in history:
         event['group_id'] = group
