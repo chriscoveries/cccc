@@ -24,10 +24,12 @@ impl Publisher {
             .map(|group| group.group_id.clone())
             .collect::<BTreeSet<_>>();
         self.previous.retain(|group_id, _| known.contains(group_id));
+        super::actor_memory::retain_groups(&known);
         for meta in groups {
             let Ok(group) = store.load(&meta.group_id) else {
                 continue;
             };
+            super::actor_memory::sample_group(&group);
             self.publish_group(&store, &group);
         }
         Ok(())
