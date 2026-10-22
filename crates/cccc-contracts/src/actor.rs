@@ -197,9 +197,9 @@ pub struct Actor {
     /// people and tools; launching does not read it. Empty when unset.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub model_cost_usd_per_mtok: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub model_strength: Option<u8>,
     #[serde(default)]
     pub command: Vec<String>,
