@@ -1,9 +1,9 @@
 use cccc_contracts::{Event, GroupState};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
-use std::collections::HashSet;
 #[cfg(test)]
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io;
 
 use crate::actors;
@@ -191,6 +191,24 @@ pub fn tick_group_with_idle_actors(
         group_id,
         include_unread,
         Some(delivery_actor_ids),
+        idle_actor_ids,
+    )
+}
+
+/// Red reference only: the errors are ignored.
+pub fn tick_group_with_runtime_errors(
+    home: &HomeLayout,
+    group_id: &str,
+    include_unread: bool,
+    delivery_actor_ids: &HashSet<String>,
+    idle_actor_ids: &HashSet<String>,
+    _errors: &BTreeMap<String, String>,
+) -> io::Result<TickResult> {
+    tick_group_with_idle_actors(
+        home,
+        group_id,
+        include_unread,
+        delivery_actor_ids,
         idle_actor_ids,
     )
 }
