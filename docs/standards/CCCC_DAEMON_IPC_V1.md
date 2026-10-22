@@ -4611,7 +4611,9 @@ the group's foreman, while it is enabled and receives delivery, one
 one line per problem; `context.problem_keys` names each problem's episode. An
 actor's Mail is such a problem while it is still unread
 `mail_overdue_after_seconds` after its first Mail notice that was not
-withdrawn. A digest goes out when a problem appears that the last digest did
+withdrawn. So is an actor whose managed runtime reports an error while it is
+the assignee of a task that is not done or archived; the line names the
+reason and those tasks. A digest goes out when a problem appears that the last digest did
 not list, at most once per interval, and, with `health_digest_repeat_seconds`
 above zero, again after that long while problems remain. It copies no message
 bodies and advances no Mail cursor.

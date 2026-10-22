@@ -156,7 +156,14 @@ pub fn tick_group(
     group_id: &str,
     include_unread: bool,
 ) -> io::Result<TickResult> {
-    tick_group_inner(home, group_id, include_unread, None, &HashSet::new())
+    tick_group_inner(
+        home,
+        group_id,
+        include_unread,
+        None,
+        &HashSet::new(),
+        &BTreeMap::new(),
+    )
 }
 
 pub fn tick_group_for_delivery_actors(
@@ -171,6 +178,7 @@ pub fn tick_group_for_delivery_actors(
         include_unread,
         Some(delivery_actor_ids),
         &HashSet::new(),
+        &BTreeMap::new(),
     )
 }
 
@@ -190,6 +198,28 @@ pub fn tick_group_with_idle_actors(
         include_unread,
         Some(delivery_actor_ids),
         idle_actor_ids,
+        &BTreeMap::new(),
+    )
+}
+
+/// Like [`tick_group_with_idle_actors`], with the actors whose runtime reports
+/// an error, each with its reason: the foreman's health digest lists those
+/// that hold an open task.
+pub fn tick_group_with_runtime_errors(
+    home: &HomeLayout,
+    group_id: &str,
+    include_unread: bool,
+    delivery_actor_ids: &HashSet<String>,
+    idle_actor_ids: &HashSet<String>,
+    errors: &BTreeMap<String, String>,
+) -> io::Result<TickResult> {
+    tick_group_inner(
+        home,
+        group_id,
+        include_unread,
+        Some(delivery_actor_ids),
+        idle_actor_ids,
+        errors,
     )
 }
 
@@ -217,6 +247,7 @@ pub fn notify_idle_mail(
             &group,
             Some(idle_actor_ids),
             idle_actor_ids,
+            &BTreeMap::new(),
             UnreadPass::IdleMailNow,
             &mut result,
         )?;
@@ -230,6 +261,7 @@ fn tick_group_inner(
     include_unread: bool,
     delivery_actor_ids: Option<&HashSet<String>>,
     idle_actor_ids: &HashSet<String>,
+    errors: &BTreeMap<String, String>,
 ) -> io::Result<TickResult> {
     let store = GroupStore::new(home.clone())?;
     let mut result = TickResult::default();
@@ -252,6 +284,7 @@ fn tick_group_inner(
             &group,
             delivery_actor_ids,
             idle_actor_ids,
+            errors,
             UnreadPass::Scheduled,
             &mut result,
         )?;
@@ -392,17 +425,26 @@ enum UnreadPass {
     IdleMailNow,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tick_unread(
     home: &HomeLayout,
     store: &GroupStore,
     group: &GroupDoc,
     delivery_actor_ids: Option<&HashSet<String>>,
     idle_actor_ids: &HashSet<String>,
+    errors: &BTreeMap<String, String>,
     pass: UnreadPass,
     result: &mut TickResult,
 ) -> io::Result<()> {
-    let due = match due_unread_notices(home, store, group, delivery_actor_ids, idle_actor_ids, pass)
-    {
+    let due = match due_unread_notices(
+        home,
+        store,
+        group,
+        delivery_actor_ids,
+        idle_actor_ids,
+        errors,
+        pass,
+    ) {
         Ok(due) => due,
         Err(error) if result.notifications.is_empty() && result.actions.is_empty() => {
             return Err(error);
@@ -426,6 +468,7 @@ fn due_unread_notices(
     group: &GroupDoc,
     delivery_actor_ids: Option<&HashSet<String>>,
     idle_actor_ids: &HashSet<String>,
+    errors: &BTreeMap<String, String>,
     pass: UnreadPass,
 ) -> io::Result<Option<(std::path::PathBuf, Vec<Event>)>> {
     let mail_after = delivery_timing_value(group, "mail_notice_after_seconds", 1_800);
@@ -442,14 +485,18 @@ fn due_unread_notices(
         return Ok(None);
     }
     // The foreman's digest also stays with the periodic tick.
-    let digest = match pass {
+    let mut digest = match pass {
         UnreadPass::Scheduled => Digest {
             interval: delivery_timing_value(group, "health_digest_interval_seconds", 0),
             repeat: delivery_timing_value(group, "health_digest_repeat_seconds", 0),
             mail_overdue: delivery_timing_value(group, "mail_overdue_after_seconds", 7_200),
+            problems: Vec::new(),
         },
         UnreadPass::IdleMailNow => Digest::default(),
     };
+    if digest.interval > 0 && !errors.is_empty() {
+        digest.problems = errors_holding_tasks(home, group, errors)?;
+    }
     let eligible = actors::visible(group)
         .filter(|actor| {
             actor.enabled && delivery_actor_ids.is_none_or(|ids| ids.contains(&actor.id))
@@ -487,11 +534,45 @@ fn due_unread_notices(
 /// appears that the last digest did not list, at most once per `interval`,
 /// and again after `repeat` while problems remain. A recipient's Mail becomes
 /// a problem once it is still unread `mail_overdue` after its first notice.
+/// `problems` are found before the ledger is read.
 #[derive(Default)]
 struct Digest {
     interval: i64,
     repeat: i64,
     mail_overdue: i64,
+    problems: Vec<(String, String)>,
+}
+
+/// An Actor whose runtime reports an error while it is the assignee of an open
+/// task: that work has stopped until someone looks.
+fn errors_holding_tasks(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    errors: &BTreeMap<String, String>,
+) -> io::Result<Vec<(String, String)>> {
+    let document = crate::context::ContextStore::new(home.clone())?.load(&group.group_id)?;
+    let mut held = BTreeMap::<&str, Vec<&str>>::new();
+    for task in &document.tasks {
+        let field = |key| task.get(key).and_then(Value::as_str).unwrap_or_default();
+        let (status, assignee, task_id): (&str, &str, &str) =
+            (field("status"), field("assignee"), field("id"));
+        if !matches!(status, "done" | "archived") && errors.contains_key(assignee) {
+            held.entry(assignee).or_default().push(task_id);
+        }
+    }
+    Ok(held
+        .into_iter()
+        .map(|(actor_id, task_ids)| {
+            let reason = errors[actor_id].chars().take(160).collect::<String>();
+            (
+                format!("error:{actor_id}:{}", task_ids.join(",")),
+                format!(
+                    "{actor_id}: in error ({reason}) while it holds {}.",
+                    task_ids.join(", ")
+                ),
+            )
+        })
+        .collect())
 }
 
 /// Write each notice and hand it to delivery. A written notice is issued for
@@ -552,7 +633,7 @@ fn unread_notices(
 ) -> Vec<Event> {
     let mut notices = Vec::new();
     // Each problem as (key, line); a key names one episode of it.
-    let mut problems = Vec::<(String, String)>::new();
+    let mut problems = digest.problems.clone();
     let mut last_digest = None::<(i64, HashSet<String>)>;
     let generations = inbox::actor_generation_positions(events);
     let now = Utc::now().timestamp();
@@ -1059,6 +1140,7 @@ mod tests {
                     &group,
                     Some(&recipients),
                     &recipients,
+                    &BTreeMap::new(),
                     pass,
                     &mut result,
                 )
@@ -1068,10 +1150,17 @@ mod tests {
 
             // The second notice cannot be written: the first is already in the
             // ledger, so it must reach delivery from this pass.
-            let (ledger_path, notices) =
-                due_unread_notices(&home, &store, &group, Some(&recipients), &recipients, pass)
-                    .expect("due notices")
-                    .expect("notices to issue");
+            let (ledger_path, notices) = due_unread_notices(
+                &home,
+                &store,
+                &group,
+                Some(&recipients),
+                &recipients,
+                &BTreeMap::new(),
+                pass,
+            )
+            .expect("due notices")
+            .expect("notices to issue");
             let mut interrupted = TickResult::default();
             let mut writes = 0;
             issue_notices(

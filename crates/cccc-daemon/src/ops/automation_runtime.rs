@@ -66,12 +66,14 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
         HashSet::new()
     };
     let idle_actor_ids = idle_actor_ids(group_id, &delivery_actor_ids);
-    match cccc_core::automation::tick_group_with_idle_actors(
+    let errors = runtime_errors(group_id, &delivery_actor_ids);
+    match cccc_core::automation::tick_group_with_runtime_errors(
         home,
         group_id,
         include_unread,
         &delivery_actor_ids,
         &idle_actor_ids,
+        &errors,
     ) {
         Ok(result) => apply(home, result, cancelled),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -88,6 +90,18 @@ fn idle_actor_ids(group_id: &str, actor_ids: &HashSet<String>) -> HashSet<String
         .iter()
         .filter(|actor_id| super::local_headless::ready_for_mail_notice(group_id, actor_id))
         .cloned()
+        .collect()
+}
+
+/// Actors whose managed session reports an error, with its reason.
+fn runtime_errors(group_id: &str, actor_ids: &HashSet<String>) -> BTreeMap<String, String> {
+    actor_ids
+        .iter()
+        .filter_map(|actor_id| {
+            let status = super::local_headless::status(group_id, actor_id)?;
+            (status.status == "error")
+                .then(|| (actor_id.clone(), status.reason.unwrap_or_default()))
+        })
         .collect()
 }
 
