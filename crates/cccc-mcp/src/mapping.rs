@@ -568,6 +568,22 @@ mod tests {
     }
 
     #[test]
+    fn task_create_mapping_keeps_the_callers_ids_and_refs() {
+        let create = json!({
+            "action":"create","group_id":"g_test","actor_id":"lead","by":"lead",
+            "title":"publish","client_request_id":"publish","parent_ref":"release",
+            "blocked_by_refs":["build"]
+        })
+        .as_object()
+        .cloned()
+        .expect("create args");
+        let (_, args) = daemon_call("cccc_task", create).expect("create mapping");
+        assert_eq!(args["ops"][0]["client_request_id"], "publish");
+        assert_eq!(args["ops"][0]["parent_ref"], "release");
+        assert_eq!(args["ops"][0]["blocked_by_refs"], json!(["build"]));
+    }
+
+    #[test]
     fn actor_notes_actions_map_to_the_daemon_owned_help_contract() {
         for (action, expected) in [
             ("get", "actor_notes_get"),
