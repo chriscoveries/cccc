@@ -11,6 +11,7 @@ import {
 // Same dot language as the Connect sidebar: live, needs attention, or finished.
 function stateDot(state: string, closed: boolean) {
   if (state === "online") return "bg-emerald-400";
+  if (state === "connectionFailed") return "bg-[var(--color-danger)]";
   if (closed) return "bg-[var(--color-text-tertiary)]";
   return "bg-[var(--color-accent-warning)]";
 }
@@ -29,7 +30,7 @@ export function DirectConnectionRow({
   const { t, i18n } = useTranslation("layout");
   const [confirmRevoke, setConfirmRevoke] = useState(false);
   const state = directRelationState(relation);
-  const canRemove = directRelationClosed(relation);
+  const closed = directRelationClosed(relation);
   const canApprove = state === "needsApproval";
   const pending = relation.state === "invited" || relation.state === "pending";
   const hint = "text-xs text-[var(--color-text-secondary)]";
@@ -45,7 +46,7 @@ export function DirectConnectionRow({
           <p role="status" className="mt-1 flex items-center gap-1.5 text-xs">
             <span
               aria-hidden
-              className={`h-1.5 w-1.5 shrink-0 rounded-full ${stateDot(state, canRemove)}`}
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${stateDot(state, closed)}`}
             />
             {t(`direct.states.${state}`)}
           </p>
@@ -61,31 +62,20 @@ export function DirectConnectionRow({
                 {t("direct.approve")}
               </Button>
             )}
-            {canRemove ? (
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                onClick={() => void onAction("remove", relation.id)}
-              >
-                {t("direct.remove")}
-              </Button>
-            ) : (
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                onClick={() => setConfirmRevoke(true)}
-              >
-                {t(
-                  pending
-                    ? relation.initiated
-                      ? "direct.cancelRequest"
-                      : "direct.cancelInvite"
-                    : "direct.disconnect",
-                )}
-              </Button>
-            )}
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setConfirmRevoke(true)}
+            >
+              {t(
+                pending
+                  ? relation.initiated
+                    ? "direct.cancelRequest"
+                    : "direct.cancelInvite"
+                  : "direct.disconnect",
+              )}
+            </Button>
           </div>
         )}
       </div>

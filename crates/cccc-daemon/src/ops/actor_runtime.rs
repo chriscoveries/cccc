@@ -38,6 +38,7 @@ pub fn apply(
     // comes from the registries, not from the next launch configuration.
     if matches!(kind, "actor.stop" | "actor.restart" | "actor.new_session") {
         super::dots_events::invalidate(home, group, actor_id)?;
+        super::grok_webhook::invalidate(home, group, actor_id)?;
     }
     if stored_actor.runtime.is_web_model()
         && stored_actor.runtime != ActorRuntime::ChatgptDots
@@ -162,7 +163,7 @@ fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionSt
     let command = cccc_runtime::resolve_command_executable(&command, &env);
     let history =
         terminal_history::config(home, &group.group_id, &actor.id).map_err(OpError::io)?;
-    cccc_runtime::start_with_history(
+    let status = cccc_runtime::start_with_history(
         LaunchSpec {
             group_id: group.group_id.clone(),
             actor_id: actor.id.clone(),
@@ -175,15 +176,21 @@ fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionSt
         },
         history,
     )
-    .map_err(runtime_error)
+    .map_err(runtime_error)?;
+    super::turn_probe::started(&actor, &status);
+    Ok(status)
 }
 
 pub(super) fn stop(group: &GroupDoc, actor_id: &str) -> Result<Option<SessionStatus>, OpError> {
-    match cccc_runtime::stop(&group.group_id, actor_id) {
+    let result = match cccc_runtime::stop(&group.group_id, actor_id) {
         Ok(status) => Ok(Some(status)),
         Err(cccc_runtime::RuntimeError::NotFound(_, _)) => Ok(None),
         Err(error) => Err(runtime_error(error)),
+    };
+    if result.is_ok() {
+        super::turn_probe::stopped(&group.group_id, actor_id);
     }
+    result
 }
 
 fn stop_registered(group: &GroupDoc, actor_id: &str) -> Result<Option<SessionStatus>, OpError> {
@@ -263,6 +270,7 @@ pub(crate) fn stop_all() -> Result<Vec<SessionStatus>, cccc_runtime::RuntimeErro
 
 pub fn stop_group(home: &HomeLayout, group: &GroupDoc) -> Result<Vec<SessionStatus>, OpError> {
     super::dots_events::invalidate_group(home, group)?;
+    super::grok_webhook::invalidate_group(home, group)?;
     super::local_headless::stop_group(&group.group_id).map_err(OpError::io)?;
     super::deepseek_runtime::stop_group(&group.group_id);
     let mut stopped = Vec::new();
