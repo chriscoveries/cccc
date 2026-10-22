@@ -16,7 +16,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Verify runtime source identity
-        run: git diff --exit-code cb4ba5e19ec7815aa88d1114ec24b779f0f99bb7 HEAD -- . ':(exclude).github/workflows/nightly.yml'
+        run: git diff --exit-code c68a3f5ef874a2d7fb73b6658df33238c82a0102 HEAD -- . ':(exclude).github/workflows/nightly.yml'
       - name: Lint the workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - uses: actions/setup-node@v7
@@ -35,7 +35,7 @@ jobs:
           import hashlib,json,os,subprocess
           from pathlib import Path
           binary=Path('target/release/cccc')
-          record={'source_commit':'cb4ba5e19ec7815aa88d1114ec24b779f0f99bb7','build_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'run_id':os.environ['GITHUB_RUN_ID'],'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'source_delta':'workflow-only; verified by git diff'}
+          record={'source_commit':'c68a3f5ef874a2d7fb73b6658df33238c82a0102','build_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'run_id':os.environ['GITHUB_RUN_ID'],'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'source_delta':'workflow-only; verified by git diff'}
           Path('PROVENANCE.json').write_text(json.dumps(record,indent=2)+'\n')
           PYTHON
       - uses: actions/upload-artifact@v7
