@@ -17,11 +17,17 @@ jobs:
       matrix:
         include:
           - label: candidate
-            source: acaea415ddb6ef2f7121acd6895bc02be653ef3a
+            source: a0c493cc0ed24d48c7892ab36239f846f2bc3a74
             candidate: "--candidate"
+            test_mode: "--candidate"
           - label: reference
-            source: bd2fd48d27d2164352463972d1d2025c54dc986a
+            source: 9671b0f5f85cd6db15d73051cc0323fd4fa7b9ce
             candidate: ""
+            test_mode: ""
+          - label: generation-reference
+            source: a30336b22855d70b958a623c372f588e53dc982d
+            candidate: "--candidate"
+            test_mode: "--generation-reference"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -51,7 +57,7 @@ jobs:
           rustc --version >> evidence/host.txt
       - name: Run and verify every new test, including normal-CI warm projection
         env:
-          CANDIDATE: ${{ matrix.candidate }}
+          TEST_MODE: ${{ matrix.test_mode }}
         shell: bash
         run: |
           set -euo pipefail
@@ -62,7 +68,7 @@ jobs:
           printf '%s\n' "$?" > evidence/daemon.exit
           set -e
           cat evidence/core.log evidence/daemon.log
-          python3 harness/scripts/tests/mail_notice_repeat/verify.py --logs evidence $CANDIDATE
+          python3 harness/scripts/tests/mail_notice_repeat/verify.py --logs evidence $TEST_MODE
       - name: Build the foreground daemon and run the recorded socket probe
         env:
           EXPECTED_SOURCE: ${{ matrix.source }}
