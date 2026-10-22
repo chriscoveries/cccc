@@ -12,6 +12,11 @@ pub enum ActorAction {
         #[arg(long = "group")]
         group_id: Option<String>,
     },
+    /// Harness RAM over the last 72 hours, per (harness, mode)
+    Memory {
+        #[arg(long = "group")]
+        group_id: Option<String>,
+    },
     Add {
         actor_id: String,
         #[arg(long, default_value = "")]
