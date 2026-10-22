@@ -5095,7 +5095,7 @@ Args:
   statuses?: string // comma-separated statuses for an atomic multi-column page
   query?: string
   assignee?: string // use "__unassigned__" for tasks without an assignee
-  attention?: "blocked" | "waiting_user" | "handoff" | "unassigned"
+  attention?: "blocked" | "ready" | "waiting_user" | "handoff" | "unassigned"
   offset?: number
   limit?: number // 1..100
   include_index?: boolean
@@ -5129,6 +5129,7 @@ Result:
   facets: {
     status_counts: Record<string, number>
     blocked: number
+    ready: number
     waiting_user: number
     pending_handoffs: number
     unassigned: number
@@ -5150,6 +5151,7 @@ Result:
   facets: {
     status_counts: Record<string, number>
     blocked: number
+    ready: number
     waiting_user: number
     pending_handoffs: number
     unassigned: number
@@ -5178,7 +5180,13 @@ Notes:
   task detail.
 - Filters are applied before pagination. Planned tasks sort newest-created first;
   other columns sort most-recently-updated first, with numeric task id as a stable
-  tie-breaker.
+  tie-breaker. `attention=ready` sorts oldest-created first, so the next task to
+  take comes first.
+- A blocker is open while the task it names is neither `done` nor `archived`; an
+  entry that names no task stays open. `attention=blocked` (and the `blocked`
+  facet) lists tasks that are not done or archived and have an open blocker or
+  wait on `actor` or `external`. `attention=ready` (and the `ready` facet) lists
+  planned tasks with `waiting_on` unset or `none` and no open blocker.
 - `offset` requires `limit`. `tasks_version` is the task-specific revision, not
   the broader context revision. Clients MUST discard a continuation response
   and restart all loaded pages when it differs from the initial page revision.
