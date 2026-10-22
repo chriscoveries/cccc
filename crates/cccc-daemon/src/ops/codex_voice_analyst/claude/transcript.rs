@@ -266,7 +266,12 @@ impl TranscriptState {
             let active_usage = &mut active.usage;
             if let Some(existing) = active_usage.as_mut() {
                 // Sum per-turn across multiple assistant records.
-                for key in ["input_tokens","output_tokens","cache_creation_input_tokens","cache_read_input_tokens"] {
+                for key in [
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                ] {
                     let add = usage.get(key).and_then(Value::as_u64).unwrap_or(0);
                     let cur = existing.get(key).and_then(Value::as_u64).unwrap_or(0);
                     existing[key] = json!(cur + add);
