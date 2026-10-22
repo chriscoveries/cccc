@@ -331,6 +331,10 @@ export type Actor = {
   enabled?: boolean;
   running?: boolean; // Actual process running status
   idle_seconds?: number | null; // Legacy idle duration, independent of terminal output activity.
+  rss_mib?: number | null; // Resident memory of the actor's process tree, in MiB
+  pss_mib?: number | null; // Proportionally attributable memory over the same tree
+  n_proc?: number | null; // Processes in the tree when the reading was taken
+  mem_sampled_at?: string | null; // When the memory reading was taken
   effective_working_state?: "stopped" | "idle" | "working" | "waiting" | "stuck" | string;
   effective_working_reason?: string;
   effective_working_updated_at?: string | null;
