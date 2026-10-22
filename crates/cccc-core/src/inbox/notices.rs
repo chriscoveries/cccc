@@ -260,8 +260,9 @@ impl NoticeState {
         let now = Utc::now().timestamp();
         let resume_at = self.resume_at.as_deref().map(|ts| timestamp(ts, now));
         let mut notices = Vec::new();
-        // Each problem as (key, line); a key names one episode of it.
-        let mut problems = Vec::<(String, String)>::new();
+        // Each problem as (key, line); a key names one episode of it. Some
+        // are found before the ledger is read.
+        let mut problems = digest.problems.clone();
         let resolution = |actor: &str, id: &str| {
             let source = self.positions.get(id)?;
             let read = self.mail_reads.get(actor).and_then(|facts| {
