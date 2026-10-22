@@ -184,7 +184,7 @@ pub enum GroupState {
     Stopped,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Actor {
     #[serde(default = "version")]
     pub v: u8,
