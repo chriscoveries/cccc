@@ -93,7 +93,7 @@ an uncertain send, rather than creating another message.
 ## Capabilities
 
 - `cccc_capability_use(tool_name="...", tool_arguments={...})` invokes hidden tools without exposing the full pack.
-- Examples include `tool_name="cccc_project_info"`, `"cccc_tracked_send"`, and `"cccc_memory"`; pass arguments in `tool_arguments`.
+- Hidden tools include `cccc_tracked_send` and `cccc_memory`; pass their arguments in `tool_arguments`.
 - Memory recall example: `cccc_capability_use(tool_name="cccc_memory", tool_arguments={"action":"search","query":"..."})`, followed by `action="get"` for exact lines.
 - Use `cccc_capability_search` only when the capability or tool name is unknown.
 - For `activation_pending` or `refresh_required=true`, relist or reconnect. On failure, inspect `diagnostics` and `resolution_plan`.
@@ -137,4 +137,7 @@ Role and actor sections below are additive overlays selected by `cccc_help`.
 | actor_start | yes | yes (any) | no |
 | actor_stop | yes | yes (any) | yes (self) |
 | actor_restart | yes | yes (any) | yes (any) |
-| actor_remove | yes | yes (self/peer) | yes (self) |
+| actor_remove | yes | yes (peer only) | yes (self) |
+
+The foreman cannot remove itself. The user can remove it; the next visible
+Actor then becomes foreman, or the Group has no foreman if none remain.
