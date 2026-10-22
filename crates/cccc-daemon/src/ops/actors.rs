@@ -24,6 +24,7 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "actor_list" => Operation::new(Read, list),
         "actor_memory_report" => Operation::new(Read, memory_report),
+        "group_health" => Operation::new(Read, group_health),
         "actor_prompt" => Operation::new(Read, prompt),
         "actor_add" => Operation::new(Write, add),
         "actor_update" => Operation::new(Write, update),
@@ -70,6 +71,23 @@ fn memory_report(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         home,
         &group.group_id,
         chrono::Utc::now().timestamp(),
+    ))
+}
+
+fn group_health(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let group = load(home, request)?;
+    authorize(&group, request, ActorAction::List, "")?;
+    let running = group
+        .actors
+        .iter()
+        .filter(|actor| {
+            actor.enabled && super::actor_runtime_status::resolve(&group, actor).running
+        })
+        .count() as u64;
+    object(super::host_health::report(
+        std::path::Path::new("/proc"),
+        &group.group_id,
+        running,
     ))
 }
 
