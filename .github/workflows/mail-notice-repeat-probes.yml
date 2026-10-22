@@ -1,0 +1,84 @@
+name: Mail notice repeat daemon probes
+
+on:
+  push:
+    branches: [test/mail-notice-repeat-v4-probes]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  daemon-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: candidate
+            source: 2dcd47b4325fe73b235821616e529a0a208274d5
+            candidate: "--candidate"
+          - label: reference
+            source: c5c7243b29759f255ef35515037df0af5182f7eb
+            candidate: ""
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: harness
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.source }}
+          path: source
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.19.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source
+          key: mail-notice-repeat-v4-${{ matrix.label }}
+      - name: Bind source and build Web assets
+        env:
+          EXPECTED_SOURCE: ${{ matrix.source }}
+        run: |
+          test "$(git -C source rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          npm ci --prefix source/web
+          npm -C source/web run build
+          mkdir -p evidence
+          uname -a > evidence/host.txt
+          lscpu >> evidence/host.txt
+          rustc --version >> evidence/host.txt
+      - name: Run and verify every new test, including isolated warm projection
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          cargo test --manifest-path source/Cargo.toml --locked --package cccc-pair-core --lib mail_notice_repeat_tests:: -- --include-ignored --test-threads=1 > evidence/core.log 2>&1
+          printf '%s\n' "$?" > evidence/core.exit
+          cargo test --manifest-path source/Cargo.toml --locked --package cccc-pair-daemon --lib mail_notice_repeat_tests:: -- --test-threads=1 > evidence/daemon.log 2>&1
+          printf '%s\n' "$?" > evidence/daemon.exit
+          set -e
+          cat evidence/core.log evidence/daemon.log
+          python3 harness/scripts/tests/mail_notice_repeat/verify.py --logs evidence $CANDIDATE
+      - name: Build the foreground daemon and run the recorded socket probe
+        env:
+          EXPECTED_SOURCE: ${{ matrix.source }}
+          CANDIDATE: ${{ matrix.candidate }}
+        run: |
+          cargo build --manifest-path source/Cargo.toml --locked --package cccc --bin cccc
+          sha256sum source/target/debug/cccc > evidence/binary.sha256
+          python3 harness/scripts/tests/mail_notice_repeat/probe.py \
+            --binary source/target/debug/cccc --source "$EXPECTED_SOURCE" \
+            --fixture source/crates/cccc-core/tests/fixtures/mail_notice_history.json \
+            --output evidence/socket-probe $CANDIDATE
+      - name: Preserve source-bound evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mail-notice-repeat-${{ matrix.label }}
+          path: evidence
+          if-no-files-found: error
+          retention-days: 7
