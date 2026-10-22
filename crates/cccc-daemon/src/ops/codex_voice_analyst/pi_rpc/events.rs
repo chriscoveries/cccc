@@ -462,9 +462,20 @@ mod tests {
         );
     }
 
-    /// A constructed privacy test, not a capture: a credential-like token and a
-    /// private directory in every place a call can carry them. Only a program
-    /// or a file name comes through.
+    #[test]
+    fn captured_tool_turn_publishes_per_turn_usage() {
+        let events = replay_captured_turn(CAPTURED_TOOL_TURN, "s");
+        let answer = events
+            .iter()
+            .find(|event| {
+                event["method"] == "item/completed"
+                    && event["params"]["item"]["type"] == "agentMessage"
+            })
+            .expect("the captured reply is published");
+        assert_eq!(answer["params"]["usage"]["input"], 210);
+        assert_eq!(answer["params"]["usage"]["output"], 12);
+        assert_eq!(answer["params"]["usage"]["cacheRead"], 1536);
+    }
     #[test]
     fn a_call_shows_only_its_program_or_file_name() {
         const TOKEN: &str = "secret-token-0123456789abcdef";
