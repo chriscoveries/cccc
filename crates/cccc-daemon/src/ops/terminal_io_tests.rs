@@ -58,6 +58,56 @@ fn write_preserves_standalone_carriage_return() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn write_refuses_a_terminal_whose_process_reports_another_actor() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path()).expect("home");
+    let group_id = format!("g_terminal_{}", uuid::Uuid::new_v4().simple());
+    let actor_id = "peer1";
+    cccc_runtime::start(LaunchSpec {
+        group_id: group_id.clone(),
+        actor_id: actor_id.into(),
+        runner: RunnerKind::Pty,
+        command: vec![
+            "sh".into(),
+            "-c".into(),
+            "exec env CCCC_ACTOR_ID=peer2 cat".into(),
+        ],
+        cwd: temp.path().into(),
+        env: BTreeMap::new(),
+        cols: 80,
+        rows: 24,
+    })
+    .expect("start runtime");
+    let pid = cccc_runtime::status(&group_id, actor_id)
+        .expect("status")
+        .pid
+        .expect("pid");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default() != "cat\n" {
+        assert!(std::time::Instant::now() < deadline, "peer1 never ran cat");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let request = DaemonRequest {
+        v: 1,
+        op: "terminal_write".into(),
+        args: json!({"group_id":group_id,"actor_id":actor_id,"data":"typed\r"})
+            .as_object()
+            .cloned()
+            .expect("args"),
+    };
+    let result = write(&home, &request);
+    let _ = cccc_runtime::stop(&group_id, actor_id);
+    let error = result.expect_err("input must not reach a process running as peer2");
+    assert_eq!(error.code, "terminal_identity_mismatch");
+    assert!(
+        error.message.contains(&format!("{group_id}/peer2")),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
 fn write_rejects_empty_data() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path()).expect("home");
