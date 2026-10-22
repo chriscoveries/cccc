@@ -19,7 +19,7 @@
 //! unreadable) drops the reading rather than showing a stale or invented one.
 //! Rows carry `null`, never `0`.
 
-use cccc_core::GroupDoc;
+use cccc_core::{GroupDoc, HomeLayout};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -72,7 +72,7 @@ pub(crate) fn cadence_seconds(group: &GroupDoc) -> u64 {
 /// One sampling pass for one Group, from the activity publisher. Actors whose
 /// reading is not due keep the one they have; Actors that are not running, or
 /// that the runtime cannot locate with a pid, hold no reading at all.
-pub(crate) fn sample_group(group: &GroupDoc) {
+pub(crate) fn sample_group(home: &HomeLayout, group: &GroupDoc) {
     let cadence = cadence_seconds(group);
     if cadence == 0 {
         forget(&group.group_id);
@@ -103,6 +103,14 @@ pub(crate) fn sample_group(group: &GroupDoc) {
                         sampled_at: cccc_contracts::utc_now(),
                         sampled_epoch: epoch,
                     },
+                );
+                super::actor_memory_trend::record_actor(
+                    home,
+                    group,
+                    actor,
+                    epoch,
+                    reading.rss_mib,
+                    reading.pss_mib,
                 );
             }
             // A failed reading is no reading: the row shows nothing rather
@@ -386,7 +394,7 @@ mod tests {
     fn samples_a_running_actor_and_drops_it_when_it_stops() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
-        let store = GroupStore::new(home).expect("store");
+        let store = GroupStore::new(home.clone()).expect("store");
         let group = store.create("memory", "").expect("group");
         store
             .mutate(&group.group_id, |doc| {
@@ -408,7 +416,7 @@ mod tests {
         .expect("runtime");
 
         let group = store.load(&group.group_id).expect("reload");
-        sample_group(&group);
+        sample_group(&home, &group);
         let fields = row_fields(&group.group_id, "peer");
         assert!(
             fields["rss_mib"].as_u64().is_some_and(|mib| mib > 0),
@@ -419,7 +427,7 @@ mod tests {
 
         cccc_runtime::stop(&group.group_id, "peer").expect("stop");
         let group = store.load(&group.group_id).expect("reload");
-        sample_group(&group);
+        sample_group(&home, &group);
         let fields = row_fields(&group.group_id, "peer");
         for key in ["rss_mib", "pss_mib", "n_proc", "mem_sampled_at"] {
             assert_eq!(

@@ -1681,3 +1681,38 @@ fn task_revision_is_exposed_and_conflicts_name_the_recorded_task() {
         before.result
     );
 }
+
+#[test]
+fn actor_memory_report_reads_a_group_window_and_refuses_an_unknown_group() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"memory trend"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+
+    let report = call(&home, "actor_memory_report", json!({"group_id":group_id}));
+    assert_eq!(report.result["window_hours"], 72);
+    assert_eq!(report.result["bucket_seconds"], 3600);
+    assert_eq!(
+        report.result["keys"],
+        json!([]),
+        "a group with no samples has no keys, not zeroed ones"
+    );
+    assert!(
+        report.result["as_of"]
+            .as_str()
+            .is_some_and(|at| at.ends_with('Z'))
+    );
+
+    let missing = raw_call(
+        &home,
+        "actor_memory_report",
+        json!({"group_id":"g_not_a_group"}),
+    );
+    assert!(
+        !missing.ok,
+        "an unknown group is an error, not an empty window"
+
+    );
+}
