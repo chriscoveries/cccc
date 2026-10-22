@@ -19,6 +19,7 @@ pub(super) struct Turn {
     pub admission: Option<oneshot::Sender<io::Result<String>>>,
     final_text: String,
     pub usage: Option<Value>,
+    totals: crate::ops::turn_usage::Accumulator,
     failure: Option<&'static str>,
     message: u64,
     tools: BTreeMap<String, Value>,
@@ -41,6 +42,7 @@ impl Turn {
             admission: Some(admission),
             final_text: String::new(),
             usage: None,
+            totals: crate::ops::turn_usage::Accumulator::new(),
             failure: None,
             message: 0,
             tools: BTreeMap::new(),
@@ -133,6 +135,11 @@ impl Turn {
                 // Authoritative snapshots replace the streamed reconstruction.
                 self.final_text = message_text(&record["message"]);
                 self.usage = record["message"].get("usage").cloned();
+                let id = record["message"]["responseId"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("message-{}", self.message));
+                self.totals.pi(id, &record["message"]);
                 self.failure = match record["message"]["stopReason"].as_str() {
                     Some("error" | "aborted") => Some(PROVIDER_FAILED),
                     // The model's context or output budget ran out before it
@@ -227,7 +234,7 @@ impl Turn {
             sender,
             generation,
             None,
-            json!({"method":"turn/completed","params":{"threadId":session,"turn":{"id":self.id,"status":status,"error":error}}}),
+            json!({"method":"turn/completed","params":{"threadId":session,"turn":{"id":self.id,"status":status,"error":error,"usage":self.totals.summary("pi_rpc")}}}),
         );
     }
 }
@@ -467,6 +474,7 @@ mod tests {
         let events = replay_captured_turn(CAPTURED_TOOL_TURN, "s");
         let answer = events
             .iter()
+            .rev()
             .find(|event| {
                 event["method"] == "item/completed"
                     && event["params"]["item"]["type"] == "agentMessage"
@@ -475,6 +483,12 @@ mod tests {
         assert_eq!(answer["params"]["usage"]["input"], 210);
         assert_eq!(answer["params"]["usage"]["output"], 12);
         assert_eq!(answer["params"]["usage"]["cacheRead"], 1536);
+        let settled = settled_turn(&events);
+        assert_eq!(settled["usage"]["input_tokens"], 1852);
+        assert_eq!(settled["usage"]["output_tokens"], 90);
+        assert_eq!(settled["usage"]["cache_read_tokens"], 1536);
+        assert_eq!(settled["usage"]["cache_write_tokens"], 0);
+        assert_eq!(settled["usage"]["usage_samples"], 2);
     }
     #[test]
     fn a_call_shows_only_its_program_or_file_name() {
