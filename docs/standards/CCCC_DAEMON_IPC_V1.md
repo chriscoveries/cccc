@@ -3362,6 +3362,37 @@ Result:
 { actors: Array<Record<string, unknown>> } // includes at least id/title/runtime/enabled + role/running
 ```
 
+#### `actor_memory_report`
+
+Harness RAM over the last 72 hours, folded into hourly buckets per `(harness, mode)`.
+Display only: nothing in delivery, idling, health or dispatch reads it.
+
+Args:
+```ts
+{ group_id: string }
+```
+
+Result:
+```ts
+{
+  window_hours: number // 72
+  bucket_seconds: number // 3600
+  as_of: string // the current hour, rfc3339
+  keys: Array<{
+    harness: string
+    mode: string // pty | headless, with -acp when the Actor runs the ACP mode
+    peak_rss_mib: number | null
+    avg_rss_mib: number | null
+    samples: number
+    peak_pss_mib: number | null
+    avg_pss_mib: number | null
+    pss_samples: number
+    hours_observed: number
+    series: Array<{ hour: string; peak_rss_mib: number | null; avg_rss_mib: number | null; samples: number }>
+  }> // busiest first; a key with no samples in the window is absent
+}
+```
+
 #### `actor_add`
 
 Args:
