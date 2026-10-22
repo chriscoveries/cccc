@@ -1198,3 +1198,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "automation/mail_notice_repeat_tests.rs"]
+mod mail_notice_repeat_tests;
