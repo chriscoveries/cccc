@@ -4,6 +4,8 @@ mod actor_delivery_preamble;
 mod actor_delivery_render;
 mod actor_delivery_worker;
 mod actor_listing;
+pub(crate) mod actor_memory;
+pub(crate) mod actor_memory_trend;
 mod actor_profile_runtime;
 pub(crate) mod actor_runtime;
 mod actor_runtime_status;
@@ -30,11 +32,13 @@ pub(crate) mod connect_outbound;
 mod connect_peer;
 mod context;
 mod direct;
+pub(crate) mod host_health;
 pub(crate) use connect::ConnectService;
 mod context_projection;
 mod deepseek_runtime;
 mod diagnostics;
 pub(crate) mod dots_events;
+mod grok_webhook;
 mod group_copy;
 mod group_create_rollback;
 mod group_creation;
@@ -113,6 +117,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         connect_outbound::resolve_operation,
         runtime_state::resolve_operation,
         dots_events::resolve_operation,
+        grok_webhook::resolve_operation,
         maintenance::resolve_operation,
         im::resolve_operation,
         memory::resolve_operation,

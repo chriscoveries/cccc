@@ -127,7 +127,7 @@ Context or arbitrary remote tools. Other Groups do not inherit the connection.
    their **Member ID**.
 3. The sender opens the intended Group in native CCCC Web as an administrator,
    opens **Group connections** in that Group’s settings or sidebar **⋮** menu, and
-   chooses **Invite a member**. On the account website, check the selected Group,
+   chooses **Invite to connect**. On the account website, check the selected Group,
    paste the recipient's Member ID and submit the invitation.
 4. The recipient opens **Group connections** on the account website, expands
    **Accept in one of your instances**, and opens their chosen instance. Sign in
@@ -219,13 +219,20 @@ provide a relay, discover devices or change firewall/router settings.
    the copy, cancel that invitation and create another.
 4. On the joining instance, open the intended Group's **Direct connection** panel,
    choose **I have an invitation**, paste it and check the displayed instance,
-   Group and expiry, then click **Request connection**. This side does not need
-   to enable a listener or open an inbound port. Saving the request is not proof
+   Group and expiry, then click **Request connection**. The preview separates your
+   local Group from the inviting Group, with the host, address and expiry below.
+   The request button stays visible while you scroll through the invitation details.
+   This side does not need to enable a listener or open an inbound port. Saving
+   the request is not proof
    of reaching the other machine; the daemon contacts it and waits for approval.
+   An unreachable address, connection timeout or identity-check error appears as
+   **Connection failed · retrying**, with the cause under **Technical details**.
+   The status clears when connectivity recovers; a failed connection is not
+   treated as a closed record or removed from the panel.
    If the deadline passes before a result arrives, it keeps checking for approval
-   granted before the deadline. The panel shows **Checking the inviter’s approval**,
-   not confirmed expiry. You can cancel at any time. A confirmed refusal stops
-   retries; a previously approved connection can recover after the deadline.
+   granted before the deadline. Without a connection error, the panel shows
+   **Checking the inviter’s approval**, not confirmed expiry. You can cancel at
+   any time. A confirmed refusal stops retries; a previously approved connection can recover after the deadline.
 5. Return to the receiving panel. Check the requesting instance and Group,
    verify its identity with the other administrator, then approve it. This side
    explicitly shows that it is waiting for **your** approval. Both panels
@@ -242,15 +249,19 @@ restarts and closed browsers. Do not copy one running `CCCC_HOME` into a second
 simultaneously running instance: that copies its cryptographic identity.
 
 Use **Disconnect** on either side to revoke that Group pair. A revoked grant
-cannot be reopened; create a new invitation. Removing a closed record clears its
-route preference for future messages but does not redirect already queued work.
-An explicitly configured Direct pair never silently falls back to an account
-connection when offline. Stopping the listener affects all receiving Direct
-connections on that instance, while outgoing connections can continue. The
-receiving settings require confirmation before this shared stop. Deleting or
+cannot be reopened; create a new invitation. The Direct panel hides confirmed
+closed records and automatically removes them, including previously closed
+records. Offline connections and requests still awaiting the receiver's decision
+remain visible. No separate **Remove** action is needed.
+
+Removal clears the Direct route preference for future messages, allowing a
+separately authorized account connection to be used. Already queued work remains
+bound to its original connection. An offline Direct connection never silently
+falls back to an account connection. Stopping the listener affects all receiving
+Direct connections on that instance, while outgoing connections can continue.
+The receiving settings require confirmation before this shared stop. Deleting or
 resetting a Group removes its Direct records and frees connection slots, while
-keeping retirement IDs to prevent reuse. Closed
-invitations and connections remain available in the collapsed history section.
+keeping retirement IDs to prevent reuse.
 
 If listening fails, correct the reported bind/port error. If the peer stays
 offline, check that the joining machine can reach the advertised address and port,

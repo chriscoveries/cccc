@@ -17,7 +17,7 @@ import { parseHelpMarkdown, updateActorHelpNote } from "../../utils/helpMarkdown
 import { parsePrivateEnvSetText } from "../../utils/privateEnvInput";
 import { runtimeDetectionKey } from "../../utils/runtimeDetection";
 import { isGrokBotUrl } from "../../utils/webModelTargetDraft";
-import type { CreatedDotsNavigation } from "../../hooks/useAppTabState";
+import type { CreatedNativeActorNavigation } from "../../hooks/useAppTabState";
 import type { EditActorSavePayload, SaveActorProfileResult } from "./ActorConfigModal";
 import { resolveNewActorId } from "./actorCreateModel";
 import type { ActorSecretSaveChanges } from "./actorSecretManagerModel";
@@ -37,7 +37,7 @@ export function useAppModalActorActions(args: {
   setEditingActor: (actor: Actor | null) => void;
   closeModal: (modal: "addActor") => void;
   refreshActors: (groupId?: string, opts?: { includeUnread?: boolean }) => Promise<void>;
-  onDotsActorCreated?: (visit: CreatedDotsNavigation) => void;
+  onNativeActorCreated?: (visit: CreatedNativeActorNavigation) => void;
   editActorRuntime: SupportedRuntime;
   editActorCommand: string;
   editActorTitle: string;
@@ -72,7 +72,7 @@ export function useAppModalActorActions(args: {
     setEditingActor,
     closeModal,
     refreshActors,
-    onDotsActorCreated,
+    onNativeActorCreated,
     editActorRuntime,
     editActorCommand,
     editActorTitle,
@@ -344,9 +344,9 @@ export function useAppModalActorActions(args: {
     try {
       let actorSnapshot: Record<string, unknown> = savedActor as unknown as Record<string, unknown>;
 
-      // A new Grok route must be configured while stopped. Do this before
-      // changing runtime so an enabled Actor cannot start without its Bot URL.
-      if (grokBotUrl !== undefined) {
+      // Runtime conversion still requires stopping the old backend. An existing
+      // native Grok Actor applies its route under the daemon's admission lock.
+      if (grokBotUrl !== undefined && currentRuntime !== "grok_web_model") {
         const stopResp = await api.stopActor(targetGroupId, actorId);
         if (!stopResp.ok) throw new Error(`${stopResp.error.code}: ${stopResp.error.message}`);
         actorSnapshot = { ...actorSnapshot, enabled: false, running: false };
@@ -474,7 +474,10 @@ export function useAppModalActorActions(args: {
       }
 
       if (options.restart) {
-        const restartResp = await api.restartActor(targetGroupId, actorId);
+        const restartResp =
+          grokBotUrl !== undefined
+            ? await api.startActor(targetGroupId, actorId)
+            : await api.restartActor(targetGroupId, actorId);
         if (!restartResp.ok) {
           throw new Error(`${restartResp.error.code}: ${restartResp.error.message}`);
         }
@@ -482,7 +485,8 @@ export function useAppModalActorActions(args: {
 
       await refreshActors(targetGroupId);
       if (!isCurrentEdit()) return;
-      setEditingActor(null);
+      // Saving the Bot is the first connection step; keep Routine setup reachable.
+      if (grokBotUrl === undefined) setEditingActor(null);
 
       if (!options.restart && grokBotUrl === undefined) {
         const isRunning = Boolean(editingActor.running ?? editingActor.enabled ?? false);
@@ -792,15 +796,17 @@ export function useAppModalActorActions(args: {
         }
       }
 
+      const createdRuntime = (resp.result as { actor?: { runtime?: string } })?.actor?.runtime;
       if (
-        (resp.result as { actor?: { runtime?: string } })?.actor?.runtime === "chatgpt_dots" &&
+        (createdRuntime === "chatgpt_dots" || createdRuntime === "grok_web_model") &&
         useGroupStore.getState().selectedGroupId === creationGroupId &&
         useUIStore.getState().activeTab === creationActiveTab
       ) {
-        onDotsActorCreated?.({
+        onNativeActorCreated?.({
           groupId: creationGroupId,
           actorId: createdActorId,
           activeTab: creationActiveTab,
+          runtime: createdRuntime,
         });
       }
       closeModal("addActor");
