@@ -1,5 +1,4 @@
 use crate::models::{ModelRegistry, ModelSpec};
-use std::collections::BTreeMap;
 
 #[test]
 fn resolves_real_catalog_values() {
@@ -41,5 +40,4 @@ fn registry_default_empty() {
     let reg = ModelRegistry::new();
     assert!(reg.models.is_empty());
     assert_eq!(reg.get("ds1017"), None);
-}
 }
