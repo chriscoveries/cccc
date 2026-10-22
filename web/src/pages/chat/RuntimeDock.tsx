@@ -249,6 +249,18 @@ function RuntimeDockActorButtonView({
             isInspectorOpen ? (isDark ? "ring-white/10" : "ring-black/10") : null
           }
         />
+        {item.memoryMib !== null ? (
+          <span
+            className={classNames(
+              "pointer-events-none absolute -left-0.5 -bottom-0.5 z-20 flex h-[17px] min-w-[17px] items-center justify-center rounded-full px-1 text-[9px] font-semibold leading-none tabular-nums shadow-[0_8px_18px_-10px_rgba(15,23,42,0.7)]",
+              ringPresentation.queuedBadgeClassName,
+            )}
+            aria-hidden="true"
+            title={item.memoryLabel}
+          >
+            {item.memoryMib > 999 ? ">1G" : `${item.memoryMib}M`}
+          </span>
+        ) : null}
         {queuedCount > 0 ? (
           <span
             className={classNames(
@@ -285,6 +297,7 @@ function RuntimeDockActorButtonView({
         {item.actorLabel} · {item.runtime} · {statusLabel}
         {queuedLabel ? ` · ${queuedLabel}` : ""}
         {mailLabel ? ` · ${mailLabel}` : ""}
+        {item.memoryLabel ? ` · ${item.memoryLabel}` : ""}
       </span>
     </div>
   );
@@ -302,6 +315,8 @@ const RuntimeDockActorButton = memo(
     previous.item.runner === next.item.runner &&
     previous.item.webModelQueuedCount === next.item.webModelQueuedCount &&
     previous.item.unreadCount === next.item.unreadCount &&
+    previous.item.memoryMib === next.item.memoryMib &&
+    previous.item.memoryLabel === next.item.memoryLabel &&
     previous.isDark === next.isDark &&
     previous.isSmallScreen === next.isSmallScreen &&
     previous.isInspectorOpen === next.isInspectorOpen &&
