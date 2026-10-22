@@ -483,9 +483,6 @@ fn due_unread_notices(
         UnreadPass::Scheduled => delivery_timing_value(group, "reply_notice_after_seconds", 900),
         UnreadPass::IdleMailNow => 0,
     };
-    if mail_after <= 0 && reply_after <= 0 {
-        return Ok(None);
-    }
     // The foreman's digest also stays with the periodic tick.
     let mut digest = match pass {
         UnreadPass::Scheduled => Digest {
@@ -496,6 +493,10 @@ fn due_unread_notices(
         },
         UnreadPass::IdleMailNow => Digest::default(),
     };
+    // The digest is its own setting: it runs with Mail and reply notices off.
+    if mail_after <= 0 && reply_after <= 0 && digest.interval <= 0 {
+        return Ok(None);
+    }
     if digest.interval > 0 && !errors.is_empty() {
         digest.problems = errors_holding_tasks(home, group, errors)?;
     }
