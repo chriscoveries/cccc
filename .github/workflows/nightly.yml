@@ -1,22 +1,32 @@
 name: Nightly
 on:
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact source commit to build
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
   stage-binary:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      SOURCE_REF: ${{ inputs.source_ref }}
     steps:
+      - name: Require an immutable source commit
+        run: python3 -c 'import os,re; assert re.fullmatch("[0-9a-f]{40}",os.environ["SOURCE_REF"])'
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ inputs.source_ref }}
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Verify runtime source identity
-        run: git diff --exit-code c68a3f5ef874a2d7fb73b6658df33238c82a0102 HEAD -- . ':(exclude).github/workflows/nightly.yml'
+        run: python3 -c 'import os,subprocess; assert subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()==os.environ["SOURCE_REF"]'
       - name: Lint the workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - uses: actions/setup-node@v7
@@ -35,7 +45,7 @@ jobs:
           import hashlib,json,os,subprocess
           from pathlib import Path
           binary=Path('target/release/cccc')
-          record={'source_commit':'c68a3f5ef874a2d7fb73b6658df33238c82a0102','build_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'run_id':os.environ['GITHUB_RUN_ID'],'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'source_delta':'workflow-only; verified by git diff'}
+          record={'source_commit':os.environ['SOURCE_REF'],'build_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'workflow_commit':os.environ['GITHUB_SHA'],'workflow_ref':os.environ['GITHUB_WORKFLOW_REF'],'run_id':os.environ['GITHUB_RUN_ID'],'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'source_delta':'none; exact source commit checked out and verified'}
           Path('PROVENANCE.json').write_text(json.dumps(record,indent=2)+'\n')
           PYTHON
       - uses: actions/upload-artifact@v7
