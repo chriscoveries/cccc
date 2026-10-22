@@ -738,3 +738,86 @@ fn mail_left_unread_after_its_notice_reaches_the_foreman_in_a_digest() {
     std::thread::sleep(std::time::Duration::from_millis(2_100));
     assert!(tick().notifications.is_empty());
 }
+
+/// Mail for an Actor that is not running gets no notice, so the digest line
+/// for Mail left unread after its notice never comes either. Mail that has
+/// waited `mail_overdue_after_seconds` for such an Actor reaches the foreman
+/// in a digest, once, until the Actor runs again.
+#[test]
+fn mail_waiting_for_an_actor_that_is_not_running_reaches_the_foreman() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("stopped Mail digest", "").expect("group");
+    store
+        .mutate(&group.group_id, |group| {
+            group.state = GroupState::Active;
+            actors::add(group, Actor::new("lead"))?;
+            let mut peer = Actor::new("peer");
+            peer.enabled = false;
+            actors::add(group, peer)?;
+            group.extra.insert(
+                "delivery".into(),
+                json!({
+                    "mail_notice_after_seconds":60,
+                    "health_digest_interval_seconds":1,
+                    "mail_overdue_after_seconds":60,
+                }),
+            );
+            Ok(())
+        })
+        .expect("delivery settings");
+    let ledger_path = store.ledger_path(&group.group_id).expect("ledger");
+    let mut mail = Event::new("chat.message", &group.group_id);
+    mail.by = "lead".into();
+    mail.ts = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    mail.data = json!({"text":"rebase onto main","to":["peer"],"message_mode":"mail"})
+        .as_object()
+        .cloned()
+        .expect("Mail data");
+    ledger::append(&ledger_path, &mail).expect("append Mail");
+    let running = HashSet::from(["lead".to_owned()]);
+    let tick = |running: &HashSet<String>| {
+        automation::tick_group_for_delivery_actors(&home, &group.group_id, true, running)
+            .expect("tick")
+    };
+
+    let digest = tick(&running);
+    assert_eq!(digest.notifications.len(), 1, "no notice, one digest");
+    let digest = &digest.notifications[0];
+    assert_eq!(digest.data["kind"], "health_digest");
+    assert_eq!(digest.data["target_actor_id"], "lead");
+    assert_eq!(
+        digest.data["context"]["problem_keys"],
+        json!([format!("waiting:peer:{}", mail.id)])
+    );
+    let message = digest.data["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(
+            "peer: 1 Mail item(s) waiting, the oldest for 2m, and it is not running to read them."
+        ),
+        "{message}"
+    );
+    assert!(!message.contains("rebase onto main"), "{message}");
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    assert!(
+        tick(&running).notifications.is_empty(),
+        "a listed problem is not sent again"
+    );
+
+    // Running again, the peer is told about its Mail the usual way.
+    store
+        .mutate(&group.group_id, |group| {
+            actors::update(
+                group,
+                "peer",
+                json!({"enabled":true}).as_object().expect("patch"),
+            )
+        })
+        .expect("start peer");
+    let both = HashSet::from(["lead".to_owned(), "peer".to_owned()]);
+    let notices = tick(&both);
+    assert_eq!(notices.notifications.len(), 1);
+    assert_eq!(notices.notifications[0].data["kind"], "mail_notice");
+    assert_eq!(notices.notifications[0].data["target_actor_id"], "peer");
+}

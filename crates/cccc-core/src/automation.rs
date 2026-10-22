@@ -458,6 +458,15 @@ fn due_unread_notices(
     if eligible.is_empty() {
         return Ok(None);
     }
+    // No notice reaches an Actor that is stopped or not running; only the
+    // digest looks at its Mail.
+    let not_running = if digest.interval > 0 {
+        actors::visible(group)
+            .filter(|actor| !eligible.iter().any(|running| running.id == actor.id))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let ledger_path = store.ledger_path(&group.group_id)?;
     let cursors = inbox::cursors(home, &group.group_id)?;
     // Project only the notices while borrowing history. Release the index read
@@ -466,6 +475,7 @@ fn due_unread_notices(
         unread_notices(
             group,
             &eligible,
+            &not_running,
             events,
             positions,
             &cursors,
@@ -543,6 +553,7 @@ impl MailDelays<'_> {
 fn unread_notices(
     group: &GroupDoc,
     eligible: &[&cccc_contracts::Actor],
+    not_running: &[&cccc_contracts::Actor],
     events: &[Event],
     positions: &HashMap<String, usize>,
     cursors: &BTreeMap<String, String>,
@@ -697,7 +708,11 @@ fn unread_notices(
             .min()
     };
 
-    for actor in eligible {
+    let actors = eligible
+        .iter()
+        .map(|actor| (*actor, true))
+        .chain(not_running.iter().map(|actor| (*actor, false)));
+    for (actor, running) in actors {
         let mail_after = mail_delays.for_actor(&actor.id);
         let generation = generations.get(&actor.id).copied().unwrap_or(0);
         let cursor_position = cursors
@@ -766,6 +781,26 @@ fn unread_notices(
             if reply_after > 0 && now - started_at >= reply_after {
                 reply_due.push(source);
             }
+        }
+
+        // Not running, so no notice will go out: once its Mail has waited
+        // `mail_overdue`, the foreman should hear of it instead.
+        if !running {
+            if let Some(oldest) = mail_pending.first() {
+                let waited = now - timestamp(&oldest.ts, now);
+                if waited >= digest.mail_overdue {
+                    problems.push((
+                        format!("waiting:{}:{}", actor.id, oldest.id),
+                        format!(
+                            "{}: {} Mail item(s) waiting, the oldest for {}, and it is not running to read them.",
+                            actor.id,
+                            mail_pending.len(),
+                            duration_text(waited)
+                        ),
+                    ));
+                }
+            }
+            continue;
         }
 
         // Announced and still unread long after: the foreman should hear of it.
