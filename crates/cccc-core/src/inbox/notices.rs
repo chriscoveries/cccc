@@ -370,3 +370,10 @@ impl NoticeState {
         notices
     }
 }
+
+#[cfg(test)]
+impl NoticeState {
+    pub(crate) fn retained_mail_claims(&self) -> usize {
+        self.mail_claims.values().map(Vec::len).sum()
+    }
+}
