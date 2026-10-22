@@ -184,6 +184,21 @@ impl Session {
         Ok(Arc::clone(&self.writer))
     }
 
+    /// The writer for input into an Actor's terminal, handed out only while
+    /// the process still reports the Actor this session was started for. Every
+    /// Actor input path takes its writer here: deliveries and `terminal_write`
+    /// (`manager::write_locked`) and an attached terminal's keystrokes
+    /// (`input_writer_from_attachment`).
+    pub(crate) fn actor_input_writer(&mut self) -> Result<SharedPtyWriter, RuntimeError> {
+        let writer = self.input_writer()?;
+        crate::process_identity::verify(
+            self.status.pid,
+            &self.status.group_id,
+            &self.status.actor_id,
+        )?;
+        Ok(writer)
+    }
+
     pub(crate) fn input_gate(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.input_gate)
     }
@@ -230,7 +245,7 @@ impl Session {
         if !self.attachments.same_session(registry) || !registry.is_writer(attachment_id)? {
             return Ok(None);
         }
-        self.input_writer().map(Some)
+        self.actor_input_writer().map(Some)
     }
 
     pub(crate) fn attachment_writable(&self, attachment_id: u64) -> Result<bool, RuntimeError> {

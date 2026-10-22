@@ -282,7 +282,11 @@ fn tail_render_options(request: &DaemonRequest) -> (bool, bool) {
 }
 
 fn runtime_error(error: cccc_runtime::RuntimeError) -> OpError {
-    OpError::new("runtime_error", error.to_string())
+    let code = match error {
+        cccc_runtime::RuntimeError::IdentityMismatch { .. } => "terminal_identity_mismatch",
+        _ => "runtime_error",
+    };
+    OpError::new(code, error.to_string())
 }
 
 fn active_session_error(error: cccc_runtime::RuntimeError) -> OpError {

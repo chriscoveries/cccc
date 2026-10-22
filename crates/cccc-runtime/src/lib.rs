@@ -11,6 +11,7 @@ mod manager;
 mod manager_windows_tests;
 mod output;
 mod output_reader;
+mod process_identity;
 mod process_tree;
 mod pty_input;
 #[cfg(target_os = "linux")]
@@ -91,4 +92,12 @@ pub enum RuntimeError {
     Io(#[from] std::io::Error),
     #[error("runtime state lock is poisoned")]
     Poisoned,
+    #[error(
+        "runtime session {group_id}/{actor_id} runs a process that reports {found}; input refused"
+    )]
+    IdentityMismatch {
+        group_id: String,
+        actor_id: String,
+        found: String,
+    },
 }

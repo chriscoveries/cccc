@@ -274,7 +274,7 @@ fn write_locked(
     let writer = session
         .lock()
         .map_err(|_| RuntimeError::Poisoned)?
-        .input_writer()?;
+        .actor_input_writer()?;
     // The input gate preserves ordering; blocking IO must not hold the Session
     // lock required by status, stop and process cleanup. Pin this generation.
     match cancelled {
