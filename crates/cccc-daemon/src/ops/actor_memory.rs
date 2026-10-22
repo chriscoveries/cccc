@@ -27,7 +27,9 @@ use std::path::Path;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 /// Default seconds between readings; `0` turns sampling off for the Group.
-pub(crate) const DEFAULT_SAMPLE_SECONDS: u64 = 30;
+/// Ten seconds is the cadence the header refreshes at, so each poll shows a
+/// fresh reading rather than the same one three times.
+pub(crate) const DEFAULT_SAMPLE_SECONDS: u64 = 10;
 
 const MIB: u64 = 1024;
 
@@ -37,16 +39,23 @@ pub(crate) struct TreeReading {
     pub rss_mib: u64,
     pub pss_mib: Option<u64>,
     pub n_proc: u32,
+    /// `utime + stime` over the tree, in clock ticks. Kept so the next pass can
+    /// turn the difference into CPU; the ticks come from the `stat` reads the
+    /// tree walk already does, so CPU costs no extra read.
+    pub cpu_ticks: u64,
 }
 
 /// The last reading of one Actor, with when it was taken.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Sample {
     rss_mib: u64,
     pss_mib: Option<u64>,
     n_proc: u32,
+    cpu_pct: Option<f64>,
+    cpu_ticks: u64,
     sampled_at: String,
     sampled_epoch: i64,
+    sampled_millis: i64,
 }
 
 type Key = (String, String);
@@ -92,16 +101,28 @@ pub(crate) fn sample_group(home: &HomeLayout, group: &GroupDoc) {
         if !due {
             continue;
         }
+        let previous = samples()
+            .get(&key)
+            .map(|sample| (sample.cpu_ticks, sample.sampled_millis));
         match sample_tree(Path::new("/proc"), pid) {
             Ok(reading) => {
+                let now_millis = chrono::Utc::now().timestamp_millis();
+                let cpu_pct = cpu_percent(
+                    reading.cpu_ticks,
+                    previous.map(|(ticks, _)| ticks),
+                    previous.map_or(0, |(_, millis)| now_millis - millis),
+                );
                 samples().insert(
                     key,
                     Sample {
                         rss_mib: reading.rss_mib,
                         pss_mib: reading.pss_mib,
                         n_proc: reading.n_proc,
+                        cpu_pct,
+                        cpu_ticks: reading.cpu_ticks,
                         sampled_at: cccc_contracts::utc_now(),
                         sampled_epoch: epoch,
+                        sampled_millis: now_millis,
                     },
                 );
                 super::actor_memory_trend::record_actor(
@@ -139,11 +160,61 @@ pub(crate) fn row_fields(group_id: &str, actor_id: &str) -> Map<String, Value> {
         number(sample.as_ref().map(|sample| u64::from(sample.n_proc))),
     );
     fields.insert(
+        "cpu_pct".into(),
+        sample
+            .as_ref()
+            .and_then(|sample| sample.cpu_pct)
+            .map_or(Value::Null, |pct| Value::from((pct * 10.0).round() / 10.0)),
+    );
+    fields.insert(
         "mem_sampled_at".into(),
         sample.map_or(Value::Null, |sample| Value::from(sample.sampled_at)),
     );
     fields
 }
+
+/// The Group's totals over the readings it holds: the sum of every running
+/// Actor's tree, and how many Actors contributed. PSS is a sum only when every
+/// contributing Actor had one, because a partial sum understates the Group.
+pub(crate) fn group_totals(group_id: &str) -> (Option<u64>, Option<u64>, u64) {
+    let readings: Vec<Sample> = samples()
+        .iter()
+        .filter(|((group, _), _)| group.as_str() == group_id)
+        .map(|(_, sample)| sample.clone())
+        .collect();
+    if readings.is_empty() {
+        return (None, None, 0);
+    }
+    let rss = readings.iter().map(|sample| sample.rss_mib).sum();
+    let pss = readings
+        .iter()
+        .map(|sample| sample.pss_mib)
+        .sum::<Option<u64>>();
+    (Some(rss), pss, readings.len() as u64)
+}
+
+/// Percent of one core the tree used between two readings, as `top` shows it.
+/// No previous reading, a clock that did not advance, or a tick count that went
+/// backwards (the tree was restarted) leaves the figure absent: a delta without
+/// a baseline is not zero load.
+pub(crate) fn cpu_percent(
+    ticks: u64,
+    previous_ticks: Option<u64>,
+    elapsed_millis: i64,
+) -> Option<f64> {
+    let previous = previous_ticks?;
+    if elapsed_millis <= 0 || ticks < previous {
+        return None;
+    }
+    let consumed = (ticks - previous) as f64 / CLOCK_TICKS_PER_SECOND;
+    Some(consumed / (elapsed_millis as f64 / 1000.0) * 100.0)
+}
+
+/// The kernel's `USER_HZ`: the rate `utime`/`stime` are counted at. Linux fixes
+/// it at 100 for every architecture this daemon runs on, which is what `top`
+/// divides by too, so the figures agree with a tool the Operator can compare
+/// against.
+const CLOCK_TICKS_PER_SECOND: f64 = 100.0;
 
 /// Drop every reading of one Group.
 pub(crate) fn forget(group_id: &str) {
@@ -164,7 +235,13 @@ fn is_due(last: i64, now: i64, cadence: u64) -> bool {
 /// the root process does not exist. Members that exit during the walk are left
 /// out; an unreadable `smaps_rollup` makes `pss_mib` absent rather than partial.
 pub(crate) fn sample_tree(root: &Path, pid: u32) -> io::Result<TreeReading> {
-    let members = tree_members(root, pid)?;
+    let procs = scan_proc(root)?;
+    let members = tree_members_in(&procs, pid)?;
+    let cpu_ticks = members
+        .iter()
+        .filter_map(|member| procs.get(member))
+        .map(|proc_stat| proc_stat.ticks)
+        .sum();
     let root_dir = root.join(pid.to_string());
     let root_status = std::fs::read_to_string(root_dir.join("status"))?;
     let mut rss_kib = parse_kib(&root_status, "VmRSS:").unwrap_or(0);
@@ -186,14 +263,33 @@ pub(crate) fn sample_tree(root: &Path, pid: u32) -> io::Result<TreeReading> {
         rss_mib: rss_kib / MIB,
         pss_mib: pss_kib.map(|kib| kib / MIB),
         n_proc: counted,
+        cpu_ticks,
     })
 }
 
 /// `pid` and every descendant, root first. A pid is a member only when its
 /// parent chain reaches `pid`, so unrelated processes in the same `/proc` are
 /// never summed into another Actor's figure.
+///
+/// Only the tests take a directory; the daemon reads `/proc` through
+/// `sample_tree`, which keeps the one scan for both the member list and the
+/// tick total.
+#[cfg(test)]
 fn tree_members(root: &Path, pid: u32) -> io::Result<Vec<u32>> {
-    let mut parents = BTreeMap::new();
+    let procs = scan_proc(root)?;
+    tree_members_in(&procs, pid)
+}
+
+/// One `/proc/<pid>/stat` line, reduced to the two fields the daemon needs.
+#[derive(Debug, Clone, Copy)]
+struct ProcStat {
+    ppid: u32,
+    ticks: u64,
+}
+
+/// Every process the directory shows, from one pass of `stat` reads.
+fn scan_proc(root: &Path) -> io::Result<BTreeMap<u32, ProcStat>> {
+    let mut procs = BTreeMap::new();
     for entry in std::fs::read_dir(root)? {
         let Ok(entry) = entry else {
             continue;
@@ -208,10 +304,18 @@ fn tree_members(root: &Path, pid: u32) -> io::Result<Vec<u32>> {
         let Ok(stat) = std::fs::read_to_string(root.join(child.to_string()).join("stat")) else {
             continue;
         };
-        if let Some(parent) = parse_ppid(&stat) {
-            parents.insert(child, parent);
+        if let Some(proc_stat) = parse_stat(&stat) {
+            procs.insert(child, proc_stat);
         }
     }
+    Ok(procs)
+}
+
+fn tree_members_in(procs: &BTreeMap<u32, ProcStat>, pid: u32) -> io::Result<Vec<u32>> {
+    let parents: BTreeMap<u32, u32> = procs
+        .iter()
+        .map(|(child, proc_stat)| (*child, proc_stat.ppid))
+        .collect();
     if !parents.contains_key(&pid) {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -237,15 +341,21 @@ fn read_pss(dir: &Path) -> Option<u64> {
         .and_then(|text| parse_kib(&text, "Pss:"))
 }
 
-/// The parent pid from a `/proc/<pid>/stat` line: field 4, after the
-/// parenthesised command name (which may itself contain spaces or brackets).
-fn parse_ppid(stat: &str) -> Option<u32> {
-    let close = stat.rfind(')')?;
-    stat.get(close + 1..)?
+/// The parent pid and the CPU ticks from a `/proc/<pid>/stat` line, read after
+/// the parenthesised command name (which may itself contain spaces or
+/// brackets): field 4 is the parent, fields 14 and 15 are `utime` and `stime`.
+fn parse_stat(stat: &str) -> Option<ProcStat> {
+    let fields: Vec<&str> = stat
+        .get(stat.rfind(')')? + 1..)?
         .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
+        .collect();
+    let ppid = fields.get(1)?.parse().ok()?;
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    Some(ProcStat {
+        ppid,
+        ticks: utime.saturating_add(stime),
+    })
 }
 
 /// The first `key` value in kB from a `/proc` file whose lines read
@@ -286,6 +396,71 @@ mod tests {
         assert_eq!(reading.n_proc, 5, "the tree has five processes");
         assert_eq!(reading.rss_mib, 336, "344896 kB of VmRSS over the tree");
         assert_eq!(reading.pss_mib, Some(136), "139715 kB of Pss over the tree");
+    }
+
+    /// Captured from this host on 2026-10-22 (see the fixture README): the
+    /// cccc process tree, 161 processes, read six seconds apart.
+    fn health_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/actor-health")
+    }
+
+    fn ticks_in(path: &std::path::Path) -> u64 {
+        std::fs::read_to_string(path)
+            .expect("captured ticks")
+            .lines()
+            .map(|line| {
+                let mut fields = line.split('\t');
+                fields.next();
+                fields.next();
+                let utime: u64 = fields.next().expect("utime").parse().expect("utime");
+                let stime: u64 = fields.next().expect("stime").parse().expect("stime");
+                utime + stime
+            })
+            .sum()
+    }
+
+    /// The CPU figure is the difference between two real readings of one tree,
+    /// divided by the wall-clock time between them.
+    #[test]
+    fn cpu_is_the_difference_between_two_real_readings_of_a_tree() {
+        let first = ticks_in(&health_fixture().join("stat-t1.tsv"));
+        let second = ticks_in(&health_fixture().join("stat-t2.tsv"));
+        assert_eq!(first, 1_236_962, "captured ticks at the first reading");
+        assert_eq!(second, 1_237_785, "captured ticks 6.027 s later");
+        let percent = cpu_percent(second, Some(first), 6_027).expect("a delta");
+        assert!(
+            (percent - 136.6).abs() < 1.0,
+            "823 ticks over 6.027 s is about 137% of one core, got {percent}"
+        );
+    }
+
+    #[test]
+    fn a_reading_with_no_earlier_one_has_no_percentage() {
+        assert_eq!(
+            cpu_percent(1_236_962, None, 0),
+            None,
+            "a delta without a baseline is not zero load"
+        );
+        assert_eq!(
+            cpu_percent(1_236_962, Some(1_237_785), 6_027),
+            None,
+            "ticks that went backwards mean the tree restarted"
+        );
+        assert_eq!(
+            cpu_percent(1_236_962, Some(1_236_962), 6_000),
+            Some(0.0),
+            "an idle tree is zero, which is a real figure"
+        );
+    }
+
+    #[test]
+    fn a_stat_line_yields_its_parent_and_its_cpu_ticks() {
+        // The daemon's own captured /proc/<pid>/stat line.
+        let stat = std::fs::read_to_string(health_fixture().join("proc-stat-2789094"))
+            .expect("captured stat");
+        let parsed = parse_stat(&stat).expect("a stat line");
+        assert_eq!(parsed.ppid, 1, "the daemon is a child of init here");
+        assert!(parsed.ticks > 0, "a running process has used CPU");
     }
 
     #[test]

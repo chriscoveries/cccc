@@ -3405,6 +3405,43 @@ Result:
 }
 ```
 
+#### `group_health`
+
+How much RAM a Group holds and how loaded the host is: the numbers behind the
+header's running chip and the Actor list in its pulldown. Read only, and display
+only — nothing in delivery, idling, dispatch or health reads it, and no Actor is
+stopped because of a figure here.
+
+Args:
+```ts
+{ group_id: string }
+```
+
+Result:
+```ts
+{
+  group_id: string
+  rss_mib: number | null // the Group's running Actors' process trees, summed; null when no Actor has a reading
+  pss_mib: number | null // the same sum, only when every contributing Actor had a PSS reading
+  actors_running: number // running Actors in the Group
+  actors_sampled: number // how many of them contributed a reading
+  host_mem_total_mib: number | null
+  host_mem_available_mib: number | null // MemAvailable, capped at the total
+  host_loadavg_1m: number | null
+  host_loadavg_5m: number | null
+  host_loadavg_15m: number | null
+  host_cpu_count: number | null // online CPUs, the divisor the load average uses
+  sampled_at: string // rfc3339, when the host figures were read
+}
+```
+
+Notes:
+- A figure the kernel did not give is `null`, never `0`: `0` free memory would
+  read as a dying host.
+- `cpu_pct` on an Actor row is the percentage of one core its process tree used
+  between two readings, as `top` shows it — not divided by the CPU count — and
+  is `null` when there is no earlier reading to subtract.
+
 
 #### `actor_add`
 
