@@ -35,9 +35,59 @@ fn project_structured_event(session: &Session, message: &Value) {
             data.insert("kind".into(), json!("approval"));
             "headless.activity.updated"
         }
+        "cccc/toolActivity" => match tool_activity(session, params, turn_id) {
+            Some((kind, activity)) => {
+                data.extend(activity);
+                kind
+            }
+            None => return,
+        },
         _ => return,
     };
     emit(session, kind, data);
+}
+
+/// A tool call the adapter identified as started or finished. Anonymous
+/// progress titles stay out of the journal.
+fn tool_activity(
+    session: &Session,
+    params: &Value,
+    turn_id: &str,
+) -> Option<(&'static str, Map<String, Value>)> {
+    let item_id = params["itemId"].as_str().filter(|id| !id.is_empty())?;
+    let phase = params["phase"].as_str()?;
+    let tool = params["title"].as_str().unwrap_or_default();
+    let item_type = params["itemType"].as_str().unwrap_or("toolCall");
+    let detail = session.managed.safe_diagnostic(&std::io::Error::other(
+        params["detail"].as_str().unwrap_or_default(),
+    ));
+    let (kind, status, summary) = match phase {
+        "started" => ("headless.activity.started", "started", tool.to_owned()),
+        "completed" => ("headless.activity.completed", "completed", tool.to_owned()),
+        "failed" => (
+            "headless.activity.completed",
+            "completed",
+            format!("{tool} failed"),
+        ),
+        _ => return None,
+    };
+    let mut activity = Map::from_iter([
+        ("activity_id".into(), json!(format!("{turn_id}:{item_id}"))),
+        ("kind".into(), json!("tool")),
+        ("status".into(), json!(status)),
+        ("summary".into(), json!(summary)),
+        ("tool_name".into(), json!(tool)),
+        ("raw_item_type".into(), json!(item_type)),
+    ]);
+    if !detail.is_empty() {
+        let field = if item_type == "commandExecution" {
+            "command"
+        } else {
+            "detail"
+        };
+        activity.insert(field.into(), json!(detail));
+    }
+    Some((kind, activity))
 }
 
 fn respond_unsupported_server_request(session: &Session, message: &Value) {
@@ -206,6 +256,40 @@ fn complete_turn(session: &Session, message: &Value) {
         // A completion for some other turn is not this session's to settle.
         return;
     };
+    if !turn_id.is_empty()
+        && matches!(
+            session.managed.runtime(),
+            cccc_contracts::ActorRuntime::Pi | cccc_contracts::ActorRuntime::Claude
+        )
+    {
+        let usage = &message["params"]["turn"]["usage"];
+        let expected = if session.managed.runtime() == cccc_contracts::ActorRuntime::Pi {
+            "pi_rpc"
+        } else {
+            "claude_transcript"
+        };
+        if usage["source"] == expected {
+            // This is the same managed task authority projected by effective_active_task_id.
+            // Read it before settlement clears the status; never infer it from assigned cards.
+            let task = session
+                .status
+                .lock()
+                .ok()
+                .and_then(|state| state.task_id.clone());
+            if let Err(error) = super::super::turn_usage::record(
+                &session.home,
+                &session.group_id,
+                &session.actor_id,
+                session.managed.generation(),
+                &turn_id,
+                task.as_deref(),
+                usage,
+                &settled.status,
+            ) {
+                tracing::warn!(%error, group_id = %session.group_id, actor_id = %session.actor_id, "failed to append turn usage");
+            }
+        }
+    }
     active_turn.take();
     // A completed turn is not automatically a successful turn. Providers report
     // failure out of band (ACP stopReason, a model API error surfaced as an

@@ -116,6 +116,17 @@ pub struct TailArgs {
     pub follow: bool,
 }
 
+/// Read provider-reported usage for settled managed turns.
+#[derive(Debug, Args)]
+pub struct UsageArgs {
+    #[arg(long = "group")]
+    pub group_id: Option<String>,
+    #[arg(long = "actor")]
+    pub actor_id: Option<String>,
+    #[arg(long, default_value_t = 50)]
+    pub limit: u64,
+}
+
 #[derive(Debug, Args)]
 pub struct InboxArgs {
     #[arg(long = "group")]
