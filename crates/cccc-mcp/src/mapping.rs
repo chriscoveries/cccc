@@ -568,6 +568,38 @@ mod tests {
     }
 
     #[test]
+    fn task_decide_mapping_answers_the_decision_request() {
+        let request = json!({"question":"Ship on Friday?","options":["yes","no"]});
+        let create = json!({
+            "action":"create","group_id":"g_test","actor_id":"lead","by":"lead",
+            "title":"release day","decision_request":request
+        })
+        .as_object()
+        .cloned()
+        .expect("create args");
+        let (_, args) = daemon_call("cccc_task", create).expect("create mapping");
+        assert_eq!(args["ops"][0]["decision_request"], request);
+
+        let decide = json!({
+            "action":"decide","group_id":"g_test","actor_id":"peer","by":"peer",
+            "task_id":"T001","choice":"yes","text":"Ship it.","source":"chat","title":"ignored"
+        })
+        .as_object()
+        .cloned()
+        .expect("decide args");
+        let (op, args) = daemon_call("cccc_task", decide).expect("decide mapping");
+        assert_eq!(op, "context_sync");
+        assert_eq!(args["by"], "peer");
+        assert_eq!(
+            args["ops"],
+            json!([{
+                "op":"task.decide","task_id":"T001","choice":"yes","text":"Ship it.",
+                "source":"chat"
+            }])
+        );
+    }
+
+    #[test]
     fn actor_notes_actions_map_to_the_daemon_owned_help_contract() {
         for (action, expected) in [
             ("get", "actor_notes_get"),
