@@ -193,6 +193,24 @@ pub fn tick_group_with_idle_actors(
     )
 }
 
+/// Red reference only: the errors are ignored.
+pub fn tick_group_with_runtime_errors(
+    home: &HomeLayout,
+    group_id: &str,
+    include_unread: bool,
+    delivery_actor_ids: &HashSet<String>,
+    idle_actor_ids: &HashSet<String>,
+    _errors: &BTreeMap<String, String>,
+) -> io::Result<TickResult> {
+    tick_group_with_idle_actors(
+        home,
+        group_id,
+        include_unread,
+        delivery_actor_ids,
+        idle_actor_ids,
+    )
+}
+
 /// Announce waiting Mail right away to `idle_actor_ids`, the recipients of a
 /// Mail just written that are idle now, instead of on the next unread tick.
 /// Only Mail notices are issued, under the tick's rules: one notice per unread
