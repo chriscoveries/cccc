@@ -13,9 +13,20 @@ struct Fingerprint {
 #[derive(Default)]
 pub struct Publisher {
     previous: BTreeMap<String, BTreeMap<String, Fingerprint>>,
+    /// The daemon's dispatch locks. Without them (tests) every tick may record
+    /// actor health; with them a tick records it only once runtimes are
+    /// restored and while no operation holds the Group.
+    locks: Option<crate::dispatch_concurrency::DispatchLocks>,
 }
 
 impl Publisher {
+    pub fn with_locks(locks: crate::dispatch_concurrency::DispatchLocks) -> Self {
+        Self {
+            previous: BTreeMap::new(),
+            locks: Some(locks),
+        }
+    }
+
     pub fn tick(&mut self, home: &HomeLayout) -> io::Result<()> {
         let store = GroupStore::new(home.clone())?;
         let groups = store.list()?;
@@ -24,22 +35,44 @@ impl Publisher {
             .map(|group| group.group_id.clone())
             .collect::<BTreeSet<_>>();
         self.previous.retain(|group_id, _| known.contains(group_id));
+        super::actor_health::retain_groups(&known);
         for meta in groups {
+            let permit = self
+                .locks
+                .as_ref()
+                .map(|locks| locks.try_group_read(&meta.group_id));
             let Ok(group) = store.load(&meta.group_id) else {
                 continue;
             };
-            self.publish_group(&store, &group);
+            let current = self.publish_group(&store, &group);
+            let emit = match &permit {
+                None => true,
+                Some(permit) => permit.is_some() && super::runtime_restore::settled(),
+            };
+            super::actor_health::tick_group(&store, &group, &current, emit);
         }
         Ok(())
     }
 
-    fn publish_group(&mut self, store: &GroupStore, group: &GroupDoc) {
+    /// Publish the Group's activity if it changed. Returns, for each running
+    /// Actor, (running, whether its runtime reports its working state).
+    fn publish_group(
+        &mut self,
+        store: &GroupStore,
+        group: &GroupDoc,
+    ) -> BTreeMap<String, (bool, bool)> {
         let mut payloads = Vec::new();
         let mut snapshot = BTreeMap::new();
+        let mut current = BTreeMap::new();
         for actor in &group.actors {
             if let Some(payload) = running_payload(store.home(), group, actor) {
                 let runner = text(&payload, "runner_effective", "pty");
                 let state = text(&payload, "effective_working_state", "waiting");
+                let reason = text(&payload, "effective_working_reason", "");
+                current.insert(
+                    actor.id.clone(),
+                    (true, super::working_state::reports_state(&reason)),
+                );
                 snapshot.insert(actor.id.clone(), Fingerprint { state, runner });
                 payloads.push(Value::Object(payload));
             }
@@ -50,7 +83,7 @@ impl Publisher {
             .cloned()
             .unwrap_or_default();
         if previous == snapshot {
-            return;
+            return current;
         }
         for (actor_id, fingerprint) in &previous {
             if !snapshot.contains_key(actor_id) {
@@ -87,6 +120,7 @@ impl Publisher {
                 "failed to append actor.activity"
             ),
         }
+        current
     }
 }
 

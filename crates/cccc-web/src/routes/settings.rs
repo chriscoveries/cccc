@@ -63,6 +63,11 @@ fn projected_settings(group: &Value) -> Value {
                 "reply_notice_after_seconds",
             ),
             (
+                "ignored_delivery_after_seconds",
+                "delivery",
+                "ignored_delivery_after_seconds",
+            ),
+            (
                 "terminal_transcript_visibility",
                 "terminal_transcript",
                 "visibility",
@@ -109,6 +114,7 @@ fn projected_settings(group: &Value) -> Value {
         "mail_notice_after_seconds":1800,
         "mail_notice_idle_after_seconds":60,
         "reply_notice_after_seconds":900,
+        "ignored_delivery_after_seconds":1800,
         "terminal_transcript_visibility":"foreman",
         "terminal_transcript_notify_tail":true,
         "terminal_transcript_notify_lines":20,

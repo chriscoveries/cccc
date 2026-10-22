@@ -40,8 +40,9 @@ async fn run_with_restore(home: HomeLayout, restore: RuntimeRestoreSpawner) -> R
     let mut lifecycle = DaemonLifecycle::new(paths, lock);
     std::fs::write(&lifecycle.paths.pid, format!("{}\n", std::process::id()))?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let actor_activity = ActorActivityService::start(lifecycle.paths.home.clone());
     let dispatch_locks = DispatchLocks::default();
+    let actor_activity =
+        ActorActivityService::start(lifecycle.paths.home.clone(), dispatch_locks.clone());
 
     let result = if use_tcp() {
         serve_tcp(

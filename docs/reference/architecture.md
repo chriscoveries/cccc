@@ -247,6 +247,7 @@ layer diagrams.
 | `actor.new_session` | Start a fresh provider session for an actor |
 | `actor.remove` | Remove an actor |
 | `actor.activity` | Runtime activity/status snapshot |
+| `actor.health` | An Actor's health bucket changed |
 | `context.sync` | Context/control-plane sync event |
 | `chat.message` | Chat message |
 | `chat.cross_group_receipt` | Source-group receipt that links a cross-group send to its destination event |
