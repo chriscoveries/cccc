@@ -440,6 +440,10 @@ pub(crate) fn idle_generation(group_id: &str, actor_id: &str) -> Option<String> 
     // Completion can hold active_turn while it appends usage or updates a
     // task. Dispatch calls this under the context lock, so contention is
     // Unknown, never a blocking lock acquisition in the reverse order.
+    // Admission retains this mutex until the provider accepts or rejects the
+    // input. Its turn/started event may not have arrived yet, so a pending
+    // submission is Unknown even if the last published status was idle.
+    let _admission = item.startup_prompt.try_lock().ok()?;
     let turn = item.active_turn.try_lock().ok()?;
     let state = item.status.try_lock().ok()?;
     (turn.is_none() && state.status == "idle" && item.running())
