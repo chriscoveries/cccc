@@ -435,31 +435,70 @@ pub fn ready_for_mail_notice(group_id: &str, actor_id: &str) -> bool {
         .is_some_and(|item| item.running() && item.ready_for_mail_notice())
 }
 
-/// Automatic task work requires an accepted delivery-to-turn receipt as well
-/// as turn state, so its spend can be attributed without guessing from output.
-pub(crate) fn supports_task_dispatch(group_id: &str, actor_id: &str) -> bool {
+/// A dispatch snapshot comes from one registered session generation. Missing
+/// authority and contention are explicit Unknown exclusions, never idle.
+pub(crate) fn task_dispatch_state(group_id: &str, actor_id: &str) -> Result<String, &'static str> {
     lookup(&(group_id.to_owned(), actor_id.to_owned()))
-        .is_some_and(|item| item.managed.structured_only())
+        .ok_or("no_managed_turn_authority")?
+        .task_dispatch_state()
 }
 
-/// Dispatch takes readiness and generation from the same registered owner.
-/// A second registry lookup could observe a replacement session instead.
 pub(crate) fn idle_generation(group_id: &str, actor_id: &str) -> Option<String> {
-    let item = lookup(&(group_id.to_owned(), actor_id.to_owned()))?;
-    if !item.managed.structured_only() || !item.managed.turn_admissions_confirmed() {
-        return None;
+    task_dispatch_state(group_id, actor_id).ok()
+}
+
+impl Session {
+    pub(super) fn task_dispatch_state(&self) -> Result<String, &'static str> {
+        if !self.managed.structured_only() {
+            return Err("no_delivery_turn_authority");
+        }
+        let admission = self
+            .admission
+            .try_lock()
+            .map_err(|_| "turn_admission_pending")?;
+        self.task_dispatch_state_under_admission(&admission)
     }
-    // Completion can hold active_turn while it appends usage or updates a
-    // task. Dispatch calls this under the context lock, so contention is
-    // Unknown, never a blocking lock acquisition in the reverse order.
-    // Admission retains this mutex until the provider accepts or rejects the
-    // input. Its turn/started event may not have arrived yet, so a pending
-    // submission is Unknown even if the last published status was idle.
-    let _admission = item.startup_prompt.try_lock().ok()?;
-    let turn = item.active_turn.try_lock().ok()?;
-    let state = item.status.try_lock().ok()?;
-    (turn.is_none() && state.status == "idle" && item.running())
-        .then(|| item.managed.generation().to_owned())
+
+    /// The caller already owns this session's delivery admission guard. All
+    /// other locks are nonblocking: completion may need the context lock that
+    /// dispatch holds. The reader never takes the admission/input guard.
+    pub(super) fn task_dispatch_state_under_admission(
+        &self,
+        _admission: &std::sync::MutexGuard<'_, ()>,
+    ) -> Result<String, &'static str> {
+        if !self.managed.structured_only() {
+            return Err("no_delivery_turn_authority");
+        }
+        if !self.managed.turn_admissions_confirmed() {
+            return Err("turn_admission_unconfirmed");
+        }
+        let _input = self
+            .startup_prompt
+            .try_lock()
+            .map_err(|_| "turn_admission_pending")?;
+        let turn = self
+            .active_turn
+            .try_lock()
+            .map_err(|_| "turn_authority_unknown")?;
+        let deliveries = self
+            .delivery_tasks
+            .try_lock()
+            .map_err(|_| "turn_authority_unknown")?;
+        // Accepted is not yet observed. No timeout may turn this missing
+        // authority into idle; the start handler retains its binding until
+        // ActiveTurn publication, so there is no empty-map publication gap.
+        if !deliveries.is_empty() {
+            return Err("delivery_turn_not_observed");
+        }
+        let state = self
+            .status
+            .try_lock()
+            .map_err(|_| "turn_authority_unknown")?;
+        if turn.is_some() || state.status != "idle" || !self.running() {
+            return Err("not_idle_or_not_running");
+        }
+        Ok(self.managed.generation().to_owned())
+    }
 }
 
 fn submit_admitted(
@@ -473,6 +512,10 @@ fn submit_admitted(
     // One delivery is admitted at a time per Actor, so a card cannot be claimed
     // for a turn another delivery started.
     let _admission = item.begin_admission();
+    // A queued outbox item must not reuse readiness from before this wait.
+    if item.defer_admitted_task_dispatch(source_events, &_admission) {
+        return BatchSubmission::Deferred;
+    }
     let Some(delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
         home,
         group,
