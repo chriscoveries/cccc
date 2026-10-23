@@ -121,6 +121,22 @@ pub(super) fn annotate_tasks(
                 .unwrap_or(60_000)
         })
         .min();
+    let disabled_reason = if cooldown.is_none() {
+        Some("dispatch_disabled")
+    } else if !matches!(group.state, GroupState::Active | GroupState::Idle) {
+        Some("group_not_running")
+    } else {
+        None
+    };
+    if let Some(reason) = disabled_reason {
+        // Opting out must not make ordinary task reads depend on a dispatch
+        // state file, catalog, or running provider.
+        for task in &mut doc.tasks {
+            task.insert("dispatch_eligible".into(), json!(false));
+            task.insert("dispatch_block_reason".into(), json!(reason));
+        }
+        return Ok(());
+    }
     let registry = ModelRegistry::load_from_path(std::path::Path::new(super::MODELS_PATH));
     let candidates = actors::visible(group)
         .filter_map(|actor| {
@@ -198,6 +214,13 @@ mod tests {
         let contexts = ContextStore::new(home.clone()).expect("contexts");
         let stored = contexts.load(&group.group_id).expect("original");
         let mut view = stored.clone();
+        let state_dir = store.state_dir(&group.group_id).expect("state");
+        std::fs::create_dir_all(&state_dir).expect("state directory");
+        std::fs::write(
+            state_dir.join("task-dispatch.json"),
+            b"invalid dispatch state",
+        )
+        .expect("unusable opted-out state");
         annotate_tasks(&home, &group, &mut view).expect("read annotation");
         assert_eq!(view.tasks[0]["dispatch_eligible"], false);
         assert_eq!(view.tasks[0]["dispatch_block_reason"], "dispatch_disabled");
