@@ -206,12 +206,11 @@ fn handle_managed_turn_started(session: &Session, message: &Value) -> bool {
     let Some(turn_id) = turn_id else {
         return false;
     };
-    // Read the pending card before taking the turn lock, and hand it to the turn
-    // only when this message is what adopts it.
-    let pending = session.turn_task();
-    match observe_started_turn(&session.active_turn, turn_id, pending) {
+    // The card is looked up by the turn id the runtime reported, so this event
+    // binds its own delivery even when it arrives long after admission.
+    let task = session.take_turn_task(turn_id);
+    match observe_started_turn(&session.active_turn, turn_id, task) {
         StartedTurnDisposition::Adopted => {
-            session.set_turn_task(None);
             session.set_status("working", Some(turn_id.to_owned()));
             true
         }
@@ -306,8 +305,9 @@ fn complete_turn(session: &Session, message: &Value) {
             }
         }
     }
-    // The batch is spent: whatever task it named belonged to this turn, not the next.
-    session.set_turn_task(None);
+    // The batch is spent: its card belonged to this turn, and a binding no started
+    // event ever claimed is dropped so the map cannot grow.
+    session.forget_turn_task(&turn_id);
     active_turn.take();
     // A completed turn is not automatically a successful turn. Providers report
     // failure out of band (ACP stopReason, a model API error surfaced as an

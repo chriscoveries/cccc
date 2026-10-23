@@ -44,7 +44,7 @@ impl Fixture {
             stop_lock: Mutex::new(()),
             startup_prompt: Mutex::new(None),
             active_turn: Mutex::new(None),
-            pending_turn_task: Mutex::new(None),
+            turn_tasks: Mutex::new(std::collections::HashMap::new()),
         };
         Self {
             session,
@@ -200,12 +200,12 @@ async fn captured_pi_and_claude_turn_usage_is_committed_once_and_readable() {
     }
 }
 
-/// A second delivery that arrives while a turn is running cannot take that turn
-/// over: the card is bound when the runtime reports the turn started, so a batch
-/// that ends up deferred — or refused — after naming its own card leaves the
-/// running turn's charge where it was.
+/// A card bound to the turn the runtime accepted stays that turn's, even when the
+/// started event is observed only after another delivery has been admitted: the
+/// binding is looked up by turn id, so nothing arriving in between can answer for
+/// it. A batch that is deferred never gets a binding at all.
 #[tokio::test]
-async fn a_deferred_batch_does_not_rename_the_running_turns_card() {
+async fn a_turn_keeps_its_card_even_when_it_is_observed_after_another_delivery() {
     use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
     use cccc_contracts::ActorRuntime;
 
@@ -247,7 +247,20 @@ async fn a_deferred_batch_does_not_rename_the_running_turns_card() {
         .expect("task id")
         .to_owned();
 
-    f.session.set_turn_task(Some(running_card.clone()));
+    let turn_id = messages
+        .iter()
+        .find_map(|message| message.pointer("/params/turn/id").and_then(Value::as_str))
+        .expect("captured turn id")
+        .to_owned();
+
+    // The runtime accepted A and named its turn, so A's delivery binds its card.
+    f.session
+        .bind_turn_task(&turn_id, Some(running_card.clone()));
+    // Before A's started event is observed, a second delivery is admitted and its
+    // own turn accepted, binding its card. It is the later binding, and it must
+    // not become A's.
+    f.session
+        .bind_turn_task("captured-turn-b", Some(deferred_card.clone()));
     for message in &messages {
         if message["method"] == "turn/completed" {
             break;
@@ -257,11 +270,24 @@ async fn a_deferred_batch_does_not_rename_the_running_turns_card() {
     assert_eq!(
         f.session.running_turn_task().as_deref(),
         Some(running_card.as_str()),
-        "the turn was started for the first card"
+        "the late started event still answers with the card its own delivery named"
     );
 
-    // A second delivery names its own card while the first turn is still open.
-    f.session.set_turn_task(Some(deferred_card.clone()));
+    // B never started here, so its binding is still waiting for its own turn and
+    // is untouched by A's settlement.
+    assert_eq!(
+        f.session.take_turn_task("captured-turn-b").as_deref(),
+        Some(deferred_card.as_str()),
+        "another delivery's card is not spent on this turn"
+    );
+    // A batch that is deferred before the runtime names a turn binds nothing, so
+    // there is no card for a later turn to inherit.
+    assert_eq!(
+        f.session.take_turn_task("never-started"),
+        None,
+        "a deferred batch leaves no card behind"
+    );
+
     for message in &messages {
         if message["method"] != "turn/completed" {
             continue;
@@ -287,9 +313,10 @@ async fn a_deferred_batch_does_not_rename_the_running_turns_card() {
         usage[0].data["task_ref"], deferred_card,
         "a batch that never became a turn does not take over an open one"
     );
-    assert!(
-        f.session.turn_task().is_none(),
-        "the deferred card is dropped with the turn that ended"
+    assert_eq!(
+        f.session.take_turn_task(&turn_id),
+        None,
+        "no binding outlives the turn that carried it"
     );
     assert!(
         f.session.running_turn_task().is_none(),
@@ -334,7 +361,12 @@ async fn a_metered_turn_is_charged_to_the_task_its_delivery_named() {
         .to_owned();
 
     // The delivery named this task, and the provider reports its own token.
-    f.session.set_turn_task(Some(task_id.clone()));
+    let turn_id = messages
+        .iter()
+        .find_map(|message| message.pointer("/params/turn/id").and_then(Value::as_str))
+        .expect("captured turn id")
+        .to_owned();
+    f.session.bind_turn_task(&turn_id, Some(task_id.clone()));
     f.session.status.lock().expect("state").task_id = Some("pi-turn-token".into());
     for message in &messages {
         handle_message(&f.session, message.clone());
