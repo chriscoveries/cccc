@@ -68,6 +68,15 @@ impl Session {
         }
     }
 
+    /// Keep the binding visible until its ActiveTurn is published. Dispatch
+    /// treats every unobserved delivery as Unknown, including unattributed ones.
+    pub(super) fn delivery_task(&self, delivery_id: &str) -> Option<Option<String>> {
+        self.delivery_tasks
+            .lock()
+            .ok()
+            .and_then(|tasks| tasks.get(delivery_id).cloned())
+    }
+
     /// The card of the delivery the runtime named, taken out so it is used once.
     /// The outer option says whether that delivery was registered at all; the inner
     /// one is the card, `None` when the delivery named no single task.

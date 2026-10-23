@@ -13,6 +13,9 @@ Output silence and native provider observations are never evidence of idle.
 Disabled, stopped, busy, and approval-waiting Actors are excluded. An in-flight
 or unresolved provider admission is Unknown; an unresolved result keeps
 automatic dispatch off for that managed generation.
+An accepted delivery without a published turn reports `delivery_turn_not_observed`
+and stays Unknown until the runtime supplies authority; elapsed time never
+makes it idle. Contended readiness reads return Unknown immediately.
 
 Each pass considers open or planned, unassigned tasks in creation order, with
 task id breaking ties. A task must have no unmet blockers or external wait,

@@ -968,3 +968,82 @@ async fn named_tool_activity_finishes_without_journaling_transient_or_foreign_up
     f.complete("turn-1", "completed", Value::Null);
     assert_eq!(f.terminals().len(), 1);
 }
+
+/// Replay a real native turn with acceptance visible before its started event.
+/// Pending input is not idle, even when its delivery carries no board task.
+#[tokio::test]
+async fn accepted_delivery_stays_unknown_until_the_captured_turn_is_published() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    use cccc_contracts::{ActorRuntime, Event};
+
+    let mut f = Fixture::new(false, "");
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let thread = messages[0]["params"]["threadId"]
+        .as_str()
+        .expect("captured thread");
+    f.session.managed = Arc::new(AnalystSession::for_usage_test(
+        f._temp.path(),
+        ActorRuntime::Pi,
+        thread,
+    ));
+    let generation = f.session.managed.generation().to_owned();
+    assert_eq!(f.session.task_dispatch_state(), Ok(generation.clone()));
+    let mut notice = Event::new("system.notify", &f.session.group_id);
+    notice.data.insert("kind".into(), json!("task_dispatch"));
+    let notices = [notice];
+    {
+        let admission = f.session.begin_admission();
+        assert_eq!(
+            f.session.task_dispatch_state(),
+            Err("turn_admission_pending")
+        );
+        assert!(
+            !f.session.defer_admitted_task_dispatch(&notices, &admission),
+            "the post-lock check must not reject its own admission guard"
+        );
+    }
+    let started = messages
+        .iter()
+        .find(|message| message["method"] == "turn/started")
+        .expect("captured start");
+    let turn = started["params"]["turn"]["id"]
+        .as_str()
+        .expect("captured turn");
+    let delivery = format!("actor-delivery:{turn}");
+    f.session.bind_delivery_task(&delivery, None);
+    assert_eq!(
+        f.session.task_dispatch_state(),
+        Err("delivery_turn_not_observed"),
+        "accepted but unobserved is unknown"
+    );
+    assert!(f.session.defer_task_dispatch(&notices));
+    {
+        let admission = f.session.begin_admission();
+        assert!(
+            f.session.defer_admitted_task_dispatch(&notices, &admission),
+            "pending turn authority must be rechecked after the admission wait"
+        );
+    }
+    assert_eq!(f.session.delivery_task(&delivery), Some(None));
+    assert_eq!(
+        f.session.task_dispatch_state(),
+        Err("delivery_turn_not_observed"),
+        "looking up a binding must not expose an idle publication gap"
+    );
+    for message in messages {
+        let starting = message["method"] == "turn/started";
+        handle_event(&f.session, message, Some(&delivery));
+        if starting {
+            assert_eq!(
+                f.session.delivery_task(&delivery),
+                None,
+                "adoption consumes the binding only after publishing ActiveTurn"
+            );
+            assert_eq!(
+                f.session.task_dispatch_state(),
+                Err("not_idle_or_not_running")
+            );
+        }
+    }
+    assert_eq!(f.session.task_dispatch_state(), Ok(generation));
+}
