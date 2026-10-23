@@ -25,8 +25,6 @@ use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 pub(crate) const WINDOW_HOURS: i64 = 72;
 
 const HOUR_SECONDS: i64 = 3600;
-/// How often the state file is rewritten, at most, in seconds.
-const SAVE_EVERY_SECONDS: i64 = 60;
 const STATE_FILE: &str = "harness-ram-72h.json";
 const SCHEMA: u32 = 1;
 
@@ -84,7 +82,10 @@ impl Default for Trend {
 struct GroupTrend {
     trend: Trend,
     loaded: bool,
-    saved_at: i64,
+    /// Samples recorded since the last successful write. A restart must not
+    /// lose a window that a report has already shown, so the file is rewritten
+    /// at the end of each sampling tick rather than on a timer.
+    dirty: bool,
     /// Where this Group's window lives. Resolved once: a Group's state
     /// directory does not move under a running daemon.
     path: Option<PathBuf>,
@@ -126,8 +127,9 @@ fn harness_id(runtime: cccc_contracts::ActorRuntime) -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-/// Fold one Actor's reading into its Group's trend, and flush the state file at
-/// most once a minute.
+/// Fold one Actor's reading into its Group's trend. The state file is written
+/// by [`flush_group`] at the end of the sampling tick, so a daemon restart
+/// cannot drop samples that have already been reported.
 pub(crate) fn record_actor(
     home: &HomeLayout,
     group: &GroupDoc,
@@ -166,15 +168,37 @@ fn record(
     load_once(entry, path.as_deref());
     entry.trend.record(harness, mode, epoch, rss_mib, pss_mib);
     entry.trend.prune(epoch);
-    let due = entry.saved_at == 0 || epoch - entry.saved_at >= SAVE_EVERY_SECONDS;
-    if !due {
+    entry.dirty = true;
+}
+
+/// Write a Group's window once the tick that sampled it has finished.
+///
+/// The window lives in memory between ticks and one tick's samples arrive one
+/// Actor at a time, so writing there would rewrite the file once per Actor.
+/// Writing at the tick boundary keeps it to one atomic replace per tick and,
+/// unlike a wall-clock throttle, leaves nothing on the floor if the daemon
+/// restarts a moment later.
+pub(crate) fn flush_group(home: &HomeLayout, group_id: &str) {
+    let mut groups = groups();
+    let entry = groups
+        .entry(group_id.to_owned())
+        .or_insert_with(|| GroupTrend::new(state_path(home, group_id).ok()));
+    let path = entry.path.clone();
+    load_once(entry, path.as_deref());
+    flush(entry, path.as_deref());
+}
+
+fn flush(entry: &mut GroupTrend, path: Option<&Path>) {
+    if !entry.dirty {
         return;
     }
-    let Some(path) = path.as_deref() else {
+    let Some(path) = path else {
+        // No state directory to write to: keep the window in memory rather
+        // than clearing the flag and pretending it was saved.
         return;
     };
     if entry.trend.save(path).is_ok() {
-        entry.saved_at = epoch;
+        entry.dirty = false;
     }
 }
 
@@ -187,6 +211,8 @@ pub(crate) fn report(home: &HomeLayout, group_id: &str, now: i64) -> Value {
     let path = entry.path.clone();
     load_once(entry, path.as_deref());
     entry.trend.prune(now);
+    // A figure a caller has been shown must survive a restart a moment later.
+    flush(entry, path.as_deref());
     entry.trend.report(now)
 }
 
@@ -200,7 +226,7 @@ impl GroupTrend {
         Self {
             trend: Trend::default(),
             loaded: false,
-            saved_at: 0,
+            dirty: false,
             path,
         }
     }
@@ -654,6 +680,82 @@ mod tests {
             Trend::load(&path),
             Trend::default(),
             "a file from another schema is not read as this one"
+        );
+    }
+
+    /// A Group home the sampler can address without a daemon around it.
+    fn test_home() -> (tempfile::TempDir, HomeLayout) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path()).expect("home");
+        (temp, home)
+    }
+
+    fn state_file(temp: &tempfile::TempDir, group_id: &str) -> PathBuf {
+        temp.path()
+            .join("groups")
+            .join(group_id)
+            .join("state")
+            .join(STATE_FILE)
+    }
+
+    /// The stage restart showed a report of 189 samples becoming 174, because
+    /// the state file was rewritten on a wall-clock timer: the samples recorded
+    /// since the last write were still only in memory. A tick that has finished
+    /// must be on disk, so a restart a moment later shows the same window.
+    #[test]
+    fn a_finished_tick_is_on_disk_before_the_next_one() {
+        let (temp, home) = test_home();
+        let group = "g_tick_on_disk";
+        let now = 1_700_000_000;
+        // Twelve samples ten seconds apart: one stage tick's worth of readings
+        // for a single (harness, mode) key, all inside the current hour.
+        for sample in 0..12 {
+            record(
+                &home,
+                group,
+                "hermes",
+                "pty",
+                now + sample * 10,
+                Some(500 + sample as u64),
+                Some(300 + sample as u64),
+            );
+        }
+        flush_group(&home, group);
+
+        let shown = report(&home, group, now + 120);
+        assert_eq!(shown["keys"][0]["samples"].as_u64(), Some(12));
+
+        // A restart: nothing in memory survives, only the file.
+        let reloaded = Trend::load(&state_file(&temp, group));
+        assert_eq!(
+            reloaded.report(now + 120),
+            shown,
+            "a restart right after the tick must not drop samples the report already showed"
+        );
+        assert_eq!(
+            reloaded.report(now + 120)["keys"][0]["series"][0]["samples"].as_u64(),
+            Some(12),
+            "the current hour keeps every sample, not only those written by the last save"
+        );
+    }
+
+    /// The same restart through the report path alone: reading the window is
+    /// enough to make what was read durable, so a caller that samples and then
+    /// restarts does not lose the reading it was given.
+    #[test]
+    fn what_a_report_showed_survives_the_restart_that_follows() {
+        let (temp, home) = test_home();
+        let group = "g_report_survives";
+        let now = 1_700_000_000;
+        record(&home, group, "devin", "headless", now, Some(700), None);
+        record(&home, group, "devin", "headless", now + 10, Some(900), None);
+
+        let shown = report(&home, group, now + 20);
+        let reloaded = Trend::load(&state_file(&temp, group));
+        assert_eq!(reloaded.report(now + 20), shown);
+        assert_eq!(
+            reloaded.report(now + 20)["keys"][0]["peak_rss_mib"].as_u64(),
+            Some(900)
         );
     }
 
