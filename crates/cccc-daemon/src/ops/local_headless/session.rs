@@ -53,6 +53,54 @@ impl Session {
         }
     }
 
+    /// Record which board task the delivery the runtime was asked to run is about,
+    /// under the delivery id it is being asked with. `None` records a delivery that
+    /// named no single card: known to be unattributed, which is not the same as
+    /// unresolved, so it can never be given anyone else's card later.
+    pub(super) fn bind_delivery_task(&self, delivery_id: &str, task: Option<String>) {
+        if let Ok(mut tasks) = self.delivery_tasks.lock() {
+            // A binding is read once, when its turn is observed. If more than a
+            // handful are waiting, no observer is coming for them.
+            if tasks.len() >= 16 {
+                tasks.clear();
+            }
+            tasks.insert(delivery_id.to_owned(), task);
+        }
+    }
+
+    /// The card of the delivery the runtime named, taken out so it is used once.
+    /// The outer option says whether that delivery was registered at all; the inner
+    /// one is the card, `None` when the delivery named no single task.
+    pub(super) fn take_delivery_task(&self, delivery_id: &str) -> Option<Option<String>> {
+        self.delivery_tasks
+            .lock()
+            .ok()
+            .and_then(|mut tasks| tasks.remove(delivery_id))
+    }
+
+    /// Drop the card of a delivery that will never start a turn.
+    pub(super) fn forget_delivery_task(&self, delivery_id: &str) {
+        if let Ok(mut tasks) = self.delivery_tasks.lock() {
+            tasks.remove(delivery_id);
+        }
+    }
+
+    /// Hold the door for one delivery's admission.
+    pub(super) fn begin_admission(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The task the running turn was started for, if any.
+    #[cfg(test)]
+    pub(super) fn running_turn_task(&self) -> Option<String> {
+        self.active_turn
+            .lock()
+            .ok()
+            .and_then(|turn| turn.as_ref().and_then(|turn| turn.task.clone()))
+    }
+
     pub(super) fn set_status(&self, status: &str, task_id: Option<String>) {
         self.set_status_with_reason(status, task_id, None);
     }

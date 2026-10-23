@@ -9,7 +9,7 @@ use cccc_core::ledger;
 use cccc_core::permissions::{self, ActorAction};
 use cccc_core::{GroupDoc, GroupStore, HomeLayout, group_scope, web_model_connectors};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::dispatch::{OpError, OpResult, object, required_arg, store, string_arg};
 use crate::ops::{
@@ -23,6 +23,8 @@ const RUNTIME_STATES_KEY: &str = "runtime_states";
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "actor_list" => Operation::new(Read, list),
+        "actor_memory_report" => Operation::new(Read, memory_report),
+        "group_health" => Operation::new(Read, group_health),
         "actor_prompt" => Operation::new(Read, prompt),
         "actor_add" => Operation::new(Write, add),
         "actor_update" => Operation::new(Write, update),
@@ -58,6 +60,37 @@ fn prompt(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         "actor_id":actor_id,
         "prompt":cccc_core::system_prompt::render_session(home, &group, actor)
     }))
+}
+
+/// The harness RAM trend: what each `(harness, mode)` cost over the last 72
+/// hours. Read only — nothing in the daemon acts on it.
+fn memory_report(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let group = load(home, request)?;
+    authorize(&group, request, ActorAction::List, "")?;
+    object(super::actor_memory_trend::report(
+        home,
+        &group.group_id,
+        chrono::Utc::now().timestamp(),
+    ))
+}
+
+fn group_health(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let group = load(home, request)?;
+    authorize(&group, request, ActorAction::List, "")?;
+    let running = group
+        .actors
+        .iter()
+        .filter(|actor| {
+            actor.enabled && super::actor_runtime_status::resolve(&group, actor).running
+        })
+        .count() as u64;
+    let live: BTreeSet<&str> = group.actors.iter().map(|actor| actor.id.as_str()).collect();
+    object(super::host_health::report(
+        std::path::Path::new("/proc"),
+        &group.group_id,
+        running,
+        &live,
+    ))
 }
 
 fn list(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
@@ -194,6 +227,8 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         ));
     }
     patch.remove("runtime_state_source");
+    patch.remove("model_cost_usd_per_mtok");
+    patch.remove("model_strength");
     if let Some(value) = patch.get("default_scope_key") {
         let reference = value
             .as_str()
@@ -1032,7 +1067,10 @@ fn rollback_actor_lifecycle(
 
 fn actor_from_args(request: &DaemonRequest) -> Result<Actor, OpError> {
     if let Some(value) = request.args.get("actor") {
-        if value.get("runner").is_some() {
+        if value.get("runner").is_some()
+            || value.get("model_cost_usd_per_mtok").is_some()
+            || value.get("model_strength").is_some()
+        {
             return Err(OpError::new(
                 "unsupported_field",
                 "runner is derived from the Runtime and cannot be selected",
@@ -1054,7 +1092,13 @@ fn actor_from_args(request: &DaemonRequest) -> Result<Actor, OpError> {
     for (key, item) in &request.args {
         if !matches!(
             key.as_str(),
-            "group_id" | "actor_id" | "by" | "env_private" | "runtime_state_source"
+            "group_id"
+                | "actor_id"
+                | "by"
+                | "env_private"
+                | "runtime_state_source"
+                | "model_cost_usd_per_mtok"
+                | "model_strength"
         ) {
             object.insert(key.clone(), item.clone());
         }

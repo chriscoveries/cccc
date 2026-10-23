@@ -3374,6 +3374,86 @@ state keeps precedence, and reading these fields MUST NOT start runtime work.
 If transcript access is busy, these optional observations MAY be null rather
 than waiting on transcript I/O; a later read can recover the same observation.
 
+#### `actor_memory_report`
+
+Harness RAM over the last 72 hours, folded into hourly buckets per `(harness, mode)`.
+Display only: nothing in delivery, idling, health or dispatch reads it.
+
+The window is persisted per Group in `state/harness-ram-72h.json`, rewritten at the
+end of each sampling tick, again by this call when samples are not yet on disk, and
+once more on the daemon's graceful stop. A graceful restart therefore drops no
+samples; a crash loses at most the tick in progress (one sampling interval).
+
+Args:
+```ts
+{ group_id: string }
+```
+
+Result:
+```ts
+{
+  window_hours: number // 72
+  bucket_seconds: number // 3600
+  as_of: string // the current hour, rfc3339
+  keys: Array<{
+    harness: string
+    mode: string // pty | headless, with -acp when the Actor runs the ACP mode
+    peak_rss_mib: number | null
+    avg_rss_mib: number | null
+    samples: number
+    peak_pss_mib: number | null
+    avg_pss_mib: number | null
+    pss_samples: number
+    hours_observed: number
+    series: Array<{ hour: string; peak_rss_mib: number | null; avg_rss_mib: number | null; samples: number }>
+  }> // busiest first; a key with no samples in the window is absent
+}
+```
+
+#### `group_health`
+
+How much RAM a Group holds and how loaded the host is: the numbers behind the
+header's running chip and the Actor list in its pulldown. Read only, and display
+only — nothing in delivery, idling, dispatch or health reads it, and no Actor is
+stopped because of a figure here.
+
+Args:
+```ts
+{ group_id: string }
+```
+
+Result:
+```ts
+{
+  group_id: string
+  rss_mib: number | null // the process trees of the Actors the Group has now, summed; null when none has a reading
+  pss_mib: number | null // the same sum, only when every contributing Actor had a PSS reading
+  actors_running: number // running Actors in the Group
+  actors_sampled: number // how many of them contributed a reading
+  host_mem_total_mib: number | null
+  host_mem_available_mib: number | null // MemAvailable, capped at the total
+  host_loadavg_1m: number | null
+  host_loadavg_5m: number | null
+  host_loadavg_15m: number | null
+  host_cpu_count: number | null // online CPUs, the divisor the load average uses
+  sampled_at: string // rfc3339, when the host figures were read
+}
+```
+
+Notes:
+- A figure the kernel did not give is `null`, never `0`: `0` free memory would
+  read as a dying host.
+- `cpu_pct` on an Actor row is the percentage of one core its process tree used
+  between two readings, as `top` shows it — not divided by the CPU count. It is
+  `null` when there is no earlier reading to subtract, and `null` again when the
+  pid or that process's start time has changed since the earlier reading: the
+  ticks of a restarted tree, or of a process that took over a reused pid, are
+  not a baseline for the one before it.
+- Only Actors the Group has now contribute to its total. An Actor that has been
+  removed takes its last reading with it, so a total never includes memory the
+  Group no longer holds.
+
+
 #### `actor_add`
 
 Args:
@@ -3382,6 +3462,7 @@ Args:
   group_id: string
   actor_id?: string
   title?: string
+  model?: string // the model the Actor runs, as a label; at most 128 characters, no control characters
   runtime?: string
   runtime_mode?: "default" | "acp" // optional headless ACP for Antigravity, Auggie, Copilot, Devin, Cursor, Kimi Code, Kiro, Hermes and Droid
   command?: string[]
@@ -3436,7 +3517,7 @@ Args:
 ```
 
 Patch keys used by CCCC v0.4.x include:
-- Identity/UI: `title`
+- Identity/UI: `title`, `model` (a label naming the model the Actor runs; launching does not read it; an empty string clears it)
 - Runtime: `runtime`, `runtime_mode`, `command`, `submit`
 - Scope: `default_scope_key`
 - Enable/disable: `enabled`

@@ -1429,6 +1429,61 @@ fn rust_daemon_provider_auth_mutations_do_not_report_synthetic_lifecycle() {
 }
 
 #[test]
+fn an_actor_carries_the_model_label_its_operator_gives_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"models"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    let added = call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"peer1",
+            "runtime":"custom",
+            "command":["sh"],
+            "enabled":false,
+            "model":"  gpt-5-codex  ",
+            "by":"user"
+        }),
+    );
+    assert_eq!(added.result["actor"]["model"], "gpt-5-codex");
+    assert_eq!(
+        added.result["event"]["data"]["actor"]["model"],
+        "gpt-5-codex"
+    );
+    let row = |home: &HomeLayout| {
+        call(home, "actor_list", json!({"group_id":group_id})).result["actors"]
+            .as_array()
+            .expect("actors")
+            .iter()
+            .find(|actor| actor["id"] == "peer1")
+            .cloned()
+            .expect("peer1 row")
+    };
+    assert_eq!(row(&home)["model"], "gpt-5-codex");
+
+    let update = |model: Value| {
+        raw_call(
+            &home,
+            "actor_update",
+            json!({"group_id":group_id,"actor_id":"peer1","by":"user","patch":{"model":model}}),
+        )
+    };
+    assert!(update(json!("claude-sonnet-4-5")).ok);
+    assert_eq!(row(&home)["model"], "claude-sonnet-4-5");
+    for invalid in [json!("x".repeat(129)), json!("two\nlines")] {
+        let refused = update(invalid);
+        assert!(!refused.ok, "{:?}", refused.result);
+        assert_eq!(row(&home)["model"], "claude-sonnet-4-5");
+    }
+    assert!(update(json!("")).ok);
+    assert!(row(&home).get("model").is_none());
+}
+
+#[test]
 fn a_foreman_retrying_a_tree_after_a_lost_reply_gets_the_same_tasks() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
@@ -1509,6 +1564,62 @@ fn a_foreman_retrying_a_tree_after_a_lost_reply_gets_the_same_tasks() {
         "{}",
         error.message
     );
+}
+
+#[test]
+fn an_actor_carries_the_model_label_its_operator_gives_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"models"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    let added = call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,
+            "actor_id":"peer1",
+            "runtime":"custom",
+            "command":["sh"],
+            "enabled":false,
+            "model":"  gpt-5-codex  ",
+            "by":"user"
+        }),
+    );
+    assert_eq!(added.result["actor"]["model"], "gpt-5-codex");
+    assert_eq!(
+        added.result["event"]["data"]["actor"]["model"],
+        "gpt-5-codex"
+    );
+    let row = |home: &HomeLayout| {
+        call(home, "actor_list", json!({"group_id":group_id})).result["actors"]
+            .as_array()
+            .expect("actors")
+            .iter()
+            .find(|actor| actor["id"] == "peer1")
+            .cloned()
+            .expect("peer1 row")
+    };
+    assert_eq!(row(&home)["model"], "gpt-5-codex");
+
+    let update = |model: Value| {
+        raw_call(
+            &home,
+            "actor_update",
+            json!({"group_id":group_id,"actor_id":"peer1","by":"user","patch":{"model":model}}),
+        )
+    };
+    assert!(update(json!("claude-sonnet-4-5")).ok);
+    assert_eq!(row(&home)["model"], "claude-sonnet-4-5");
+    for invalid in [json!("x".repeat(129)), json!("two\nlines")] {
+        let refused = update(invalid);
+        assert!(!refused.ok, "{:?}", refused.result);
+        assert_eq!(row(&home)["model"], "claude-sonnet-4-5");
+    }
+    assert!(update(json!("")).ok);
+    assert!(row(&home).get("model").is_none());
+
 }
 
 fn call(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
@@ -1680,4 +1791,86 @@ fn task_revision_is_exposed_and_conflicts_name_the_recorded_task() {
         call(&home, "context_get", json!({"group_id":id,"detail":"full"})).result,
         before.result
     );
+}
+
+#[test]
+fn actor_memory_report_reads_a_group_window_and_refuses_an_unknown_group() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"memory trend"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+
+    let report = call(&home, "actor_memory_report", json!({"group_id":group_id}));
+    assert_eq!(report.result["window_hours"], 72);
+    assert_eq!(report.result["bucket_seconds"], 3600);
+    assert_eq!(
+        report.result["keys"],
+        json!([]),
+        "a group with no samples has no keys, not zeroed ones"
+    );
+    assert!(
+        report.result["as_of"]
+            .as_str()
+            .is_some_and(|at| at.ends_with('Z'))
+    );
+
+    let missing = raw_call(
+        &home,
+        "actor_memory_report",
+        json!({"group_id":"g_not_a_group"}),
+    );
+    assert!(
+        !missing.ok,
+        "an unknown group is an error, not an empty window"
+
+    );
+}
+
+#[test]
+fn group_health_reads_the_group_and_the_host_and_stops_nothing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"health"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+
+    let health = call(&home, "group_health", json!({"group_id":group_id}));
+    assert_eq!(health.result["group_id"], json!(group_id));
+    assert_eq!(
+        health.result["rss_mib"],
+        serde_json::Value::Null,
+        "no readings means no total, not zero MiB"
+    );
+    assert_eq!(health.result["actors_running"], 0);
+    assert_eq!(health.result["actors_sampled"], 0);
+    for key in [
+        "host_mem_total_mib",
+        "host_mem_available_mib",
+        "host_loadavg_1m",
+        "host_loadavg_5m",
+        "host_loadavg_15m",
+        "host_cpu_count",
+    ] {
+        assert!(
+            health.result.get(key).is_some(),
+            "the host figures are always present, measured or null: {key}"
+        );
+    }
+    // Only a host with /proc can name its CPUs; elsewhere the figure is null.
+    #[cfg(unix)]
+    assert!(
+        health.result["host_cpu_count"].as_u64().is_some(),
+        "a host that cannot name its CPUs cannot normalise load"
+    );
+    assert!(
+        health.result["sampled_at"]
+            .as_str()
+            .is_some_and(|at| at.ends_with('Z'))
+    );
+
+    let missing = raw_call(&home, "group_health", json!({"group_id":"g_not_a_group"}));
+    assert!(!missing.ok, "an unknown group is an error");
 }
