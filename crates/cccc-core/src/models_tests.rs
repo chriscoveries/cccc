@@ -4,7 +4,7 @@ use crate::models::{ModelRegistry, ModelSpec};
 fn resolves_real_catalog_values() {
     let mut reg = ModelRegistry::new();
     reg.models.insert(
-        "ds1017".to_string(),
+        "priced-model".to_string(),
         ModelSpec {
             usd_per_mtok: 0.07,
             strength: Some(3),
@@ -21,7 +21,7 @@ fn resolves_real_catalog_values() {
             ..Default::default()
         },
     );
-    let (cost, strength) = reg.resolve("ds1017");
+    let (cost, strength) = reg.resolve("priced-model");
     assert_eq!(cost, Some(0.07));
     assert_eq!(strength, Some(3));
     let (cost, strength) = reg.resolve("free");
@@ -39,5 +39,5 @@ fn resolves_real_catalog_values() {
 fn registry_default_empty() {
     let reg = ModelRegistry::new();
     assert!(reg.models.is_empty());
-    assert_eq!(reg.get("ds1017"), None);
+    assert_eq!(reg.get("priced-model"), None);
 }
