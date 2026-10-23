@@ -60,7 +60,7 @@ export type BudgetField = { ok: true; value: number | null } | { ok: false };
  */
 export function parseBudgetField(text: string): BudgetField {
   const trimmed = String(text ?? "").trim();
-  if (!trimmed) return { ok: true, value: null };
+  if (!trimmed) return { ok: true, value: 0 };
   const parsed = Number(trimmed);
   if (!Number.isFinite(parsed) || parsed < 0) return { ok: false };
   return { ok: true, value: parsed };
