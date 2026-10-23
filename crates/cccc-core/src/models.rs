@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// A model's metadata, from the owner-edited catalog (MODEL-HARNESS-CATALOG).
+/// A model's metadata, from the operator-edited catalog file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ModelSpec {
     /// Blended USD per million tokens. 0.0 for free.
