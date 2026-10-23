@@ -12,4 +12,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - name: Exercise commit admission, manual undo, and delivery refs without their guards
-        run: cargo test --package cccc-pair-core --test integration --locked task_dispatch:: -- --nocapture
+        run: |
+          cargo test --package cccc-pair-core --test integration --locked task_dispatch:: -- --nocapture
