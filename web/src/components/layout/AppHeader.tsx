@@ -143,7 +143,8 @@ export function AppHeader({
           a.model_cost_usd_per_mtok != null ? `$${a.model_cost_usd_per_mtok}/Mtok` : "—"
         } · ${a.model_strength != null ? `str ${a.model_strength}` : "—"}`,
         onClick: () => {
-          if (selectedGroupId && window.confirm(`Stop ${a.id}?`)) void stopActor(selectedGroupId, a.id);
+          if (selectedGroupId && window.confirm(`Stop ${a.id}?`))
+            void stopActor(selectedGroupId, a.id);
         },
         tone: "danger" as const,
         section: "actors",
