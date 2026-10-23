@@ -266,6 +266,7 @@ fn payload(home: &HomeLayout, group: &GroupDoc, by: &str) -> Result<Value, OpErr
         "ruleset":{"rules":rules,"snippets":effective_snippets},
         "snippet_catalog":{"built_in":built_in,"built_in_overrides":filtered_overrides,"custom":filtered_custom},
         "status":status,
+        "dispatch_actors":super::task_dispatch::actor_status(group),
         "config_path":home.groups_dir().join(&group.group_id).join("group.yaml").display().to_string(),
         "supported_vars":["interval_minutes","group_title","actor_names","scheduled_at"],
         "version":group.automation.get("version").and_then(Value::as_u64).unwrap_or(1),

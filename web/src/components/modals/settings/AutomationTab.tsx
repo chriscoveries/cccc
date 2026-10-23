@@ -10,6 +10,7 @@ import type {
   AutomationRuleSet,
   AutomationRuleStatus,
   AutomationSnippetCatalog,
+  DispatchActorStatus,
 } from "../../../types";
 import {
   Section,
@@ -86,6 +87,7 @@ export function AutomationTab(props: AutomationTabProps) {
   const [status, setStatus] = useState<Record<string, AutomationRuleStatus>>({});
   const [configPath, setConfigPath] = useState("");
   const [supportedVars, setSupportedVars] = useState<string[]>([]);
+  const [dispatchActors, setDispatchActors] = useState<DispatchActorStatus[]>([]);
 
   const [snippetManagerOpen, setSnippetManagerOpen] = useState(false);
   const [newSnippetId, setNewSnippetId] = useState("");
@@ -129,6 +131,7 @@ export function AutomationTab(props: AutomationTabProps) {
       );
       setRulesVersion(typeof resp.result.version === "number" ? resp.result.version : undefined);
       setStatus(resp.result.status || {});
+      setDispatchActors(resp.result.dispatch_actors || []);
       setConfigPath(String(resp.result.config_path || ""));
       setSupportedVars(
         Array.isArray(resp.result.supported_vars) ? resp.result.supported_vars.map(String) : [],
@@ -148,6 +151,7 @@ export function AutomationTab(props: AutomationTabProps) {
     setStatus({});
     setConfigPath("");
     setSupportedVars([]);
+    setDispatchActors([]);
     setRulesErr("");
     setRulesBusy(false);
     setShowCompletedRules(false);
@@ -727,6 +731,28 @@ export function AutomationTab(props: AutomationTabProps) {
           </div>
         </div>
 
+        {dispatchActors.length > 0 &&
+        draft.rules.some((rule) => actionKind(rule.action) === "dispatch_ready_task") ? (
+          <div className="space-y-1 text-xs text-[var(--color-text-secondary)]">
+            {dispatchActors.map((actor) => (
+              <div key={actor.actor_id}>
+                {actor.actor_id}:{" "}
+                {actor.dispatchable
+                  ? t("automation.dispatchReady", "Authoritative idle state available")
+                  : t(
+                      `automation.dispatchReasons.${actor.reason}`,
+                      actor.reason === "no_managed_turn_authority"
+                        ? "Not dispatchable: no managed turn authority (PTY state is unknown)"
+                        : actor.reason === "actor_disabled"
+                          ? "Not dispatchable: Actor disabled"
+                          : actor.reason === "group_not_running"
+                            ? "Not dispatchable: group not running"
+                            : "Not dispatchable: busy, stopped, or turn state unknown",
+                    )}
+              </div>
+            ))}
+          </div>
+        ) : null}
         <AutomationRuleList
           isDark={isDark}
           visibleRules={visibleRules}
