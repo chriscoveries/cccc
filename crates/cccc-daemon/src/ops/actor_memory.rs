@@ -141,6 +141,9 @@ pub(crate) fn sample_group(home: &HomeLayout, group: &GroupDoc) {
             }
         }
     }
+    // Persist once, after the tick: the window a reader can see must outlive a
+    // restart that lands before the next tick.
+    super::actor_memory_trend::flush_group(home, &group.group_id);
 }
 
 /// The memory fields of one `actor_list` row, or all `null` when the Actor has
