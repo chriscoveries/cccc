@@ -61,7 +61,11 @@ pub fn dispatch_ready_tasks_checked(
         group_id,
         |doc, state| {
             let mut actors = actors.to_vec();
-            actors.retain(|actor| !actor.actor_id.is_empty() && !actor.generation.is_empty());
+            actors.retain(|actor| {
+                !actor.actor_id.is_empty()
+                    && !actor.generation.is_empty()
+                    && !holds_open_task(doc, &actor.actor_id)
+            });
             actors.sort_by(|a, b| {
                 price(a.usd_per_mtok)
                     .unwrap_or(f64::INFINITY)
@@ -95,7 +99,6 @@ pub fn dispatch_ready_tasks_checked(
                     .expect("listed task");
                 let Some(actor) = actors.iter().find(|actor| {
                     !used.contains(&actor.actor_id)
-                        && !holds_open_task(doc, &actor.actor_id)
                         && cooldown_ready(doc, state, &actor.actor_id, now_ms, cooldown_ms)
                         && fits(task, actor)
                 }) else {
@@ -328,6 +331,18 @@ pub fn task_block_reasons(
     } else {
         DispatchState::default()
     };
+    // The document is immutable for this read. Compute Actor-level exclusions
+    // once, not a full task scan for every task/Actor pair on a paged read.
+    let availability = actors
+        .iter()
+        .map(|actor| {
+            (
+                actor,
+                !holds_open_task(doc, &actor.actor_id),
+                cooldown_ready(doc, &state, &actor.actor_id, now, cooldown),
+            )
+        })
+        .collect::<Vec<_>>();
     Ok(doc
         .tasks
         .iter()
@@ -336,24 +351,21 @@ pub fn task_block_reasons(
                 if actors.is_empty() {
                     return Some("no_idle_actor");
                 }
-                let fitting = actors
+                let fitting = availability
                     .iter()
-                    .filter(|actor| fits(task, actor))
+                    .filter(|entry| fits(task, entry.0))
                     .collect::<Vec<_>>();
                 if fitting.is_empty() {
                     return Some("no_budget_fitting_actor");
                 }
                 let available = fitting
                     .into_iter()
-                    .filter(|actor| !holds_open_task(doc, &actor.actor_id))
+                    .filter(|entry| entry.1)
                     .collect::<Vec<_>>();
                 if available.is_empty() {
                     return Some("actor_holds_open_task");
                 }
-                if !available
-                    .into_iter()
-                    .any(|actor| cooldown_ready(doc, &state, &actor.actor_id, now, cooldown))
-                {
+                if !available.into_iter().any(|entry| entry.2) {
                     return Some("actor_cooldown");
                 }
                 None
