@@ -3368,8 +3368,9 @@ Harness RAM over the last 72 hours, folded into hourly buckets per `(harness, mo
 Display only: nothing in delivery, idling, health or dispatch reads it.
 
 The window is persisted per Group in `state/harness-ram-72h.json`, rewritten at the
-end of each sampling tick and again by this call when samples are not yet on disk, so
-a restart cannot drop history a reader has already been shown.
+end of each sampling tick, again by this call when samples are not yet on disk, and
+once more on the daemon's graceful stop. A graceful restart therefore drops no
+samples; a crash loses at most the tick in progress (one sampling interval).
 
 Args:
 ```ts
