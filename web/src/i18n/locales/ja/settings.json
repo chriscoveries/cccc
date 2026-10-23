@@ -681,6 +681,7 @@
     "notebookSectionLockedConnecting": "現在の Google サインインが完了すると、ここに作業 / メモリノートブックの表示・バインド・管理が現れます。"
   },
   "automation": {
+    "notifyIdleHeldTasks": "待機中の Actor に割り当て済みの未完了タスクを通知する",
     "title": "自動化",
     "description": "組み込み自動化とスケジュール済みルールを構成します。設定は次の場所に保存されます",
     "configPathFallback": "CCCC_HOME/.../group.yaml",
@@ -801,6 +802,9 @@
     "savePoliciesTitle": "コラボレーションフォローアップ設定を保存"
   },
   "ruleEditor": {
+    "dispatchReadyTasks": "準備済みタスクを割り当て",
+    "dispatchCooldown": "Actor のクールダウン（ミリ秒）",
+    "dispatchDescription": "モデル料金が予算内の待機中 Actor に、最も古い準備済みタスクを割り当てます。既定では無効です。",
     "editRule": "ルールの編集：",
     "unnamed": "名前のない",
     "last": "最後：",
@@ -848,6 +852,7 @@
     "targetActors": "ターゲット Actor"
   },
   "ruleList": {
+    "dispatchReadyTasks": "準備済みタスクを割り当て",
     "showCompleted": "完了済みを表示",
     "clearCompleted": "完了済みをクリア（{{count}}）",
     "clearCompletedTitle": "完了した 1 回限りのリマインダーをクリアする",

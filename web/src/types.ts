@@ -813,6 +813,7 @@ export type GroupSettings = {
   help_nudge_min_messages: number;
   mail_notice_after_seconds: number;
   mail_notice_idle_after_seconds: number;
+  notify_idle_held_tasks?: boolean;
   reply_notice_after_seconds: number;
 
   terminal_transcript_visibility: "off" | "foreman" | "all";
@@ -1457,6 +1458,7 @@ export type AutomationRuleAction =
       message?: string;
       priority?: "low" | "normal" | "high" | "urgent";
     }
+  | { kind: "dispatch_ready_task"; dispatch_cooldown_ms?: number }
   | { kind: "group_state"; state: "active" | "idle" | "paused" | "stopped" }
   | { kind: "actor_control"; operation: "start" | "stop" | "restart"; targets?: string[] };
 

@@ -32,6 +32,8 @@ interface AutomationTabProps {
   devActors: Actor[];
   busy: boolean;
 
+  notifyIdleHeldTasks?: boolean;
+  setNotifyIdleHeldTasks?: (v: boolean) => void;
   idleSeconds: number;
   setIdleSeconds: (v: number) => void;
   keepaliveSeconds: number;
@@ -641,6 +643,15 @@ export function AutomationTab(props: AutomationTabProps) {
         </p>
       </div>
 
+      <label className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
+        <input
+          type="checkbox"
+          checked={props.notifyIdleHeldTasks ?? false}
+          disabled={props.busy}
+          onChange={(event) => props.setNotifyIdleHeldTasks?.(event.target.checked)}
+        />
+        {t("automation.notifyIdleHeldTasks")}
+      </label>
       <AutomationPoliciesSection
         isDark={isDark}
         busy={props.busy}

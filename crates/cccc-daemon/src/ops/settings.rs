@@ -13,6 +13,11 @@ use serde_json::{Map, Value, json};
 use crate::dispatch::{OpError, OpResult, object, required_arg, store, string_arg};
 
 const SECTION_SETTING_KEYS: &[(&str, &str, &str)] = &[
+    (
+        "notify_idle_held_tasks",
+        "delivery",
+        "notify_idle_held_tasks",
+    ),
     ("default_send_to", "messaging", "default_send_to"),
     (
         "mail_notice_after_seconds",
@@ -74,6 +79,12 @@ fn group_settings(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     authorize(&group, request)?;
     let mut patch = patch(request)?;
     patch.remove("by");
+    if patch
+        .get("notify_idle_held_tasks")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(OpError::invalid("notify_idle_held_tasks must be a boolean"));
+    }
     let settings_value = store(home)?
         .mutate(&group.group_id, |doc| {
             let mut flat = match doc.extra.remove("settings") {
@@ -164,6 +175,8 @@ fn promote_legacy_group_settings(doc: &mut GroupDoc, flat: &mut Map<String, Valu
 }
 
 fn effective_group_settings(doc: &GroupDoc, mut flat: Map<String, Value>) -> Map<String, Value> {
+    flat.entry("notify_idle_held_tasks")
+        .or_insert(Value::Bool(false));
     for key in AUTOMATION_TIMING_KEYS {
         if let Some(value) = doc.automation.get(*key) {
             flat.insert((*key).into(), value.clone());

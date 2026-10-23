@@ -31,6 +31,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             model,
             runtime,
             runtime_mode,
+            turn_probe,
             command,
             env: raw_env,
             scope,
@@ -45,7 +46,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
                 "actor_add",
                 json!({
                     "group_id":group(home,group_id)?,"actor_id":actor_id,"title":title,
-                    "model":model,"runtime":runtime,"runtime_mode":runtime_mode,"command":command,"env":env(raw_env)?,
+                    "model":model,"runtime":runtime,"runtime_mode":runtime_mode,"turn_probe":turn_probe,"command":command,"env":env(raw_env)?,
                     "default_scope_key":scope,"submit":submit,"by":by
                 }),
             )
@@ -62,6 +63,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             model,
             runtime,
             runtime_mode,
+            turn_probe,
             scope,
             command,
             env: raw_env,
@@ -74,6 +76,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             optional(&mut patch, "model", model);
             optional(&mut patch, "runtime", runtime);
             optional(&mut patch, "runtime_mode", runtime_mode);
+            optional(&mut patch, "turn_probe", turn_probe);
             if let Some(scope) = scope {
                 patch.insert(
                     "default_scope_key".into(),

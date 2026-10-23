@@ -46,6 +46,11 @@ fn projected_settings(group: &Value) -> Value {
     }
     if let Some(target) = stored.as_object_mut() {
         for (legacy_key, section, canonical_key) in [
+            (
+                "notify_idle_held_tasks",
+                "delivery",
+                "notify_idle_held_tasks",
+            ),
             ("default_send_to", "messaging", "default_send_to"),
             (
                 "mail_notice_after_seconds",
@@ -108,6 +113,7 @@ fn projected_settings(group: &Value) -> Value {
         "help_nudge_min_messages":10,
         "mail_notice_after_seconds":1800,
         "mail_notice_idle_after_seconds":60,
+        "notify_idle_held_tasks":false,
         "reply_notice_after_seconds":900,
         "terminal_transcript_visibility":"foreman",
         "terminal_transcript_notify_tail":true,
