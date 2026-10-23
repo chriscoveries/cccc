@@ -227,6 +227,8 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         ));
     }
     patch.remove("runtime_state_source");
+    patch.remove("model_cost_usd_per_mtok");
+    patch.remove("model_strength");
     if let Some(value) = patch.get("default_scope_key") {
         let reference = value
             .as_str()
@@ -1065,7 +1067,10 @@ fn rollback_actor_lifecycle(
 
 fn actor_from_args(request: &DaemonRequest) -> Result<Actor, OpError> {
     if let Some(value) = request.args.get("actor") {
-        if value.get("runner").is_some() {
+        if value.get("runner").is_some()
+            || value.get("model_cost_usd_per_mtok").is_some()
+            || value.get("model_strength").is_some()
+        {
             return Err(OpError::new(
                 "unsupported_field",
                 "runner is derived from the Runtime and cannot be selected",
@@ -1087,7 +1092,13 @@ fn actor_from_args(request: &DaemonRequest) -> Result<Actor, OpError> {
     for (key, item) in &request.args {
         if !matches!(
             key.as_str(),
-            "group_id" | "actor_id" | "by" | "env_private" | "runtime_state_source"
+            "group_id"
+                | "actor_id"
+                | "by"
+                | "env_private"
+                | "runtime_state_source"
+                | "model_cost_usd_per_mtok"
+                | "model_strength"
         ) {
             object.insert(key.clone(), item.clone());
         }

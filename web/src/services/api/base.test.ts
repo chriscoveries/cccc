@@ -5,12 +5,47 @@ import {
   filenameFromContentDisposition,
   isAuthRequiredErrorCode,
   normalizePresentationBrowserSurfaceState,
+  normalizeTask,
   onAuthRequired,
   removeAuthTokenFromUrl,
   refreshAuthTokenInUrl,
   setAuthToken,
   withAuthToken,
 } from "./base";
+
+describe("normalizeTask", () => {
+  it("keeps the cost a task carries, so the task detail can show it", () => {
+    // The daemon sends these fields on every task read; this reconstruction is
+    // the one place a task reaches the UI, and a field dropped here is shown as
+    // a missing value however faithfully the daemon sent it.
+    const task = normalizeTask({
+      id: "T089",
+      title: "Metered turn",
+      status: "active",
+      cost_usd: 0.00698229,
+      target_budget_usd: 0.07,
+      max_usd_per_mtok: 0.07,
+      cost_turns: 1,
+      unpriced_turns: 0,
+      unmetered_turns: 0,
+      cost_updated_at: "2026-10-22T20:00:00Z",
+    });
+    expect(task?.cost_usd).toBe(0.00698229);
+    expect(task?.target_budget_usd).toBe(0.07);
+    expect(task?.max_usd_per_mtok).toBe(0.07);
+    expect(task?.cost_turns).toBe(1);
+    expect(task?.unpriced_turns).toBe(0);
+    expect(task?.unmetered_turns).toBe(0);
+    expect(task?.cost_updated_at).toBe("2026-10-22T20:00:00Z");
+  });
+
+  it("stays absent when the daemon sent no cost, rather than reading zero", () => {
+    const task = normalizeTask({ id: "T090", title: "No cost" });
+    expect(task?.cost_usd).toBeNull();
+    expect(task?.target_budget_usd).toBeNull();
+    expect(task?.max_usd_per_mtok).toBeNull();
+  });
+});
 
 describe("apiJson", () => {
   afterEach(() => {
