@@ -615,17 +615,16 @@ pub(super) fn task_ref_in(events: &[Event]) -> Option<String> {
             if reference.get("kind").and_then(Value::as_str) != Some("task_ref") {
                 continue;
             }
-            let Some(task_id) = reference
+            // Every task_ref entry counts, usable or not: a malformed one beside
+            // a good one makes two refs, and two refs are not one task.
+            entries += 1;
+            let task_id = reference
                 .get("task_id")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|id| !id.is_empty())
-            else {
-                continue;
-            };
-            entries += 1;
+                .filter(|id| !id.is_empty());
             if named.is_none() {
-                named = Some(task_id.to_owned());
+                named = task_id.map(str::to_owned);
             }
         }
     }
@@ -866,6 +865,26 @@ fn a_batch_names_at_most_one_task() {
         task_ref_in(&[first.clone(), first.clone()]),
         None,
         "one ref in each of two messages is still two refs"
+    );
+
+    // A ref that names a task but carries no id is still a ref, so a delivery
+    // with one of those beside a good one has two refs, and one on its own names
+    // nothing at all.
+    let mut unnamed = captured["turns"][0]["board_task"].clone();
+    unnamed.as_object_mut().expect("ref").remove("task_id");
+    assert_eq!(
+        task_ref_in(&[message(json!([unnamed.clone()]))]),
+        None,
+        "a task_ref with no id names no task"
+    );
+    let paired = message(json!([
+        captured["turns"][0]["board_task"].clone(),
+        unnamed.clone()
+    ]));
+    assert_eq!(
+        task_ref_in(&[paired]),
+        None,
+        "a malformed ref beside a good one is still two refs"
     );
 
     let other_kind = message(json!([{"kind":"message_ref","task_id":"T089"}]));

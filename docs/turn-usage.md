@@ -25,7 +25,7 @@ rename what that turn is charged to; a delivery that starts no turn drops its
 card. It stays null
 unless the delivery named exactly one task: refs are counted, not deduplicated,
 so two refs that happen to name the same task leave it null just as two different
-tasks do. A provider token is never read as a board task, and assigned cards are
+tasks do, and a `task_ref` carrying no id counts as a ref but names nothing. A provider token is never read as a board task, and assigned cards are
 never used to guess attribution. Missing counters,
 overflowing sums or mixed/unknown models stay null. Prompts, replies, tool
 arguments and opaque provider payloads are not copied into usage events.
