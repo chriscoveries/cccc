@@ -1059,7 +1059,13 @@ fn actor_from_args(request: &DaemonRequest) -> Result<Actor, OpError> {
     for (key, item) in &request.args {
         if !matches!(
             key.as_str(),
-            "group_id" | "actor_id" | "by" | "env_private" | "runtime_state_source" | "model_cost_usd_per_mtok" | "model_strength"
+            "group_id"
+                | "actor_id"
+                | "by"
+                | "env_private"
+                | "runtime_state_source"
+                | "model_cost_usd_per_mtok"
+                | "model_strength"
         ) {
             object.insert(key.clone(), item.clone());
         }
