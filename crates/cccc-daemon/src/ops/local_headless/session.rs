@@ -53,6 +53,19 @@ impl Session {
         }
     }
 
+    /// Record which board task the admitted batch is about. Called for every
+    /// admission, including one that names no task, so a turn is never charged
+    /// to a batch before it.
+    pub(super) fn set_turn_task(&self, task: Option<String>) {
+        if let Ok(mut current) = self.turn_task.lock() {
+            *current = task;
+        }
+    }
+
+    pub(super) fn turn_task(&self) -> Option<String> {
+        self.turn_task.lock().ok().and_then(|task| task.clone())
+    }
+
     pub(super) fn set_status(&self, status: &str, task_id: Option<String>) {
         self.set_status_with_reason(status, task_id, None);
     }
