@@ -1,10 +1,23 @@
 // @vitest-environment happy-dom
+import { readFileSync } from "node:fs";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { SearchModal } from "./SearchModal";
 import { apiJson } from "../services/api";
 import type { Actor } from "../types";
+
+const piCapture = readFileSync(
+  new URL(
+    "../../../crates/cccc-daemon/src/ops/codex_voice_analyst/pi_rpc/captured_tool_turn.jsonl",
+    import.meta.url,
+  ),
+  "utf8",
+)
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line));
+
 vi.mock("../services/api", () => ({ apiJson: vi.fn() }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -140,3 +153,50 @@ it("runs a filtered search immediately when a kind filter is selected before sub
   expect(String(vi.mocked(apiJson).mock.lastCall?.[0])).toContain("q=&kind=notify");
   expect(host.textContent).toContain("notify result");
 });
+
+it.each(["assistant", "user"])(
+  "shows captured Pi %s usage through existing ledger search with unknown counters preserved",
+  async (role) => {
+    const { message } = piCapture.find(
+      (event) => event.type === "message_end" && event.message?.role === role,
+    );
+    const usage = message.usage;
+    vi.mocked(apiJson).mockResolvedValueOnce({
+      ok: true,
+      result: {
+        events: [
+          {
+            kind: "turn.usage",
+            data: {
+              source: "pi_rpc",
+              model_id: message.model ?? null,
+              input_tokens: usage?.input ?? null,
+              output_tokens: usage?.output ?? null,
+              cache_read_tokens: usage?.cacheRead ?? null,
+              cache_write_tokens: usage?.cacheWrite ?? null,
+            },
+          },
+        ],
+        has_more: false,
+      },
+    });
+    await render();
+    await submit();
+    expect(String(vi.mocked(apiJson).mock.lastCall?.[0])).toContain("q=&kind=all");
+    expect(host.textContent).toContain("turnUsage.title");
+    const value = (field: string) =>
+      [...host.querySelectorAll("dt")].find(
+        (element) => element.textContent === `turnUsage.${field}`,
+      )?.nextElementSibling?.textContent;
+    expect(value("source")).toBe("pi_rpc");
+    expect(value("model_id")).toBe(message.model ?? "turnUsage.unknown");
+    for (const [field, captured] of [
+      ["input_tokens", usage?.input],
+      ["output_tokens", usage?.output],
+      ["cache_read_tokens", usage?.cacheRead],
+      ["cache_write_tokens", usage?.cacheWrite],
+    ]) {
+      expect(value(field)).toBe(captured == null ? "turnUsage.unknown" : String(captured));
+    }
+  },
+);

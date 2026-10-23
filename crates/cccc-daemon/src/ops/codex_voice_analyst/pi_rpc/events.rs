@@ -18,6 +18,7 @@ pub(super) struct Turn {
     pub cancelling: bool,
     pub admission: Option<oneshot::Sender<io::Result<String>>>,
     final_text: String,
+    totals: crate::ops::turn_usage::Accumulator,
     failure: Option<&'static str>,
     message: u64,
     tools: BTreeMap<String, Value>,
@@ -39,6 +40,7 @@ impl Turn {
             cancelling: false,
             admission: Some(admission),
             final_text: String::new(),
+            totals: crate::ops::turn_usage::Accumulator::new(),
             failure: None,
             message: 0,
             tools: BTreeMap::new(),
@@ -130,6 +132,19 @@ impl Turn {
             "message_end" if record["message"]["role"] == "assistant" => {
                 // Authoritative snapshots replace the streamed reconstruction.
                 self.final_text = message_text(&record["message"]);
+                // End snapshots repeat around tool operations. Provider response
+                // identity (or the message timestamp) makes each assistant count once.
+                let id = record["message"]["responseId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(|id| format!("response:{id}"))
+                    .or_else(|| {
+                        record["message"]["timestamp"]
+                            .as_u64()
+                            .map(|timestamp| format!("timestamp:{timestamp}"))
+                    })
+                    .unwrap_or_else(|| format!("message-{}", self.message));
+                self.totals.pi(id, &record["message"]);
                 self.failure = match record["message"]["stopReason"].as_str() {
                     Some("error" | "aborted") => Some(PROVIDER_FAILED),
                     // The model's context or output budget ran out before it
@@ -224,7 +239,7 @@ impl Turn {
             sender,
             generation,
             None,
-            json!({"method":"turn/completed","params":{"threadId":session,"turn":{"id":self.id,"status":status,"error":error}}}),
+            json!({"method":"turn/completed","params":{"threadId":session,"turn":{"id":self.id,"status":status,"error":error,"usage":self.totals.summary("pi_rpc")}}}),
         );
     }
 }

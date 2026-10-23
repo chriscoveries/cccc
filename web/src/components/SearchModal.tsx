@@ -15,6 +15,47 @@ import { getMessageInsight } from "../utils/messagePerspective";
 type KindFilter = "all" | "chat" | "notify";
 type SearchCriteria = { query: string; kind: KindFilter; by: string };
 
+const TURN_USAGE_FIELDS = [
+  "actor_id",
+  "turn_id",
+  "generation",
+  "source",
+  "status",
+  "started_at",
+  "ended_at",
+  "model_id",
+  "input_tokens",
+  "output_tokens",
+  "cache_read_tokens",
+  "cache_write_tokens",
+  "usage_samples",
+] as const;
+
+function TurnUsageDetails({ data }: { data: LedgerEvent["data"] }) {
+  const { t } = useTranslation("chat");
+  const record = (data || {}) as Record<string, unknown>;
+  return (
+    <div className="mt-2 text-sm text-[var(--color-text-primary)]">
+      <h3 className="font-medium">{t("turnUsage.title")}</h3>
+      <dl className="mt-2 grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-3 gap-y-1">
+        {TURN_USAGE_FIELDS.map((field) => {
+          const value = record[field];
+          const text =
+            typeof value === "number" || (typeof value === "string" && value.length > 0)
+              ? String(value)
+              : t("turnUsage.unknown");
+          return (
+            <div key={field} className="contents">
+              <dt className="text-[var(--color-text-secondary)]">{t(`turnUsage.${field}`)}</dt>
+              <dd className="min-w-0 break-words">{text}</dd>
+            </div>
+          );
+        })}
+      </dl>
+    </div>
+  );
+}
+
 interface SearchModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -344,9 +385,13 @@ export function SearchModal({
                       </span>
                     )}
                   </div>
-                  <div className="mt-2 text-sm whitespace-pre-wrap break-words text-[var(--color-text-primary)]">
-                    {highlightText(text, searchedQuery || "", isDark)}
-                  </div>
+                  {ev.kind === "turn.usage" ? (
+                    <TurnUsageDetails data={ev.data} />
+                  ) : (
+                    <div className="mt-2 text-sm whitespace-pre-wrap break-words text-[var(--color-text-primary)]">
+                      {highlightText(text, searchedQuery || "", isDark)}
+                    </div>
+                  )}
                   {insight ? (
                     <div className="mt-3 border-t border-[var(--glass-border-subtle)] pt-2">
                       <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-muted)]">

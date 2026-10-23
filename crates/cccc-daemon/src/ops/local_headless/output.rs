@@ -256,6 +256,22 @@ fn complete_turn(session: &Session, message: &Value) {
         // A completion for some other turn is not this session's to settle.
         return;
     };
+    let usage = &message["params"]["turn"]["usage"];
+    if !turn_id.is_empty()
+        && session.managed.runtime() == cccc_contracts::ActorRuntime::Pi
+        && usage["source"] == "pi_rpc"
+        && let Err(error) = super::super::turn_usage::record(
+            &session.home,
+            &session.group_id,
+            &session.actor_id,
+            session.managed.generation(),
+            &turn_id,
+            usage,
+            &settled.status,
+        )
+    {
+        tracing::warn!(%error, group_id = %session.group_id, actor_id = %session.actor_id, "failed to append turn usage");
+    }
     active_turn.take();
     // A completed turn is not automatically a successful turn. Providers report
     // failure out of band (ACP stopReason, a model API error surfaced as an
