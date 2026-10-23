@@ -44,6 +44,7 @@ impl Fixture {
             stop_lock: Mutex::new(()),
             startup_prompt: Mutex::new(None),
             active_turn: Mutex::new(None),
+            turn_task: Mutex::new(None),
         };
         Self {
             session,
@@ -174,6 +175,11 @@ async fn captured_pi_and_claude_turn_usage_is_committed_once_and_readable() {
         } else {
             assert_eq!(&usage[0].data["task_id"], turn);
         }
+        // No delivery named a board task here, so nothing is charged to one.
+        assert!(
+            usage[0].data["task_ref"].is_null(),
+            "a turn whose delivery named no task stays uncharged"
+        );
         // A replay of the same generation and provider turn must not double-charge.
         for message in messages {
             handle_message(&f.session, message);
@@ -192,6 +198,93 @@ async fn captured_pi_and_claude_turn_usage_is_committed_once_and_readable() {
         );
         assert_eq!(response.result["usage"][0]["id"], usage[0].id);
     }
+}
+
+/// What the stage found, as a test: the runtime reports its own turn token as
+/// the session's task id while the delivery names a board task. The board task
+/// is what gets charged, and the token never is.
+#[tokio::test]
+async fn a_metered_turn_is_charged_to_the_task_its_delivery_named() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    use cccc_contracts::ActorRuntime;
+
+    let mut f = Fixture::new(false, "");
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let thread = messages[0]["params"]["threadId"]
+        .as_str()
+        .expect("owned thread");
+    f.session.managed = Arc::new(AnalystSession::for_usage_test(
+        f._temp.path(),
+        ActorRuntime::Pi,
+        thread,
+    ));
+    let synced = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .sync(
+            &f.session.group_id,
+            &[json!({"op":"task.create","title":"Review the parser"})
+                .as_object()
+                .cloned()
+                .expect("operation")],
+            None,
+            "user",
+            false,
+        )
+        .expect("create task");
+    let task_id = synced.changes[0]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+
+    // The delivery named this task, and the provider reports its own token.
+    f.session.set_turn_task(Some(task_id.clone()));
+    f.session.status.lock().expect("state").task_id = Some("pi-turn-token".into());
+    for message in &messages {
+        handle_message(&f.session, message.clone());
+    }
+
+    let path = GroupStore::new(f.session.home.clone())
+        .expect("store")
+        .ledger_path(&f.session.group_id)
+        .expect("group ledger");
+    let usage = cccc_core::ledger::read_all(&path)
+        .expect("ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1, "one settled turn, one usage record");
+    assert_eq!(
+        usage[0].data["task_ref"],
+        task_id.as_str(),
+        "the board task the delivery named"
+    );
+    assert_ne!(
+        usage[0].data["task_id"],
+        task_id.as_str(),
+        "the provider's own task token is not the board task"
+    );
+
+    let recorded = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .load(&f.session.group_id)
+        .expect("load")
+        .tasks
+        .into_iter()
+        .find(|task| task["id"] == task_id.as_str())
+        .expect("task");
+    assert_eq!(recorded["cost_turns"], 1, "the metered turn is counted");
+    assert_eq!(
+        recorded["unpriced_turns"], 1,
+        "no catalog on this host, so the turn is counted as unpriced, never guessed"
+    );
+    assert_eq!(
+        recorded["cost_usd"], 0.0,
+        "an unpriced turn adds no dollars and is not read as free"
+    );
+    assert!(
+        f.session.turn_task().is_none(),
+        "the batch's task is spent with its turn"
+    );
 }
 
 #[tokio::test]
