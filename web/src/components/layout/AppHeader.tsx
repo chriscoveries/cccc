@@ -15,7 +15,7 @@ import { AppSettingsMenu } from "./AppSettingsMenu";
 import { fetchActors, stopActor } from "../../services/api/actors";
 import { fetchGroupHealth, type GroupHealth } from "../../services/api/groups";
 
-type ActorRow = { id: string; rss_mib?: number | null; cpu_pct?: number | null };
+type ActorRow = { id: string; running?: boolean; rss_mib?: number | null; cpu_pct?: number | null };
 
 export interface AppHeaderProps {
   theme: Theme;
@@ -127,7 +127,7 @@ export function AppHeader({
 
   const healthText =
     health && selectedStatus?.key === "run"
-      ? ` · ${((health.rss_mib ?? 0) / 1024).toFixed(1)} GiB` +
+      ? ` · ${health.rss_mib != null ? `${(health.rss_mib / 1024).toFixed(1)} GiB` : "—"}` +
         (health.host_mem_available_mib != null
           ? ` · ${(health.host_mem_available_mib / 1024).toFixed(1)} GiB free`
           : "") +
@@ -163,9 +163,9 @@ export function AppHeader({
         )
       : []),
     ...actors
-      .filter((a: ActorRow) => a?.id)
+      .filter((a: ActorRow) => a?.id && a.running)
       .map((a: ActorRow) => ({
-        label: `${a.id} · ${a.rss_mib ?? 0} MiB · ${a.cpu_pct ?? "—"}%`,
+        label: `${a.id} · ${a.rss_mib != null ? `${a.rss_mib} MiB` : "—"} · ${a.cpu_pct != null ? `${a.cpu_pct}%` : "—"}`,
         onClick: () => {
           if (selectedGroupId) void stopActor(selectedGroupId, a.id);
         },
