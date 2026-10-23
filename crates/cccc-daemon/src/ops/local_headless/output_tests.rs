@@ -44,10 +44,8 @@ impl Fixture {
             stop_lock: Mutex::new(()),
             startup_prompt: Mutex::new(None),
             active_turn: Mutex::new(None),
-            pending_turn_task: Mutex::new(None),
-            turn_tasks: Mutex::new(std::collections::HashMap::new()),
+            delivery_tasks: Mutex::new(std::collections::HashMap::new()),
             admission: Mutex::new(()),
-            unresolved_admission: AtomicBool::new(false),
         };
         Self {
             session,
@@ -250,55 +248,45 @@ async fn a_turn_keeps_its_card_even_when_it_is_observed_after_another_delivery()
         .expect("task id")
         .to_owned();
 
-    let turn_id = messages
-        .iter()
-        .find_map(|message| message.pointer("/params/turn/id").and_then(Value::as_str))
-        .expect("captured turn id")
-        .to_owned();
-
-    // The runtime accepted A and named its turn, so A's delivery binds its card.
+    // A's delivery registered its card before it was sent, and a second delivery
+    // registered its own while A's turn was still unobserved.
     f.session
-        .bind_turn_task(&turn_id, Some(running_card.clone()));
-    // Before A's started event is observed, a second delivery is admitted and its
-    // own turn accepted, binding its card. It is the later binding, and it must
-    // not become A's.
+        .bind_delivery_task("actor-delivery:a", Some(running_card.clone()));
     f.session
-        .bind_turn_task("captured-turn-b", Some(deferred_card.clone()));
+        .bind_delivery_task("actor-delivery:b", Some(deferred_card.clone()));
     for message in &messages {
         if message["method"] == "turn/completed" {
             break;
         }
-        handle_message(&f.session, message.clone());
+        handle_event(&f.session, message.clone(), Some("actor-delivery:a"));
     }
     assert_eq!(
         f.session.running_turn_task().as_deref(),
         Some(running_card.as_str()),
-        "the late started event still answers with the card its own delivery named"
+        "the turn is charged to the delivery the runtime named, not the latest one"
     );
 
-    // B never started here, so its binding is still waiting for its own turn and
-    // is untouched by A's settlement.
+    // B never started here, so its card is still waiting for its own turn.
     assert_eq!(
         f.session
-            .take_turn_task("captured-turn-b")
-            .flatten()
+            .take_delivery_task("actor-delivery:b")
+            .unwrap_or(None)
             .as_deref(),
         Some(deferred_card.as_str()),
         "another delivery's card is not spent on this turn"
     );
-    // A batch that is deferred before the runtime names a turn binds nothing, so
-    // there is no card for a later turn to inherit.
+    // A delivery the runtime never named leaves nothing behind at all.
     assert_eq!(
-        f.session.take_turn_task("never-started"),
+        f.session.take_delivery_task("actor-delivery:never-sent"),
         None,
-        "a deferred batch leaves no card behind"
+        "an unregistered delivery has no card to inherit"
     );
 
     for message in &messages {
         if message["method"] != "turn/completed" {
             continue;
         }
-        handle_message(&f.session, message.clone());
+        handle_event(&f.session, message.clone(), Some("actor-delivery:a"));
     }
 
     let path = GroupStore::new(f.session.home.clone())
@@ -320,9 +308,9 @@ async fn a_turn_keeps_its_card_even_when_it_is_observed_after_another_delivery()
         "a batch that never became a turn does not take over an open one"
     );
     assert_eq!(
-        f.session.take_turn_task(&turn_id),
+        f.session.take_delivery_task("actor-delivery:a"),
         None,
-        "no binding outlives the turn that carried it"
+        "no registration outlives the turn that carried it"
     );
     assert!(
         f.session.running_turn_task().is_none(),
@@ -330,12 +318,11 @@ async fn a_turn_keeps_its_card_even_when_it_is_observed_after_another_delivery()
     );
 }
 
-/// The other order the runtime can take: it reports the turn started before it
-/// answers the admission, so the card is claimed by the start event and the
-/// acceptance that arrives afterwards has nothing left to bind. The turn is
-/// still charged to the card its own delivery named.
+/// A turn whose events name no delivery has no authority tying it to a batch, so
+/// it is charged to nothing even though a card is registered for a delivery that
+/// was sent. Unknown provenance is never filled in from what was admitted last.
 #[tokio::test]
-async fn a_turn_observed_before_its_acceptance_keeps_the_card_its_delivery_named() {
+async fn a_turn_whose_events_name_no_delivery_stays_unattributed() {
     use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
     use cccc_contracts::ActorRuntime;
 
@@ -366,46 +353,27 @@ async fn a_turn_observed_before_its_acceptance_keeps_the_card_its_delivery_named
         .as_str()
         .expect("task id")
         .to_owned();
-    let turn_id = messages
-        .iter()
-        .find_map(|message| message.pointer("/params/turn/id").and_then(Value::as_str))
-        .expect("captured turn id")
-        .to_owned();
-
-    // The delivery named this card and its admission is still open when the
-    // runtime reports the turn.
-    f.session.set_pending_turn_task(Some(card.clone()));
+    // The delivery named this card, but this turn's events name no delivery, so
+    // there is nothing tying the two together.
+    f.session
+        .bind_delivery_task("actor-delivery:unnamed", Some(card.clone()));
     for message in &messages {
         if message["method"] == "turn/completed" {
             break;
         }
-        handle_message(&f.session, message.clone());
+        handle_event(&f.session, message.clone(), None);
     }
     assert_eq!(
-        f.session.running_turn_task().as_deref(),
-        Some(card.as_str()),
-        "the start event took the card of the delivery it belongs to"
-    );
-
-    // Acceptance arrives afterwards and finds the card already claimed.
-    assert_eq!(
-        f.session.take_pending_turn_task(),
+        f.session.running_turn_task(),
         None,
-        "a claimed card is not left for the acceptance to bind again"
-    );
-    f.session
-        .bind_turn_task(&turn_id, f.session.take_pending_turn_task());
-    assert_eq!(
-        f.session.running_turn_task().as_deref(),
-        Some(card.as_str()),
-        "binding nothing leaves the open turn's card as it was"
+        "a turn that names no delivery is not given anyone's card"
     );
 
     for message in &messages {
         if message["method"] != "turn/completed" {
             continue;
         }
-        handle_message(&f.session, message.clone());
+        handle_event(&f.session, message.clone(), None);
     }
 
     let path = GroupStore::new(f.session.home.clone())
@@ -418,10 +386,18 @@ async fn a_turn_observed_before_its_acceptance_keeps_the_card_its_delivery_named
         .filter(|event| event.kind == "turn.usage")
         .collect::<Vec<_>>();
     assert_eq!(usage.len(), 1, "one settled turn, one usage record");
+    assert!(
+        usage[0].data["task_ref"].is_null(),
+        "a turn with no delivery authority is charged to nothing, got {}",
+        usage[0].data["task_ref"]
+    );
     assert_eq!(
-        usage[0].data["task_ref"],
-        card.as_str(),
-        "the turn is charged to the card its early start event claimed"
+        f.session
+            .take_delivery_task("actor-delivery:unnamed")
+            .unwrap_or(None)
+            .as_deref(),
+        Some(card.as_str()),
+        "the registered card is still there for its own delivery"
     );
 }
 
@@ -459,19 +435,14 @@ async fn an_unattributed_turn_never_claims_another_deliverys_card() {
         .as_str()
         .expect("task id")
         .to_owned();
-    let turn_id = messages
-        .iter()
-        .find_map(|message| message.pointer("/params/turn/id").and_then(Value::as_str))
-        .expect("captured turn id")
-        .to_owned();
 
-    // This turn's delivery named no card, so its acceptance resolved it to
-    // nothing at all rather than leaving it unresolved.
-    f.session.bind_turn_task(&turn_id, None);
-    // Another delivery is now being admitted, holding its own card.
-    f.session.set_pending_turn_task(Some(next_card.clone()));
+    // This turn's delivery named no card, which is recorded as unattributed
+    // rather than left unresolved; another delivery has since registered its own.
+    f.session.bind_delivery_task("actor-delivery:a", None);
+    f.session
+        .bind_delivery_task("actor-delivery:b", Some(next_card.clone()));
     for message in &messages {
-        handle_message(&f.session, message.clone());
+        handle_event(&f.session, message.clone(), Some("actor-delivery:a"));
     }
 
     let path = GroupStore::new(f.session.home.clone())
@@ -490,18 +461,20 @@ async fn an_unattributed_turn_never_claims_another_deliverys_card() {
         usage[0].data["task_ref"]
     );
     assert_eq!(
-        f.session.take_pending_turn_task().as_deref(),
+        f.session
+            .take_delivery_task("actor-delivery:b")
+            .unwrap_or(None)
+            .as_deref(),
         Some(next_card.as_str()),
-        "the delivery being admitted keeps its own card"
+        "the other delivery keeps its own card"
     );
 }
 
-/// An admission the runtime never confirmed may still start a turn, and that turn's
-/// events cannot be told apart from the next delivery's. Until the session settles,
-/// no start event takes a card, so the ambiguity costs attribution rather than
-/// charging one delivery's turn to another's card.
+/// An admission the runtime never confirmed may still start a turn. That turn's
+/// events name their own delivery, so the card registered before the batch was sent
+/// still resolves it — the confirmation the runtime withheld is not needed.
 #[tokio::test]
-async fn an_unconfirmed_admission_keeps_the_next_start_unattributed() {
+async fn an_unconfirmed_admission_is_still_charged_to_the_card_it_registered() {
     use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
     use cccc_contracts::ActorRuntime;
 
@@ -533,12 +506,12 @@ async fn an_unconfirmed_admission_keeps_the_next_start_unattributed() {
         .expect("task id")
         .to_owned();
 
-    // The previous admission was never confirmed, and another delivery now holds
-    // its own card while the session is still open.
-    f.session.quarantine_unresolved_admission();
-    f.session.set_pending_turn_task(Some(next_card.clone()));
+    // The admission was never confirmed, but the card it registered is still the
+    // one the runtime will name if that turn ever starts.
+    f.session
+        .bind_delivery_task("actor-delivery:a", Some(next_card.clone()));
     for message in &messages {
-        handle_message(&f.session, message.clone());
+        handle_event(&f.session, message.clone(), Some("actor-delivery:a"));
     }
 
     let path = GroupStore::new(f.session.home.clone())
@@ -551,19 +524,10 @@ async fn an_unconfirmed_admission_keeps_the_next_start_unattributed() {
         .filter(|event| event.kind == "turn.usage")
         .collect::<Vec<_>>();
     assert_eq!(usage.len(), 1, "one settled turn, one usage record");
-    assert!(
-        usage[0].data["task_ref"].is_null(),
-        "a turn that cannot be told apart from an unconfirmed admission is not charged, got {}",
-        usage[0].data["task_ref"]
-    );
     assert_eq!(
-        f.session.take_pending_turn_task().as_deref(),
-        Some(next_card.as_str()),
-        "the delivery being admitted keeps its own card"
-    );
-    assert!(
-        !f.session.has_unresolved_admission(),
-        "a settled session is no longer holding an unconfirmed admission"
+        usage[0].data["task_ref"],
+        next_card.as_str(),
+        "an unconfirmed delivery's turn is still charged to the card it registered"
     );
 }
 
@@ -604,15 +568,11 @@ async fn a_metered_turn_is_charged_to_the_task_its_delivery_named() {
         .to_owned();
 
     // The delivery named this task, and the provider reports its own token.
-    let turn_id = messages
-        .iter()
-        .find_map(|message| message.pointer("/params/turn/id").and_then(Value::as_str))
-        .expect("captured turn id")
-        .to_owned();
-    f.session.bind_turn_task(&turn_id, Some(task_id.clone()));
+    f.session
+        .bind_delivery_task("actor-delivery:metered", Some(task_id.clone()));
     f.session.status.lock().expect("state").task_id = Some("pi-turn-token".into());
     for message in &messages {
-        handle_message(&f.session, message.clone());
+        handle_event(&f.session, message.clone(), Some("actor-delivery:metered"));
     }
 
     let path = GroupStore::new(f.session.home.clone())
@@ -661,9 +621,10 @@ async fn a_metered_turn_is_charged_to_the_task_its_delivery_named() {
             "an unpriced turn adds no dollars and is not read as free"
         );
     }
-    assert!(
-        f.session.take_pending_turn_task().is_none(),
-        "the batch's card is spent with its turn"
+    assert_eq!(
+        f.session.take_delivery_task("actor-delivery:metered"),
+        None,
+        "the delivery's registration is spent with its turn"
     );
 }
 

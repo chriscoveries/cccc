@@ -53,47 +53,36 @@ impl Session {
         }
     }
 
-    /// Record which board task the turn the runtime just accepted is about, under
-    /// that runtime turn id. Nothing is held for a batch that started no turn, and
-    /// the binding is looked up by id, so a late `turn/started` cannot be answered
-    /// with another delivery's card.
-    pub(super) fn bind_turn_task(&self, turn_id: &str, task: Option<String>) {
-        // A turn that is already open takes its card directly: the runtime
-        // reported it before it accepted the batch.
-        if let Ok(mut active) = self.active_turn.lock() {
-            if let Some(turn) = active.as_mut() {
-                if turn.turn_id == turn_id {
-                    turn.task = task;
-                    return;
-                }
-            }
-        }
-        if let Ok(mut tasks) = self.turn_tasks.lock() {
-            // A binding is only ever read once, when its turn is observed. If
-            // more than a handful are waiting, no observer is coming for them.
-            if tasks.len() >= 8 {
+    /// Record which board task the delivery the runtime was asked to run is about,
+    /// under the delivery id it is being asked with. `None` records a delivery that
+    /// named no single card: known to be unattributed, which is not the same as
+    /// unresolved, so it can never be given anyone else's card later.
+    pub(super) fn bind_delivery_task(&self, delivery_id: &str, task: Option<String>) {
+        if let Ok(mut tasks) = self.delivery_tasks.lock() {
+            // A binding is read once, when its turn is observed. If more than a
+            // handful are waiting, no observer is coming for them.
+            if tasks.len() >= 16 {
                 tasks.clear();
             }
-            tasks.insert(turn_id.to_owned(), task);
+            tasks.insert(delivery_id.to_owned(), task);
         }
     }
 
-    /// Mark that an admission ended without the runtime confirming it, so a
-    /// late event from that call cannot be read as the next delivery's turn.
-    pub(super) fn quarantine_unresolved_admission(&self) {
-        self.unresolved_admission
-            .store(true, std::sync::atomic::Ordering::Release);
+    /// The card of the delivery the runtime named, taken out so it is used once.
+    /// The outer option says whether that delivery was registered at all; the inner
+    /// one is the card, `None` when the delivery named no single task.
+    pub(super) fn take_delivery_task(&self, delivery_id: &str) -> Option<Option<String>> {
+        self.delivery_tasks
+            .lock()
+            .ok()
+            .and_then(|mut tasks| tasks.remove(delivery_id))
     }
 
-    pub(super) fn has_unresolved_admission(&self) -> bool {
-        self.unresolved_admission
-            .load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    /// The session settled, so an unconfirmed admission can no longer surface.
-    pub(super) fn clear_unresolved_admission(&self) {
-        self.unresolved_admission
-            .store(false, std::sync::atomic::Ordering::Release);
+    /// Drop the card of a delivery that will never start a turn.
+    pub(super) fn forget_delivery_task(&self, delivery_id: &str) {
+        if let Ok(mut tasks) = self.delivery_tasks.lock() {
+            tasks.remove(delivery_id);
+        }
     }
 
     /// Hold the door for one delivery's admission.
@@ -101,38 +90,6 @@ impl Session {
         self.admission
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Name the card of the delivery about to be admitted.
-    pub(super) fn set_pending_turn_task(&self, task: Option<String>) {
-        if let Ok(mut pending) = self.pending_turn_task.lock() {
-            *pending = task;
-        }
-    }
-
-    /// Take the pending card, for the turn that has just been resolved.
-    pub(super) fn take_pending_turn_task(&self) -> Option<String> {
-        self.pending_turn_task
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.take())
-    }
-
-    /// The card bound to `turn_id`, taken out so a binding is used once. The outer
-    /// option says whether the runtime had resolved this turn's card at all; the
-    /// inner one is the card, `None` when the delivery named no single task.
-    pub(super) fn take_turn_task(&self, turn_id: &str) -> Option<Option<String>> {
-        self.turn_tasks
-            .lock()
-            .ok()
-            .and_then(|mut tasks| tasks.remove(turn_id))
-    }
-
-    /// Drop a binding for a turn that ended unobserved, so the map stays bounded.
-    pub(super) fn forget_turn_task(&self, turn_id: &str) {
-        if let Ok(mut tasks) = self.turn_tasks.lock() {
-            tasks.remove(turn_id);
-        }
     }
 
     /// The task the running turn was started for, if any.
