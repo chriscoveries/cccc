@@ -33,6 +33,13 @@ pub(super) fn list(
         .map(|mut actor| -> Result<Value, OpError> {
             actor.normalize_runtime_constraints();
             actor.role = actors::effective_role(group, &actor.id);
+            // Stamp model cost/strength from the daemon's model registry (optional).
+            let registry = cccc_core::models::ModelRegistry::load_from_path(std::path::Path::new(
+                "/etc/cccc/models.toml",
+            ));
+            let (cost, strength) = registry.resolve(&actor.model);
+            actor.model_cost_usd_per_mtok = cost;
+            actor.model_strength = strength;
             let status = actor_runtime_status::resolve(group, &actor);
             let mut value = serde_json::to_value(&actor).unwrap_or_else(|_| json!({}));
             if let Some(object) = value.as_object_mut() {
