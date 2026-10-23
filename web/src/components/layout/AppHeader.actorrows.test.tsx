@@ -12,10 +12,7 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-vi.mock("../../services/api/actors", () => ({
-  fetchActors: vi.fn(),
-  stopActor: vi.fn(),
-}));
+vi.mock("../../services/api/actors", () => ({ fetchActors: vi.fn(), stopActor: vi.fn() }));
 
 const noop = () => undefined;
 const props: AppHeaderProps = {
@@ -82,13 +79,7 @@ function trialActors() {
         rss_mib: 31,
         cpu_pct: null,
       },
-      {
-        id: "stage-seat",
-        runtime: "hermes",
-        running: false,
-        rss_mib: null,
-        cpu_pct: null,
-      },
+      { id: "stage-seat", runtime: "hermes", running: false, rss_mib: null, cpu_pct: null },
     ],
   };
 }
@@ -103,9 +94,9 @@ it("renders the price and strength from the actor API, with a dash when null", a
   vi.mocked(fetchActors).mockResolvedValue({ ok: true, result: trialActors() } as never);
   await mount();
   await act(async () =>
-    host.querySelector<HTMLButtonElement>("[data-group-run-controls]")!.dispatchEvent(
-      new MouseEvent("click", { bubbles: true, detail: 1 }),
-    ),
+    host
+      .querySelector<HTMLButtonElement>("[data-group-run-controls]")!
+      .dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 })),
   );
   const menu = document.querySelector<HTMLElement>('[role="menu"]')!;
   const items = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]'));
@@ -131,9 +122,9 @@ it("stops a running actor from the row", async () => {
   vi.mocked(stopActor).mockResolvedValue({ ok: true } as never);
   await mount();
   await act(async () =>
-    host.querySelector<HTMLButtonElement>("[data-group-run-controls]")!.dispatchEvent(
-      new MouseEvent("click", { bubbles: true, detail: 1 }),
-    ),
+    host
+      .querySelector<HTMLButtonElement>("[data-group-run-controls]")!
+      .dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 })),
   );
   const menu = document.querySelector<HTMLElement>('[role="menu"]')!;
   const row = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]')).find((item) =>
