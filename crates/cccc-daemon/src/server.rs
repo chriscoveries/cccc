@@ -32,6 +32,8 @@ async fn run_with_restore(home: HomeLayout, restore: RuntimeRestoreSpawner) -> R
     let paths = DaemonPaths::new(home);
     std::fs::create_dir_all(&paths.daemon_dir)?;
     let lock = claim_home(&paths)?;
+    cccc_core::context::recover_dispatch_transactions(&paths.home)
+        .context("recover task dispatch transactions before exposing the daemon")?;
     if let Err(error) = cccc_core::group_bridge_retirement::retire(&paths.home) {
         tracing::warn!(%error, "manual Group Bridge state retained for retirement on next startup");
     }

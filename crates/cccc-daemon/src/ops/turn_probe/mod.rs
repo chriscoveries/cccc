@@ -144,6 +144,26 @@ pub(super) fn cached(group: &str, actor: &str) -> Option<TurnObservation> {
     }
 }
 
+/// An idle observation remains bound to the actual enabled PTY generation,
+/// including when the saved next-launch setting has already changed.
+pub(super) fn idle_generation(group: &str, actor: &str) -> Option<String> {
+    let entry = entries()
+        .lock()
+        .ok()?
+        .get(&(group.into(), actor.into()))
+        .cloned()?;
+    if !super::local_headless::has_no_registered_session(group, actor)
+        || !matches!(entry.observation, TurnObservation::Idle { .. })
+    {
+        return None;
+    }
+    generation(group, actor, &entry)?;
+    Some(format!(
+        "{}:{}:{}:{}",
+        entry.started_at, entry.root.pid, entry.root.start, entry.root.namespace
+    ))
+}
+
 pub(super) fn fields(
     observation: TurnObservation,
 ) -> (String, String, Option<String>, Option<String>) {
