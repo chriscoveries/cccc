@@ -182,6 +182,28 @@ fn captured_tasks_dispatch_oldest_by_price_strength_and_actor_id() {
         events.iter().filter(|e| e.kind == "system.notify").count(),
         4
     );
+    for assignment in &assignments {
+        let push = events
+            .iter()
+            .find(|event| {
+                event.kind == "system.notify"
+                    && event.data["context"]["task_id"] == assignment.data["task_id"]
+            })
+            .expect("matching dispatch push");
+        assert_eq!(
+            push.data
+                .get("refs")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            1,
+            "dispatch push must carry exactly one structured task ref"
+        );
+        assert!(
+            push.data["refs"][0]["kind"] == "task_ref"
+                && push.data["refs"][0]["task_id"] == assignment.data["task_id"],
+            "dispatch task ref must identify its assigned card"
+        );
+    }
     let after = f.doc();
     for id in &f.ready {
         let old = before.tasks.iter().find(|t| t["id"] == *id).expect("old");
