@@ -15,6 +15,8 @@ import { AppSettingsMenu } from "./AppSettingsMenu";
 import { fetchActors, stopActor } from "../../services/api/actors";
 import { fetchGroupHealth, type GroupHealth } from "../../services/api/groups";
 
+type ActorRow = { id: string; rss_mib?: number | null; cpu_pct?: number | null };
+
 export interface AppHeaderProps {
   theme: Theme;
   textScale: TextScale;
@@ -78,7 +80,7 @@ export function AppHeader({
         runtime_status: selectedGroupRuntimeStatus || undefined,
       })
     : null;
-  const [actors, setActors] = useState<any[]>([]);
+  const [actors, setActors] = useState<ActorRow[]>([]);
   const [health, setHealth] = useState<GroupHealth | null>(null);
   useEffect(() => {
     if (!selectedGroupId) {
@@ -151,29 +153,26 @@ export function AppHeader({
     sseStatus === "connected"
       ? runLabel
       : `${runLabel} · ${t(sseStatus === "connecting" ? "reconnecting" : "disconnected")}${sseErrorDetail ? ` · ${sseErrorDetail}` : ""}. ${t("connectionInterruptedHint")}`;
-  const runMenu = useGroupMenu(
-    runLabel,
-    [
-      ... (selectedStatus && onControlGroup && !webReadOnly
-        ? groupRunMenuActions(
-            selectedStatus.key,
-            t,
-            (control) => onControlGroup(selectedGroupId, control),
-            controlsBusy,
-          )
-        : []),
-      ...actors
-        .filter((a: any) => a?.id)
-        .map((a: any) => ({
-          label: `${a.id} · ${a.rss_mib ?? 0} MiB · ${a.cpu_pct ?? "—"}%`,
-          onClick: () => {
-            if (selectedGroupId) void stopActor(selectedGroupId, a.id);
-          },
-          tone: "danger" as const,
-          section: "actors",
-        })),
-    ],
-  );
+  const runMenu = useGroupMenu(runLabel, [
+    ...(selectedStatus && onControlGroup && !webReadOnly
+      ? groupRunMenuActions(
+          selectedStatus.key,
+          t,
+          (control) => onControlGroup(selectedGroupId, control),
+          controlsBusy,
+        )
+      : []),
+    ...actors
+      .filter((a: ActorRow) => a?.id)
+      .map((a: ActorRow) => ({
+        label: `${a.id} · ${a.rss_mib ?? 0} MiB · ${a.cpu_pct ?? "—"}%`,
+        onClick: () => {
+          if (selectedGroupId) void stopActor(selectedGroupId, a.id);
+        },
+        tone: "danger" as const,
+        section: "actors",
+      })),
+  ]);
   return (
     <header className="@container/group-header absolute inset-x-0 top-0 z-20 flex h-14 shrink-0 items-center px-3 glass-header md:relative md:inset-auto md:px-4">
       <div
