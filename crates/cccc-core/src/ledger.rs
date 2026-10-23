@@ -140,6 +140,31 @@ pub fn append(path: &Path, event: &Event) -> io::Result<()> {
     append_with(path, event, append_locked)
 }
 
+/// Publish cache observations only after a multi-event transaction committed.
+/// The transaction owns the writer lock and has already durably written these
+/// exact events. Cache failures cannot undo that committed ledger suffix.
+pub(crate) fn note_batch_append(path: &Path, file: &File, events: &[Event], offset: u64) {
+    let Ok(source) = snapshot::Source::from_file(path, file) else {
+        return;
+    };
+    let mut start = offset;
+    for event in events {
+        let Ok(encoded) = serde_json::to_vec(event) else {
+            return;
+        };
+        let len = encoded.len() + 1;
+        crate::inbox::projection::note_append(
+            path,
+            event,
+            source.clone(),
+            start,
+            start + len as u64,
+        );
+        crate::ledger_index::note_append(path, event, len);
+        start += len as u64;
+    }
+}
+
 fn append_with(
     path: &Path,
     event: &Event,

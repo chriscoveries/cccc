@@ -3453,7 +3453,6 @@ Notes:
   removed takes its last reading with it, so a total never includes memory the
   Group no longer holds.
 
-
 #### `actor_add`
 
 Args:

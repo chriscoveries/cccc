@@ -224,7 +224,7 @@ fn handle_managed_turn_started(
     // that delivery registered — never the one admitted most recently, and never a
     // guess. A turn whose event names no delivery stays unattributed.
     let task = delegation
-        .and_then(|id| session.take_delivery_task(id))
+        .and_then(|id| session.delivery_task(id))
         .unwrap_or(None);
     match observe_started_turn(
         &session.active_turn,
@@ -234,6 +234,11 @@ fn handle_managed_turn_started(
     ) {
         StartedTurnDisposition::Adopted => {
             session.set_status("working", Some(turn_id.to_owned()));
+            // Publish the turn before consuming its delivery. A readiness
+            // reader must see either the pending binding or the active turn.
+            if let Some(delivery) = delegation {
+                let _ = session.take_delivery_task(delivery);
+            }
             true
         }
         StartedTurnDisposition::Matched => true,

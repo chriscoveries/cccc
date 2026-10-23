@@ -435,6 +435,72 @@ pub fn ready_for_mail_notice(group_id: &str, actor_id: &str) -> bool {
         .is_some_and(|item| item.running() && item.ready_for_mail_notice())
 }
 
+/// A dispatch snapshot comes from one registered session generation. Missing
+/// authority and contention are explicit Unknown exclusions, never idle.
+pub(crate) fn task_dispatch_state(group_id: &str, actor_id: &str) -> Result<String, &'static str> {
+    lookup(&(group_id.to_owned(), actor_id.to_owned()))
+        .ok_or("no_managed_turn_authority")?
+        .task_dispatch_state()
+}
+
+pub(crate) fn idle_generation(group_id: &str, actor_id: &str) -> Option<String> {
+    task_dispatch_state(group_id, actor_id).ok()
+}
+
+impl Session {
+    pub(super) fn task_dispatch_state(&self) -> Result<String, &'static str> {
+        if !self.managed.structured_only() {
+            return Err("no_delivery_turn_authority");
+        }
+        let admission = self
+            .admission
+            .try_lock()
+            .map_err(|_| "turn_admission_pending")?;
+        self.task_dispatch_state_under_admission(&admission)
+    }
+
+    /// The caller already owns this session's delivery admission guard. All
+    /// other locks are nonblocking: completion may need the context lock that
+    /// dispatch holds. The reader never takes the admission/input guard.
+    pub(super) fn task_dispatch_state_under_admission(
+        &self,
+        _admission: &std::sync::MutexGuard<'_, ()>,
+    ) -> Result<String, &'static str> {
+        if !self.managed.structured_only() {
+            return Err("no_delivery_turn_authority");
+        }
+        if !self.managed.turn_admissions_confirmed() {
+            return Err("turn_admission_unconfirmed");
+        }
+        let _input = self
+            .startup_prompt
+            .try_lock()
+            .map_err(|_| "turn_admission_pending")?;
+        let turn = self
+            .active_turn
+            .try_lock()
+            .map_err(|_| "turn_authority_unknown")?;
+        let deliveries = self
+            .delivery_tasks
+            .try_lock()
+            .map_err(|_| "turn_authority_unknown")?;
+        // Accepted is not yet observed. No timeout may turn this missing
+        // authority into idle; the start handler retains its binding until
+        // ActiveTurn publication, so there is no empty-map publication gap.
+        if !deliveries.is_empty() {
+            return Err("delivery_turn_not_observed");
+        }
+        let state = self
+            .status
+            .try_lock()
+            .map_err(|_| "turn_authority_unknown")?;
+        if turn.is_some() || state.status != "idle" || !self.running() {
+            return Err("not_idle_or_not_running");
+        }
+        Ok(self.managed.generation().to_owned())
+    }
+}
+
 fn submit_admitted(
     home: &HomeLayout,
     group: &GroupDoc,
@@ -446,6 +512,10 @@ fn submit_admitted(
     // One delivery is admitted at a time per Actor, so a card cannot be claimed
     // for a turn another delivery started.
     let _admission = item.begin_admission();
+    // A queued outbox item must not reuse readiness from before this wait.
+    if item.defer_admitted_task_dispatch(source_events, &_admission) {
+        return BatchSubmission::Deferred;
+    }
     let Some(delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
         home,
         group,
@@ -466,7 +536,9 @@ fn submit_admitted(
         // Only this route's turns name the delivery they came from, so only this
         // route registers a card, and it registers it before the batch is sent so
         // that even a turn reported before the runtime answers resolves its own.
-        item.bind_delivery_task(&id, task_ref_in(source_events));
+        if !item.bind_delivery_task(&id, task_ref_in(source_events)) {
+            return BatchSubmission::Deferred;
+        }
         let mut outcome = BatchSubmission::Deferred;
         submit_with_startup_prompt(&item.startup_prompt, &delivery, |prepared| {
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {

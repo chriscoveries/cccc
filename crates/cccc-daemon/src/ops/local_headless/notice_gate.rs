@@ -40,10 +40,31 @@ pub(super) fn held_batch(events: &[Event], now: DateTime<Utc>) -> bool {
     !events.is_empty() && events.iter().all(|event| held_notice(event, now))
 }
 
+fn task_dispatch_batch(events: &[Event]) -> bool {
+    events.iter().any(|event| {
+        event.kind == "system.notify"
+            && event.data.get("kind").and_then(Value::as_str) == Some("task_dispatch")
+    })
+}
+
 impl Session {
     pub(super) fn ready_for_mail_notice(&self) -> bool {
         self.active_turn.lock().is_ok_and(|turn| turn.is_none())
             && self.status.lock().is_ok_and(|state| state.status == "idle")
+    }
+
+    /// A task outbox item is retained while busy; it is never withdrawn as
+    /// an early Mail notice. Repeat this after any admission-lock wait too.
+    pub(super) fn defer_task_dispatch(&self, events: &[Event]) -> bool {
+        task_dispatch_batch(events) && self.task_dispatch_state().is_err()
+    }
+
+    pub(super) fn defer_admitted_task_dispatch(
+        &self,
+        events: &[Event],
+        admission: &std::sync::MutexGuard<'_, ()>,
+    ) -> bool {
+        task_dispatch_batch(events) && self.task_dispatch_state_under_admission(admission).is_err()
     }
 
     /// Submit `events` unless they are held notices the Actor is not ready
@@ -53,6 +74,11 @@ impl Session {
         events: &[Event],
         submit: impl FnOnce() -> BatchSubmission,
     ) -> BatchSubmission {
+        // A committed task notice is an outbox item, not provider admission.
+        // If work began meanwhile, retain it for the normal delivery retry.
+        if self.defer_task_dispatch(events) {
+            return BatchSubmission::Deferred;
+        }
         if held_batch(events, Utc::now()) && !self.ready_for_mail_notice() {
             return BatchSubmission::Withheld;
         }

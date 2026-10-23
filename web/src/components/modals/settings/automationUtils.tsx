@@ -172,9 +172,10 @@ export function defaultActorControlAction(): Extract<
 
 export function actionKind(
   action: AutomationRule["action"] | undefined,
-): "notify" | "group_state" | "actor_control" {
+): "notify" | "group_state" | "actor_control" | "dispatch_ready_task" {
   const kind = String(action?.kind || "notify").trim();
-  if (kind === "group_state" || kind === "actor_control") return kind;
+  if (kind === "group_state" || kind === "actor_control" || kind === "dispatch_ready_task")
+    return kind;
   return "notify";
 }
 

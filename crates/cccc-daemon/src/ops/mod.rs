@@ -80,6 +80,7 @@ pub(crate) mod runtime_restore;
 mod runtime_session;
 mod runtime_state;
 mod settings;
+mod task_dispatch;
 mod task_list;
 mod terminal;
 mod terminal_history_source;

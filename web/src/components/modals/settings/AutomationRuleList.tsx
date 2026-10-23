@@ -153,6 +153,8 @@ export function AutomationRuleList({
             recipients: recipientsLabel,
             content: contentLabel,
           });
+        } else if (kind === "dispatch_ready_task") {
+          actionLabel = t("ruleList.dispatchReadyTasks");
         } else if (kind === "group_state") {
           const stateValue = String(
             rule.action && "state" in rule.action ? rule.action.state || "paused" : "paused",

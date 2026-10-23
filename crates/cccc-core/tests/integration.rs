@@ -12,3 +12,6 @@ mod kernel;
 mod nomcp;
 #[path = "suite/presentation.rs"]
 mod presentation;
+
+#[path = "suite/task_dispatch.rs"]
+mod task_dispatch;
