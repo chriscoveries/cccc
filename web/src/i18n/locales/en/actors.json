@@ -109,6 +109,8 @@
   "secretsSection": "Environment variables",
   "capabilitiesSection": "Capabilities",
   "profileToolsSection": "Runtime profile tools",
+  "model_label": "Model label (optional)",
+  "model_label_hint": "Operator-supplied model_label declaration. It does not select the launch model, is not verified against the running model, and has no billing meaning. Leave empty to keep it undeclared or clear it.",
   "displayName": "Display Name",
   "leaveEmptyForId": "Leave empty to use the agent ID as display name",
   "avatarTitle": "Avatar",

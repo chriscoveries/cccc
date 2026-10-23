@@ -3351,6 +3351,8 @@ Result:
 
 ### 8.4 Actors
 
+`model_label` is an optional operator-supplied declaration, independent of the Actor title. Set it on add or update (CLI `--model-label`, MCP `cccc_actor`, or Web); an empty string explicitly clears it, while omitting it on update preserves it. It is trimmed and limited to 128 characters without control characters, and omitted from Actor records when empty: absent means undeclared. It does not drive launching, is not verified against the running model, and carries no billing meaning. The operator must update or clear it after a model change; CCCC does no runtime-specific command parsing or database inspection for it.
+
 #### `actor_list`
 
 Args:
@@ -3382,6 +3384,7 @@ Args:
   group_id: string
   actor_id?: string
   title?: string
+  model_label?: string
   runtime?: string
   runtime_mode?: "default" | "acp" // optional headless ACP for Antigravity, Auggie, Copilot, Devin, Cursor, Kimi Code, Kiro, Hermes and Droid
   command?: string[]
@@ -3436,7 +3439,7 @@ Args:
 ```
 
 Patch keys used by CCCC v0.4.x include:
-- Identity/UI: `title`
+- Identity/UI: `title`, `model_label`
 - Runtime: `runtime`, `runtime_mode`, `command`, `submit`
 - Scope: `default_scope_key`
 - Enable/disable: `enabled`

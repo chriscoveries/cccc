@@ -1309,7 +1309,7 @@
   },
   {
     "name": "cccc_actor",
-    "description": "Actor operations: list/profile_list/add/remove/start/stop/restart. Actor creation follows the caller's allowed Runtime/Profile surface.",
+    "description": "Actor operations: list/profile_list/add/update/remove/start/stop/restart. Actor creation follows the caller's allowed Runtime/Profile surface.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1327,6 +1327,7 @@
             "list",
             "profile_list",
             "add",
+            "update",
             "remove",
             "start",
             "stop",
@@ -1343,6 +1344,11 @@
         },
         "title": {
           "type": "string"
+        },
+        "model_label": {
+          "type": "string",
+          "description": "Optional operator-supplied declaration on add/update; not launch configuration, a verified running model, or billing evidence. Empty clears it; omission on update preserves it; absent means undeclared.",
+          "maxLength": 128
         },
         "command": {
           "type": "array",

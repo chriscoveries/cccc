@@ -16,6 +16,9 @@ pub enum ActorAction {
         actor_id: String,
         #[arg(long, default_value = "")]
         title: String,
+        /// Operator-supplied model_label; does not select or verify the running model.
+        #[arg(long, default_value = "")]
+        model_label: String,
         #[arg(long, default_value = "codex")]
         runtime: String,
         #[arg(long, default_value = "default", value_parser = ["default", "acp"])]
@@ -43,6 +46,9 @@ pub enum ActorAction {
         group_id: Option<String>,
         #[arg(long)]
         title: Option<String>,
+        /// Operator-supplied model_label; an empty value clears the declaration.
+        #[arg(long)]
+        model_label: Option<String>,
         #[arg(long)]
         runtime: Option<String>,
         #[arg(long, value_parser = ["default", "acp"])]

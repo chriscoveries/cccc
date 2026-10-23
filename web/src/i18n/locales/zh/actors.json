@@ -109,6 +109,8 @@
   "secretsSection": "环境变量",
   "capabilitiesSection": "能力",
   "profileToolsSection": "运行配置工具",
+  "model_label": "模型标签（可选）",
+  "model_label_hint": "model_label 是由操作者提供的可选声明。它不决定启动模型，不会与运行中的模型核验，也不代表计费信息。留空表示未声明或清除标签。",
   "displayName": "显示名称",
   "leaveEmptyForId": "留空则使用智能体 ID 作为显示名称",
   "avatarTitle": "头像",

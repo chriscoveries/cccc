@@ -109,6 +109,8 @@
   "secretsSection": "環境変数",
   "capabilitiesSection": "能力",
   "profileToolsSection": "ランタイムプロファイル",
+  "model_label": "モデルラベル（任意）",
+  "model_label_hint": "model_label は操作者が宣言する任意の情報です。起動するモデルを指定せず、実行中のモデルとの照合も行わず、課金上の意味もありません。空欄は未宣言、またはラベルの消去を意味します。",
   "displayName": "表示名",
   "leaveEmptyForId": "空欄の場合はエージェント ID を表示名として使用します",
   "avatarTitle": "Avatar",

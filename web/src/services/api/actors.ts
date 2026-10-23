@@ -78,6 +78,7 @@ export async function addActor(
     profileScope?: ProfileScope;
     profileOwner?: string;
     title?: string;
+    model_label?: string;
     capabilityAutoload?: string[];
     capabilityHidden?: string[];
   },
@@ -102,6 +103,7 @@ export async function addActor(
           : [],
         capability_hidden: Array.isArray(options?.capabilityHidden) ? options.capabilityHidden : [],
         title: options?.title || "",
+        model_label: options?.model_label,
         default_scope_key: "",
         by: "user",
       }),
@@ -124,6 +126,7 @@ export async function updateActor(
     profileOwner?: string;
     profileAction?: "convert_to_custom";
     enabled?: boolean;
+    model_label?: string;
     capabilityAutoload?: string[];
     capabilityHidden?: string[];
   },
@@ -134,6 +137,7 @@ export async function updateActor(
   if (command !== undefined) body.command = command.trim();
   if (opts?.runtimeMode) body.runtime_mode = opts.runtimeMode;
   if (title !== undefined) body.title = title.trim();
+  if (opts?.model_label !== undefined) body.model_label = opts.model_label.trim();
   if (opts?.profileId !== undefined) body.profile_id = String(opts.profileId || "");
   if (opts?.profileScope !== undefined) body.profile_scope = String(opts.profileScope || "");
   if (opts?.profileOwner !== undefined) body.profile_owner = String(opts.profileOwner || "");

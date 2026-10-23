@@ -193,6 +193,10 @@ pub struct Actor {
     pub role: Option<ActorRole>,
     #[serde(default)]
     pub title: String,
+    /// Optional operator-supplied declaration, not a verified running model.
+    /// Empty means undeclared; launching and billing do not read it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_label: String,
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
@@ -245,6 +249,7 @@ impl Actor {
             id: id.into(),
             role: None,
             title: String::new(),
+            model_label: String::new(),
             command: Vec::new(),
             env: BTreeMap::new(),
             default_scope_key: String::new(),

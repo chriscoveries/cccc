@@ -4,6 +4,96 @@ use cccc_core::HomeLayout;
 use serde_json::{Map, Value, json};
 
 #[test]
+fn actor_model_label_is_undeclared_when_absent() {
+    let legacy: cccc_contracts::Actor =
+        serde_json::from_value(json!({"id":"peer1"})).expect("legacy actor");
+    assert!(
+        serde_json::to_value(legacy)
+            .expect("actor")
+            .get("model_label")
+            .is_none()
+    );
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"model_label"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    let added = call(
+        &home,
+        "actor_add",
+        json!({"group_id":group_id,"actor_id":"peer1","runtime":"custom","command":["sh"],"enabled":false,"by":"user"}),
+    );
+    assert!(added.result["actor"].get("model_label").is_none());
+    let listed = call(&home, "actor_list", json!({"group_id":group_id}));
+    assert!(listed.result["actors"][0].get("model_label").is_none());
+}
+
+#[test]
+fn actor_model_label_is_operator_supplied_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"model_label"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id");
+    let added = call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,"actor_id":"peer1","title":"Reviewer","runtime":"custom",
+            "command":["sh"],"enabled":false,"model_label":"  gpt-5-codex  ","by":"user"
+        }),
+    );
+    assert_eq!(added.result["actor"]["model_label"], "gpt-5-codex");
+    assert_eq!(
+        added.result["event"]["data"]["actor"]["model_label"],
+        "gpt-5-codex"
+    );
+    let row =
+        || call(&home, "actor_list", json!({"group_id":group_id})).result["actors"][0].clone();
+    let update = |patch: Value| {
+        raw_call(
+            &home,
+            "actor_update",
+            json!({"group_id":group_id,"actor_id":"peer1","patch":patch,"by":"user"}),
+        )
+    };
+    assert!(update(json!({"title":"Lead reviewer"})).ok);
+    assert_eq!(row()["model_label"], "gpt-5-codex");
+    let updated = update(json!({"model_label":"claude-sonnet-4-5"}));
+    assert!(updated.ok, "{:?}", updated.error);
+    assert_eq!(updated.result["actor"]["model_label"], "claude-sonnet-4-5");
+    assert_eq!(row()["model_label"], "claude-sonnet-4-5");
+    assert_eq!(row()["title"], "Lead reviewer");
+    assert_eq!(row()["runtime"], "custom");
+    assert_eq!(row()["command"], json!(["sh"]));
+    let persisted = cccc_core::GroupStore::new(home.clone())
+        .expect("store")
+        .load(group_id)
+        .expect("reload");
+    assert_eq!(
+        serde_json::to_value(&persisted.actors[0]).expect("actor")["model_label"],
+        "claude-sonnet-4-5"
+    );
+    for invalid in [
+        json!("x".repeat(129)),
+        json!("two\nlines"),
+        Value::Null,
+        json!(42),
+    ] {
+        assert!(!update(json!({"model_label":invalid})).ok);
+        assert_eq!(row()["model_label"], "claude-sonnet-4-5");
+    }
+    let cleared = update(json!({"model_label":""}));
+    assert!(cleared.ok, "{:?}", cleared.error);
+    assert!(cleared.result["actor"].get("model_label").is_none());
+    assert!(row().get("model_label").is_none());
+    assert!(update(json!({"model_label":"gpt-5-codex"})).ok);
+    assert_eq!(row()["model_label"], "gpt-5-codex");
+}
+
+#[test]
 fn actor_add_rejects_the_removed_runner_selector() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");

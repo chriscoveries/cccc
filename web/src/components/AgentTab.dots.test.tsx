@@ -134,6 +134,25 @@ async function render(compact: boolean, currentActor = actor, groupId = "g_dot")
   );
 }
 
+it.each([false, true])("shows only the declared model_label (compact=%s)", async (compact) => {
+  await render(compact);
+  expect(host.querySelector('[title="model_label"]')).toBeNull();
+
+  const declaration = { model_label: "Operator-selected model" };
+  await render(compact, { ...actor, ...declaration });
+  expect(host.querySelector('[title="model_label"]')?.textContent).toContain(
+    declaration.model_label,
+  );
+
+  await render(compact, { ...actor, ...{ model_label: "Updated declaration" } });
+  expect(host.textContent).toContain("Updated declaration");
+  expect(host.textContent).not.toContain(declaration.model_label);
+
+  await render(compact, actor);
+  expect(host.querySelector('[title="model_label"]')).toBeNull();
+  expect(host.textContent).not.toContain("Updated declaration");
+});
+
 it.each([false, true])(
   "shows a GET-projected managed turn error without offering Start (compact=%s)",
   async (compact) => {

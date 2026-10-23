@@ -295,6 +295,9 @@ export function useAppModalActorActions(args: {
     const commandChanged =
       mode === "custom" && (!linkedBefore || convertToCustom) && nextCommand !== currentCommand;
     const titleChanged = nextTitle !== currentTitle;
+    const model_label = payload.model_label?.trim();
+    const model_label_changed =
+      model_label !== undefined && model_label !== String(savedActor.model_label || "").trim();
     const autoloadChanged =
       JSON.stringify(nextCapabilityAutoload) !== JSON.stringify(currentCapabilityAutoload);
     const profileChanged =
@@ -311,6 +314,7 @@ export function useAppModalActorActions(args: {
       runtimeModeChanged ||
       commandChanged ||
       titleChanged ||
+      model_label_changed ||
       autoloadChanged ||
       profileChanged;
 
@@ -360,7 +364,11 @@ export function useAppModalActorActions(args: {
           undefined,
           undefined,
           nextTitle,
-          { profileAction: "convert_to_custom", capabilityAutoload: nextCapabilityAutoload },
+          {
+            profileAction: "convert_to_custom",
+            capabilityAutoload: nextCapabilityAutoload,
+            ...(model_label_changed ? { model_label } : {}),
+          },
         );
         if (!convertResp.ok) {
           throw new Error(`${convertResp.error.code}: ${convertResp.error.message}`);
@@ -376,7 +384,8 @@ export function useAppModalActorActions(args: {
       }
 
       if (mode === "profile") {
-        const needProfilePatch = profileChanged || titleChanged || autoloadChanged;
+        const needProfilePatch =
+          profileChanged || titleChanged || model_label_changed || autoloadChanged;
         if (needProfilePatch) {
           const profileResp = await api.updateActor(
             targetGroupId,
@@ -386,6 +395,7 @@ export function useAppModalActorActions(args: {
             nextTitle,
             {
               profileId,
+              ...(model_label_changed ? { model_label } : {}),
               profileScope: (selectedProfile?.scope || "global") as api.ProfileScope,
               profileOwner: String(selectedProfile?.owner_id || "").trim() || undefined,
               capabilityAutoload: nextCapabilityAutoload,
@@ -412,6 +422,8 @@ export function useAppModalActorActions(args: {
           nextRuntimeMode !== (actorSnapshot.runtime_mode || "default") ||
           nextCommand !== snapshotCommand ||
           nextTitle !== snapshotTitle ||
+          (model_label !== undefined &&
+            model_label !== String(actorSnapshot.model_label || "").trim()) ||
           autoloadChanged;
         if (needCustomPatch) {
           const customResp = await api.updateActor(
@@ -422,6 +434,7 @@ export function useAppModalActorActions(args: {
             nextTitle,
             {
               capabilityAutoload: nextCapabilityAutoload,
+              ...(model_label_changed ? { model_label } : {}),
               ...(supportsAcpMode(nextRuntime) || actorSnapshot.runtime_mode === "acp"
                 ? { runtimeMode: nextRuntimeMode }
                 : {}),
@@ -703,6 +716,7 @@ export function useAppModalActorActions(args: {
   const handleAddActor = async (
     avatarFile?: File | null,
     runtimeMode?: "default" | "acp",
+    model_label?: string,
   ): Promise<boolean> => {
     if (!selectedGroupId) return false;
     const creationGroupId = selectedGroupId;
@@ -757,8 +771,13 @@ export function useAppModalActorActions(args: {
               profileScope: (selectedProfile?.scope || "global") as api.ProfileScope,
               profileOwner: String(selectedProfile?.owner_id || "").trim() || undefined,
               capabilityAutoload,
+              model_label,
             }
-          : { capabilityAutoload, ...(supportsAcpMode(newActorRuntime) ? { runtimeMode } : {}) },
+          : {
+              capabilityAutoload,
+              model_label,
+              ...(supportsAcpMode(newActorRuntime) ? { runtimeMode } : {}),
+            },
       );
       if (!resp.ok) {
         setAddActorError(resp.error?.message || t("failedToAddAgent"));

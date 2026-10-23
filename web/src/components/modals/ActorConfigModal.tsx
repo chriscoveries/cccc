@@ -52,6 +52,7 @@ type AdvancedTabId = "connection" | "environment" | "capabilities" | "profile";
 
 export interface EditActorSavePayload {
   mode: ConfigMode;
+  model_label?: string;
   runtimeMode?: RuntimeMode;
   setVars: Record<string, string>;
   unsetKeys: string[];
@@ -145,7 +146,11 @@ export interface CreateActorConfigProps extends ActorConfigBaseProps {
   onChangeError: (message: string) => void;
   canSubmit: boolean;
   submitDisabledReason: string;
-  onCreate: (avatarFile?: File | null, runtimeMode?: RuntimeMode) => Promise<boolean> | boolean;
+  onCreate: (
+    avatarFile?: File | null,
+    runtimeMode?: RuntimeMode,
+    model_label?: string,
+  ) => Promise<boolean> | boolean;
 }
 
 export type ActorConfigModalProps = EditActorConfigProps | CreateActorConfigProps;
@@ -272,6 +277,7 @@ function CreateActorConfigModal({
   const { modalRef } = useModalA11y(isOpen, onCancel);
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("default");
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [model_label, setModelLabel] = useState("");
   const [capabilitiesPrimed, setCapabilitiesPrimed] = useState(false);
   const [advancedTab, setAdvancedTab] = useState<AdvancedTabId>("environment");
   const avatarPreviewUrl = useMemo(
@@ -280,7 +286,10 @@ function CreateActorConfigModal({
   );
 
   useEffect(() => {
-    if (!isOpen) setRuntimeMode("default");
+    if (!isOpen) {
+      setRuntimeMode("default");
+      setModelLabel("");
+    }
   }, [isOpen]);
 
   useEffect(() => {
@@ -333,9 +342,16 @@ function CreateActorConfigModal({
   const handleSubmit = async () => {
     try {
       const ok = await Promise.resolve(
-        onCreate(avatarFile, supportsAcpMode(runtime) ? runtimeMode : "default"),
+        onCreate(
+          avatarFile,
+          supportsAcpMode(runtime) ? runtimeMode : "default",
+          model_label.trim() || undefined,
+        ),
       );
-      if (ok) setAvatarFile(null);
+      if (ok) {
+        setAvatarFile(null);
+        setModelLabel("");
+      }
     } catch (e) {
       onChangeError(e instanceof Error ? e.message : t("failedToAddAgent"));
     }
@@ -343,6 +359,7 @@ function CreateActorConfigModal({
 
   const handleCancel = () => {
     setAvatarFile(null);
+    setModelLabel("");
     onCancel();
   };
 
@@ -493,6 +510,24 @@ function CreateActorConfigModal({
                         {hasForeman ? t("foremanLeads") : t("firstAgentForeman")}
                       </div>
                     </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="create-actor-model-label"
+                    className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]"
+                  >
+                    {t("model_label")}
+                  </label>
+                  <Input
+                    id="create-actor-model-label"
+                    value={model_label}
+                    onChange={(e) => setModelLabel(e.target.value)}
+                    disabled={busy === "actor-add"}
+                  />
+                  <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                    {t("model_label_hint")}
                   </div>
                 </div>
 
@@ -854,6 +889,7 @@ function EditActorConfigModal({
   const [secretsRefreshing, setSecretsRefreshing] = useState(false);
   const [secretKeysLoadFailed, setSecretKeysLoadFailed] = useState(false);
   const [attachProfileId, setAttachProfileId] = useState("");
+  const [model_label, setModelLabel] = useState(savedActor?.model_label || "");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("default");
   const [editMode, setEditMode] = useState<ConfigMode>("custom");
   const [pendingConvertToCustom, setPendingConvertToCustom] = useState(false);
@@ -944,6 +980,7 @@ function EditActorConfigModal({
   const applyRunningTarget = grokTargetChanged && (connectionEnabled ?? isRunning);
   const launchChanges = buildActorSecretSaveChanges(secretChanges);
   const hasChanges =
+    model_label.trim() !== String(savedActor?.model_label || "").trim() ||
     title.trim() !== baseline.current.title.trim() ||
     (baseline.current.notesLoaded && actorNotes.trim() !== baseline.current.actorNotes.trim()) ||
     JSON.stringify(parseCapabilityIdInput(capabilityAutoloadText)) !==
@@ -1120,6 +1157,7 @@ function EditActorConfigModal({
     }
     initializedDraftIdentityRef.current = identity;
     setRuntimeMode(savedActor?.runtime_mode || "default");
+    setModelLabel(savedActor?.model_label || "");
     secretFetchSeqRef.current += 1;
     setEditMode(hasLinked ? "profile" : "custom");
     setPendingConvertToCustom(false);
@@ -1146,6 +1184,7 @@ function EditActorConfigModal({
     linkedProfileOwner,
     linkedProfileScope,
     savedActor?.runtime_mode,
+    savedActor?.model_label,
   ]);
 
   useEffect(() => {
@@ -1287,6 +1326,9 @@ function EditActorConfigModal({
       try {
         await callback({
           mode: "profile",
+          ...(model_label.trim() !== String(savedActor?.model_label || "").trim()
+            ? { model_label: model_label.trim() }
+            : {}),
           setVars: {},
           unsetKeys: [],
           clear: false,
@@ -1318,6 +1360,9 @@ function EditActorConfigModal({
     try {
       await callback({
         mode: "custom",
+        ...(model_label.trim() !== String(savedActor?.model_label || "").trim()
+          ? { model_label: model_label.trim() }
+          : {}),
         runtimeMode: supportsAcpMode(runtime) ? runtimeMode : "default",
         setVars: secretSaveChanges.setVars,
         unsetKeys: secretSaveChanges.unsetKeys,
@@ -1499,6 +1544,23 @@ function EditActorConfigModal({
                         {groupRoleLabel}
                       </span>
                     </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="edit-actor-model-label"
+                    className="block text-xs font-medium mb-2 text-[var(--color-text-muted)]"
+                  >
+                    {t("model_label")}
+                  </label>
+                  <Input
+                    id="edit-actor-model-label"
+                    value={model_label}
+                    onChange={(e) => setModelLabel(e.target.value)}
+                  />
+                  <div className="text-[10px] mt-1.5 text-[var(--color-text-muted)]">
+                    {t("model_label_hint")}
                   </div>
                 </div>
 

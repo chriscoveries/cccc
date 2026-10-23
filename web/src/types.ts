@@ -326,6 +326,7 @@ export type Actor = {
   role?: string;
   internal_kind?: string | null;
   title?: string;
+  model_label?: string;
   avatar_url?: string | null;
   has_custom_avatar?: boolean;
   enabled?: boolean;

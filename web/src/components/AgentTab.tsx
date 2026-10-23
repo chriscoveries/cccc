@@ -795,6 +795,14 @@ export function AgentTab({
             >
               {actor.title || actor.id}
             </span>
+            {actor.model_label ? (
+              <span
+                className="max-w-[40%] truncate text-[var(--color-text-muted)]"
+                title={t("model_label")}
+              >
+                {actor.model_label}
+              </span>
+            ) : null}
             {compactStatusText ? (
               <span
                 className="max-w-[40%] shrink-0 truncate text-[var(--color-text-secondary)]"
@@ -906,6 +914,9 @@ export function AgentTab({
                   )}
                 >
                   {rtInfo?.label || t("custom")} • {runtimeStatusText}
+                  {actor.model_label ? (
+                    <span title={t("model_label")}> • {actor.model_label}</span>
+                  ) : null}
                 </div>
                 {/* Mobile-only: condensed single-line agent state */}
                 {(!isEventActor || agentState) && (
