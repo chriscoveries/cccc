@@ -119,8 +119,9 @@ export function AutomationRuleEditorModal(props: AutomationRuleEditorModalProps)
   const kind = String(ruleDraft.action?.kind || "notify").trim() as
     | "notify"
     | "group_state"
-    | "actor_control";
-  const scheduleLockedToOneTime = kind !== "notify";
+    | "actor_control"
+    | "dispatch_ready_task";
+  const scheduleLockedToOneTime = kind === "group_state" || kind === "actor_control";
   const scheduleSelectValue = scheduleLockedToOneTime ? "at" : triggerKind;
   const activeTriggerKind = scheduleLockedToOneTime ? "at" : triggerKind;
   const operationalActionsEnabled = activeTriggerKind === "at";
@@ -528,6 +529,7 @@ export function AutomationRuleEditorModal(props: AutomationRuleEditorModalProps)
               <SelectCombobox
                 items={[
                   { value: "notify", label: t("ruleEditor.sendReminder") },
+                  { value: "dispatch_ready_task", label: t("ruleEditor.dispatchReadyTasks") },
                   {
                     value: "group_state",
                     label: `${t("ruleEditor.setGroupStatus")}${operationalActionsEnabled ? "" : t("automation.oneTimeOnlySuffix")}`,
@@ -542,11 +544,24 @@ export function AutomationRuleEditorModal(props: AutomationRuleEditorModalProps)
                 value={kind}
                 onChange={(value) => {
                   const next = String(value || "notify");
-                  if (next !== "notify" && !operationalActionsEnabled) {
+                  if (
+                    next !== "notify" &&
+                    next !== "dispatch_ready_task" &&
+                    !operationalActionsEnabled
+                  ) {
                     onSetRulesErr(t("automation.operationalActionsHint"));
                     return;
                   }
                   onSetRulesErr("");
+                  if (next === "dispatch_ready_task") {
+                    patchRule({
+                      enabled: false,
+                      scope: "group",
+                      owner_actor_id: null,
+                      action: { kind: "dispatch_ready_task", dispatch_cooldown_ms: 60000 },
+                    });
+                    return;
+                  }
                   if (next === "group_state") {
                     onSetOneShotMode("after");
                     patchRule({
@@ -712,6 +727,37 @@ export function AutomationRuleEditorModal(props: AutomationRuleEditorModalProps)
                   </div>
                 )}
               </>
+            ) : null}
+
+            {kind === "dispatch_ready_task" ? (
+              <div>
+                <label className={labelClass(isDark)}>{t("ruleEditor.dispatchCooldown")}</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={1000}
+                  value={
+                    ruleDraft.action?.kind === "dispatch_ready_task"
+                      ? (ruleDraft.action.dispatch_cooldown_ms ?? 60000)
+                      : 60000
+                  }
+                  onChange={(event) =>
+                    patchRule({
+                      action: {
+                        kind: "dispatch_ready_task",
+                        dispatch_cooldown_ms: Math.max(
+                          0,
+                          Math.trunc(Number(event.target.value) || 0),
+                        ),
+                      },
+                    })
+                  }
+                  className={inputClass(isDark)}
+                />
+                <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                  {t("ruleEditor.dispatchDescription")}
+                </p>
+              </div>
             ) : null}
 
             {kind === "group_state" ? (

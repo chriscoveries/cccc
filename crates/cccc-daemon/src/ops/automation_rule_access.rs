@@ -22,6 +22,7 @@ pub(super) fn validate(
         "rule",
     )?;
     required_text(rule, "id")?;
+    let enabled_omitted = !rule.contains_key("enabled");
     match rule.get("enabled") {
         Some(value) if value.as_bool().is_none() => {
             return Err(invalid("enabled must be a boolean"));
@@ -68,6 +69,12 @@ pub(super) fn validate(
         })
     });
     let action_kind = validate_action(action)?;
+    if action_kind == "dispatch_ready_task" && enabled_omitted {
+        rule.insert("enabled".into(), Value::Bool(false));
+    }
+    if action_kind == "dispatch_ready_task" && scope != "group" {
+        return Err(invalid("task dispatch requires group scope"));
+    }
     if matches!(action_kind.as_str(), "group_state" | "actor_control") && trigger_kind != "at" {
         return Err(invalid(format!(
             "action.kind={action_kind} only supports trigger.kind=at"
@@ -183,6 +190,24 @@ fn validate_action(value: &mut Value) -> Result<String, OpError> {
         .ok_or_else(|| invalid("action must be an object"))?;
     let kind = required_text(action, "kind")?.to_owned();
     match kind.as_str() {
+        "dispatch_ready_task" => {
+            reject_unknown(
+                action,
+                &["kind", "dispatch_cooldown_ms"],
+                "dispatch_ready_task action",
+            )?;
+            if action
+                .get("dispatch_cooldown_ms")
+                .is_some_and(|value| value.as_u64().is_none())
+            {
+                return Err(invalid(
+                    "dispatch_cooldown_ms must be a nonnegative integer",
+                ));
+            }
+            action
+                .entry("dispatch_cooldown_ms")
+                .or_insert_with(|| json!(60_000));
+        }
         "notify" => {
             reject_unknown(
                 action,
@@ -274,4 +299,33 @@ fn reject_unknown(
 
 fn invalid(message: impl Into<String>) -> OpError {
     OpError::new("group_automation_manage_failed", message)
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn task_dispatch_is_an_explicit_group_only_opt_in() {
+        let rule = json!({"id":"dispatch","trigger":{"kind":"interval","every_seconds":60},"action":{"kind":"dispatch_ready_task"}});
+        let mut saved = rule.as_object().expect("rule").clone();
+        validate(&mut saved, "user", false, None).expect("new action");
+        assert_eq!(saved["enabled"], false);
+        assert_eq!(saved["action"]["dispatch_cooldown_ms"], 60_000);
+        saved.insert("enabled".into(), json!(true));
+        validate(&mut saved, "user", false, None).expect("explicit opt in");
+        assert_eq!(saved["enabled"], true);
+        saved.insert("scope".into(), json!("personal"));
+        saved.insert("owner_actor_id".into(), json!("user"));
+        assert!(validate(&mut saved, "user", false, None).is_err());
+        assert!(
+            validate(
+                &mut rule.as_object().expect("rule").clone(),
+                "actor",
+                true,
+                None
+            )
+            .is_err()
+        );
+    }
 }

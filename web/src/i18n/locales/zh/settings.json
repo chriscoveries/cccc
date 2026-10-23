@@ -673,6 +673,7 @@
     "notebookSectionLockedConnecting": "完成当前 Google 登录后，这里会显示工作 / 记忆笔记本的查看、绑定与管理。"
   },
   "automation": {
+    "notifyIdleHeldTasks": "提醒空闲 Actor 处理其已分派的未完成任务",
     "title": "自动化",
     "description": "配置内建自动化和定时规则。设置存储在",
     "configPathFallback": "CCCC_HOME/…/group.yaml",
@@ -793,6 +794,9 @@
     "savePoliciesTitle": "保存协作跟进设置"
   },
   "ruleEditor": {
+    "dispatchReadyTasks": "分派就绪任务",
+    "dispatchCooldown": "Actor 冷却时间（毫秒）",
+    "dispatchDescription": "将最早就绪的任务分派给模型价格符合预算的空闲 Actor。默认禁用。",
     "editRule": "编辑规则：",
     "unnamed": "未命名",
     "last": "上次：",
@@ -840,6 +844,7 @@
     "targetActors": "目标 Actor"
   },
   "ruleList": {
+    "dispatchReadyTasks": "分派就绪任务",
     "showCompleted": "显示已完成",
     "clearCompleted": "清除已完成（{{count}}）",
     "clearCompletedTitle": "清除已完成的一次性提醒",
