@@ -10,6 +10,7 @@ import type {
 } from "../../types";
 import { formatTime } from "../../utils/time";
 import { getTaskDisplaySummary, resolveTaskType, type TaskTypeId } from "../../utils/taskWorkflow";
+import { budgetFieldText, parseBudgetField } from "../../features/contextModal/taskCost";
 
 export interface BriefDraft {
   objective: string;
@@ -32,6 +33,8 @@ export interface TaskDraft {
   handoffTo: string;
   notes: string;
   checklist: string;
+  targetBudgetUsd: string;
+  maxUsdPerMtok: string;
 }
 
 export interface NoteDraft {
@@ -237,6 +240,8 @@ export function taskToDraft(task: Task): TaskDraft {
     handoffTo: String(task.handoff_to || ""),
     notes: String(task.notes || ""),
     checklist: checklistToText(task.checklist),
+    targetBudgetUsd: budgetFieldText(task.target_budget_usd),
+    maxUsdPerMtok: budgetFieldText(task.max_usd_per_mtok),
   };
 }
 
@@ -254,6 +259,8 @@ export function emptyTaskDraft(status: BoardStatus = "planned"): TaskDraft {
     handoffTo: "",
     notes: "",
     checklist: "",
+    targetBudgetUsd: "",
+    maxUsdPerMtok: "",
   };
 }
 
@@ -270,6 +277,12 @@ export function alignTaskDraftTaskType(
   return taskType;
 }
 
+/** A stored budget value and a typed one, both as the text a field shows. */
+function draftBudgetValue(text: string): string {
+  const parsed = parseBudgetField(text);
+  return parsed.ok ? budgetFieldText(parsed.value) : String(text ?? "").trim();
+}
+
 export function taskDraftDirty(draft: TaskDraft | null | undefined): boolean {
   if (!draft) return false;
   return !!(
@@ -284,6 +297,8 @@ export function taskDraftDirty(draft: TaskDraft | null | undefined): boolean {
     draft.handoffTo.trim() ||
     draft.notes.trim() ||
     draft.checklist.trim() ||
+    draft.targetBudgetUsd.trim() ||
+    draft.maxUsdPerMtok.trim() ||
     String(draft.status || "planned") !== "planned"
   );
 }
@@ -518,6 +533,8 @@ export function taskDraftMatches(
     String(task.waiting_on || "none") === draft.waitingOn &&
     String(task.handoff_to || "") === draft.handoffTo &&
     String(task.notes || "") === draft.notes &&
-    checklistToText(task.checklist) === draft.checklist
+    checklistToText(task.checklist) === draft.checklist &&
+    budgetFieldText(task.target_budget_usd) === draftBudgetValue(draft.targetBudgetUsd) &&
+    budgetFieldText(task.max_usd_per_mtok) === draftBudgetValue(draft.maxUsdPerMtok)
   );
 }
