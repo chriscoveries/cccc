@@ -10,7 +10,9 @@ Native-terminal delivery without that correlation is excluded: its spend
 cannot be charged to a card by guessing which later turn it started.
 PTY Actors have no supported authoritative turn state and are not dispatchable.
 Output silence and native provider observations are never evidence of idle.
-Disabled, stopped, busy, and approval-waiting Actors are excluded.
+Disabled, stopped, busy, and approval-waiting Actors are excluded. An in-flight
+or unresolved provider admission is Unknown; an unresolved result keeps
+automatic dispatch off for that managed generation.
 
 Each pass considers open or planned, unassigned tasks in creation order, with
 task id breaking ties. A task must have no unmet blockers or external wait,

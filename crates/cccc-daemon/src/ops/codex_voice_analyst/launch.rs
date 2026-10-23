@@ -418,6 +418,17 @@ impl AnalystSession {
         }
     }
 
+    /// An admission without a confirmed outcome is not evidence of idle. A
+    /// query never waits for an in-flight provider request; that is Unknown too.
+    /// Unresolved requests keep auto-dispatch disabled for this generation.
+    pub(crate) fn turn_admissions_confirmed(&self) -> bool {
+        self.delegations.try_lock().is_ok_and(|entries| {
+            entries
+                .values()
+                .all(|entry| matches!(entry, DelegationState::Started(_)))
+        })
+    }
+
     pub(crate) fn process_running(&self) -> bool {
         self.protocol.running()
             && self
