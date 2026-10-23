@@ -440,6 +440,9 @@ export function normalizeTask(value: unknown): Task | null {
     task_type: asOptionalString(record.task_type),
     notes: asString(record.notes),
     checklist,
+    dispatch_eligible:
+      typeof record.dispatch_eligible === "boolean" ? record.dispatch_eligible : undefined,
+    dispatch_block_reason: asOptionalString(record.dispatch_block_reason),
     created_at: asOptionalString(record.created_at),
     updated_at: asOptionalString(record.updated_at),
     archived_from: asOptionalString(record.archived_from),
