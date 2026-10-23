@@ -1,0 +1,46 @@
+{
+  "captured": "two consecutive assigned turns of one managed Pi actor, 2026-10-23T04:24:55Z to 04:25:30Z",
+  "catalog": { "model_id": "ds1017", "usd_per_mtok": 0.07 },
+  "turns": [
+    {
+      "board_task": {
+        "kind": "task_ref",
+        "task_id": "T089",
+        "title": "Verify stage roles file contents and digest"
+      },
+      "runtime_task_id": "pi-96239a042f094d8b8a44ba650c600566",
+      "runtime_turn_id": "pi-96239a042f094d8b8a44ba650c600566",
+      "usage": {
+        "model_id": "ds1017",
+        "source": "pi_rpc",
+        "status": "completed",
+        "input_tokens": 2478,
+        "output_tokens": 885,
+        "cache_read_tokens": 96384,
+        "cache_write_tokens": 0,
+        "usage_samples": 4
+      },
+      "expected_usd": 0.00698229
+    },
+    {
+      "board_task": {
+        "kind": "task_ref",
+        "task_id": "T090",
+        "title": "Verify installed Pi package metadata"
+      },
+      "runtime_task_id": "pi-78c8332af90d4834b349d0d7f4c967ca",
+      "runtime_turn_id": "pi-78c8332af90d4834b349d0d7f4c967ca",
+      "usage": {
+        "model_id": "ds1017",
+        "source": "pi_rpc",
+        "status": "completed",
+        "input_tokens": 1576,
+        "output_tokens": 581,
+        "cache_read_tokens": 103680,
+        "cache_write_tokens": 0,
+        "usage_samples": 4
+      },
+      "expected_usd": 0.00740859
+    }
+  ]
+}
