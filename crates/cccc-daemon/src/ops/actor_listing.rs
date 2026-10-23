@@ -71,6 +71,7 @@ pub(super) fn list(
                         .pid
                         .map_or(Value::Null, |pid| Value::from(u64::from(pid))),
                 );
+                object.extend(super::actor_memory::row_fields(&group.group_id, &actor.id));
                 object.extend(super::working_state::runtime_actor_fields(
                     home,
                     &actor,
