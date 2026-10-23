@@ -216,6 +216,20 @@ pub(crate) fn report(home: &HomeLayout, group_id: &str, now: i64) -> Value {
     entry.trend.report(now)
 }
 
+/// Write every Group's window. Called on the daemon's graceful shutdown path so
+/// a stop that lands between ticks still keeps the samples of the last one.
+pub(crate) fn flush_all(home: &HomeLayout) {
+    let mut groups = groups();
+    for (group_id, entry) in groups.iter_mut() {
+        let path = entry
+            .path
+            .clone()
+            .or_else(|| state_path(home, group_id).ok());
+        load_once(entry, path.as_deref());
+        flush(entry, path.as_deref());
+    }
+}
+
 /// Drop the trend of Groups that no longer exist.
 pub(crate) fn retain_groups(known: &std::collections::BTreeSet<String>) {
     groups().retain(|group, _| known.contains(group));
@@ -757,6 +771,62 @@ mod tests {
             reloaded.report(now + 20)["keys"][0]["peak_rss_mib"].as_u64(),
             Some(900)
         );
+    }
+
+    /// The daemon's graceful stop, exercised the way `server.rs` calls it: the
+    /// captured census rows are folded in, `flush_all` runs, and a reload must
+    /// show the same counts a report showed before the stop.
+    #[test]
+    fn a_graceful_stop_keeps_the_window_it_sampled() {
+        let (temp, home) = test_home();
+        let group = "g_graceful_stop";
+        let captured = captured_stream();
+        assert_eq!(
+            captured.len(),
+            3,
+            "three real census ticks are on the branch"
+        );
+
+        let mut now = 0;
+        for (at, rows) in &captured {
+            now = *at;
+            for (harness, pss_kib) in rows {
+                record(
+                    &home,
+                    group,
+                    harness,
+                    "headless",
+                    *at,
+                    None,
+                    Some(kib_to_mib(*pss_kib)),
+                );
+            }
+        }
+        let before = report(&home, group, now);
+        let samples_before = before["keys"]
+            .as_array()
+            .expect("keys")
+            .iter()
+            .map(|key| key["pss_samples"].as_u64().expect("pss_samples"))
+            .sum::<u64>();
+        assert!(samples_before > 0, "the captured stream has real samples");
+
+        // What the daemon does on SIGTERM before it stops serving.
+        flush_all(&home);
+
+        let reloaded = Trend::load(&state_file(&temp, group));
+        let after = reloaded.report(now);
+        let samples_after = after["keys"]
+            .as_array()
+            .expect("keys")
+            .iter()
+            .map(|key| key["pss_samples"].as_u64().expect("pss_samples"))
+            .sum::<u64>();
+        assert_eq!(
+            samples_after, samples_before,
+            "a graceful stop must not drop a single captured sample"
+        );
+        assert_eq!(after, before, "the whole window, hour by hour");
     }
 
     #[test]

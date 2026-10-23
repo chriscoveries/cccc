@@ -315,6 +315,10 @@ fn use_tcp() -> bool {
 
 fn begin_runtime_shutdown(home: &HomeLayout) {
     let _ = crate::runtime_start_gate::prevent(home);
+    // A graceful stop keeps the harness RAM window: the trend is a diagnostic,
+    // but losing the samples of the last tick on every ordinary restart would
+    // make the 72-hour figure depend on how often the daemon happens to stop.
+    crate::ops::actor_memory_trend::flush_all(home);
 }
 
 #[cfg(test)]
