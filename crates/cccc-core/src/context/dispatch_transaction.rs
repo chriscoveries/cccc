@@ -45,6 +45,22 @@ pub(super) fn run(
     })
 }
 
+/// The last admission check runs after task persistence and immediately before
+/// the ledger/outbox commit. A rejection follows the same complete rollback
+/// path as a failed append; no assignment or notification becomes visible.
+pub(super) fn run_guarded(
+    home: &HomeLayout,
+    group_id: &str,
+    change: impl FnOnce(&mut ContextDoc, &mut DispatchState) -> io::Result<Vec<Event>>,
+    admit: impl FnOnce() -> io::Result<()>,
+) -> io::Result<Vec<Event>> {
+    run_with(home, group_id, change, |file, bytes| {
+        admit()?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })
+}
+
 fn run_with(
     home: &HomeLayout,
     group_id: &str,

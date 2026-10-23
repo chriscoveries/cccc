@@ -656,12 +656,15 @@ export type Task = {
   handoff_to?: string | null;
   task_type?: string | null;
   notes?: string | null;
-  /** Recorded cost, never enforced: the ceiling a task should stay under. */
+  /** Only gates new dispatch; never stops or blocks running work. */
   target_budget_usd?: number | null;
-  /** Recorded cost, never enforced: the dearest model a turn may use. */
+  /** The dearest per-token model eligible for a new dispatch. */
   max_usd_per_mtok?: number | null;
   /** What the task's metered turns have cost so far, from the daemon. */
   cost_usd?: number | null;
+  /** Read-only eligibility snapshot; rechecked by the committing transaction. */
+  dispatch_eligible?: boolean;
+  dispatch_block_reason?: string | null;
   cost_updated_at?: string | null;
   cost_turns?: number | null;
   unpriced_turns?: number | null;
@@ -1489,12 +1492,20 @@ export type AutomationRuleStatus = {
   completed_at?: string;
 };
 
+export type DispatchActorStatus = {
+  actor_id: string;
+  dispatchable: boolean;
+  reason: string | null;
+  generation: string | null;
+};
+
 export type GroupAutomation = {
   ruleset: AutomationRuleSet;
   snippet_catalog?: AutomationSnippetCatalog;
   status: Record<string, AutomationRuleStatus>;
   config_path: string;
   supported_vars: string[];
+  dispatch_actors?: DispatchActorStatus[];
   version?: number;
   server_now?: string;
 };

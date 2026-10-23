@@ -58,6 +58,18 @@ export function TaskCardBadges({
           {task.priority}
         </span>
       ) : null}
+      {!compact &&
+      task.dispatch_block_reason &&
+      task.dispatch_block_reason !== "dispatch_disabled" &&
+      !task.assignee &&
+      (task.status === "planned" || task.status === "open") ? (
+        <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-amber-600 dark:text-amber-400">
+          {tr(
+            `context.dispatchReasons.${task.dispatch_block_reason}`,
+            `Dispatch: ${task.dispatch_block_reason.replace(/_/g, " ")}`,
+          )}
+        </span>
+      ) : null}
       {blocked ? (
         <span className="rounded-full bg-rose-500/15 px-2 py-0.5 text-rose-600 dark:text-rose-400">
           {tr("context.blocked", "Blocked")}

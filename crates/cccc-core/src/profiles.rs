@@ -1,4 +1,4 @@
-use cccc_contracts::{ActorRuntime, ActorSubmit, RunnerKind, RuntimeMode, TurnProbe, utc_now};
+use cccc_contracts::{ActorRuntime, ActorSubmit, RunnerKind, RuntimeMode, utc_now};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -52,7 +52,6 @@ struct SecretDoc {
 pub struct RuntimeProfileConfig {
     pub runtime: ActorRuntime,
     pub runtime_mode: RuntimeMode,
-    pub turn_probe: TurnProbe,
     pub runner: RunnerKind,
     pub command: Vec<String>,
     pub submit: ActorSubmit,
@@ -151,14 +150,12 @@ impl ProfileStore {
         let runtime_mode = parse_profile_field(&profile, "runtime_mode", RuntimeMode::default())?;
         runtime_mode.validate(runtime).map_err(io::Error::other)?;
         let runner = runtime.runner_for(runtime_mode);
-        let turn_probe = parse_profile_field(&profile, "turn_probe", TurnProbe::Off)?;
         let submit = parse_profile_field(&profile, "submit", ActorSubmit::default())?;
         let command = parse_profile_command(&profile)?;
         let environment = self.secret_values_ref(profile_id, scope, owner_id)?;
         Ok(Some(RuntimeProfileConfig {
             runtime,
             runtime_mode,
-            turn_probe,
             runner,
             command,
             submit,
@@ -237,19 +234,6 @@ impl ProfileStore {
             "runtime_mode".into(),
             serde_json::to_value(runtime_mode).map_err(io::Error::other)?,
         );
-        let turn_probe: TurnProbe = parse_profile_field(
-            &Value::Object(profile.clone()),
-            "turn_probe",
-            TurnProbe::Off,
-        )?;
-        if turn_probe.is_off() {
-            profile.remove("turn_probe");
-        } else {
-            profile.insert(
-                "turn_probe".into(),
-                serde_json::to_value(turn_probe).map_err(io::Error::other)?,
-            );
-        }
         profile.insert(
             "runner".into(),
             serde_json::to_value(runtime.runner_for(runtime_mode)).map_err(io::Error::other)?,
@@ -278,7 +262,6 @@ impl ProfileStore {
                     | "owner_id"
                     | "runtime"
                     | "runtime_mode"
-                    | "turn_probe"
                     | "runner"
                     | "command"
                     | "submit"
@@ -794,59 +777,6 @@ fn python_repr(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn turn_probe_is_opt_in_and_profile_controlled() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let home = HomeLayout::from_path(temp.path()).expect("home");
-        let store = ProfileStore::new(home).expect("store");
-        let off = store
-            .upsert(
-                json!({"id":"native", "runtime":"hermes"})
-                    .as_object()
-                    .expect("profile")
-                    .clone(),
-                None,
-            )
-            .expect("default profile");
-        assert!(off.get("turn_probe").is_none());
-        assert_eq!(
-            store
-                .runtime_ref("native", "global", "")
-                .expect("runtime")
-                .expect("profile")
-                .turn_probe,
-            TurnProbe::Off
-        );
-        store
-            .upsert(
-                json!({"id":"native", "runtime":"hermes", "turn_probe":"auto"})
-                    .as_object()
-                    .expect("profile")
-                    .clone(),
-                None,
-            )
-            .expect("opt in");
-        assert_eq!(
-            store
-                .runtime_ref("native", "global", "")
-                .expect("runtime")
-                .expect("profile")
-                .turn_probe,
-            TurnProbe::Auto
-        );
-        assert!(
-            store
-                .upsert(
-                    json!({"id":"native", "turn_probe":"guess_from_output"})
-                        .as_object()
-                        .expect("profile")
-                        .clone(),
-                    None
-                )
-                .is_err()
-        );
-    }
 
     #[test]
     fn profile_upsert_canonicalizes_shell_command_strings() {

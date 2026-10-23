@@ -444,6 +444,9 @@ export function normalizeTask(value: unknown): Task | null {
     task_type: asOptionalString(record.task_type),
     notes: asString(record.notes),
     checklist,
+    dispatch_eligible:
+      typeof record.dispatch_eligible === "boolean" ? record.dispatch_eligible : undefined,
+    dispatch_block_reason: asOptionalString(record.dispatch_block_reason),
     // Recorded cost, never enforced. Kept here because this reconstruction is
     // the only path a task takes to the UI: a field left out is a field the task
     // detail cannot show, however faithfully the daemon sent it.

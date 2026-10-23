@@ -12,10 +12,11 @@ const MAX_PAGE_SIZE: usize = 100;
 
 pub(super) fn run(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group_id = required_arg(request, "group_id")?;
-    super::context::load_group(home, &group_id)?;
+    let group = super::context::load_group(home, &group_id)?;
     let contexts = ContextStore::new(home.clone()).map_err(OpError::io)?;
-    let document = contexts.load(&group_id).map_err(OpError::io)?;
+    let mut document = contexts.load(&group_id).map_err(OpError::io)?;
     let version = contexts.tasks_version(&document);
+    super::task_dispatch::annotate_tasks(home, &group, &mut document).map_err(OpError::io)?;
 
     if let Some(task_id) = string_arg(request, "task_id").filter(|value| !value.trim().is_empty()) {
         return one(&document.tasks, &task_id, version);

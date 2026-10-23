@@ -182,6 +182,28 @@ fn captured_tasks_dispatch_oldest_by_price_strength_and_actor_id() {
         events.iter().filter(|e| e.kind == "system.notify").count(),
         4
     );
+    for assignment in &assignments {
+        let push = events
+            .iter()
+            .find(|event| {
+                event.kind == "system.notify"
+                    && event.data["context"]["task_id"] == assignment.data["task_id"]
+            })
+            .expect("matching dispatch push");
+        assert_eq!(
+            push.data
+                .get("refs")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            1,
+            "dispatch push must carry exactly one structured task ref"
+        );
+        assert!(
+            push.data["refs"][0]["kind"] == "task_ref"
+                && push.data["refs"][0]["task_id"] == assignment.data["task_id"],
+            "dispatch task ref must identify its assigned card"
+        );
+    }
     let after = f.doc();
     for id in &f.ready {
         let old = before.tasks.iter().find(|t| t["id"] == *id).expect("old");
@@ -373,4 +395,77 @@ fn concurrent_passes_never_assign_a_task_or_actor_twice() {
         assert_eq!(tasks.len(), 4);
         assert_eq!(actors.len(), 4);
     });
+}
+
+#[test]
+fn manual_unassignment_bypasses_cooldown_and_keeps_the_sort_audit() {
+    let f = Fixture::new();
+    let first = f.run(&f.actors[..1], f.now);
+    let assigned = first
+        .iter()
+        .find(|e| e.kind == "task.assign")
+        .expect("assignment");
+    assert!(assigned.data["sort_key"]["usd_per_mtok"] == 0.07);
+    assert!(assigned.data["sort_key"]["strength"] == 3);
+    assert!(assigned.data["sort_key"]["actor_id"] == f.actors[0].actor_id);
+    f.edit(json!({"op":"task.update","task_id":assigned.data["task_id"],"assignee":null}));
+    let next = f.run(&f.actors[..1], f.now + 1);
+    let assigned = next
+        .iter()
+        .find(|e| e.kind == "task.assign")
+        .expect("manual undo bypasses the wait");
+    assert!(assigned.data["cooldown_bypassed"] == true);
+}
+
+#[test]
+fn task_read_reports_budget_wait_and_actor_block_reasons() {
+    let f = Fixture::new();
+    f.edit(json!({"op":"task.update","task_id":f.ready[0],"target_budget_usd":0.0}));
+    f.edit(json!({"op":"task.update","task_id":f.ready[1],"max_usd_per_mtok":0.0}));
+    let reasons =
+        dispatch::task_block_reasons(&f.home, &f.group, &f.doc(), &f.actors, 60_000, f.now)
+            .expect("read-only reasons");
+    assert_eq!(reasons[&f.ready[0]], Some("target_budget_reached"));
+    assert_eq!(reasons[&f.ready[1]], Some("no_budget_fitting_actor"));
+    assert_eq!(reasons[&f.ready[2]], None);
+    let reasons = dispatch::task_block_reasons(&f.home, &f.group, &f.doc(), &[], 60_000, f.now)
+        .expect("no idle authority");
+    assert_eq!(reasons[&f.ready[2]], Some("no_idle_actor"));
+}
+
+#[test]
+fn actor_becoming_busy_at_commit_rolls_back_assignment_and_notification() {
+    let f = Fixture::new();
+    let context = ContextStore::new(f.home.clone()).expect("context");
+    let before = context.load(&f.group).expect("before");
+    let ledger_path = f.groups.ledger_path(&f.group).expect("ledger");
+    let before_ledger = std::fs::read(&ledger_path).unwrap_or_default();
+    let checks = std::cell::Cell::new(0);
+    let result = dispatch::dispatch_ready_tasks_checked(
+        &f.home,
+        &f.group,
+        "dispatch",
+        60_000,
+        &f.actors[..1],
+        f.now,
+        |_| {
+            checks.set(checks.get() + 1);
+            checks.get() == 1
+        },
+    );
+    assert_eq!(
+        result.expect_err("busy at commit must abort").kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(checks.get() >= 2);
+    assert_eq!(
+        context.load(&f.group).expect("after"),
+        before,
+        "busy commit left a partial assignment"
+    );
+    assert_eq!(
+        std::fs::read(ledger_path).unwrap_or_default(),
+        before_ledger,
+        "busy commit published a notification"
+    );
 }
