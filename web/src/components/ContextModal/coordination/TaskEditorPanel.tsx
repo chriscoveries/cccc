@@ -9,6 +9,7 @@ import {
   type TaskTypeId,
 } from "../../../utils/taskWorkflow";
 import { SelectCombobox } from "../../SelectCombobox";
+import { taskPriceCeilingLabel, taskSpendLabel } from "../../../features/contextModal/taskCost";
 import {
   alignTaskDraftTaskType,
   getWaitingOnOptions,
@@ -693,6 +694,49 @@ export function TaskEditorPanel({
           </div>
         </details>
 
+        <div className="grid gap-2 sm:grid-cols-2">
+          <label className="grid gap-1 text-xs">
+            <span className="text-[var(--color-text-muted)]">
+              {tr("context.targetBudgetUsd", "Target budget (USD)")}
+            </span>
+            <input
+              type="text"
+              inputMode="decimal"
+              aria-label={tr("context.targetBudgetUsd", "Target budget (USD)")}
+              className={ui.inputClass}
+              value={taskDraft.targetBudgetUsd}
+              placeholder={tr("context.taskBudgetClearsHint", "Empty clears")}
+              onChange={(event) => {
+                const value = event.target.value;
+                setTaskDraft((draft) => (draft ? { ...draft, targetBudgetUsd: value } : draft));
+              }}
+            />
+          </label>
+          <label className="grid gap-1 text-xs">
+            <span className="text-[var(--color-text-muted)]">
+              {tr("context.maxUsdPerMtok", "Max model price ($/Mtok)")}
+            </span>
+            <input
+              type="text"
+              inputMode="decimal"
+              aria-label={tr("context.maxUsdPerMtok", "Max model price ($/Mtok)")}
+              className={ui.inputClass}
+              value={taskDraft.maxUsdPerMtok}
+              placeholder={tr("context.taskBudgetClearsHint", "Empty clears")}
+              onChange={(event) => {
+                const value = event.target.value;
+                setTaskDraft((draft) => (draft ? { ...draft, maxUsdPerMtok: value } : draft));
+              }}
+            />
+          </label>
+          <div className="text-[11px] text-[var(--color-text-muted)] sm:col-span-2">
+            {tr(
+              "context.taskCostReadOnly",
+              "Spend is recorded by the daemon and cannot be edited here.",
+            )}
+          </div>
+        </div>
+
         {isCreate ? (
           <div
             className={classNames(
@@ -726,6 +770,13 @@ export function TaskEditorPanel({
             <div>
               {tr("context.checklistItems", "Checklist items")}:{" "}
               {Array.isArray(selectedTask.checklist) ? selectedTask.checklist.length : 0}
+            </div>
+            <div data-testid="task-cost">
+              {tr("context.cost", "Cost")}: {taskSpendLabel(selectedTask)}
+            </div>
+            <div>
+              {tr("context.modelPriceCeiling", "Max model price")}:{" "}
+              {taskPriceCeilingLabel(selectedTask)}
             </div>
           </div>
         ) : null}

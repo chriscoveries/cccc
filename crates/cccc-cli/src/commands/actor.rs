@@ -28,6 +28,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
         ActorAction::Add {
             actor_id,
             title,
+            model,
             runtime,
             runtime_mode,
             command,
@@ -44,7 +45,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
                 "actor_add",
                 json!({
                     "group_id":group(home,group_id)?,"actor_id":actor_id,"title":title,
-                    "runtime":runtime,"runtime_mode":runtime_mode,"command":command,"env":env(raw_env)?,
+                    "model":model,"runtime":runtime,"runtime_mode":runtime_mode,"command":command,"env":env(raw_env)?,
                     "default_scope_key":scope,"submit":submit,"by":by
                 }),
             )
@@ -58,6 +59,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             actor_id,
             group_id,
             title,
+            model,
             runtime,
             runtime_mode,
             scope,
@@ -69,6 +71,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
         } => {
             let mut patch = Map::new();
             optional(&mut patch, "title", title);
+            optional(&mut patch, "model", model);
             optional(&mut patch, "runtime", runtime);
             optional(&mut patch, "runtime_mode", runtime_mode);
             if let Some(scope) = scope {

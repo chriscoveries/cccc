@@ -20,6 +20,7 @@ import {
 } from "../../services/api";
 import { reloadContextAfterWrite } from "../../features/contextModal/contextWriteback";
 import { useTaskBoardData } from "../../features/contextModal/useTaskBoardData";
+import { taskBudgetUpdate } from "../../features/contextModal/taskCost";
 import type { GroupContext, AgentsMdInfo, Task } from "../../types";
 import {
   evaluateTaskWorkflow,
@@ -721,6 +722,21 @@ export function ContextModal({
   const handleSaveTask = useCallback(async () => {
     if (!groupId || !taskDraft) return;
     const title = taskDraft.title.trim();
+    const budget = taskBudgetUpdate(taskDraft);
+    if (!budget.ok) {
+      setSyncError(
+        budget.field === "target_budget_usd"
+          ? tr(
+              "context.targetBudgetInvalid",
+              "A target budget must be an amount in USD, or empty to clear it.",
+            )
+          : tr(
+              "context.modelPriceCeilingInvalid",
+              "A model price must be an amount in USD per million tokens, or empty to clear it.",
+            ),
+      );
+      return;
+    }
     if (!title) {
       setSyncError(tr("context.taskTitleRequired", "Task title is required."));
       return;
@@ -765,6 +781,7 @@ export function ContextModal({
             task_type: taskDraft.taskType,
             notes: taskDraft.notes,
             checklist: parseChecklist(taskDraft.checklist, []),
+            ...budget.fields,
           },
         ]);
         const nextResp = await applyContextWriteback(resp);
@@ -802,6 +819,7 @@ export function ContextModal({
         task_type: taskDraft.taskType,
         notes: taskDraft.notes,
         checklist: parseChecklist(taskDraft.checklist, selectedTask.checklist),
+        ...budget.fields,
       });
       const nextResp = await applyContextWriteback(resp);
       if (!nextResp.ok) {

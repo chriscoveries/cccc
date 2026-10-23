@@ -17,9 +17,14 @@ import { fetchGroupHealth, type GroupHealth } from "../../services/api/groups";
 
 type ActorRow = {
   id: string;
-  harness?: string;
-  mode?: string;
+  runtime?: string;
+  effective_runtime?: string;
+  runner_effective?: string;
+  runtime_mode?: string;
+  effective_runtime_mode?: string;
   model?: string;
+  model_cost_usd_per_mtok?: number | null;
+  model_strength?: number | null;
   running?: boolean;
   rss_mib?: number | null;
   cpu_pct?: number | null;
@@ -173,7 +178,7 @@ export function AppHeader({
     ...actors
       .filter((a: ActorRow) => a?.id && a.running)
       .map((a: ActorRow) => ({
-        label: `${a.id} · ${a.harness ?? "—"} · ${a.mode ?? "—"} · ${a.model ?? "—"} · ${a.rss_mib != null ? `${a.rss_mib} MiB` : "—"} · ${a.cpu_pct != null ? `${a.cpu_pct}%` : "—"} · Stop`,
+        label: `${a.id} · ${a.effective_runtime ?? a.runtime ?? "—"} · ${a.runner_effective ?? a.effective_runtime_mode ?? a.runtime_mode ?? "—"} · ${a.model ?? "—"} · ${a.model_cost_usd_per_mtok != null ? `$${a.model_cost_usd_per_mtok}/Mtok` : "—"} · ${a.model_strength != null ? `str ${a.model_strength}` : "—"} · ${a.rss_mib != null ? `${a.rss_mib} MiB` : "—"} · ${a.cpu_pct != null ? `${a.cpu_pct}%` : "—"} · Stop`,
         onClick: () => {
           if (selectedGroupId && window.confirm(`Stop ${a.id}?`))
             void stopActor(selectedGroupId, a.id);
