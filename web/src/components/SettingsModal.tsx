@@ -128,6 +128,7 @@ export function SettingsModal({
   const clearSettingsTarget = useModalStore((state) => state.clearSettingsTarget);
 
   // Automation + delivery settings state
+  const [notifyIdleHeldTasks, setNotifyIdleHeldTasks] = useState(false);
   const [mailNoticeAfterSeconds, setMailNoticeAfterSeconds] = useState(1800);
   const [mailNoticeIdleAfterSeconds, setMailNoticeIdleAfterSeconds] = useState(60);
   const [replyNoticeAfterSeconds, setReplyNoticeAfterSeconds] = useState(900);
@@ -289,6 +290,13 @@ export function SettingsModal({
         settings.mail_notice_after_seconds ?? 1800,
       ),
     );
+    setNotifyIdleHeldTasks((current) =>
+      sync(
+        current,
+        previous?.notify_idle_held_tasks ?? false,
+        settings.notify_idle_held_tasks ?? false,
+      ),
+    );
     setMailNoticeIdleAfterSeconds((current) =>
       sync(
         current,
@@ -412,6 +420,7 @@ export function SettingsModal({
     scope === "group" ? groupTab : globalTab,
     mailNoticeAfterSeconds,
     mailNoticeIdleAfterSeconds,
+    notifyIdleHeldTasks,
     replyNoticeAfterSeconds,
     idleSeconds,
     keepaliveSeconds,
@@ -465,6 +474,7 @@ export function SettingsModal({
 
   const handleSaveAutomationSettings = async () => {
     await saveGroupSettings({
+      notify_idle_held_tasks: notifyIdleHeldTasks,
       actor_idle_timeout_seconds: idleSeconds,
       keepalive_delay_seconds: keepaliveSeconds,
       keepalive_max_per_actor: keepaliveMax,
@@ -475,6 +485,7 @@ export function SettingsModal({
   };
 
   const handleResetAutomationSettingsDraft = () => {
+    setNotifyIdleHeldTasks(false);
     setIdleSeconds(0);
     setKeepaliveSeconds(120);
     setKeepaliveMax(3);
@@ -730,6 +741,8 @@ export function SettingsModal({
                     groupId={groupId}
                     devActors={devActors}
                     busy={busy}
+                    notifyIdleHeldTasks={notifyIdleHeldTasks}
+                    setNotifyIdleHeldTasks={setNotifyIdleHeldTasks}
                     idleSeconds={idleSeconds}
                     setIdleSeconds={setIdleSeconds}
                     keepaliveSeconds={keepaliveSeconds}

@@ -51,7 +51,25 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
     if cancelled.load(Ordering::Acquire) {
         return;
     }
-    let delivery_actor_ids = if include_unread {
+    let group = GroupStore::new(home.clone())
+        .and_then(|s| s.load(group_id))
+        .ok();
+    let idle_actions = group.as_ref().is_some_and(|g| {
+        g.extra
+            .get("delivery")
+            .and_then(|delivery| delivery.get("notify_idle_held_tasks"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            || g.automation
+                .get("rules")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|rules| {
+                    rules.iter().any(|r| {
+                        r["enabled"] == true && r["action"]["kind"] == "dispatch_ready_task"
+                    })
+                })
+    });
+    let delivery_actor_ids = if include_unread || idle_actions {
         GroupStore::new(home.clone())
             .and_then(|store| store.load(group_id))
             .map(|group| {
@@ -65,7 +83,10 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
     } else {
         HashSet::new()
     };
-    let idle_actor_ids = idle_actor_ids(group_id, &delivery_actor_ids);
+    let mut idle_actor_ids = idle_actor_ids(group_id, &delivery_actor_ids);
+    if idle_actions && let Some(group) = &group {
+        idle_actor_ids.extend(super::task_dispatch::idle_ids(group));
+    }
     match cccc_core::automation::tick_group_with_idle_actors(
         home,
         group_id,
@@ -213,11 +234,76 @@ fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
             actor_delivery::dispatch(home, &group, &event);
         }
     }
+    let mut dispatched = HashSet::new();
     for action in result.actions {
         if cancelled.load(Ordering::Acquire) {
             return;
         }
         match action {
+            ScheduledAction::DispatchReadyTask {
+                group_id,
+                rule_id,
+                fired_at,
+                one_time,
+                cooldown_ms,
+                idle_actor_ids,
+            } => {
+                if let Ok(group) = store.load(&group_id) {
+                    match super::task_dispatch::run(
+                        home,
+                        &group,
+                        &rule_id,
+                        cooldown_ms,
+                        &idle_actor_ids,
+                    ) {
+                        Ok(events) => {
+                            if !events.is_empty() {
+                                complete_rule(home, &group_id, &rule_id, fired_at, one_time);
+                            }
+                            dispatched.extend(
+                                events
+                                    .iter()
+                                    .filter(|event| event.kind == "task.assign")
+                                    .filter_map(|event| {
+                                        event
+                                            .data
+                                            .get("actor_id")
+                                            .and_then(serde_json::Value::as_str)
+                                            .map(str::to_owned)
+                                    }),
+                            );
+                            for event in events.iter().filter(|event| event.kind == "system.notify")
+                            {
+                                actor_delivery::dispatch(home, &group, event);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, %group_id, %rule_id, "task dispatch transaction failed")
+                        }
+                    }
+                }
+            }
+            ScheduledAction::NotifyIdleHeldTasks {
+                group_id,
+                idle_actor_ids,
+            } => {
+                if let Ok(group) = store.load(&group_id) {
+                    match super::task_dispatch::held(
+                        home,
+                        &group,
+                        &idle_actor_ids.difference(&dispatched).cloned().collect(),
+                    ) {
+                        Ok(events) => {
+                            for event in events {
+                                actor_delivery::dispatch(home, &group, &event);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, %group_id, "idle-held task notice failed")
+                        }
+                    }
+                }
+            }
             ScheduledAction::GroupState {
                 group_id,
                 state,

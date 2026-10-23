@@ -681,6 +681,7 @@
     "notebookSectionLockedConnecting": "Finish the current Google sign-in flow and the Work and Memory notebook controls will appear here."
   },
   "automation": {
+    "notifyIdleHeldTasks": "Notify idle Actors about their open assigned tasks",
     "title": "Automation",
     "description": "Configure built-in automation and scheduled rules. Settings are stored in",
     "configPathFallback": "CCCC_HOME/.../group.yaml",
@@ -801,6 +802,9 @@
     "savePoliciesTitle": "Save collaboration follow-up settings"
   },
   "ruleEditor": {
+    "dispatchReadyTasks": "Dispatch ready tasks",
+    "dispatchCooldown": "Actor cooldown (milliseconds)",
+    "dispatchDescription": "Assign the oldest ready task to an idle Actor whose model fits its budget. Disabled by default.",
     "editRule": "Edit Rule:",
     "unnamed": "unnamed",
     "last": "Last:",
@@ -848,6 +852,7 @@
     "targetActors": "Target Actors"
   },
   "ruleList": {
+    "dispatchReadyTasks": "Dispatch ready tasks",
     "showCompleted": "Show Completed",
     "clearCompleted": "Clear Completed ({{count}})",
     "clearCompletedTitle": "Clear completed one-time reminders",
