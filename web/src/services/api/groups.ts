@@ -1613,7 +1613,6 @@ export async function resetGroupPrompt(groupId: string, kind: GroupPromptKind) {
   }
 }
 
-
 export type GroupHealth = {
   group_id: string;
   rss_mib: number | null;
