@@ -53,6 +53,15 @@ impl Session {
         events: &[Event],
         submit: impl FnOnce() -> BatchSubmission,
     ) -> BatchSubmission {
+        // A committed task notice is an outbox item, not provider admission.
+        // If work began meanwhile, retain it for the normal delivery retry.
+        if events.iter().any(|event| {
+            event.kind == "system.notify"
+                && event.data.get("kind").and_then(Value::as_str) == Some("task_dispatch")
+        }) && !self.ready_for_mail_notice()
+        {
+            return BatchSubmission::Deferred;
+        }
         if held_batch(events, Utc::now()) && !self.ready_for_mail_notice() {
             return BatchSubmission::Withheld;
         }
