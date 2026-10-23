@@ -71,6 +71,7 @@ impl Session {
     /// The card of the delivery the runtime named, taken out so it is used once.
     /// The outer option says whether that delivery was registered at all; the inner
     /// one is the card, `None` when the delivery named no single task.
+    #[allow(dead_code)]
     pub(super) fn take_delivery_task(&self, delivery_id: &str) -> Option<Option<String>> {
         self.delivery_tasks
             .lock()
