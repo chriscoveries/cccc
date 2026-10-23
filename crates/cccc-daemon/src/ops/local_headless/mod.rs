@@ -86,6 +86,11 @@ pub enum BatchSubmission {
 #[derive(Debug)]
 struct ActiveTurn {
     turn_id: String,
+    /// The board task the delivery that started this turn named, taken from the
+    /// batch's single task ref when the runtime reported the turn started. Bound
+    /// to the turn itself, not to the session: a batch that is deferred while
+    /// this turn runs must never be able to rename it.
+    task: Option<String>,
 }
 
 /// Everything needed to re-open the viewer attachment (`claude attach` or
@@ -112,7 +117,7 @@ struct Session {
     /// The board task the delivered batch named, if it named exactly one. Set
     /// when a batch is admitted, read when its turn settles, cleared after. The
     /// runtime's own turn id is never a task id and is never used as one.
-    turn_task: Mutex<Option<String>>,
+    pending_turn_task: Mutex<Option<String>>,
 }
 
 fn poisoned() -> std::io::Error {
