@@ -81,15 +81,11 @@ pub(super) fn held(
 /// Computed per-Actor authority, not a claim inferred from terminal silence.
 pub(super) fn actor_status(group: &GroupDoc) -> Vec<serde_json::Value> {
     actors::visible(group).map(|actor| {
-        let generation = idle_generation(group, actor);
+        let runtime = super::local_headless::task_dispatch_state(&group.group_id, &actor.id);
+        let generation = runtime.as_ref().ok().cloned();
         let reason = if !actor.enabled { Some("actor_disabled") }
             else if !matches!(group.state, GroupState::Active | GroupState::Idle) { Some("group_not_running") }
-            else if super::local_headless::registered_running(&group.group_id, &actor.id).is_none() {
-                Some("no_managed_turn_authority")
-            } else if !super::local_headless::supports_task_dispatch(&group.group_id, &actor.id) {
-                Some("no_delivery_turn_authority")
-            } else if generation.is_none() { Some("not_idle_or_not_running") }
-            else { None };
+            else { runtime.err() };
         serde_json::json!({"actor_id":actor.id,"dispatchable":reason.is_none(),"reason":reason,"generation":generation})
     }).collect()
 }
