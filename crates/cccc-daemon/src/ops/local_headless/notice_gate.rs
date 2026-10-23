@@ -46,6 +46,15 @@ impl Session {
             && self.status.lock().is_ok_and(|state| state.status == "idle")
     }
 
+    /// A task outbox item is retained while busy; it is never withdrawn as
+    /// an early Mail notice. Repeat this after any admission-lock wait too.
+    pub(super) fn defer_task_dispatch(&self, events: &[Event]) -> bool {
+        events.iter().any(|event| {
+            event.kind == "system.notify"
+                && event.data.get("kind").and_then(Value::as_str) == Some("task_dispatch")
+        }) && !self.ready_for_mail_notice()
+    }
+
     /// Submit `events` unless they are held notices the Actor is not ready
     /// for, which are withheld instead.
     pub(super) fn admit_batch(
@@ -55,11 +64,7 @@ impl Session {
     ) -> BatchSubmission {
         // A committed task notice is an outbox item, not provider admission.
         // If work began meanwhile, retain it for the normal delivery retry.
-        if events.iter().any(|event| {
-            event.kind == "system.notify"
-                && event.data.get("kind").and_then(Value::as_str) == Some("task_dispatch")
-        }) && !self.ready_for_mail_notice()
-        {
+        if self.defer_task_dispatch(events) {
             return BatchSubmission::Deferred;
         }
         if held_batch(events, Utc::now()) && !self.ready_for_mail_notice() {
