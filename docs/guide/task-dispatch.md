@@ -4,7 +4,10 @@ The Automation panel can add a `dispatch_ready_task` action to an existing
 interval, cron, or one-time rule. New dispatch rules start disabled. Enable
 the rule explicitly to assign work without a coordinator Actor.
 
-An Actor is eligible only while its current managed session reports idle.
+An Actor is eligible only while its current managed session reports idle and
+its delivery route returns an authoritative turn-id receipt (ACP or Pi).
+Native-terminal delivery without that correlation is excluded: its spend
+cannot be charged to a card by guessing which later turn it started.
 PTY Actors have no supported authoritative turn state and are not dispatchable.
 Output silence and native provider observations are never evidence of idle.
 Disabled, stopped, busy, and approval-waiting Actors are excluded.

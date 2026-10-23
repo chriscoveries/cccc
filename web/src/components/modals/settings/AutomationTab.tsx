@@ -743,11 +743,13 @@ export function AutomationTab(props: AutomationTabProps) {
                       `automation.dispatchReasons.${actor.reason}`,
                       actor.reason === "no_managed_turn_authority"
                         ? "Not dispatchable: no managed turn authority (PTY state is unknown)"
-                        : actor.reason === "actor_disabled"
-                          ? "Not dispatchable: Actor disabled"
-                          : actor.reason === "group_not_running"
-                            ? "Not dispatchable: group not running"
-                            : "Not dispatchable: busy, stopped, or turn state unknown",
+                        : actor.reason === "no_delivery_turn_authority"
+                          ? "Not dispatchable: delivery cannot identify the turn it starts"
+                          : actor.reason === "actor_disabled"
+                            ? "Not dispatchable: Actor disabled"
+                            : actor.reason === "group_not_running"
+                              ? "Not dispatchable: group not running"
+                              : "Not dispatchable: busy, stopped, or turn state unknown",
                     )}
               </div>
             ))}

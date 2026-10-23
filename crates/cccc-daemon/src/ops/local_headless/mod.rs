@@ -25,6 +25,7 @@ pub(crate) use events::{
 pub(crate) use supervisor::registered_running;
 pub(crate) use supervisor::{
     cancel_turn, idle_generation, respond_interaction, respond_permission, structured_state,
+    supports_task_dispatch,
 };
 
 use cccc_core::HomeLayout;
