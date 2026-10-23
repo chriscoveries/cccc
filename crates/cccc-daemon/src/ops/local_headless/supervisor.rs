@@ -444,7 +444,7 @@ pub(crate) fn supports_task_dispatch(group_id: &str, actor_id: &str) -> bool {
 /// A second registry lookup could observe a replacement session instead.
 pub(crate) fn idle_generation(group_id: &str, actor_id: &str) -> Option<String> {
     let item = lookup(&(group_id.to_owned(), actor_id.to_owned()))?;
-    if !item.managed.structured_only() {
+    if !item.managed.structured_only() || !item.managed.turn_admissions_confirmed() {
         return None;
     }
     // Completion can hold active_turn while it appends usage or updates a
