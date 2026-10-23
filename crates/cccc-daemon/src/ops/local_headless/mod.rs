@@ -120,10 +120,12 @@ struct Session {
     /// the batch, its `turn/started`, or its completion — because any of the three
     /// can be observed before the others.
     pending_turn_task: Mutex<Option<String>>,
-    /// Cards by the runtime turn id that carries them, for a turn whose
-    /// `turn/started` has been observed but whose acceptance has not yet named it.
-    /// The runtime's own turn id is never a task id and is never used as one.
-    turn_tasks: Mutex<std::collections::HashMap<String, String>>,
+    /// Cards by the runtime turn id that carries them. An entry is always made
+    /// when the runtime accepts a batch, with `None` when that batch named no
+    /// single card: a turn known to be unattributed must not be mistaken for one
+    /// whose card is still unresolved. The runtime's own turn id is never a task
+    /// id and is never used as one.
+    turn_tasks: Mutex<std::collections::HashMap<String, Option<String>>>,
     /// Held across one delivery's admission, so only one delivery is ever pending
     /// for this Actor and a card can never be read for someone else's turn.
     admission: Mutex<()>,

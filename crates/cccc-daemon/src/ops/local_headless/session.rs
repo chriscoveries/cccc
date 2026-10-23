@@ -58,15 +58,12 @@ impl Session {
     /// the binding is looked up by id, so a late `turn/started` cannot be answered
     /// with another delivery's card.
     pub(super) fn bind_turn_task(&self, turn_id: &str, task: Option<String>) {
-        let Some(task) = task else {
-            return;
-        };
         // A turn that is already open takes its card directly: the runtime
         // reported it before it accepted the batch.
         if let Ok(mut active) = self.active_turn.lock() {
             if let Some(turn) = active.as_mut() {
                 if turn.turn_id == turn_id {
-                    turn.task = Some(task);
+                    turn.task = task;
                     return;
                 }
             }
@@ -103,8 +100,10 @@ impl Session {
             .and_then(|mut pending| pending.take())
     }
 
-    /// The card bound to `turn_id`, taken out so a binding is used once.
-    pub(super) fn take_turn_task(&self, turn_id: &str) -> Option<String> {
+    /// The card bound to `turn_id`, taken out so a binding is used once. The outer
+    /// option says whether the runtime had resolved this turn's card at all; the
+    /// inner one is the card, `None` when the delivery named no single task.
+    pub(super) fn take_turn_task(&self, turn_id: &str) -> Option<Option<String>> {
         self.turn_tasks
             .lock()
             .ok()
