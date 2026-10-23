@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 /// A model's metadata, from the operator-edited catalog file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ModelSpec {
-    /// Blended USD per million tokens. 0.0 for free.
+    /// Blended USD per million tokens. None when unset (unpriced).
     #[serde(default)]
-    pub usd_per_mtok: f64,
+    pub usd_per_mtok: Option<f64>,
     /// Flat USD per month for subscription models (Devin). None for token-priced.
     #[serde(default)]
     pub usd_per_month: Option<f64>,
@@ -56,7 +56,7 @@ impl ModelRegistry {
     /// Resolve cost and strength for an Actor's model label.
     pub fn resolve(&self, model: &str) -> (Option<f64>, Option<u8>) {
         match self.get(model) {
-            Some(spec) => (Some(spec.usd_per_mtok), spec.strength),
+            Some(spec) => (spec.usd_per_mtok, spec.strength),
             None => (None, None),
         }
     }
