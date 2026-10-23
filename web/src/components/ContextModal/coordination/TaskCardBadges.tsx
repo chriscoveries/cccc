@@ -66,7 +66,7 @@ export function TaskCardBadges({
         <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-amber-600 dark:text-amber-400">
           {tr(
             `context.dispatchReasons.${task.dispatch_block_reason}`,
-            `Dispatch: ${task.dispatch_block_reason.replaceAll("_", " ")}`,
+            `Dispatch: ${task.dispatch_block_reason.replace(/_/g, " ")}`,
           )}
         </span>
       ) : null}
