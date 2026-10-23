@@ -433,10 +433,20 @@ pub fn ready_for_mail_notice(group_id: &str, actor_id: &str) -> bool {
         .is_some_and(|item| item.running() && item.ready_for_mail_notice())
 }
 
+/// Automatic task work requires an accepted delivery-to-turn receipt as well
+/// as turn state, so its spend can be attributed without guessing from output.
+pub(crate) fn supports_task_dispatch(group_id: &str, actor_id: &str) -> bool {
+    lookup(&(group_id.to_owned(), actor_id.to_owned()))
+        .is_some_and(|item| item.managed.structured_only())
+}
+
 /// Dispatch takes readiness and generation from the same registered owner.
 /// A second registry lookup could observe a replacement session instead.
 pub(crate) fn idle_generation(group_id: &str, actor_id: &str) -> Option<String> {
     let item = lookup(&(group_id.to_owned(), actor_id.to_owned()))?;
+    if !item.managed.structured_only() {
+        return None;
+    }
     // Completion can hold active_turn while it appends usage or updates a
     // task. Dispatch calls this under the context lock, so contention is
     // Unknown, never a blocking lock acquisition in the reverse order.
