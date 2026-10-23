@@ -339,6 +339,10 @@ export function asOptionalString(value: unknown): string | null {
   return text ? text : null;
 }
 
+export function asOptionalNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 export function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => asString(item).trim()).filter(Boolean);
@@ -443,6 +447,16 @@ export function normalizeTask(value: unknown): Task | null {
     dispatch_eligible:
       typeof record.dispatch_eligible === "boolean" ? record.dispatch_eligible : undefined,
     dispatch_block_reason: asOptionalString(record.dispatch_block_reason),
+    // Recorded cost, never enforced. Kept here because this reconstruction is
+    // the only path a task takes to the UI: a field left out is a field the task
+    // detail cannot show, however faithfully the daemon sent it.
+    target_budget_usd: asOptionalNumber(record.target_budget_usd),
+    max_usd_per_mtok: asOptionalNumber(record.max_usd_per_mtok),
+    cost_usd: asOptionalNumber(record.cost_usd),
+    cost_updated_at: asOptionalString(record.cost_updated_at),
+    cost_turns: asOptionalNumber(record.cost_turns),
+    unpriced_turns: asOptionalNumber(record.unpriced_turns),
+    unmetered_turns: asOptionalNumber(record.unmetered_turns),
     created_at: asOptionalString(record.created_at),
     updated_at: asOptionalString(record.updated_at),
     archived_from: asOptionalString(record.archived_from),
