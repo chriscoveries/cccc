@@ -78,6 +78,24 @@ impl Session {
         }
     }
 
+    /// Mark that an admission ended without the runtime confirming it, so a
+    /// late event from that call cannot be read as the next delivery's turn.
+    pub(super) fn quarantine_unresolved_admission(&self) {
+        self.unresolved_admission
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(super) fn has_unresolved_admission(&self) -> bool {
+        self.unresolved_admission
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The session settled, so an unconfirmed admission can no longer surface.
+    pub(super) fn clear_unresolved_admission(&self) {
+        self.unresolved_admission
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
     /// Hold the door for one delivery's admission.
     pub(super) fn begin_admission(&self) -> std::sync::MutexGuard<'_, ()> {
         self.admission

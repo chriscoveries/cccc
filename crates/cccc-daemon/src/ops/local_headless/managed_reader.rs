@@ -111,6 +111,7 @@ pub(crate) async fn verify_claude_reader_release(
         pending_turn_task: Mutex::new(None),
         turn_tasks: Mutex::new(std::collections::HashMap::new()),
         admission: Mutex::new(()),
+        unresolved_admission: AtomicBool::new(false),
     });
     let weak = Arc::downgrade(&session);
     let receiver = managed.subscribe();

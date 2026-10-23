@@ -36,6 +36,7 @@ fn session(temp: &std::path::Path) -> (Session, super::control_fixture::ControlD
         pending_turn_task: Mutex::new(None),
         turn_tasks: Mutex::new(std::collections::HashMap::new()),
         admission: Mutex::new(()),
+        unresolved_admission: AtomicBool::new(false),
     };
     (session, directory)
 }
