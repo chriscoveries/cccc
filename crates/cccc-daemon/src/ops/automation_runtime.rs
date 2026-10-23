@@ -254,7 +254,7 @@ fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
                         &group,
                         &rule_id,
                         cooldown_ms,
-                        &idle_actor_ids,
+                        &idle_actor_ids.difference(&dispatched).cloned().collect(),
                     ) {
                         Ok(events) => {
                             if !events.is_empty() {
