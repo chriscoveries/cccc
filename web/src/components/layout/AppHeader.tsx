@@ -12,6 +12,7 @@ import { groupRunMenuActions } from "./groupRunMenuActions";
 import { useGroupMenu } from "./useGroupMenu";
 import type { GroupControl } from "../../utils/groupControls";
 import { AppSettingsMenu } from "./AppSettingsMenu";
+import { fetchActors, stopActor } from "../../services/api/actors";
 import { fetchGroupHealth, type GroupHealth } from "../../services/api/groups";
 
 export interface AppHeaderProps {
@@ -77,7 +78,29 @@ export function AppHeader({
         runtime_status: selectedGroupRuntimeStatus || undefined,
       })
     : null;
+  const [actors, setActors] = useState<any[]>([]);
   const [health, setHealth] = useState<GroupHealth | null>(null);
+  useEffect(() => {
+    if (!selectedGroupId) {
+      setActors([]);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const resp = await fetchActors(selectedGroupId);
+        if (!cancelled && resp?.ok) setActors(resp.result?.actors ?? []);
+      } catch {
+        if (!cancelled) setActors([]);
+      }
+    };
+    load();
+    const id = window.setInterval(load, 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [selectedGroupId]);
   useEffect(() => {
     if (!selectedGroupId) {
       setHealth(null);
@@ -130,14 +153,26 @@ export function AppHeader({
       : `${runLabel} · ${t(sseStatus === "connecting" ? "reconnecting" : "disconnected")}${sseErrorDetail ? ` · ${sseErrorDetail}` : ""}. ${t("connectionInterruptedHint")}`;
   const runMenu = useGroupMenu(
     runLabel,
-    selectedStatus && onControlGroup && !webReadOnly
-      ? groupRunMenuActions(
-          selectedStatus.key,
-          t,
-          (control) => onControlGroup(selectedGroupId, control),
-          controlsBusy,
-        )
-      : [],
+    [
+      ... (selectedStatus && onControlGroup && !webReadOnly
+        ? groupRunMenuActions(
+            selectedStatus.key,
+            t,
+            (control) => onControlGroup(selectedGroupId, control),
+            controlsBusy,
+          )
+        : []),
+      ...actors
+        .filter((a: any) => a?.id)
+        .map((a: any) => ({
+          label: `${a.id} · ${a.rss_mib ?? 0} MiB · ${a.cpu_pct ?? "—"}%`,
+          onClick: () => {
+            if (selectedGroupId) void stopActor(selectedGroupId, a.id);
+          },
+          tone: "danger" as const,
+          section: "actors",
+        })),
+    ],
   );
   return (
     <header className="@container/group-header absolute inset-x-0 top-0 z-20 flex h-14 shrink-0 items-center px-3 glass-header md:relative md:inset-auto md:px-4">
