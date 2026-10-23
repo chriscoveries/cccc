@@ -534,7 +534,9 @@ fn submit_admitted(
         // Only this route's turns name the delivery they came from, so only this
         // route registers a card, and it registers it before the batch is sent so
         // that even a turn reported before the runtime answers resolves its own.
-        item.bind_delivery_task(&id, task_ref_in(source_events));
+        if !item.bind_delivery_task(&id, task_ref_in(source_events)) {
+            return BatchSubmission::Deferred;
+        }
         let mut outcome = BatchSubmission::Deferred;
         submit_with_startup_prompt(&item.startup_prompt, &delivery, |prepared| {
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
