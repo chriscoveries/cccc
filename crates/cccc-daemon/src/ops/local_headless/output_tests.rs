@@ -53,6 +53,27 @@ impl Fixture {
         }
     }
 
+    fn pi() -> Self {
+        let mut fixture = Self::new(false, "");
+        fixture.session.managed = Arc::new(AnalystSession::for_usage_test(
+            fixture._temp.path(),
+            "abcdef01",
+        ));
+        fixture
+    }
+
+    fn usage(&self) -> Vec<cccc_contracts::Event> {
+        let store = GroupStore::new(self.session.home.clone()).expect("fixture store");
+        let path = store
+            .ledger_path(&self.session.group_id)
+            .expect("fixture ledger");
+        cccc_core::ledger::read_all(&path)
+            .expect("read fixture ledger")
+            .into_iter()
+            .filter(|event| event.kind == "turn.usage")
+            .collect()
+    }
+
     fn start(&self, turn_id: &str) {
         handle_message(
             &self.session,
@@ -436,4 +457,161 @@ async fn named_tool_activity_finishes_without_journaling_transient_or_foreign_up
     );
     f.complete("turn-1", "completed", Value::Null);
     assert_eq!(f.terminals().len(), 1);
+}
+
+#[tokio::test]
+async fn captured_pi_usage_is_committed_at_settlement_and_readable_in_the_ledger() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    let f = Fixture::pi();
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    for message in &messages {
+        assert!(
+            f.usage().is_empty(),
+            "no usage is committed before settlement"
+        );
+        handle_message(&f.session, message.clone());
+    }
+    let usage = f.usage();
+    assert_eq!(
+        usage.len(),
+        1,
+        "one settled owned turn has one usage record"
+    );
+    let event = &usage[0];
+    let completion = &messages.last().expect("captured completion")["params"]["turn"];
+    assert_eq!(event.by, f.session.actor_id);
+    assert_eq!(event.data["actor_id"], f.session.actor_id);
+    assert_eq!(event.data["turn_id"], completion["id"]);
+    assert_eq!(event.data["generation"], f.session.managed.generation());
+    assert_eq!(event.data["status"], "completed");
+    assert_eq!(
+        event.data.len(),
+        13,
+        "only selected usage and ownership fields"
+    );
+    for field in [
+        "source",
+        "model_id",
+        "started_at",
+        "ended_at",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "usage_samples",
+    ] {
+        assert_eq!(event.data[field], completion["usage"][field], "{field}");
+    }
+    assert_eq!(event.data["input_tokens"], 1852);
+    assert_eq!(event.data["output_tokens"], 90);
+    assert_eq!(event.data["cache_read_tokens"], 1536);
+    assert_eq!(event.data["cache_write_tokens"], 0);
+
+    // Both a repeated completion and a full notification replay use the same
+    // captured turn identity; neither can create a second ledger record.
+    handle_message(&f.session, messages.last().expect("completion").clone());
+    for message in messages {
+        handle_message(&f.session, message);
+    }
+    assert_eq!(f.usage().len(), 1);
+    let request: cccc_contracts::DaemonRequest = serde_json::from_value(json!({
+        "op":"ledger_tail", "args":{"group_id":f.session.group_id,"kind":"all","by":"user"}
+    }))
+    .expect("existing ledger request");
+    let response = crate::dispatch::dispatch(&f.session.home, &request);
+    assert!(response.ok, "{response:?}");
+    let rows = response.result["events"]
+        .as_array()
+        .expect("existing ledger events");
+    let rows = rows
+        .iter()
+        .filter(|row| row["kind"] == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], event.id);
+    assert_eq!(
+        rows[0]["data"],
+        serde_json::to_value(&event.data).expect("usage JSON")
+    );
+}
+
+#[tokio::test]
+async fn captured_pi_usage_rejects_foreign_thread_turn_and_runtime() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    let f = Fixture::pi();
+    let owned = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let other_turn = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let other_thread = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "other-thread");
+    for message in other_thread {
+        handle_message(&f.session, message);
+    }
+    assert!(f.usage().is_empty());
+    assert!(f.session.active_turn.lock().expect("active turn").is_none());
+    for message in &owned[..owned.len() - 1] {
+        handle_message(&f.session, message.clone());
+    }
+    handle_message(
+        &f.session,
+        other_turn.last().expect("other completion").clone(),
+    );
+    assert!(
+        f.usage().is_empty(),
+        "a different Pi turn cannot settle the owner"
+    );
+    assert!(f.session.active_turn.lock().expect("active turn").is_some());
+    handle_message(&f.session, owned.last().expect("owned completion").clone());
+    assert_eq!(f.usage().len(), 1);
+
+    let other_runtime = Fixture::new(true, "");
+    for message in owned {
+        handle_message(&other_runtime.session, message);
+    }
+    assert!(
+        other_runtime.usage().is_empty(),
+        "only the Pi adapter owns Pi usage"
+    );
+}
+
+#[tokio::test]
+async fn captured_pi_failed_and_cancelled_usage_survives_settlement() {
+    use crate::ops::codex_voice_analyst::{
+        CAPTURED_PI_LENGTH_STOP, CAPTURED_PI_TOOL_TURN, replay_captured_pi_records,
+        replay_captured_pi_turn,
+    };
+    let records = CAPTURED_PI_TOOL_TURN
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("captured Pi record"))
+        .filter(|record| record["type"] != "response")
+        .collect::<Vec<_>>();
+    // Cancellation uses the owned Turn's flag with the original reported usage.
+    for (messages, status, input, output, cache_read) in [
+        (
+            replay_captured_pi_turn(CAPTURED_PI_LENGTH_STOP, "abcdef01"),
+            "failed",
+            429,
+            1,
+            1280,
+        ),
+        (
+            replay_captured_pi_records(&records, "abcdef01", true),
+            "cancelled",
+            1852,
+            90,
+            1536,
+        ),
+    ] {
+        let f = Fixture::pi();
+        for message in &messages {
+            handle_message(&f.session, message.clone());
+        }
+        let usage = f.usage();
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].data["status"], status);
+        assert_eq!(usage[0].data["source"], "pi_rpc");
+        assert_eq!(usage[0].data["input_tokens"], input);
+        assert_eq!(usage[0].data["output_tokens"], output);
+        assert_eq!(usage[0].data["cache_read_tokens"], cache_read);
+        handle_message(&f.session, messages.last().expect("completion").clone());
+        assert_eq!(f.usage().len(), 1);
+    }
 }

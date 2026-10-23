@@ -358,6 +358,17 @@ pub(crate) fn replay_captured_turn(captured: &str, thread_id: &str) -> Vec<Value
         .map(|line| serde_json::from_str::<Value>(line).expect("captured Pi RPC record"))
         .filter(|record| record["type"] != "response")
         .collect::<Vec<_>>();
+    replay_captured_records(&records, thread_id, false)
+}
+
+/// Replay captured records with only the controlled owner's cancellation state
+/// selected by the test. Provider counters and records stay from the capture.
+#[cfg(test)]
+pub(crate) fn replay_captured_records(
+    records: &[Value],
+    thread_id: &str,
+    cancelling: bool,
+) -> Vec<Value> {
     let prompt = records
         .iter()
         .find(|record| record["type"] == "message_start" && record["message"]["role"] == "user")
@@ -367,7 +378,10 @@ pub(crate) fn replay_captured_turn(captured: &str, thread_id: &str) -> Vec<Value
     let (admission, _) = oneshot::channel();
     let mut turn = Turn::new("captured".into(), prompt, admission);
     let mut settled = false;
-    for record in &records {
+    for record in records {
+        if record["type"] == "agent_settled" {
+            turn.cancelling = cancelling;
+        }
         settled |= turn
             .observe(record, &sender, "generation", thread_id)
             .expect("captured record is accepted");

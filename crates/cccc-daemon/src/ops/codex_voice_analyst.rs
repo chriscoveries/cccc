@@ -38,6 +38,7 @@ mod pi_rpc;
 #[cfg(test)]
 pub(crate) use pi_rpc::{
     CAPTURED_LENGTH_STOP as CAPTURED_PI_LENGTH_STOP, CAPTURED_TOOL_TURN as CAPTURED_PI_TOOL_TURN,
+    replay_captured_records as replay_captured_pi_records,
     replay_captured_turn as replay_captured_pi_turn,
 };
 mod process;
@@ -433,6 +434,13 @@ fn required_value<'a>(value: &'a str, name: &str) -> io::Result<&'a str> {
 
 #[cfg(all(test, unix))]
 impl AnalystSession {
+    /// Select Pi's owned-turn settlement path using an inert provider transport.
+    pub(crate) fn for_usage_test(config: &std::path::Path, thread: &str) -> Self {
+        let mut session = Self::claude_for_shutdown_test(config, thread, Vec::new(), true);
+        session.runtime = ActorRuntime::Pi;
+        session
+    }
+
     /// Exercise Actor output using the existing inert shutdown transport. The
     /// selected runtime only chooses the actual structured projection branch.
     pub(crate) fn for_output_test(
