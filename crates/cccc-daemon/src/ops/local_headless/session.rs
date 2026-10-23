@@ -57,15 +57,20 @@ impl Session {
     /// under the delivery id it is being asked with. `None` records a delivery that
     /// named no single card: known to be unattributed, which is not the same as
     /// unresolved, so it can never be given anyone else's card later.
-    pub(super) fn bind_delivery_task(&self, delivery_id: &str, task: Option<String>) {
-        if let Ok(mut tasks) = self.delivery_tasks.lock() {
-            // A binding is read once, when its turn is observed. If more than a
-            // handful are waiting, no observer is coming for them.
-            if tasks.len() >= 16 {
-                tasks.clear();
-            }
-            tasks.insert(delivery_id.to_owned(), task);
+    pub(super) fn bind_delivery_task(&self, delivery_id: &str, task: Option<String>) -> bool {
+        let Ok(mut tasks) = self.delivery_tasks.lock() else {
+            return false;
+        };
+        if let Some(existing) = tasks.get(delivery_id) {
+            return existing == &task;
         }
+        // A full table is backpressure, never proof that old deliveries ended.
+        // Refuse this admission instead of erasing unobserved turn authority.
+        if tasks.len() >= 16 {
+            return false;
+        }
+        tasks.insert(delivery_id.to_owned(), task);
+        true
     }
 
     /// Keep the binding visible until its ActiveTurn is published. Dispatch
