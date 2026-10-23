@@ -1,16 +1,16 @@
 # Captured lane-census stream (real RAM by harness)
 
-Three consecutive real ticks of firestar's own lane census, captured
-2026-10-22 21:21Z–21:30Z, used as the sample stream for the harness-RAM 72-hour
-aggregate (`crates/cccc-daemon/src/ops/actor_memory_trend.rs`).
+Three consecutive real ticks of the lane census, captured 2026-10-22
+21:21Z–21:30Z, used as the sample stream for the harness-RAM 72-hour aggregate
+(`crates/cccc-daemon/src/ops/actor_memory_trend.rs`).
 
 ## Where it comes from
 
-`deploy/lane-census/cccc-lane-census.py` (cwf repo) runs on a five-minute timer
-and folds every try into `/var/lib/cccc/lane-census-state.json`: one row per
-lane with the runtime it runs, the last and peak proportional memory (`PSS`) it
-held, and how many samples it has contributed. The capture behind this fixture
-read that file after each tick and wrote one line per tick:
+A census job samples every lane's process tree on a five-minute timer and folds
+each pass into one small state file: one row per lane with the runtime it runs,
+the last and peak proportional memory (`PSS`) it held, and how many samples it
+has contributed. The capture behind this fixture read that state after each tick
+and wrote one line per tick:
 
 ```json
 {"captured_at": "...", "census_samples": 6895, "source_ts": "...",
@@ -25,8 +25,9 @@ one.
 
 Kept: the harness id (`runtime`), the per-lane `pss_kb_last`, and a stable
 per-harness index in place of the lane name. Dropped: lane and actor identities,
-group ids, swap, idle duty, sample counts and timestamps of first sight. The
-test needs the harness and the number, and nothing else.
+identities, group ids, swap, idle duty, sample counts and timestamps of first
+sight, and every host-specific path and name. The test needs the harness and the
+number, and nothing else.
 
 ## Why PSS and not RSS
 
