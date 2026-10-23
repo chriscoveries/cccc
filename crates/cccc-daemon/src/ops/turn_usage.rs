@@ -133,7 +133,7 @@ pub(super) fn record(
         event.data.insert(field.into(), usage[field].clone());
     }
     let directory = store.state_dir(group_id)?.join("turn-usage");
-    with_exclusive_lock(&directory.join("writer.lock"), || {
+    let recorded = with_exclusive_lock(&directory.join("writer.lock"), || {
         let done = directory.join("committed").join(&event.id);
         if done.exists() {
             return Ok(());
@@ -144,7 +144,53 @@ pub(super) fn record(
             cccc_core::fs::write_json(&pending, &event)?;
         }
         deliver(&path, &directory, &pending, recovering)
-    })
+    });
+    recorded?;
+    if let Some(task_id) = task_id {
+        // After the event is durable, so a turn nobody recorded never moves a
+        // task's spend. Best effort: a task store that will not take the write
+        // must not cost the turn its usage record.
+        accrue_task_cost(
+            home,
+            group_id,
+            task_id,
+            usage,
+            std::path::Path::new(super::MODELS_PATH),
+        );
+    }
+    Ok(())
+}
+
+/// What this catalog says the model costs, applied to the task the turn named.
+fn accrue_task_cost(
+    home: &HomeLayout,
+    group_id: &str,
+    task_id: &str,
+    usage: &Value,
+    catalog: &std::path::Path,
+) {
+    let registry = cccc_core::models::ModelRegistry::load_from_path(catalog);
+    let outcome = registry.turn_cost(usage.get("model_id").and_then(Value::as_str), usage);
+    let mut operation = serde_json::Map::new();
+    operation.insert("op".into(), json!("task.cost.accrue"));
+    operation.insert("task_id".into(), json!(task_id));
+    match outcome {
+        cccc_core::models::TurnCost::Priced { usd, .. } => {
+            operation.insert("outcome".into(), json!("priced"));
+            operation.insert("usd".into(), json!(usd));
+        }
+        cccc_core::models::TurnCost::Unpriced { .. } => {
+            operation.insert("outcome".into(), json!("unpriced"));
+        }
+        cccc_core::models::TurnCost::Unmetered => {
+            operation.insert("outcome".into(), json!("unmetered"));
+        }
+    }
+    let applied = cccc_core::context::ContextStore::new(home.clone())
+        .and_then(|store| store.sync(group_id, &[operation], None, "cccc-daemon", false));
+    if let Err(error) = applied {
+        tracing::warn!(%task_id, %error, "turn metered; the task's cost was not written");
+    }
 }
 
 fn deliver(
@@ -240,6 +286,7 @@ pub(super) fn list(home: &HomeLayout, request: &DaemonRequest) -> crate::dispatc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
 
     fn captured_usage() -> Value {
         crate::ops::codex_voice_analyst::replay_captured_pi_turn(
@@ -329,5 +376,182 @@ mod tests {
             usage["input_tokens"],
             record["message"]["usage"]["input_tokens"]
         );
+    }
+
+    /// The first captured Claude record: 2 input, 40 output, 213,575 cache reads
+    /// and 905 cache writes — 214,522 metered tokens.
+    fn captured_claude_usage(model_id: &str) -> Value {
+        let record: Value = serde_json::from_str(
+            include_str!("codex_voice_analyst/claude/captured_turn_usage.jsonl")
+                .lines()
+                .next()
+                .expect("record"),
+        )
+        .expect("record");
+        let usage = &record["message"]["usage"];
+        json!({
+            "model_id": model_id,
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "cache_read_tokens": usage["cache_read_input_tokens"],
+            "cache_write_tokens": usage["cache_creation_input_tokens"],
+        })
+    }
+
+    /// Two catalog entries at the prices the owner set: a token-priced model and
+    /// a free one. The catalog file is the daemon's own format.
+    fn catalog(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("models.toml");
+        std::fs::write(
+            &path,
+            "[models.ds1017]\nusd_per_mtok = 0.07\n\n[models.free]\nusd_per_mtok = 0.0\n",
+        )
+        .expect("catalog");
+        path
+    }
+
+    fn group_with_task(home: &HomeLayout) -> (String, String) {
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("cost", "").expect("group");
+        let synced = cccc_core::context::ContextStore::new(home.clone())
+            .expect("context")
+            .sync(
+                &group.group_id,
+                &[json!({"op":"task.create","title":"metered work"})
+                    .as_object()
+                    .cloned()
+                    .expect("operation")],
+                None,
+                "user",
+                false,
+            )
+            .expect("create task");
+        let task_id = synced.changes[0]["task_id"]
+            .as_str()
+            .expect("task id")
+            .to_owned();
+        (group.group_id, task_id)
+    }
+
+    fn task(home: &HomeLayout, group_id: &str, task_id: &str) -> Map {
+        let doc = cccc_core::context::ContextStore::new(home.clone())
+            .expect("context")
+            .load(group_id)
+            .expect("load");
+        doc.tasks
+            .into_iter()
+            .find(|task| task["id"].as_str() == Some(task_id))
+            .expect("task")
+    }
+
+    #[test]
+    fn a_metered_turn_costs_the_task_what_the_catalog_says() {
+        let temp = tempfile::tempdir().expect("home");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let (group_id, task_id) = group_with_task(&home);
+        let path = catalog(temp.path());
+
+        accrue_task_cost(
+            &home,
+            &group_id,
+            &task_id,
+            &captured_claude_usage("ds1017"),
+            &path,
+        );
+
+        let task = task(&home, &group_id, &task_id);
+        // 214_522 tokens x $0.07 per million.
+        let spent = task["cost_usd"].as_f64().expect("cost");
+        assert!((spent - 0.01501654).abs() < 1e-12, "{spent}");
+        assert_eq!(task["cost_turns"], 1);
+        assert_eq!(task["unpriced_turns"], 0);
+        assert_eq!(task["unmetered_turns"], 0);
+        assert!(task["cost_updated_at"].as_str().is_some());
+    }
+
+    #[test]
+    fn a_turn_on_an_unpriced_model_is_counted_and_never_guessed() {
+        let temp = tempfile::tempdir().expect("home");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let (group_id, task_id) = group_with_task(&home);
+        let path = catalog(temp.path());
+
+        accrue_task_cost(
+            &home,
+            &group_id,
+            &task_id,
+            &captured_claude_usage("not-in-the-catalog"),
+            &path,
+        );
+
+        let task = task(&home, &group_id, &task_id);
+        assert_eq!(task["cost_usd"], 0.0);
+        assert_eq!(task["unpriced_turns"], 1);
+        assert_eq!(task["cost_turns"], 0);
+    }
+
+    #[test]
+    fn a_free_model_is_priced_at_zero_and_not_called_unpriced() {
+        let temp = tempfile::tempdir().expect("home");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let (group_id, task_id) = group_with_task(&home);
+        let path = catalog(temp.path());
+
+        accrue_task_cost(
+            &home,
+            &group_id,
+            &task_id,
+            &captured_claude_usage("free"),
+            &path,
+        );
+
+        let task = task(&home, &group_id, &task_id);
+        assert_eq!(task["cost_usd"], 0.0);
+        assert_eq!(task["cost_turns"], 1);
+        assert_eq!(task["unpriced_turns"], 0);
+    }
+
+    #[test]
+    fn a_turn_that_reported_no_counters_is_unmetered_not_free() {
+        let temp = tempfile::tempdir().expect("home");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let (group_id, task_id) = group_with_task(&home);
+        let path = catalog(temp.path());
+
+        accrue_task_cost(
+            &home,
+            &group_id,
+            &task_id,
+            &json!({"model_id": "ds1017"}),
+            &path,
+        );
+
+        let task = task(&home, &group_id, &task_id);
+        assert_eq!(task["unmetered_turns"], 1);
+        assert_eq!(task["cost_turns"], 0);
+        assert_eq!(task["unpriced_turns"], 0);
+        assert_eq!(task["cost_usd"], 0.0);
+    }
+
+    #[test]
+    fn a_turn_for_a_task_that_is_not_there_leaves_no_trace() {
+        let temp = tempfile::tempdir().expect("home");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let (group_id, task_id) = group_with_task(&home);
+        let path = catalog(temp.path());
+
+        // Best effort by design: the usage event is already durable, and an
+        // unknown task must not make the accounting path fail the turn.
+        accrue_task_cost(
+            &home,
+            &group_id,
+            "T999",
+            &captured_claude_usage("ds1017"),
+            &path,
+        );
+
+        let task = task(&home, &group_id, &task_id);
+        assert_eq!(task["cost_usd"], 0.0);
+        assert_eq!(task["cost_turns"], 0);
     }
 }

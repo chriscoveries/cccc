@@ -1,4 +1,7 @@
 pub(crate) mod actor_activity;
+
+/// The operator-edited model catalog the daemon reads for prices.
+pub(crate) const MODELS_PATH: &str = "/etc/cccc/models.toml";
 pub(crate) mod actor_delivery;
 mod actor_delivery_preamble;
 mod actor_delivery_render;
