@@ -579,11 +579,15 @@ fn submit_admitted(
     BatchSubmission::Deferred
 }
 
-/// The board task a delivered batch names: the single `task_ref` id across its
-/// messages. A batch naming two tasks, or none, leaves the turn unattributed
-/// rather than picking one — and an id that is not a `task_ref` is never one.
+/// The board task a delivered batch names: the id of the single `task_ref` entry
+/// across its messages. Exactly one entry, counted rather than deduplicated: two
+/// refs that happen to name the same task are still two refs, and collapsing
+/// them by id would make a delivery that broke the rule look like one that kept
+/// it. Any other count — two entries, or none — leaves the turn unattributed, and
+/// a ref of another kind is never a task.
 pub(super) fn task_ref_in(events: &[Event]) -> Option<String> {
-    let mut ids = std::collections::BTreeSet::new();
+    let mut named: Option<String> = None;
+    let mut entries = 0usize;
     for event in events {
         let Some(refs) = event.data.get("refs").and_then(Value::as_array) else {
             continue;
@@ -592,17 +596,21 @@ pub(super) fn task_ref_in(events: &[Event]) -> Option<String> {
             if reference.get("kind").and_then(Value::as_str) != Some("task_ref") {
                 continue;
             }
-            if let Some(task_id) = reference
+            let Some(task_id) = reference
                 .get("task_id")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
-            {
-                ids.insert(task_id.to_owned());
+            else {
+                continue;
+            };
+            entries += 1;
+            if named.is_none() {
+                named = Some(task_id.to_owned());
             }
         }
     }
-    (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
+    (entries == 1).then_some(named)?
 }
 
 fn submit_with_startup_prompt(
@@ -821,6 +829,24 @@ fn a_batch_names_at_most_one_task() {
         task_ref_in(&[first.clone(), second.clone()]),
         None,
         "two tasks in one batch is not one task"
+    );
+
+    // The same real card named twice: twice inside one message, and once in each
+    // of two messages. Both are two refs, so neither is one task, and the turn
+    // stays unattributed rather than the ids collapsing into one.
+    let twice = message(json!([
+        captured["turns"][0]["board_task"].clone(),
+        captured["turns"][0]["board_task"].clone()
+    ]));
+    assert_eq!(
+        task_ref_in(std::slice::from_ref(&twice)),
+        None,
+        "two refs naming the same task are two refs"
+    );
+    assert_eq!(
+        task_ref_in(&[first.clone(), first.clone()]),
+        None,
+        "one ref in each of two messages is still two refs"
     );
 
     let other_kind = message(json!([{"kind":"message_ref","task_id":"T089"}]));

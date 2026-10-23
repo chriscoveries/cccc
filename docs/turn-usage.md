@@ -19,9 +19,10 @@ provider's own task or turn authority, projected as `effective_active_task_id`,
 read before settlement clears it; absent authority stays null. `task_ref` is the
 board task the delivered batch named in its `task_refs`, captured when that batch
 was admitted, and it is the only field a turn's cost is charged to. It stays null
-when the delivery named no task, or named more than one — a provider token is
-never read as a board task, and assigned cards are never used to guess
-attribution. Missing counters,
+unless the delivery named exactly one task: refs are counted, not deduplicated,
+so two refs that happen to name the same task leave it null just as two different
+tasks do. A provider token is never read as a board task, and assigned cards are
+never used to guess attribution. Missing counters,
 overflowing sums or mixed/unknown models stay null. Prompts, replies, tool
 arguments and opaque provider payloads are not copied into usage events.
 
