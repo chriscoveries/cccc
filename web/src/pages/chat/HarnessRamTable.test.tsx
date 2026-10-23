@@ -10,18 +10,22 @@ const mocks = vi.hoisted(() => ({
   report: null as HarnessRamReport | null,
   calls: 0,
   fail: false,
+  deferred: false,
+  response: null as unknown,
+  settle: null as ((value: unknown) => void) | null,
 }));
 
 vi.mock("../../services/api/actors", () => ({
   fetchMemoryReport: () => {
     mocks.calls += 1;
-    if (mocks.fail) {
-      return Promise.resolve({
-        ok: false,
-        error: { code: "unavailable", message: "daemon offline" },
-      });
-    }
-    return Promise.resolve({ ok: true, result: mocks.report });
+    const response = mocks.fail
+      ? { ok: false, error: { code: "unavailable", message: "daemon offline" } }
+      : { ok: true, result: mocks.report };
+    mocks.response = response;
+    if (!mocks.deferred) return Promise.resolve(response);
+    return new Promise((resolve) => {
+      mocks.settle = resolve;
+    });
   },
 }));
 
@@ -39,6 +43,9 @@ let root: Root;
 beforeEach(() => {
   mocks.calls = 0;
   mocks.fail = false;
+  mocks.deferred = false;
+  mocks.response = null;
+  mocks.settle = null;
   mocks.report = {
     window_hours: 72,
     bucket_seconds: 3600,
@@ -103,6 +110,56 @@ it("fetches once when opened and shows the harness cost", async () => {
     await Promise.resolve();
   });
   expect(mocks.calls).toBe(1);
+});
+
+// Regression: the request used to be cancelled by the re-render its own
+// "loading" state caused, so a slow answer never landed and the panel sat on
+// "Loading" for as long as the fetch took.
+it("keeps the answer when it arrives after the render it causes", async () => {
+  mocks.deferred = true;
+  await act(async () => {
+    root.render(<HarnessRamTable groupId="g_slow" isDark={false} />);
+  });
+  await act(async () => {
+    host.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(mocks.calls).toBe(1);
+  expect(host.textContent).toContain("Loading");
+
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await act(async () => {
+    mocks.settle?.(mocks.response);
+  });
+
+  const text = host.textContent || "";
+  expect(text).not.toContain("Loading");
+  expect(text).toContain("codex");
+  expect(text).toContain("1.3G");
+});
+
+it("offers a retry when the request fails", async () => {
+  mocks.fail = true;
+  await act(async () => {
+    root.render(<HarnessRamTable groupId="g_retry" isDark={false} />);
+  });
+  await act(async () => {
+    host.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(host.textContent).toContain("daemon offline");
+  expect(mocks.calls).toBe(1);
+
+  mocks.fail = false;
+  const retry = Array.from(host.querySelectorAll("button")).find(
+    (button) => button.textContent === "Retry",
+  );
+  await act(async () => {
+    retry?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+
+  expect(mocks.calls).toBe(2);
+  expect(host.textContent).toContain("codex");
 });
 
 it("says when there is nothing yet, and shows a load error", async () => {
