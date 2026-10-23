@@ -102,7 +102,9 @@ export function HarnessRamTable({ groupId, isDark }: { groupId: string; isDark: 
               ×
             </button>
           </div>
-          {loading ? <p className="opacity-60">{t("loading", { defaultValue: "Loading…" })}</p> : null}
+          {loading ? (
+            <p className="opacity-60">{t("loading", { defaultValue: "Loading…" })}</p>
+          ) : null}
           {error ? (
             <p className="text-red-400">
               {error}{" "}
