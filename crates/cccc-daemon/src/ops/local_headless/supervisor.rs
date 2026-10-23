@@ -760,8 +760,15 @@ mod tests {
 }
 /// A batch is about one task or none. Two task refs in one batch are two
 /// tasks, and picking either would charge a turn to work it never did.
+///
+/// The refs are the ones two real deliveries carried: one card each, taken from
+/// the capture under `fixtures/turn-attribution/`.
 #[test]
 fn a_batch_names_at_most_one_task() {
+    let captured: Value = serde_json::from_str(include_str!(
+        "fixtures/turn-attribution/captured_turns.json"
+    ))
+    .expect("captured turns");
     let message = |refs: Value| {
         let mut event = Event::new("chat.message", "g_demo");
         event.by = "user".into();
@@ -771,17 +778,25 @@ fn a_batch_names_at_most_one_task() {
             .expect("message");
         event
     };
-    let one = message(json!([{"kind":"task_ref","task_id":"t_1","title":"Review"}]));
-    assert_eq!(task_ref_in(std::slice::from_ref(&one)), Some("t_1".into()));
-
-    let two = message(json!([{"kind":"task_ref","task_id":"t_2"}]));
+    let first = message(json!([captured["turns"][0]["board_task"].clone()]));
     assert_eq!(
-        task_ref_in(&[one.clone(), two.clone()]),
+        task_ref_in(std::slice::from_ref(&first)),
+        Some("T089".into()),
+        "the delivery named one card, and it is that card"
+    );
+    let second = message(json!([captured["turns"][1]["board_task"].clone()]));
+    assert_eq!(
+        task_ref_in(std::slice::from_ref(&second)),
+        Some("T090".into())
+    );
+
+    assert_eq!(
+        task_ref_in(&[first.clone(), second.clone()]),
         None,
         "two tasks in one batch is not one task"
     );
 
-    let other_kind = message(json!([{"kind":"message_ref","task_id":"t_3"}]));
+    let other_kind = message(json!([{"kind":"message_ref","task_id":"T089"}]));
     assert_eq!(
         task_ref_in(std::slice::from_ref(&other_kind)),
         None,

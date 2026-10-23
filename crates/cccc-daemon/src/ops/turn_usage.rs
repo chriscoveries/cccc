@@ -106,6 +106,35 @@ pub(super) fn record(
     usage: &Value,
     status: &str,
 ) -> io::Result<()> {
+    record_with_catalog(
+        home,
+        group_id,
+        actor_id,
+        generation,
+        turn_id,
+        task_id,
+        task_ref,
+        usage,
+        status,
+        std::path::Path::new(super::MODELS_PATH),
+    )
+}
+
+/// The same record, priced against a named catalog, so a test can hand it the
+/// prices the capture was taken at instead of whatever this host happens to have.
+#[allow(clippy::too_many_arguments)]
+fn record_with_catalog(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    generation: &str,
+    turn_id: &str,
+    task_id: Option<&str>,
+    task_ref: Option<&str>,
+    usage: &Value,
+    status: &str,
+    catalog: &std::path::Path,
+) -> io::Result<()> {
     let store = GroupStore::new(home.clone())?;
     let path = store.ledger_path(group_id)?;
     let key =
@@ -155,13 +184,7 @@ pub(super) fn record(
         // task's spend. Best effort: a task store that will not take the write
         // must not cost the turn its usage record. Charged to the board task the
         // delivery named, never to the provider's own task or turn token.
-        accrue_task_cost(
-            home,
-            group_id,
-            task_ref,
-            usage,
-            std::path::Path::new(super::MODELS_PATH),
-        );
+        accrue_task_cost(home, group_id, task_ref, usage, catalog);
     }
     Ok(())
 }
@@ -416,6 +439,36 @@ mod tests {
         path
     }
 
+    /// A group whose board already numbers its cards up to `count`, so a test
+    /// can use the ids the capture used (`T089`, `T090`) instead of whatever
+    /// numbers a fresh board would hand out. Ids are allocated from the highest
+    /// number the document has seen, so one sync of `count` creates lands them
+    /// all in order.
+    fn group_with_cards(home: &HomeLayout, count: usize) -> String {
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("capture", "").expect("group");
+        let operations = (0..count)
+            .map(|index| {
+                json!({"op":"task.create","title":format!("card {}", index + 1)})
+                    .as_object()
+                    .cloned()
+                    .expect("operation")
+            })
+            .collect::<Vec<_>>();
+        cccc_core::context::ContextStore::new(home.clone())
+            .expect("context")
+            .sync(&group.group_id, &operations, None, "user", false)
+            .expect("create cards");
+        group.group_id
+    }
+
+    fn captured_turns() -> Value {
+        serde_json::from_str(include_str!(
+            "local_headless/fixtures/turn-attribution/captured_turns.json"
+        ))
+        .expect("captured turns")
+    }
+
     fn group_with_task(home: &HomeLayout) -> (String, String) {
         let store = GroupStore::new(home.clone()).expect("store");
         let group = store.create("cost", "").expect("group");
@@ -448,6 +501,120 @@ mod tests {
             .into_iter()
             .find(|task| task["id"].as_str() == Some(task_id))
             .expect("task")
+    }
+
+    /// The capture this feature exists for: two assigned turns, each delivery
+    /// carrying one task ref, each turn metered at the catalog price of the model
+    /// it ran on. The money lands on the card the delivery named.
+    #[test]
+    fn captured_turns_accrue_to_the_card_each_delivery_named() {
+        let temp = tempfile::tempdir().expect("home");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let prices = catalog(temp.path());
+        let group_id = group_with_cards(&home, 90);
+        let captured = captured_turns();
+        let generation = "1720d5ddc64c4adcb46d6bd91034b7c9";
+
+        for turn in captured["turns"].as_array().expect("turns") {
+            let card = turn["board_task"]["task_id"].as_str().expect("card");
+            record_with_catalog(
+                &home,
+                &group_id,
+                "reviewer",
+                generation,
+                turn["runtime_turn_id"].as_str().expect("turn"),
+                turn["runtime_task_id"].as_str(),
+                Some(card),
+                &turn["usage"],
+                "completed",
+                &prices,
+            )
+            .expect("record the turn");
+
+            let task = task(&home, &group_id, card);
+            let spent = task["cost_usd"].as_f64().expect("cost");
+            let expected = turn["expected_usd"].as_f64().expect("expected cost");
+            assert!(
+                (spent - expected).abs() < 1e-9,
+                "{card} spent {spent}, the capture says {expected}"
+            );
+            assert_eq!(task["cost_turns"], 1, "{card} counted its metered turn");
+            assert_eq!(task["unpriced_turns"], 0, "{card} had a price");
+            assert_eq!(task["unmetered_turns"], 0, "{card} reported tokens");
+        }
+
+        // The event keeps the runtime's own task token, and carries the board
+        // task beside it; only the second field is a card.
+        let path = GroupStore::new(home.clone())
+            .expect("store")
+            .ledger_path(&group_id)
+            .expect("ledger");
+        let usage = ledger::read_all(&path)
+            .expect("ledger")
+            .into_iter()
+            .filter(|event| event.kind == "turn.usage")
+            .collect::<Vec<_>>();
+        assert_eq!(usage.len(), 2, "two turns, two usage records");
+        assert_eq!(usage[0].data["task_ref"], "T089");
+        assert_eq!(
+            usage[0].data["task_id"],
+            "pi-96239a042f094d8b8a44ba650c600566"
+        );
+        assert_eq!(usage[1].data["task_ref"], "T090");
+        assert_eq!(
+            usage[1].data["task_id"],
+            "pi-78c8332af90d4834b349d0d7f4c967ca"
+        );
+    }
+
+    /// A delivery that named no card charges nothing, and neither does one that
+    /// named two: the turn is recorded unattributed rather than billed to a card
+    /// somebody guessed at.
+    #[test]
+    fn a_turn_whose_delivery_named_no_single_card_charges_nothing() {
+        let temp = tempfile::tempdir().expect("home");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let prices = catalog(temp.path());
+        let group_id = group_with_cards(&home, 89);
+        let captured = captured_turns();
+        let turn = &captured["turns"][0];
+        let generation = "1720d5ddc64c4adcb46d6bd91034b7c9";
+
+        for (turn_id, task_ref) in [("unreferenced", None), ("ambiguous", None)] {
+            record_with_catalog(
+                &home,
+                &group_id,
+                "reviewer",
+                generation,
+                turn_id,
+                turn["runtime_task_id"].as_str(),
+                task_ref,
+                &turn["usage"],
+                "completed",
+                &prices,
+            )
+            .expect("record the turn");
+        }
+
+        let task = task(&home, &group_id, "T089");
+        assert_eq!(task["cost_usd"].as_f64().unwrap_or(0.0), 0.0, "no spend");
+        assert!(task.get("cost_turns").is_none(), "no metered turn counted");
+        assert!(
+            task.get("unpriced_turns").is_none(),
+            "nothing priced or unpriced was counted"
+        );
+
+        // The usage is still recorded, so nothing is lost by leaving it unattributed.
+        let path = GroupStore::new(home.clone())
+            .expect("store")
+            .ledger_path(&group_id)
+            .expect("ledger");
+        let usage = ledger::read_all(&path)
+            .expect("ledger")
+            .into_iter()
+            .filter(|event| event.kind == "turn.usage")
+            .count();
+        assert_eq!(usage, 2);
     }
 
     #[test]
