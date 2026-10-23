@@ -338,21 +338,6 @@ fn tick_rules(
         let one_time = trigger_kind == "at";
         let mut completed = false;
         match kind {
-            "dispatch_ready_task" => {
-                if !idle_actor_ids.is_empty() {
-                    result.actions.push(ScheduledAction::DispatchReadyTask {
-                        group_id: group.group_id.clone(),
-                        rule_id: id.into(),
-                        fired_at: now.timestamp(),
-                        one_time,
-                        cooldown_ms: action
-                            .and_then(|a| a.get("dispatch_cooldown_ms"))
-                            .and_then(Value::as_u64)
-                            .unwrap_or(60_000),
-                        idle_actor_ids: idle_actor_ids.clone(),
-                    });
-                }
-            }
             "notify" => {
                 let scheduled_at = scheduled_at(trigger, last_fired, now);
                 let events = notify_events(group, id, rule, action, &scheduled_at);
