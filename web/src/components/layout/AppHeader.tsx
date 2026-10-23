@@ -15,7 +15,15 @@ import { AppSettingsMenu } from "./AppSettingsMenu";
 import { fetchActors, stopActor } from "../../services/api/actors";
 import { fetchGroupHealth, type GroupHealth } from "../../services/api/groups";
 
-type ActorRow = { id: string; running?: boolean; rss_mib?: number | null; cpu_pct?: number | null };
+type ActorRow = {
+  id: string;
+  harness?: string;
+  mode?: string;
+  model?: string;
+  running?: boolean;
+  rss_mib?: number | null;
+  cpu_pct?: number | null;
+};
 
 export interface AppHeaderProps {
   theme: Theme;
@@ -165,9 +173,10 @@ export function AppHeader({
     ...actors
       .filter((a: ActorRow) => a?.id && a.running)
       .map((a: ActorRow) => ({
-        label: `${a.id} · ${a.rss_mib != null ? `${a.rss_mib} MiB` : "—"} · ${a.cpu_pct != null ? `${a.cpu_pct}%` : "—"}`,
+        label: `${a.id} · ${a.harness ?? "—"} · ${a.mode ?? "—"} · ${a.model ?? "—"} · ${a.rss_mib != null ? `${a.rss_mib} MiB` : "—"} · ${a.cpu_pct != null ? `${a.cpu_pct}%` : "—"} · Stop`,
         onClick: () => {
-          if (selectedGroupId) void stopActor(selectedGroupId, a.id);
+          if (selectedGroupId && window.confirm(`Stop ${a.id}?`))
+            void stopActor(selectedGroupId, a.id);
         },
         tone: "danger" as const,
         section: "actors",
@@ -238,6 +247,11 @@ export function AppHeader({
                     variant="badge"
                     className="min-h-8 min-w-8 justify-center pointer-coarse:min-h-10 pointer-coarse:min-w-10 [&>span:last-child]:hidden @min-[480px]/group-work-header:[&>span:last-child]:inline !border-transparent !bg-transparent @min-[480px]/group-work-header:!rounded-full @min-[480px]/group-work-header:!border-[var(--glass-border-subtle)] @min-[480px]/group-work-header:pr-6 cursor-pointer transition-colors hover:text-[var(--color-text-primary)]"
                   />
+                  {selectedStatus?.key === "run" && healthText ? (
+                    <span className="hidden @min-[480px]/group-work-header:inline text-xs text-[var(--color-text-secondary)]">
+                      {healthText.trim()}
+                    </span>
+                  ) : null}
                   <ChevronDownIcon
                     size={13}
                     aria-hidden="true"
