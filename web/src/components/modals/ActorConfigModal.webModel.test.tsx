@@ -126,6 +126,45 @@ describe("Web Model effective Actor configuration", () => {
   });
   const button = (label: string) =>
     [...host.querySelectorAll("button")].find((b) => b.textContent === label)!;
+  it.each([
+    [undefined, "Declared model"],
+    ["Declared model", "Updated model"],
+    ["Declared model", ""],
+  ])("saves model_label %s as %s without restarting", async (initial, next) => {
+    const p = props();
+    p.savedActor = {
+      id: p.actorId,
+      runtime: p.runtime,
+      command: [p.command],
+      title: p.title,
+      capability_autoload: ["skill:fixture"],
+      ...{ model_label: initial },
+    };
+    await act(async () => root.render(<ActorConfigModal {...p} />));
+    const input = host.querySelector<HTMLInputElement>("#edit-actor-model-label");
+    expect(input).not.toBeNull();
+    expect(input!.value).toBe(initial || "");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, next);
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button("common:save").click());
+    expect(p.onSave).toHaveBeenCalledWith(expect.objectContaining({ model_label: next }));
+    expect(p.onSaveAndRestart).not.toHaveBeenCalled();
+  });
+
+  it("keeps an absent model_label undeclared when saving another field", async () => {
+    const p = props();
+    await act(async () => root.render(<ActorConfigModal {...p} />));
+    const input = host.querySelector<HTMLInputElement>("#edit-actor-model-label");
+    expect(input).not.toBeNull();
+    expect(input!.value).toBe("");
+    await act(async () => root.render(<ActorConfigModal {...p} title="Updated title" />));
+    await act(async () => button("common:save").click());
+    expect(p.onSave).toHaveBeenCalledOnce();
+    expect(vi.mocked(p.onSave).mock.calls[0][0]).not.toHaveProperty("model_label");
+  });
+
   it("shows ACP settings on runtime selection and preserves the saved mode baseline", async () => {
     const p = props();
     p.runtime = "antigravity";

@@ -238,6 +238,41 @@ pub enum HermesAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn parses_actor_model_label_set_update_clear_and_omission() {
+        for (action, label) in [
+            ("add", "gpt-5-codex"),
+            ("update", "claude-sonnet-4-5"),
+            ("update", ""),
+        ] {
+            let matches = Cli::command()
+                .try_get_matches_from(["cccc", "actor", action, "peer1", "--model-label", label])
+                .expect("model_label argument");
+            let args = matches
+                .subcommand_matches("actor")
+                .and_then(|args| args.subcommand_matches(action))
+                .expect("actor action");
+            assert_eq!(
+                args.get_one::<String>("model_label").map(String::as_str),
+                Some(label)
+            );
+        }
+        for action in ["add", "update"] {
+            let matches = Cli::command()
+                .try_get_matches_from(["cccc", "actor", action, "peer1"])
+                .expect("optional model_label");
+            let args = matches
+                .subcommand_matches("actor")
+                .and_then(|args| args.subcommand_matches(action))
+                .expect("actor action");
+            assert_eq!(
+                args.get_one::<String>("model_label").map(String::as_str),
+                if action == "add" { Some("") } else { None }
+            );
+        }
+    }
 
     #[test]
     fn parses_membership_verbs() {

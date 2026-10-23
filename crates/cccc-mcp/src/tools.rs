@@ -41,6 +41,38 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn actor_model_label_is_available_on_add_and_update_including_explicit_clear() {
+        let catalog = super::catalog();
+        let actor = catalog
+            .iter()
+            .find(|tool| tool["name"] == "cccc_actor")
+            .expect("actor tool");
+        let properties = &actor["inputSchema"]["properties"];
+        assert_eq!(properties["model_label"]["type"], "string");
+        assert!(
+            properties["action"]["enum"]
+                .as_array()
+                .expect("actions")
+                .contains(&serde_json::json!("update"))
+        );
+        for (action, label) in [
+            ("add", "gpt-5-codex"),
+            ("update", "claude-sonnet-4-5"),
+            ("update", ""),
+        ] {
+            let arguments =
+                serde_json::json!({"action":action,"actor_id":"peer1","model_label":label});
+            let (op, args) = crate::mapping::daemon_call(
+                "cccc_actor",
+                arguments.as_object().expect("args").clone(),
+            )
+            .expect("mapping");
+            assert_eq!(op, format!("actor_{action}"));
+            assert_eq!(args["model_label"], label);
+        }
+    }
+
+    #[test]
     fn every_published_tool_has_an_intended_exposure_path() {
         let ordinary = cccc_core::actor_base_tool_names("peer", None);
         let temp = tempfile::tempdir().expect("temp");

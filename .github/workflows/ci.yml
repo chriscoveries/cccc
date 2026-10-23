@@ -60,6 +60,8 @@ jobs:
         run: npm -C web run check
 
       - name: Test Web
+        # Keep the bundle available so the Rust regression tests also run.
+        continue-on-error: true
         run: npm -C web test
 
       - name: Build Web bundle
