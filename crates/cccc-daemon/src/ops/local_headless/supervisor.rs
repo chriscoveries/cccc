@@ -166,6 +166,7 @@ pub(super) fn attach_managed(
         pending_turn_task: Mutex::new(None),
         turn_tasks: Mutex::new(std::collections::HashMap::new()),
         admission: Mutex::new(()),
+        unresolved_admission: AtomicBool::new(false),
     });
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
@@ -530,6 +531,9 @@ fn submit_admitted(
                             ]),
                         );
                     }
+                    // The runtime may still start this turn; until the session
+                    // settles, no later start event may take a fresh card.
+                    item.quarantine_unresolved_admission();
                     outcome = BatchSubmission::Unconfirmed;
                     false
                 }

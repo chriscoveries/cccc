@@ -207,11 +207,13 @@ fn handle_managed_turn_started(session: &Session, message: &Value) -> bool {
         return false;
     };
     // A turn the runtime has already resolved — with a card, or with none —
-    // answers for itself. Only a turn whose own admission is still open can take
-    // the pending card, and admissions are serialised, so that card is its own.
+    // answers for itself. A turn that is not resolved can only take the pending
+    // card when no earlier admission is still unresolved, since that admission's
+    // events would arrive the same way and cannot be told apart from this one.
     let task = match session.take_turn_task(turn_id) {
         Some(resolved) => resolved,
-        None => session.take_pending_turn_task(),
+        None if !session.has_unresolved_admission() => session.take_pending_turn_task(),
+        None => None,
     };
     match observe_started_turn(&session.active_turn, turn_id, task) {
         StartedTurnDisposition::Adopted => {
@@ -310,8 +312,10 @@ fn complete_turn(session: &Session, message: &Value) {
         }
     }
     // The batch is spent: its card belonged to this turn, and a binding no started
-    // event ever claimed is dropped so the map cannot grow.
+    // event ever claimed is dropped so the map cannot grow. With the turn settled,
+    // an admission that was never confirmed can no longer surface.
     session.forget_turn_task(&turn_id);
+    session.clear_unresolved_admission();
     active_turn.take();
     // A completed turn is not automatically a successful turn. Providers report
     // failure out of band (ACP stopReason, a model API error surfaced as an

@@ -128,6 +128,11 @@ struct Session {
     /// Held across one delivery's admission, so only one delivery is ever pending
     /// for this Actor and a card can never be read for someone else's turn.
     admission: Mutex<()>,
+    /// Set when an admission ended without the runtime confirming it. The runtime
+    /// may still start that turn, and its events arrive without anything tying
+    /// them to the batch, so no start event may take a pending card until the
+    /// session has settled again. Cleared when a turn settles.
+    unresolved_admission: AtomicBool,
 }
 
 fn poisoned() -> std::io::Error {
