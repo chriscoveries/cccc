@@ -6,7 +6,7 @@ fn resolves_real_catalog_values() {
     reg.models.insert(
         "priced-model".to_string(),
         ModelSpec {
-            usd_per_mtok: 0.07,
+            usd_per_mtok: Some(0.07),
             strength: Some(3),
             code: true,
             ..Default::default()
@@ -15,7 +15,7 @@ fn resolves_real_catalog_values() {
     reg.models.insert(
         "free".to_string(),
         ModelSpec {
-            usd_per_mtok: 0.0,
+            usd_per_mtok: Some(0.0),
             strength: Some(2),
             code: false,
             ..Default::default()
