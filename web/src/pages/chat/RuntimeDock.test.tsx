@@ -106,6 +106,16 @@ it("uses refreshed unread counts instead of stale loaded read markers", async ()
   expect(badge()).toBeNull();
 });
 
+it("shows the actor's process-tree memory when the daemon has a reading", async () => {
+  await render({ rss_mib: 336, pss_mib: 136, n_proc: 5 });
+  const memory = host.querySelector<HTMLElement>('span[title*="MiB RSS"]');
+  expect(memory?.textContent).toBe("336M");
+  expect(memory?.title).toBe("336 MiB RSS, 136 MiB PSS, 5 procs");
+  expect(host.querySelector(".sr-only")?.textContent).toContain("336 MiB RSS");
+  await render({ rss_mib: null, pss_mib: null, n_proc: null });
+  expect(host.querySelector('span[title*="MiB RSS"]')).toBeNull();
+});
+
 it("keeps the ring size stable as work starts, idles, needs attention, and stops", async () => {
   for (const state of ["working", "idle", "stuck", "stopped", "working"] as const) {
     await render({ effective_working_state: state, running: state !== "stopped" });
@@ -135,7 +145,7 @@ it("follows locally observed activity without inventing duration from a backend 
 });
 
 it("preserves separate unread and queue totals without changing the button size", async () => {
-  await render({ unread_count: 123, web_model_queued_count: 120 });
+  await render({ runtime: "web_model", unread_count: 123, web_model_queued_count: 120 });
   expect(badge()?.textContent).toBe("99+");
   const queue = host.querySelector<HTMLElement>('span[title*="queued for next turn"]');
   expect(queue?.textContent).toBe("99+");
@@ -143,15 +153,15 @@ it("preserves separate unread and queue totals without changing the button size"
   const buttonClass = host.querySelector("button")?.className;
   expect(host.querySelector("button")?.title).toContain("123 unread mail");
   expect(host.querySelector("button")?.title).toContain("120 queued for next turn");
-  await render({ unread_count: 0, web_model_queued_count: 0 });
+  await render({ runtime: "web_model", unread_count: 0, web_model_queued_count: 0 });
   expect(host.querySelector("button")?.className).toBe(buttonClass);
   expect(badge()).toBeNull();
   expect(host.querySelector('span[title*="queued for next turn"]')).toBeNull();
 });
 
 it("refreshes counts and activity when switching Groups with the same Actor ID", async () => {
-  await render({ web_model_queued_count: 3 });
-  await render({ unread_count: 0, effective_working_state: "idle" }, "g2");
+  await render({ runtime: "web_model", web_model_queued_count: 3 });
+  await render({ runtime: "web_model", unread_count: 0, effective_working_state: "idle" }, "g2");
   expect(badge()).toBeNull();
   expect(activity()).toBeNull();
   expect(host.querySelector('span[title*="queued for next turn"]')).toBeNull();
@@ -277,3 +287,10 @@ it.each([
       .toBe(tone);
   },
 );
+
+it("does not show a retired browser queue badge on a native Grok Actor", async () => {
+  await render({ runtime: "grok_web_model", web_model_queued_count: 4, unread_count: 2 });
+  expect(host.querySelector('span[title*="queued for next turn"]')).toBeNull();
+  expect(host.querySelector("button")?.title).not.toContain("queued for next turn");
+  expect(badge()?.textContent).toBe("2");
+});

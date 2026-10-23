@@ -331,6 +331,10 @@ export type Actor = {
   enabled?: boolean;
   running?: boolean; // Actual process running status
   idle_seconds?: number | null; // Seconds since last PTY output (null if not running/headless)
+  rss_mib?: number | null; // Resident memory of the actor's process tree, in MiB
+  pss_mib?: number | null; // Proportionally attributable memory over the same tree
+  n_proc?: number | null; // Processes in the tree when the reading was taken
+  mem_sampled_at?: string | null; // When the memory reading was taken
   effective_working_state?: "stopped" | "idle" | "working" | "waiting" | "stuck" | string;
   effective_working_reason?: string;
   effective_working_updated_at?: string | null;
@@ -782,7 +786,7 @@ export type GroupContext = {
   meta?: { project_status?: string | null; [key: string]: unknown };
 };
 
-export type ProjectMdInfo = {
+export type AgentsMdInfo = {
   exists: boolean;
   path?: string | null;
   content?: string | null;
@@ -1595,11 +1599,13 @@ export const SUPPORTED_RUNTIMES = [
 export type SupportedRuntime = (typeof SUPPORTED_RUNTIMES)[number];
 
 export function isWebModelRuntime(runtime: string | undefined): boolean {
-  return runtime === "chatgpt_dots" || isBrowserWebModelRuntime(runtime);
+  return (
+    runtime === "chatgpt_dots" || runtime === "grok_web_model" || isBrowserWebModelRuntime(runtime)
+  );
 }
 
 export function isBrowserWebModelRuntime(runtime: string | undefined): boolean {
-  return runtime === "web_model" || runtime === "grok_web_model";
+  return runtime === "web_model";
 }
 
 export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
@@ -1640,7 +1646,7 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   },
   grok_web_model: {
     label: "Grok Bot Web Model",
-    desc: "Grok Bot browser delivery + remote MCP connector",
+    desc: "Grok Bot native Webhook + remote MCP connector",
   },
   custom: { label: "Custom", desc: "Manual MCP installation needed" },
 };
@@ -1982,3 +1988,31 @@ export function supportsAcpMode(runtime?: string | null): boolean {
     "droid",
   ].includes(runtime || "");
 }
+
+/// One (harness, mode) row of the 72-hour harness RAM trend.
+export type HarnessRamHour = {
+  hour: string;
+  peak_rss_mib: number | null;
+  avg_rss_mib: number | null;
+  samples: number;
+};
+
+export type HarnessRamKey = {
+  harness: string;
+  mode: string;
+  peak_rss_mib: number | null;
+  avg_rss_mib: number | null;
+  samples: number;
+  peak_pss_mib?: number | null;
+  avg_pss_mib?: number | null;
+  pss_samples?: number;
+  hours_observed: number;
+  series: HarnessRamHour[];
+};
+
+export type HarnessRamReport = {
+  window_hours: number;
+  bucket_seconds: number;
+  as_of: string;
+  keys: HarnessRamKey[];
+};
