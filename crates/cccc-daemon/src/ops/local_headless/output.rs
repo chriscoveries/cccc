@@ -206,9 +206,12 @@ fn handle_managed_turn_started(session: &Session, message: &Value) -> bool {
     let Some(turn_id) = turn_id else {
         return false;
     };
-    // The card is looked up by the turn id the runtime reported, so this event
-    // binds its own delivery even when it arrives long after admission.
-    let task = session.take_turn_task(turn_id);
+    // The turn id is authoritative when the batch has already been accepted and
+    // bound. Otherwise this event is arriving before the runtime answered the
+    // admission, and the single pending card is this turn's.
+    let task = session
+        .take_turn_task(turn_id)
+        .or_else(|| session.take_pending_turn_task());
     match observe_started_turn(&session.active_turn, turn_id, task) {
         StartedTurnDisposition::Adopted => {
             session.set_status("working", Some(turn_id.to_owned()));
@@ -289,7 +292,10 @@ fn complete_turn(session: &Session, message: &Value) {
                 .lock()
                 .ok()
                 .and_then(|state| state.task_id.clone());
-            let task_ref = current.task.clone();
+            let task_ref = current
+                .task
+                .clone()
+                .or_else(|| session.take_turn_task(&turn_id));
             if let Err(error) = super::super::turn_usage::record(
                 &session.home,
                 &session.group_id,
