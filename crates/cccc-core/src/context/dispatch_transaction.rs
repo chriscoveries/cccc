@@ -269,18 +269,15 @@ fn rollback(group: &Path, file: &mut File, intent: &Intent) -> io::Result<()> {
 }
 
 pub fn recover_all(home: &HomeLayout) -> io::Result<()> {
-    let store = GroupStore::new(home.clone())?;
+    home.initialize().map_err(io::Error::other)?;
     for entry in fs::read_dir(home.groups_dir())? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let dir = store.group_dir(&id)?;
-        let paths = ContextPaths::new(&dir);
+        let dir = entry.path();
         if journal(&dir).try_exists()? {
+            let paths = ContextPaths::new(&dir);
             with_exclusive_lock(&paths.lock_file, || recover_locked(&dir))?;
         }
     }
@@ -341,6 +338,13 @@ mod tests {
             events.push(event);
         }
         Ok(events)
+    }
+
+    #[test]
+    fn startup_ignores_directories_without_a_dispatch_journal() {
+        let (_temp, home, _id, _actor) = fixture();
+        fs::create_dir(home.groups_dir().join("unregistered-directory")).expect("directory");
+        recover_all(&home).expect("no unrelated group parsing");
     }
 
     #[test]
