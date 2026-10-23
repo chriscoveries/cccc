@@ -2,13 +2,14 @@
 
 A real `/proc` capture, used by `crates/cccc-daemon/src/ops/actor_memory.rs`.
 
-Captured 2026-10-22 from `agent`'s own processes on a development host.
+Captured 2026-10-22 from real harness processes on a development host.
 Nothing here is synthetic and no value was edited afterwards.
 
 ## The tree
 
-`2793514` is a live harness launcher (`node /usr/local/bin/codex …`) with four
-descendants: `2793524`, `2793848`, `2794541`, `2806563`. Five processes in all.
+`2793514` is a live harness launcher (a Node process running a coding agent)
+with four descendants: `2793524`, `2793848`, `2794541`, `2806563`. Five
+processes in all.
 `517722` is an unrelated real process captured from the same `/proc`, with no
 children, included so a test can prove the walk never sums a process outside
 the tree.
