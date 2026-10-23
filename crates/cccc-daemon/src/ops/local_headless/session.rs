@@ -53,21 +53,32 @@ impl Session {
         }
     }
 
-    /// Record which board task the batch about to be delivered is about. This is
-    /// the pending card, not the running turn's: it is handed to a turn only when
-    /// the runtime reports that turn started, and dropped if no turn starts, so a
-    /// deferred delivery never renames an open one.
-    pub(super) fn set_turn_task(&self, task: Option<String>) {
-        if let Ok(mut current) = self.pending_turn_task.lock() {
-            *current = task;
+    /// Record which board task the turn the runtime just accepted is about, under
+    /// that runtime turn id. Nothing is held for a batch that started no turn, and
+    /// the binding is looked up by id, so a late `turn/started` cannot be answered
+    /// with another delivery's card.
+    pub(super) fn bind_turn_task(&self, turn_id: &str, task: Option<String>) {
+        let Some(task) = task else {
+            return;
+        };
+        if let Ok(mut tasks) = self.turn_tasks.lock() {
+            tasks.insert(turn_id.to_owned(), task);
         }
     }
 
-    pub(super) fn turn_task(&self) -> Option<String> {
-        self.pending_turn_task
+    /// The card bound to `turn_id`, taken out so a binding is used once.
+    pub(super) fn take_turn_task(&self, turn_id: &str) -> Option<String> {
+        self.turn_tasks
             .lock()
             .ok()
-            .and_then(|task| task.clone())
+            .and_then(|mut tasks| tasks.remove(turn_id))
+    }
+
+    /// Drop a binding for a turn that ended unobserved, so the map stays bounded.
+    pub(super) fn forget_turn_task(&self, turn_id: &str) {
+        if let Ok(mut tasks) = self.turn_tasks.lock() {
+            tasks.remove(turn_id);
+        }
     }
 
     /// The task the running turn was started for, if any.
