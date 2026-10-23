@@ -5,7 +5,7 @@ use super::{
 };
 use cccc_contracts::{Actor, ActorRuntime, Event, RunnerKind, utc_now};
 use cccc_core::{GroupDoc, HomeLayout};
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -163,6 +163,8 @@ pub(super) fn attach_managed(
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
+        delivery_tasks: Mutex::new(std::collections::HashMap::new()),
+        admission: Mutex::new(()),
     });
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
@@ -468,6 +470,9 @@ fn submit_admitted(
     cancelled: &AtomicBool,
     item: &Session,
 ) -> BatchSubmission {
+    // One delivery is admitted at a time per Actor, so a card cannot be claimed
+    // for a turn another delivery started.
+    let _admission = item.begin_admission();
     let Some(delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
         home,
         group,
@@ -485,6 +490,10 @@ fn submit_admitted(
                 .collect::<Vec<_>>()
                 .join(",")
         );
+        // Only this route's turns name the delivery they came from, so only this
+        // route registers a card, and it registers it before the batch is sent so
+        // that even a turn reported before the runtime answers resolves its own.
+        item.bind_delivery_task(&id, task_ref_in(source_events));
         let mut outcome = BatchSubmission::Deferred;
         submit_with_startup_prompt(&item.startup_prompt, &delivery, |prepared| {
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
@@ -541,11 +550,17 @@ fn submit_admitted(
                             ]),
                         );
                     }
+                    // The runtime may still start this turn, and it will name this
+                    // delivery when it does, so the card stays registered.
                     outcome = BatchSubmission::Unconfirmed;
                     false
                 }
             }
         });
+        if matches!(outcome, BatchSubmission::Deferred) {
+            // The runtime refused the batch, so no turn will ever name it.
+            item.forget_delivery_task(&id);
+        }
         return outcome;
     }
     if let Err(error) = item.reattach_viewer() {
@@ -566,6 +581,8 @@ fn submit_admitted(
                 cancelled,
             )
         });
+        // A terminal route has no authoritative word on which turn a delivery
+        // started, so it never holds a card and its turns stay unattributed.
         return if accepted {
             BatchSubmission::Accepted
         } else {
@@ -573,6 +590,39 @@ fn submit_admitted(
         };
     }
     BatchSubmission::Deferred
+}
+
+/// The board task a delivered batch names: the id of the single `task_ref` entry
+/// across its messages. Exactly one entry, counted rather than deduplicated: two
+/// refs that happen to name the same task are still two refs, and collapsing
+/// them by id would make a delivery that broke the rule look like one that kept
+/// it. Any other count — two entries, or none — leaves the turn unattributed, and
+/// a ref of another kind is never a task.
+pub(super) fn task_ref_in(events: &[Event]) -> Option<String> {
+    let mut named: Option<String> = None;
+    let mut entries = 0usize;
+    for event in events {
+        let Some(refs) = event.data.get("refs").and_then(Value::as_array) else {
+            continue;
+        };
+        for reference in refs {
+            if reference.get("kind").and_then(Value::as_str) != Some("task_ref") {
+                continue;
+            }
+            // Every task_ref entry counts, usable or not: a malformed one beside
+            // a good one makes two refs, and two refs are not one task.
+            entries += 1;
+            let task_id = reference
+                .get("task_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty());
+            if named.is_none() {
+                named = task_id.map(str::to_owned);
+            }
+        }
+    }
+    (entries == 1).then_some(named)?
 }
 
 fn submit_with_startup_prompt(
@@ -755,6 +805,97 @@ mod tests {
         assert_eq!(*startup_prompt.lock().expect("startup prompt"), None);
     }
 }
+/// A batch is about one task or none. Two task refs in one batch are two
+/// tasks, and picking either would charge a turn to work it never did.
+///
+/// The refs are the ones two real deliveries carried: one card each, taken from
+/// the capture under `fixtures/turn-attribution/`.
+#[test]
+fn a_batch_names_at_most_one_task() {
+    let captured: Value = serde_json::from_str(include_str!(
+        "fixtures/turn-attribution/captured_turns.json"
+    ))
+    .expect("captured turns");
+    let message = |refs: Value| {
+        let mut event = Event::new("chat.message", "g_demo");
+        event.by = "user".into();
+        event.data = json!({"text":"work","to":["architect"],"refs":refs})
+            .as_object()
+            .cloned()
+            .expect("message");
+        event
+    };
+    let first = message(json!([captured["turns"][0]["board_task"].clone()]));
+    assert_eq!(
+        task_ref_in(std::slice::from_ref(&first)),
+        Some("T089".into()),
+        "the delivery named one card, and it is that card"
+    );
+    let second = message(json!([captured["turns"][1]["board_task"].clone()]));
+    assert_eq!(
+        task_ref_in(std::slice::from_ref(&second)),
+        Some("T090".into())
+    );
+
+    assert_eq!(
+        task_ref_in(&[first.clone(), second.clone()]),
+        None,
+        "two tasks in one batch is not one task"
+    );
+
+    // The same real card named twice: twice inside one message, and once in each
+    // of two messages. Both are two refs, so neither is one task, and the turn
+    // stays unattributed rather than the ids collapsing into one.
+    let twice = message(json!([
+        captured["turns"][0]["board_task"].clone(),
+        captured["turns"][0]["board_task"].clone()
+    ]));
+    assert_eq!(
+        task_ref_in(std::slice::from_ref(&twice)),
+        None,
+        "two refs naming the same task are two refs"
+    );
+    assert_eq!(
+        task_ref_in(&[first.clone(), first.clone()]),
+        None,
+        "one ref in each of two messages is still two refs"
+    );
+
+    // A ref that names a task but carries no id is still a ref, so a delivery
+    // with one of those beside a good one has two refs, and one on its own names
+    // nothing at all.
+    let mut unnamed = captured["turns"][0]["board_task"].clone();
+    unnamed.as_object_mut().expect("ref").remove("task_id");
+    assert_eq!(
+        task_ref_in(&[message(json!([unnamed.clone()]))]),
+        None,
+        "a task_ref with no id names no task"
+    );
+    let paired = message(json!([
+        captured["turns"][0]["board_task"].clone(),
+        unnamed.clone()
+    ]));
+    assert_eq!(
+        task_ref_in(&[paired]),
+        None,
+        "a malformed ref beside a good one is still two refs"
+    );
+
+    let other_kind = message(json!([{"kind":"message_ref","task_id":"T089"}]));
+    assert_eq!(
+        task_ref_in(std::slice::from_ref(&other_kind)),
+        None,
+        "only a task_ref names a task"
+    );
+
+    let mut nudge = Event::new("system.notify", "g_demo");
+    nudge.data = json!({"kind":"nudge","message":"check status"})
+        .as_object()
+        .cloned()
+        .expect("notify");
+    assert_eq!(task_ref_in(std::slice::from_ref(&nudge)), None);
+}
+
 #[test]
 fn headless_turn_uses_complete_envelope_and_control_semantics() {
     let mut message = Event::new("chat.message", "g_demo");

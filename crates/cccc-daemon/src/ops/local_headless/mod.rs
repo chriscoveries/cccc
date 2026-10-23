@@ -87,6 +87,13 @@ pub enum BatchSubmission {
 #[derive(Debug)]
 struct ActiveTurn {
     turn_id: String,
+    /// The delivery this turn came from, when the runtime reported one.
+    delegation: Option<String>,
+    /// The board task the delivery that started this turn named, taken from the
+    /// batch's single task ref when the runtime reported the turn started. Bound
+    /// to the turn itself, not to the session: a batch that is deferred while
+    /// this turn runs must never be able to rename it.
+    task: Option<String>,
 }
 
 /// Everything needed to re-open the viewer attachment (`claude attach` or
@@ -110,6 +117,15 @@ struct Session {
     stop_lock: Mutex<()>,
     startup_prompt: Mutex<Option<String>>,
     active_turn: Mutex<Option<ActiveTurn>>,
+    /// Cards by the delivery id the runtime was asked to run. An entry is made
+    /// before the batch is submitted, with `None` when that batch named no single
+    /// card, so a turn the runtime starts carries its own card rather than being
+    /// matched against whatever was admitted last. The runtime's own turn id is
+    /// never a task id and is never used as one.
+    delivery_tasks: Mutex<std::collections::HashMap<String, Option<String>>>,
+    /// Held across one delivery's admission, so this Actor is asked to run one
+    /// batch at a time.
+    admission: Mutex<()>,
 }
 
 fn poisoned() -> std::io::Error {
