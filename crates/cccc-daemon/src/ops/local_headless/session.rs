@@ -61,9 +61,46 @@ impl Session {
         let Some(task) = task else {
             return;
         };
+        // A turn that is already open takes its card directly: the runtime
+        // reported it before it accepted the batch.
+        if let Ok(mut active) = self.active_turn.lock() {
+            if let Some(turn) = active.as_mut() {
+                if turn.turn_id == turn_id {
+                    turn.task = Some(task);
+                    return;
+                }
+            }
+        }
         if let Ok(mut tasks) = self.turn_tasks.lock() {
+            // A binding is only ever read once, when its turn is observed. If
+            // more than a handful are waiting, no observer is coming for them.
+            if tasks.len() >= 8 {
+                tasks.clear();
+            }
             tasks.insert(turn_id.to_owned(), task);
         }
+    }
+
+    /// Hold the door for one delivery's admission.
+    pub(super) fn begin_admission(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Name the card of the delivery about to be admitted.
+    pub(super) fn set_pending_turn_task(&self, task: Option<String>) {
+        if let Ok(mut pending) = self.pending_turn_task.lock() {
+            *pending = task;
+        }
+    }
+
+    /// Take the pending card, for the turn that has just been resolved.
+    pub(super) fn take_pending_turn_task(&self) -> Option<String> {
+        self.pending_turn_task
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
     }
 
     /// The card bound to `turn_id`, taken out so a binding is used once.
