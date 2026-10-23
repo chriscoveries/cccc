@@ -50,15 +50,21 @@ export function HarnessRamTable({ groupId, isDark }: { groupId: string; isDark: 
   const [open, setOpen] = useState(false);
   const [report, setReport] = useState<HarnessRamReport | null>(null);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
+  // One request per open, and one more per retry. `loading` is deliberately not
+  // a dependency: setting it here re-renders, and a dependency on it would tear
+  // this effect down and cancel the request it had just sent, leaving the panel
+  // on "Loading" for as long as the fetch takes. A request that is still in
+  // flight when the panel closes is dropped, not applied.
   useEffect(() => {
-    if (!open || report !== null || busy) return;
+    if (!open) return undefined;
     let cancelled = false;
-    setBusy(true);
+    setLoading(true);
     void fetchMemoryReport(groupId).then((response) => {
       if (cancelled) return;
-      setBusy(false);
+      setLoading(false);
       if (response.ok) {
         setReport(response.result);
         setError("");
@@ -69,7 +75,7 @@ export function HarnessRamTable({ groupId, isDark }: { groupId: string; isDark: 
     return () => {
       cancelled = true;
     };
-  }, [open, report, busy, groupId]);
+  }, [open, groupId, attempt]);
 
   const keys = report?.keys ?? [];
   return (
@@ -96,9 +102,20 @@ export function HarnessRamTable({ groupId, isDark }: { groupId: string; isDark: 
               ×
             </button>
           </div>
-          {busy ? <p className="opacity-60">{t("loading", { defaultValue: "Loading…" })}</p> : null}
-          {error ? <p className="text-red-400">{error}</p> : null}
-          {!busy && !error && keys.length === 0 ? (
+          {loading ? <p className="opacity-60">{t("loading", { defaultValue: "Loading…" })}</p> : null}
+          {error ? (
+            <p className="text-red-400">
+              {error}{" "}
+              <button
+                type="button"
+                onClick={() => setAttempt((count) => count + 1)}
+                className="underline underline-offset-2 hover:no-underline focus-visible:outline-none focus-visible:ring-2"
+              >
+                {t("retry", { defaultValue: "Retry" })}
+              </button>
+            </p>
+          ) : null}
+          {!loading && !error && keys.length === 0 ? (
             <p className="opacity-60">
               {t("harnessRamEmpty", { defaultValue: "No readings in the last 72 hours yet." })}
             </p>
