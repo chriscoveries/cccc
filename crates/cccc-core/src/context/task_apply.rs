@@ -1,5 +1,5 @@
 use cccc_contracts::utc_now;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use std::io;
 
 use super::model::ContextDoc;
@@ -8,12 +8,57 @@ const TASK_STATUSES: &[&str] = &["planned", "active", "done", "archived"];
 const TASK_TYPES: &[&str] = &["free", "standard", "optimization"];
 const WAITING_ON: &[&str] = &["none", "user", "actor", "external"];
 
-pub(super) fn create(doc: &mut ContextDoc, op: &Map<String, Value>, by: &str) -> io::Result<()> {
-    let title = required(op, "title")?.trim().to_owned();
-    let parent = nullable_id(op, "parent_id")?;
-    if let Some(id) = parent.as_deref() {
-        find(doc, id)?;
+/// The two budget fields a caller may set, and the four cost fields it may not:
+/// those are written only by the daemon as turns are metered.
+const BUDGET_FIELDS: [&str; 2] = ["target_budget_usd", "max_usd_per_mtok"];
+const COST_FIELDS: [&str; 5] = [
+    "cost_usd",
+    "cost_updated_at",
+    "cost_turns",
+    "unpriced_turns",
+    "unmetered_turns",
+];
+
+/// The task a `task.create` names: the one it created, or the one the same
+/// caller already created under the same `client_request_id` (`replayed`).
+pub(super) struct CreatedTask {
+    pub(super) task_id: String,
+    pub(super) replayed: bool,
+}
+
+pub(super) fn create(
+    doc: &mut ContextDoc,
+    op: &Map<String, Value>,
+    by: &str,
+) -> io::Result<CreatedTask> {
+    let client_request_id = nullable_id(op, "client_request_id")?;
+    if let Some(task_id) = client_request_id
+        .as_deref()
+        .and_then(|request_id| requested_task(doc, request_id, by))
+    {
+        return Ok(CreatedTask {
+            task_id,
+            replayed: true,
+        });
     }
+    let title = required(op, "title")?.trim().to_owned();
+    let parent = match (
+        nullable_id(op, "parent_id")?,
+        nullable_id(op, "parent_ref")?,
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(io::Error::other(
+                "task.create takes parent_id or parent_ref, not both",
+            ));
+        }
+        (Some(id), None) => {
+            find(doc, &id)?;
+            Some(id)
+        }
+        (None, Some(reference)) => Some(referenced_task(doc, &reference, by)?),
+        (None, None) => None,
+    };
+    let blocked_by = blocked_by_with_refs(doc, op, by)?;
     let status = enum_value(op, "status", TASK_STATUSES)?.unwrap_or("planned");
     let task_type = enum_value(op, "task_type", TASK_TYPES)?.unwrap_or(if parent.is_none() {
         "standard"
@@ -21,17 +66,19 @@ pub(super) fn create(doc: &mut ContextDoc, op: &Map<String, Value>, by: &str) ->
         "free"
     });
     let waiting_on = enum_value(op, "waiting_on", WAITING_ON)?;
-    let mut task = op
-        .iter()
-        .filter(|(key, _)| key.as_str() != "op")
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect::<Map<_, _>>();
+    let budgets = budget_fields(op)?;
+    reject_cost_fields(op)?;
+    let mut task = op.clone();
+    for key in ["op", "parent_ref", "blocked_by_refs"] {
+        task.remove(key);
+    }
     let number = doc
         .task_id_high_water
         .max(maximum_task_number(&doc.tasks))
         .checked_add(1)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "task number exhausted"))?;
-    task.insert("id".into(), Value::String(format!("T{number:03}")));
+    let task_id = format!("T{number:03}");
+    task.insert("id".into(), Value::String(task_id.clone()));
     task.insert("title".into(), Value::String(title));
     task.insert("status".into(), Value::String(status.into()));
     task.insert("task_type".into(), Value::String(task_type.into()));
@@ -39,20 +86,100 @@ pub(super) fn create(doc: &mut ContextDoc, op: &Map<String, Value>, by: &str) ->
         Some(parent_id) => task.insert("parent_id".into(), Value::String(parent_id)),
         None => task.remove("parent_id"),
     };
+    if let Some(value) = blocked_by {
+        task.insert("blocked_by".into(), value);
+    }
+    match client_request_id {
+        Some(request_id) => task.insert("client_request_id".into(), Value::String(request_id)),
+        None => task.remove("client_request_id"),
+    };
     if let Some(value) = waiting_on {
         task.insert("waiting_on".into(), Value::String(value.into()));
     }
+    for (key, value) in budgets {
+        match value {
+            Some(usd) => task.insert(key.into(), json_number(usd)),
+            None => task.remove(key),
+        };
+    }
+    // A task that has not been metered yet has spent nothing, and has neither
+    // priced nor unpriced turns; absent is a different statement from zero.
+    task.insert("cost_usd".into(), json_number(0.0));
+    task.insert("cost_turns".into(), json!(0));
+    task.insert("unpriced_turns".into(), json!(0));
+    task.insert("unmetered_turns".into(), json!(0));
     task.insert("created_by".into(), Value::String(by.into()));
     task.insert("created_at".into(), Value::String(utc_now()));
     task.insert("updated_at".into(), Value::String(utc_now()));
     doc.tasks.push(task);
     doc.task_id_high_water = number;
-    Ok(())
+    Ok(CreatedTask {
+        task_id,
+        replayed: false,
+    })
+}
+
+/// The task `by` created under `client_request_id`, if any.
+fn requested_task(doc: &ContextDoc, request_id: &str, by: &str) -> Option<String> {
+    if request_id.is_empty() {
+        return None;
+    }
+    doc.tasks
+        .iter()
+        .find(|task| {
+            task.get("client_request_id").and_then(Value::as_str) == Some(request_id)
+                && task.get("created_by").and_then(Value::as_str) == Some(by)
+        })
+        .and_then(|task| task.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+/// A `parent_ref` or `blocked_by_refs` entry: the `client_request_id` of a task
+/// the same caller created, earlier in this batch or before it.
+fn referenced_task(doc: &ContextDoc, reference: &str, by: &str) -> io::Result<String> {
+    requested_task(doc, reference, by).ok_or_else(|| {
+        io::Error::other(format!(
+            "task ref {reference} names no task created by {by}"
+        ))
+    })
+}
+
+/// `blocked_by` with each `blocked_by_refs` entry resolved and appended.
+fn blocked_by_with_refs(
+    doc: &ContextDoc,
+    op: &Map<String, Value>,
+    by: &str,
+) -> io::Result<Option<Value>> {
+    let Some(references) = op.get("blocked_by_refs") else {
+        return Ok(None);
+    };
+    let references = references
+        .as_array()
+        .filter(|items| items.iter().all(Value::is_string))
+        .ok_or_else(|| io::Error::other("blocked_by_refs must be an array of strings"))?;
+    let mut blocked_by = match op.get("blocked_by") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items.clone(),
+        Some(_) => {
+            return Err(io::Error::other(
+                "blocked_by must be an array when blocked_by_refs is given",
+            ));
+        }
+    };
+    for reference in references.iter().filter_map(Value::as_str) {
+        let task_id = Value::String(referenced_task(doc, reference.trim(), by)?);
+        if !blocked_by.contains(&task_id) {
+            blocked_by.push(task_id);
+        }
+    }
+    Ok(Some(Value::Array(blocked_by)))
 }
 
 pub(super) fn update(doc: &mut ContextDoc, op: &Map<String, Value>) -> io::Result<()> {
     let task_id = required(op, "task_id")?.trim().to_owned();
     find(doc, &task_id)?;
+    reject_cost_fields(op)?;
+    let budgets = budget_fields(op)?;
     let title = op
         .get("title")
         .map(|_| required(op, "title").map(|value| value.trim().to_owned()))
@@ -103,8 +230,97 @@ pub(super) fn update(doc: &mut ContextDoc, op: &Map<String, Value>) -> io::Resul
     if let Some(value) = task_type {
         task.insert("task_type".into(), Value::String(value.into()));
     }
+    for (key, value) in budgets {
+        match value {
+            Some(usd) => task.insert(key.into(), json_number(usd)),
+            None => task.remove(key),
+        };
+    }
     task.insert("updated_at".into(), Value::String(utc_now()));
     Ok(())
+}
+
+/// The budget fields an op carries, each `Some(Option<f64>)` when the op names
+/// it: `null` clears the field, a number must be finite and not negative.
+fn budget_fields(op: &Map<String, Value>) -> io::Result<Vec<(&'static str, Option<f64>)>> {
+    let mut found = Vec::new();
+    for key in BUDGET_FIELDS {
+        let Some(value) = op.get(key) else {
+            continue;
+        };
+        if value.is_null() {
+            found.push((key, None));
+            continue;
+        }
+        let usd = value
+            .as_f64()
+            .filter(|usd| usd.is_finite() && *usd >= 0.0)
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "{key} must be a finite number of USD, not negative"
+                ))
+            })?;
+        found.push((key, Some(usd)));
+    }
+    Ok(found)
+}
+
+/// Cost is the daemon's to write, from metered turns: a caller that tries to set
+/// it is refused rather than silently ignored, so a forged figure cannot pass
+/// for a metered one.
+fn reject_cost_fields(op: &Map<String, Value>) -> io::Result<()> {
+    if let Some(key) = COST_FIELDS.iter().find(|key| op.contains_key(**key)) {
+        return Err(io::Error::other(format!(
+            "{key} is written by the daemon from metered turns, not by callers"
+        )));
+    }
+    Ok(())
+}
+
+/// A USD figure as JSON: whole cents are still floats, so a reader never has to
+/// tell an integer 3 from a price of 3.0.
+fn json_number(usd: f64) -> Value {
+    Value::from(usd)
+}
+
+/// Apply what a metered turn cost to the task it belongs to.
+///
+/// `outcome` is `priced` (with `usd`), `unpriced` (tokens but no price) or
+/// `unmetered` (no token counts). Each path moves its own counter, so a task's
+/// spend history says how many turns it could not price instead of folding them
+/// into zero.
+pub(super) fn accrue(doc: &mut ContextDoc, op: &Map<String, Value>) -> io::Result<()> {
+    let task_id = required(op, "task_id")?.trim().to_owned();
+    let outcome = required(op, "outcome")?.trim().to_owned();
+    let task = find_mut(doc, &task_id)?;
+    match outcome.as_str() {
+        "priced" => {
+            let usd = op
+                .get("usd")
+                .and_then(Value::as_f64)
+                .filter(|usd| usd.is_finite() && *usd >= 0.0)
+                .ok_or_else(|| io::Error::other("a priced turn needs a finite usd"))?;
+            let spent = task
+                .get("cost_usd")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+                .max(0.0);
+            task.insert("cost_usd".into(), json_number(spent + usd));
+            bump(task, "cost_turns");
+        }
+        "unpriced" => bump(task, "unpriced_turns"),
+        "unmetered" => bump(task, "unmetered_turns"),
+        other => {
+            return Err(io::Error::other(format!("unknown cost outcome: {other}")));
+        }
+    }
+    task.insert("cost_updated_at".into(), Value::String(utc_now()));
+    Ok(())
+}
+
+fn bump(task: &mut Map<String, Value>, key: &str) {
+    let count = task.get(key).and_then(Value::as_u64).unwrap_or(0);
+    task.insert(key.into(), json!(count.saturating_add(1)));
 }
 
 pub(super) fn move_task(doc: &mut ContextDoc, op: &Map<String, Value>) -> io::Result<()> {
@@ -330,6 +546,104 @@ mod tests {
         assert_eq!(doc.tasks[0]["title"], "root");
         assert_eq!(doc.tasks[0]["status"], "planned");
         assert!(doc.tasks[0].get("parent_id").is_none());
+    }
+
+    #[test]
+    fn budgets_are_recorded_and_cost_belongs_to_the_daemon() {
+        let mut doc = ContextDoc::default();
+        create(
+            &mut doc,
+            &operation(json!({
+                "op":"task.create","title":"budgeted",
+                "target_budget_usd": 5.0, "max_usd_per_mtok": 0.07
+            })),
+            "user",
+        )
+        .expect("budgeted task");
+        assert_eq!(doc.tasks[0]["target_budget_usd"], 5.0);
+        assert_eq!(doc.tasks[0]["max_usd_per_mtok"], 0.07);
+        // Unsent money is zero, and zero is not absent: a reader can tell a
+        // fresh task from one whose cost was never recorded.
+        assert_eq!(doc.tasks[0]["cost_usd"], 0.0);
+        assert_eq!(doc.tasks[0]["cost_turns"], 0);
+        assert!(doc.tasks[0].get("cost_updated_at").is_none());
+
+        for invalid in [
+            json!({"op":"task.create","title":"bad","target_budget_usd":-1}),
+            json!({"op":"task.create","title":"bad","max_usd_per_mtok":"cheap"}),
+            json!({"op":"task.create","title":"bad","cost_usd":3.0}),
+        ] {
+            assert!(create(&mut doc, &operation(invalid), "user").is_err());
+        }
+        for invalid in [
+            json!({"op":"task.update","task_id":"T001","target_budget_usd":-0.01}),
+            json!({"op":"task.update","task_id":"T001","cost_usd":3.0}),
+            json!({"op":"task.update","task_id":"T001","unpriced_turns":0}),
+        ] {
+            assert!(update(&mut doc, &operation(invalid)).is_err());
+        }
+
+        update(
+            &mut doc,
+            &operation(json!({"op":"task.update","task_id":"T001","target_budget_usd": 12.5})),
+        )
+        .expect("raise budget");
+        assert_eq!(doc.tasks[0]["target_budget_usd"], 12.5);
+        update(
+            &mut doc,
+            &operation(json!({"op":"task.update","task_id":"T001","target_budget_usd": null})),
+        )
+        .expect("clear budget");
+        assert!(doc.tasks[0].get("target_budget_usd").is_none());
+        assert_eq!(doc.tasks[0]["max_usd_per_mtok"], 0.07);
+    }
+
+    #[test]
+    fn metered_turns_accumulate_and_unpriced_ones_are_counted_apart() {
+        let mut doc = ContextDoc::default();
+        create(
+            &mut doc,
+            &operation(json!({"op":"task.create","title":"metered"})),
+            "user",
+        )
+        .expect("task");
+        for usd in [0.01501654, 0.0005] {
+            accrue(
+                &mut doc,
+                &operation(json!({"op":"task.cost.accrue","task_id":"T001",
+                    "outcome":"priced","usd": usd})),
+            )
+            .expect("priced");
+        }
+        accrue(
+            &mut doc,
+            &operation(json!({"op":"task.cost.accrue","task_id":"T001","outcome":"unpriced"})),
+        )
+        .expect("unpriced");
+        accrue(
+            &mut doc,
+            &operation(json!({"op":"task.cost.accrue","task_id":"T001","outcome":"unmetered"})),
+        )
+        .expect("unmetered");
+
+        let spent = doc.tasks[0]["cost_usd"].as_f64().expect("cost");
+        assert!((spent - 0.01551654).abs() < 1e-12, "{spent}");
+        assert_eq!(doc.tasks[0]["cost_turns"], 2);
+        assert_eq!(doc.tasks[0]["unpriced_turns"], 1);
+        assert_eq!(doc.tasks[0]["unmetered_turns"], 1);
+        assert!(doc.tasks[0]["cost_updated_at"].as_str().is_some());
+        // Recording a cost moves nothing else about the task.
+        assert_eq!(doc.tasks[0]["status"], "planned");
+
+        for invalid in [
+            json!({"op":"task.cost.accrue","task_id":"T999","outcome":"priced","usd":1.0}),
+            json!({"op":"task.cost.accrue","task_id":"T001","outcome":"priced"}),
+            json!({"op":"task.cost.accrue","task_id":"T001","outcome":"priced","usd":-2.0}),
+            json!({"op":"task.cost.accrue","task_id":"T001","outcome":"free"}),
+        ] {
+            assert!(accrue(&mut doc, &operation(invalid)).is_err());
+        }
+        assert!((doc.tasks[0]["cost_usd"].as_f64().expect("cost") - 0.01551654).abs() < 1e-12);
     }
 
     #[test]

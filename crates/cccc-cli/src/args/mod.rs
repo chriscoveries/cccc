@@ -11,7 +11,7 @@ pub use integrations::{
 };
 pub use messaging::{
     CancelReplyArgs, ConnectArgs, DeliverArgs, InboxArgs, LedgerAction, LedgerArgs, ReplyArgs,
-    SendArgs, TailArgs, TrackedSendArgs,
+    SendArgs, TailArgs, TrackedSendArgs, UsageArgs,
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -116,6 +116,8 @@ pub enum CommandKind {
     Deliver(DeliverArgs),
     CancelReply(CancelReplyArgs),
     Tail(TailArgs),
+    /// Read settled Pi and Claude turn usage from the Group ledger.
+    Usage(UsageArgs),
     Ledger(LedgerArgs),
     Daemon {
         #[command(subcommand)]
@@ -327,6 +329,21 @@ mod tests {
 
     #[test]
     fn parses_legacy_prompt_tail_and_runtime_flags() {
+        let usage = Cli::try_parse_from([
+            "cccc",
+            "usage",
+            "--group",
+            "g_fixture",
+            "--actor",
+            "peer",
+            "--limit",
+            "12",
+        ])
+        .expect("usage");
+        assert!(matches!(
+            usage.command,
+            Some(CommandKind::Usage(UsageArgs { limit: 12, .. }))
+        ));
         let cli = Cli::try_parse_from(["cccc", "prompt", "--actor-id", "peer"]).expect("prompt");
         assert!(matches!(
             cli.command,
@@ -449,5 +466,37 @@ mod tests {
             panic!("wrong command");
         };
         assert_eq!(args.event_id, "event-2");
+    }
+
+    #[test]
+    fn parses_the_actor_model_label_on_add_and_update() {
+        let cli = Cli::try_parse_from([
+            "cccc",
+            "actor",
+            "add",
+            "peer1",
+            "--runtime",
+            "codex",
+            "--model",
+            "gpt-5-codex",
+        ])
+        .expect("actor add");
+        let Some(CommandKind::Actor(ActorArgs {
+            action: ActorAction::Add { model, .. },
+        })) = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(model, "gpt-5-codex");
+
+        let cli = Cli::try_parse_from(["cccc", "actor", "update", "peer1", "--model", ""])
+            .expect("actor update");
+        let Some(CommandKind::Actor(ActorArgs {
+            action: ActorAction::Update { model, .. },
+        })) = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(model.as_deref(), Some(""));
     }
 }

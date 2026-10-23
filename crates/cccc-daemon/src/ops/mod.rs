@@ -1,4 +1,7 @@
 pub(crate) mod actor_activity;
+
+/// The operator-edited model catalog the daemon reads for prices.
+pub(crate) const MODELS_PATH: &str = "/etc/cccc/models.toml";
 pub(crate) mod actor_delivery;
 mod actor_delivery_preamble;
 mod actor_delivery_render;
@@ -35,6 +38,7 @@ mod context_projection;
 mod deepseek_runtime;
 mod diagnostics;
 pub(crate) mod dots_events;
+mod grok_webhook;
 mod group_copy;
 mod group_create_rollback;
 mod group_creation;
@@ -77,6 +81,7 @@ mod task_list;
 mod terminal;
 mod terminal_history_source;
 mod terminal_text;
+mod turn_usage;
 mod voice_notifications;
 pub(crate) mod voice_secretary;
 mod web_model_connectors;
@@ -113,6 +118,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         connect_outbound::resolve_operation,
         runtime_state::resolve_operation,
         dots_events::resolve_operation,
+        grok_webhook::resolve_operation,
         maintenance::resolve_operation,
         im::resolve_operation,
         memory::resolve_operation,

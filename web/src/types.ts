@@ -652,6 +652,16 @@ export type Task = {
   handoff_to?: string | null;
   task_type?: string | null;
   notes?: string | null;
+  /** Recorded cost, never enforced: the ceiling a task should stay under. */
+  target_budget_usd?: number | null;
+  /** Recorded cost, never enforced: the dearest model a turn may use. */
+  max_usd_per_mtok?: number | null;
+  /** What the task's metered turns have cost so far, from the daemon. */
+  cost_usd?: number | null;
+  cost_updated_at?: string | null;
+  cost_turns?: number | null;
+  unpriced_turns?: number | null;
+  unmetered_turns?: number | null;
   created_at?: string | null;
   updated_at?: string | null;
   checklist?: TaskChecklistItem[];
@@ -782,7 +792,7 @@ export type GroupContext = {
   meta?: { project_status?: string | null; [key: string]: unknown };
 };
 
-export type ProjectMdInfo = {
+export type AgentsMdInfo = {
   exists: boolean;
   path?: string | null;
   content?: string | null;
@@ -1595,11 +1605,13 @@ export const SUPPORTED_RUNTIMES = [
 export type SupportedRuntime = (typeof SUPPORTED_RUNTIMES)[number];
 
 export function isWebModelRuntime(runtime: string | undefined): boolean {
-  return runtime === "chatgpt_dots" || isBrowserWebModelRuntime(runtime);
+  return (
+    runtime === "chatgpt_dots" || runtime === "grok_web_model" || isBrowserWebModelRuntime(runtime)
+  );
 }
 
 export function isBrowserWebModelRuntime(runtime: string | undefined): boolean {
-  return runtime === "web_model" || runtime === "grok_web_model";
+  return runtime === "web_model";
 }
 
 export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
@@ -1640,7 +1652,7 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   },
   grok_web_model: {
     label: "Grok Bot Web Model",
-    desc: "Grok Bot browser delivery + remote MCP connector",
+    desc: "Grok Bot native Webhook + remote MCP connector",
   },
   custom: { label: "Custom", desc: "Manual MCP installation needed" },
 };

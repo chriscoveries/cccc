@@ -44,6 +44,8 @@ impl Fixture {
             stop_lock: Mutex::new(()),
             startup_prompt: Mutex::new(None),
             active_turn: Mutex::new(None),
+            delivery_tasks: Mutex::new(std::collections::HashMap::new()),
+            admission: Mutex::new(()),
         };
         Self {
             session,
@@ -95,6 +97,535 @@ impl Fixture {
             })
             .collect()
     }
+}
+
+#[tokio::test]
+async fn captured_pi_and_claude_turn_usage_is_committed_once_and_readable() {
+    use crate::ops::codex_voice_analyst::{
+        CAPTURED_PI_LENGTH_STOP, CAPTURED_PI_TOOL_TURN, replay_captured_claude_usage_turn,
+        replay_captured_pi_turn,
+    };
+    use cccc_contracts::{ActorRuntime, DaemonRequest};
+    for (runtime, messages, input, output) in [
+        (
+            ActorRuntime::Pi,
+            replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01"),
+            1852,
+            90,
+        ),
+        (
+            ActorRuntime::Pi,
+            replay_captured_pi_turn(CAPTURED_PI_LENGTH_STOP, "abcdef01"),
+            429,
+            1,
+        ),
+        (
+            ActorRuntime::Claude,
+            replay_captured_claude_usage_turn(),
+            14,
+            4698,
+        ),
+    ] {
+        let mut f = Fixture::new(false, "");
+        let thread = messages[0]["params"]["threadId"]
+            .as_str()
+            .expect("owned thread");
+        f.session.managed = Arc::new(AnalystSession::for_usage_test(
+            f._temp.path(),
+            runtime,
+            thread,
+        ));
+        let store = GroupStore::new(f.session.home.clone()).expect("store");
+        let path = store
+            .ledger_path(&f.session.group_id)
+            .expect("group ledger");
+        for message in &messages {
+            if message["method"] == "turn/completed" {
+                assert!(
+                    cccc_core::ledger::read_all(&path)
+                        .expect("ledger")
+                        .iter()
+                        .all(|event| event.kind != "turn.usage"),
+                    "no usage record before settlement"
+                );
+                if runtime == ActorRuntime::Claude {
+                    // No task association is authoritative: retain null, not an assigned-card guess.
+                    f.session.status.lock().expect("state").task_id = None;
+                }
+            }
+            handle_message(&f.session, message.clone());
+        }
+        let usage = cccc_core::ledger::read_all(&path)
+            .expect("ledger")
+            .into_iter()
+            .filter(|event| event.kind == "turn.usage")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            usage.len(),
+            1,
+            "one settled turn must emit one group-ledger usage record"
+        );
+        assert_eq!(usage[0].data["actor_id"], f.session.actor_id);
+        assert_eq!(usage[0].data["input_tokens"], input);
+        assert_eq!(usage[0].data["output_tokens"], output);
+        assert_eq!(usage[0].data["turn_count"], 1);
+        assert!(!usage[0].data["model_id"].is_null());
+        let turn = &messages.last().expect("completion")["params"]["turn"]["id"];
+        if runtime == ActorRuntime::Claude {
+            assert!(usage[0].data["task_id"].is_null());
+        } else {
+            assert_eq!(&usage[0].data["task_id"], turn);
+        }
+        // No delivery named a board task here, so nothing is charged to one.
+        assert!(
+            usage[0].data["task_ref"].is_null(),
+            "a turn whose delivery named no task stays uncharged"
+        );
+        // A replay of the same generation and provider turn must not double-charge.
+        for message in messages {
+            handle_message(&f.session, message);
+        }
+        let request: DaemonRequest = serde_json::from_value(json!({"op":"turn_usage", "args":{
+            "group_id":f.session.group_id,"actor_id":f.session.actor_id,"by":"user"}}))
+        .expect("request");
+        let response = crate::dispatch::dispatch(&f.session.home, &request);
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.result["usage"]
+                .as_array()
+                .expect("usage list")
+                .len(),
+            1
+        );
+        assert_eq!(response.result["usage"][0]["id"], usage[0].id);
+    }
+}
+
+/// A card bound to the turn the runtime accepted stays that turn's, even when the
+/// started event is observed only after another delivery has been admitted: the
+/// binding is looked up by turn id, so nothing arriving in between can answer for
+/// it. A batch that is deferred never gets a binding at all.
+#[tokio::test]
+async fn a_turn_keeps_its_card_even_when_it_is_observed_after_another_delivery() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    use cccc_contracts::ActorRuntime;
+
+    let mut f = Fixture::new(false, "");
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let thread = messages[0]["params"]["threadId"]
+        .as_str()
+        .expect("owned thread");
+    f.session.managed = Arc::new(AnalystSession::for_usage_test(
+        f._temp.path(),
+        ActorRuntime::Pi,
+        thread,
+    ));
+    let synced = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .sync(
+            &f.session.group_id,
+            &[
+                json!({"op":"task.create","title":"Running turn"})
+                    .as_object()
+                    .cloned()
+                    .expect("operation"),
+                json!({"op":"task.create","title":"Deferred batch"})
+                    .as_object()
+                    .cloned()
+                    .expect("operation"),
+            ],
+            None,
+            "user",
+            false,
+        )
+        .expect("create tasks");
+    let running_card = synced.changes[0]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+    let deferred_card = synced.changes[1]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+
+    // A's delivery registered its card before it was sent, and a second delivery
+    // registered its own while A's turn was still unobserved.
+    f.session
+        .bind_delivery_task("actor-delivery:a", Some(running_card.clone()));
+    f.session
+        .bind_delivery_task("actor-delivery:b", Some(deferred_card.clone()));
+    for message in &messages {
+        if message["method"] == "turn/completed" {
+            break;
+        }
+        handle_event(&f.session, message.clone(), Some("actor-delivery:a"));
+    }
+    assert_eq!(
+        f.session.running_turn_task().as_deref(),
+        Some(running_card.as_str()),
+        "the turn is charged to the delivery the runtime named, not the latest one"
+    );
+
+    // B never started here, so its card is still waiting for its own turn.
+    assert_eq!(
+        f.session
+            .take_delivery_task("actor-delivery:b")
+            .unwrap_or(None)
+            .as_deref(),
+        Some(deferred_card.as_str()),
+        "another delivery's card is not spent on this turn"
+    );
+    // A delivery the runtime never named leaves nothing behind at all.
+    assert_eq!(
+        f.session.take_delivery_task("actor-delivery:never-sent"),
+        None,
+        "an unregistered delivery has no card to inherit"
+    );
+
+    for message in &messages {
+        if message["method"] != "turn/completed" {
+            continue;
+        }
+        handle_event(&f.session, message.clone(), Some("actor-delivery:a"));
+    }
+
+    let path = GroupStore::new(f.session.home.clone())
+        .expect("store")
+        .ledger_path(&f.session.group_id)
+        .expect("group ledger");
+    let usage = cccc_core::ledger::read_all(&path)
+        .expect("ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1, "one settled turn, one usage record");
+    assert_eq!(
+        usage[0].data["task_ref"], running_card,
+        "the running turn is charged to the card it started with"
+    );
+    assert_ne!(
+        usage[0].data["task_ref"], deferred_card,
+        "a batch that never became a turn does not take over an open one"
+    );
+    assert_eq!(
+        f.session.take_delivery_task("actor-delivery:a"),
+        None,
+        "no registration outlives the turn that carried it"
+    );
+    assert!(
+        f.session.running_turn_task().is_none(),
+        "no turn is running any more"
+    );
+}
+
+/// A turn whose events name no delivery has no authority tying it to a batch, so
+/// it is charged to nothing even though a card is registered for a delivery that
+/// was sent. Unknown provenance is never filled in from what was admitted last.
+#[tokio::test]
+async fn a_turn_whose_events_name_no_delivery_stays_unattributed() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    use cccc_contracts::ActorRuntime;
+
+    let mut f = Fixture::new(false, "");
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let thread = messages[0]["params"]["threadId"]
+        .as_str()
+        .expect("owned thread");
+    f.session.managed = Arc::new(AnalystSession::for_usage_test(
+        f._temp.path(),
+        ActorRuntime::Pi,
+        thread,
+    ));
+    let synced = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .sync(
+            &f.session.group_id,
+            &[json!({"op":"task.create","title":"Early observed turn"})
+                .as_object()
+                .cloned()
+                .expect("operation")],
+            None,
+            "user",
+            false,
+        )
+        .expect("create task");
+    let card = synced.changes[0]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+    // The delivery named this card, but this turn's events name no delivery, so
+    // there is nothing tying the two together.
+    f.session
+        .bind_delivery_task("actor-delivery:unnamed", Some(card.clone()));
+    for message in &messages {
+        if message["method"] == "turn/completed" {
+            break;
+        }
+        handle_event(&f.session, message.clone(), None);
+    }
+    assert_eq!(
+        f.session.running_turn_task(),
+        None,
+        "a turn that names no delivery is not given anyone's card"
+    );
+
+    for message in &messages {
+        if message["method"] != "turn/completed" {
+            continue;
+        }
+        handle_event(&f.session, message.clone(), None);
+    }
+
+    let path = GroupStore::new(f.session.home.clone())
+        .expect("store")
+        .ledger_path(&f.session.group_id)
+        .expect("group ledger");
+    let usage = cccc_core::ledger::read_all(&path)
+        .expect("ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1, "one settled turn, one usage record");
+    assert!(
+        usage[0].data["task_ref"].is_null(),
+        "a turn with no delivery authority is charged to nothing, got {}",
+        usage[0].data["task_ref"]
+    );
+    assert_eq!(
+        f.session
+            .take_delivery_task("actor-delivery:unnamed")
+            .unwrap_or(None)
+            .as_deref(),
+        Some(card.as_str()),
+        "the registered card is still there for its own delivery"
+    );
+}
+
+/// A turn whose own delivery named no card is unattributed and stays that way: it
+/// does not take the card of the delivery being admitted while it finishes.
+#[tokio::test]
+async fn an_unattributed_turn_never_claims_another_deliverys_card() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    use cccc_contracts::ActorRuntime;
+
+    let mut f = Fixture::new(false, "");
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let thread = messages[0]["params"]["threadId"]
+        .as_str()
+        .expect("owned thread");
+    f.session.managed = Arc::new(AnalystSession::for_usage_test(
+        f._temp.path(),
+        ActorRuntime::Pi,
+        thread,
+    ));
+    let synced = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .sync(
+            &f.session.group_id,
+            &[json!({"op":"task.create","title":"The next delivery"})
+                .as_object()
+                .cloned()
+                .expect("operation")],
+            None,
+            "user",
+            false,
+        )
+        .expect("create task");
+    let next_card = synced.changes[0]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+
+    // This turn's delivery named no card, which is recorded as unattributed
+    // rather than left unresolved; another delivery has since registered its own.
+    f.session.bind_delivery_task("actor-delivery:a", None);
+    f.session
+        .bind_delivery_task("actor-delivery:b", Some(next_card.clone()));
+    for message in &messages {
+        handle_event(&f.session, message.clone(), Some("actor-delivery:a"));
+    }
+
+    let path = GroupStore::new(f.session.home.clone())
+        .expect("store")
+        .ledger_path(&f.session.group_id)
+        .expect("group ledger");
+    let usage = cccc_core::ledger::read_all(&path)
+        .expect("ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1, "one settled turn, one usage record");
+    assert!(
+        usage[0].data["task_ref"].is_null(),
+        "a turn that named no card is charged to nothing, got {}",
+        usage[0].data["task_ref"]
+    );
+    assert_eq!(
+        f.session
+            .take_delivery_task("actor-delivery:b")
+            .unwrap_or(None)
+            .as_deref(),
+        Some(next_card.as_str()),
+        "the other delivery keeps its own card"
+    );
+}
+
+/// An admission the runtime never confirmed may still start a turn. That turn's
+/// events name their own delivery, so the card registered before the batch was sent
+/// still resolves it — the confirmation the runtime withheld is not needed.
+#[tokio::test]
+async fn an_unconfirmed_admission_is_still_charged_to_the_card_it_registered() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    use cccc_contracts::ActorRuntime;
+
+    let mut f = Fixture::new(false, "");
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let thread = messages[0]["params"]["threadId"]
+        .as_str()
+        .expect("owned thread");
+    f.session.managed = Arc::new(AnalystSession::for_usage_test(
+        f._temp.path(),
+        ActorRuntime::Pi,
+        thread,
+    ));
+    let synced = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .sync(
+            &f.session.group_id,
+            &[json!({"op":"task.create","title":"The next delivery"})
+                .as_object()
+                .cloned()
+                .expect("operation")],
+            None,
+            "user",
+            false,
+        )
+        .expect("create task");
+    let next_card = synced.changes[0]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+
+    // The admission was never confirmed, but the card it registered is still the
+    // one the runtime will name if that turn ever starts.
+    f.session
+        .bind_delivery_task("actor-delivery:a", Some(next_card.clone()));
+    for message in &messages {
+        handle_event(&f.session, message.clone(), Some("actor-delivery:a"));
+    }
+
+    let path = GroupStore::new(f.session.home.clone())
+        .expect("store")
+        .ledger_path(&f.session.group_id)
+        .expect("group ledger");
+    let usage = cccc_core::ledger::read_all(&path)
+        .expect("ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1, "one settled turn, one usage record");
+    assert_eq!(
+        usage[0].data["task_ref"],
+        next_card.as_str(),
+        "an unconfirmed delivery's turn is still charged to the card it registered"
+    );
+}
+
+/// What the stage found, as a test: the runtime reports its own turn token as
+/// the session's task id while the delivery names a board task. The board task
+/// is what gets charged, and the token never is.
+#[tokio::test]
+async fn a_metered_turn_is_charged_to_the_task_its_delivery_named() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    use cccc_contracts::ActorRuntime;
+
+    let mut f = Fixture::new(false, "");
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let thread = messages[0]["params"]["threadId"]
+        .as_str()
+        .expect("owned thread");
+    f.session.managed = Arc::new(AnalystSession::for_usage_test(
+        f._temp.path(),
+        ActorRuntime::Pi,
+        thread,
+    ));
+    let synced = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .sync(
+            &f.session.group_id,
+            &[json!({"op":"task.create","title":"Review the parser"})
+                .as_object()
+                .cloned()
+                .expect("operation")],
+            None,
+            "user",
+            false,
+        )
+        .expect("create task");
+    let task_id = synced.changes[0]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+
+    // The delivery named this task, and the provider reports its own token.
+    f.session
+        .bind_delivery_task("actor-delivery:metered", Some(task_id.clone()));
+    f.session.status.lock().expect("state").task_id = Some("pi-turn-token".into());
+    for message in &messages {
+        handle_event(&f.session, message.clone(), Some("actor-delivery:metered"));
+    }
+
+    let path = GroupStore::new(f.session.home.clone())
+        .expect("store")
+        .ledger_path(&f.session.group_id)
+        .expect("group ledger");
+    let usage = cccc_core::ledger::read_all(&path)
+        .expect("ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1, "one settled turn, one usage record");
+    assert_eq!(
+        usage[0].data["task_ref"],
+        task_id.as_str(),
+        "the board task the delivery named"
+    );
+    assert_ne!(
+        usage[0].data["task_id"],
+        task_id.as_str(),
+        "the provider's own task token is not the board task"
+    );
+
+    let recorded = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .load(&f.session.group_id)
+        .expect("load")
+        .tasks
+        .into_iter()
+        .find(|task| task["id"] == task_id.as_str())
+        .expect("task");
+    // Whether the runner carries a catalog for this model is not this test's
+    // subject: the turn is counted exactly once, as priced or as unpriced, and
+    // never both.
+    let priced = recorded["cost_turns"].as_u64().unwrap_or(0);
+    let unpriced = recorded["unpriced_turns"].as_u64().unwrap_or(0);
+    assert_eq!(
+        priced + unpriced,
+        1,
+        "the metered turn is counted exactly once: priced {priced}, unpriced {unpriced}"
+    );
+    if priced == 0 {
+        assert_eq!(
+            recorded["cost_usd"].as_f64().unwrap_or(0.0),
+            0.0,
+            "an unpriced turn adds no dollars and is not read as free"
+        );
+    }
+    assert_eq!(
+        f.session.take_delivery_task("actor-delivery:metered"),
+        None,
+        "the delivery's registration is spent with its turn"
+    );
 }
 
 #[tokio::test]
@@ -308,4 +839,132 @@ async fn completed_with_an_error_is_projected_as_one_failed_outcome() {
     assert_eq!(terminals[0]["type"], "headless.turn.failed");
     assert_eq!(terminals[0]["data"]["status"], "failed");
     assert_eq!(f.session.status.lock().expect("state").status, "error");
+}
+
+#[tokio::test]
+async fn a_captured_pi_length_stop_without_a_reply_reads_as_an_error() {
+    // A real Pi turn that hit the model's length limit before writing any text.
+    let f = Fixture::new(true, "");
+    let captured = crate::ops::codex_voice_analyst::CAPTURED_PI_LENGTH_STOP;
+    for message in crate::ops::codex_voice_analyst::replay_captured_pi_turn(captured, "abcdef01") {
+        handle_message(&f.session, message);
+    }
+    let terminals = f.terminals();
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0]["type"], "headless.turn.failed");
+    let error = terminals[0]["data"]["error"].as_str().unwrap_or_default();
+    assert!(error.contains("length limit"), "{error}");
+    let state = f.session.status.lock().expect("state");
+    assert_eq!(state.status, "error");
+    assert_eq!(state.reason.as_deref(), Some(error));
+}
+
+#[tokio::test]
+async fn captured_pi_tool_calls_reach_the_journal_between_turn_start_and_answer() {
+    // The captured session reads notes.txt. Marking that value private proves
+    // that call arguments pass the session's redaction before the journal.
+    let f = Fixture::new(true, "notes.txt");
+    let captured = crate::ops::codex_voice_analyst::CAPTURED_PI_TOOL_TURN;
+    for message in crate::ops::codex_voice_analyst::replay_captured_pi_turn(captured, "abcdef01") {
+        handle_message(&f.session, message);
+    }
+    let events = f.events();
+    let kinds = events
+        .iter()
+        .filter_map(|event| event["type"].as_str())
+        .filter(|kind| *kind != "headless.message.delta")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            "headless.turn.started",
+            "headless.activity.started",
+            "headless.activity.started",
+            "headless.activity.completed",
+            "headless.activity.completed",
+            "headless.message.completed",
+            "headless.turn.completed",
+        ]
+    );
+    let activity = |kind: &str, tool: &str| {
+        events
+            .iter()
+            .find(|event| event["type"] == kind && event["data"]["tool_name"] == tool)
+            .map(|event| event["data"].clone())
+            .expect("tool activity")
+    };
+    let bash = activity("headless.activity.completed", "bash");
+    assert_eq!(bash["status"], "completed");
+    assert_eq!(bash["kind"], "tool");
+    assert_eq!(bash["raw_item_type"], "commandExecution");
+    assert_eq!(bash["command"], "ls", "the program, not its arguments");
+    assert_eq!(
+        bash["activity_id"],
+        activity("headless.activity.started", "bash")["activity_id"],
+        "a call's start and finish share one trace entry"
+    );
+    let read = activity("headless.activity.started", "read");
+    assert_eq!(read["status"], "started");
+    assert_eq!(read["detail"], "[redacted]");
+    let text = events
+        .iter()
+        .filter(|event| event["type"] == "headless.message.delta")
+        .filter_map(|event| event["data"]["delta"].as_str())
+        .collect::<String>();
+    // Both assistant messages stream: the line before the calls, then the answer.
+    assert_eq!(
+        text,
+        "I'll run the command and read the file.notes.txt contains the text \"fixture file\"."
+    );
+}
+
+#[tokio::test]
+async fn named_tool_activity_finishes_without_journaling_transient_or_foreign_updates() {
+    let f = Fixture::new(true, "private-token");
+    f.start("turn-1");
+    let tool_event = |turn: &str, phase: Option<&str>| {
+        let mut params = json!({
+            "threadId":"abcdef01", "turnId":turn, "title":"bash",
+            "detail":"cargo test private-token", "itemType":"commandExecution"
+        });
+        if let Some(phase) = phase {
+            params["itemId"] = json!("call-1");
+            params["phase"] = json!(phase);
+        }
+        json!({"method":"cccc/toolActivity", "params":params})
+    };
+    handle_message(&f.session, tool_event("turn-1", None));
+    handle_message(&f.session, tool_event("another-turn", Some("started")));
+    handle_message(&f.session, tool_event("turn-1", Some("started")));
+    handle_message(&f.session, tool_event("turn-1", None));
+    handle_message(&f.session, tool_event("turn-1", Some("failed")));
+    let events = f.events();
+    let activity = events
+        .iter()
+        .filter(|event| {
+            event["type"]
+                .as_str()
+                .is_some_and(|kind| kind.starts_with("headless.activity."))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        activity.len(),
+        2,
+        "only the identified call's start and end are journaled"
+    );
+    assert_eq!(activity[0]["type"], "headless.activity.started");
+    assert_eq!(activity[1]["type"], "headless.activity.completed");
+    assert_eq!(
+        activity[0]["data"]["activity_id"],
+        activity[1]["data"]["activity_id"]
+    );
+    assert_eq!(activity[1]["data"]["summary"], "bash failed");
+    assert_eq!(activity[1]["data"]["command"], "cargo test [redacted]");
+    assert_eq!(
+        f.session.status.lock().expect("state").status,
+        "working",
+        "a failed tool can be handled by the model; it does not end the turn"
+    );
+    f.complete("turn-1", "completed", Value::Null);
+    assert_eq!(f.terminals().len(), 1);
 }

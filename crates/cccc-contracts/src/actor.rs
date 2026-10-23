@@ -145,7 +145,7 @@ impl ActorRuntime {
 
     #[must_use]
     pub const fn is_browser_web_model(self) -> bool {
-        matches!(self, Self::WebModel | Self::GrokWebModel)
+        matches!(self, Self::WebModel)
     }
 
     /// The runner is an implementation detail derived from the Runtime, not a
@@ -184,7 +184,7 @@ pub enum GroupState {
     Stopped,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Actor {
     #[serde(default = "version")]
     pub v: u8,
@@ -193,6 +193,14 @@ pub struct Actor {
     pub role: Option<ActorRole>,
     #[serde(default)]
     pub title: String,
+    /// The model this Actor runs, as its operator names it. A label for
+    /// people and tools; launching does not read it. Empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default)]
+    pub model_cost_usd_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub model_strength: Option<u8>,
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
@@ -245,6 +253,9 @@ impl Actor {
             id: id.into(),
             role: None,
             title: String::new(),
+            model: String::new(),
+            model_cost_usd_per_mtok: None,
+            model_strength: None,
             command: Vec::new(),
             env: BTreeMap::new(),
             default_scope_key: String::new(),
@@ -311,7 +322,15 @@ mod tests {
         assert_eq!(actor.runner, RunnerKind::Headless);
         assert!(actor.command.is_empty());
         assert!(ActorRuntime::WebModel.is_browser_web_model());
-        assert!(ActorRuntime::GrokWebModel.is_browser_web_model());
+    }
+
+    #[test]
+    fn grok_bot_uses_native_delivery_with_its_own_connector() {
+        let runtime = ActorRuntime::GrokWebModel;
+        assert!(runtime.is_web_model());
+        assert!(!runtime.is_browser_web_model());
+        assert_eq!(runtime.web_model_provider(), Some("grok_web"));
+        assert_eq!(runtime.runner(), RunnerKind::Headless);
     }
 
     #[test]

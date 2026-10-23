@@ -21,11 +21,7 @@ pub(super) fn list(
         .map(|actor| actor.id.clone())
         .collect::<Vec<_>>();
     let unread = if include_unread {
-        inbox::list_unread_many(home, group, &actor_ids, 1000)
-            .map_err(OpError::io)?
-            .into_iter()
-            .map(|(actor_id, events)| (actor_id, events.len()))
-            .collect::<BTreeMap<_, _>>()
+        inbox::unread_counts(home, group, &actor_ids, 1000).map_err(OpError::io)?
     } else {
         BTreeMap::new()
     };
@@ -37,6 +33,13 @@ pub(super) fn list(
         .map(|mut actor| -> Result<Value, OpError> {
             actor.normalize_runtime_constraints();
             actor.role = actors::effective_role(group, &actor.id);
+            // Stamp model cost/strength from the daemon's model registry (optional).
+            let registry = cccc_core::models::ModelRegistry::load_from_path(std::path::Path::new(
+                super::MODELS_PATH,
+            ));
+            let (cost, strength) = registry.resolve(&actor.model);
+            actor.model_cost_usd_per_mtok = cost;
+            actor.model_strength = strength;
             let status = actor_runtime_status::resolve(group, &actor);
             let mut value = serde_json::to_value(&actor).unwrap_or_else(|_| json!({}));
             if let Some(object) = value.as_object_mut() {
