@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::args::{
     CancelReplyArgs, ConnectArgs, DeliverArgs, InboxArgs, LedgerAction, LedgerArgs, ReplyArgs,
-    SendArgs, TailArgs, TrackedSendArgs,
+    SendArgs, TailArgs, TrackedSendArgs, UsageArgs,
 };
 use crate::commands::common::{call, group, print};
 
@@ -207,6 +207,18 @@ pub async fn tail(client: &DaemonClient, home: &HomeLayout, args: TailArgs) -> R
             ()=tokio::time::sleep(std::time::Duration::from_secs(1))=>{}
         }
     }
+}
+
+pub async fn usage(client: &DaemonClient, home: &HomeLayout, args: UsageArgs) -> Result<()> {
+    print(
+        call(
+            client,
+            "turn_usage",
+            json!({"group_id":group(home, args.group_id)?,
+        "actor_id":args.actor_id,"limit":args.limit}),
+        )
+        .await?,
+    )
 }
 
 pub async fn inbox(client: &DaemonClient, home: &HomeLayout, args: InboxArgs) -> Result<()> {

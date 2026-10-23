@@ -35,7 +35,7 @@ pub(super) fn list(
             actor.role = actors::effective_role(group, &actor.id);
             // Stamp model cost/strength from the daemon's model registry (optional).
             let registry = cccc_core::models::ModelRegistry::load_from_path(std::path::Path::new(
-                "/etc/cccc/models.toml",
+                super::MODELS_PATH,
             ));
             let (cost, strength) = registry.resolve(&actor.model);
             actor.model_cost_usd_per_mtok = cost;
@@ -71,7 +71,6 @@ pub(super) fn list(
                         .pid
                         .map_or(Value::Null, |pid| Value::from(u64::from(pid))),
                 );
-                object.extend(super::actor_memory::row_fields(&group.group_id, &actor.id));
                 object.extend(super::working_state::runtime_actor_fields(
                     home,
                     &actor,
