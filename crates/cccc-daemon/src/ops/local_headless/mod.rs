@@ -114,10 +114,12 @@ struct Session {
     stop_lock: Mutex<()>,
     startup_prompt: Mutex<Option<String>>,
     active_turn: Mutex<Option<ActiveTurn>>,
-    /// The board task the delivered batch named, if it named exactly one. Set
-    /// when a batch is admitted, read when its turn settles, cleared after. The
-    /// runtime's own turn id is never a task id and is never used as one.
-    pending_turn_task: Mutex<Option<String>>,
+    /// Board tasks by the runtime turn id that carries them, filled when a turn
+    /// is accepted and emptied when that turn is observed. Keyed by turn id so a
+    /// `turn/started` observed later still resolves to the delivery that started
+    /// it, instead of to whichever batch was admitted last. The runtime's own turn
+    /// id is never a task id and is never used as one.
+    turn_tasks: Mutex<std::collections::HashMap<String, String>>,
 }
 
 fn poisoned() -> std::io::Error {
