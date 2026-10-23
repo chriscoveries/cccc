@@ -56,11 +56,6 @@ export function HarnessRamTable({ groupId, isDark }: { groupId: string; isDark: 
   // The panel outlives a Group switch, so the report it is holding belongs to
   // the Group that was showing when it arrived. A switch starts from nothing
   // rather than standing the previous Group's rows in for the new ones.
-  useEffect(() => {
-    setReport(null);
-    setError("");
-  }, [groupId]);
-
   // One request per open, and one more per retry. `loading` is deliberately not
   // a dependency: setting it here re-renders, and a dependency on it would tear
   // this effect down and cancel the request it had just sent, leaving the panel
