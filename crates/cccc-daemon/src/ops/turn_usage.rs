@@ -433,7 +433,7 @@ mod tests {
         (group.group_id, task_id)
     }
 
-    fn task(home: &HomeLayout, group_id: &str, task_id: &str) -> Map {
+    fn task(home: &HomeLayout, group_id: &str, task_id: &str) -> Map<String, Value> {
         let doc = cccc_core::context::ContextStore::new(home.clone())
             .expect("context")
             .load(group_id)
