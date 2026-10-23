@@ -312,6 +312,8 @@
     "cancel": "Cancel",
     "checklist": "Checklist",
     "checklistItems": "Checklist items",
+    "cost": "Cost",
+    "modelPriceCeiling": "Max model price",
     "checklistPlaceholder": "Use [ ], [~], [x] prefixes if useful.",
     "clearFilters": "Clear filters",
     "commitments": "Commitments",

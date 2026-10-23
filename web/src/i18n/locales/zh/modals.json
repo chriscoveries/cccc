@@ -312,6 +312,8 @@
     "cancel": "取消",
     "checklist": "清单",
     "checklistItems": "清单项",
+    "cost": "成本",
+    "modelPriceCeiling": "模型单价上限",
     "checklistPlaceholder": "如有需要，可使用 [ ]、[~]、[x] 前缀。",
     "clearFilters": "清空筛选",
     "commitments": "承诺事项",
