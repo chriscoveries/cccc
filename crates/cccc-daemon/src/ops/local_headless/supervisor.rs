@@ -437,7 +437,13 @@ pub fn ready_for_mail_notice(group_id: &str, actor_id: &str) -> bool {
 /// A second registry lookup could observe a replacement session instead.
 pub(crate) fn idle_generation(group_id: &str, actor_id: &str) -> Option<String> {
     let item = lookup(&(group_id.to_owned(), actor_id.to_owned()))?;
-    (item.running() && item.ready_for_mail_notice()).then(|| item.managed.generation().to_owned())
+    // Completion can hold active_turn while it appends usage or updates a
+    // task. Dispatch calls this under the context lock, so contention is
+    // Unknown, never a blocking lock acquisition in the reverse order.
+    let turn = item.active_turn.try_lock().ok()?;
+    let state = item.status.try_lock().ok()?;
+    (turn.is_none() && state.status == "idle" && item.running())
+        .then(|| item.managed.generation().to_owned())
 }
 
 fn submit_admitted(
