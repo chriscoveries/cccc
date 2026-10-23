@@ -163,6 +163,7 @@ pub(super) fn attach_managed(
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
+        pending_turn_task: Mutex::new(None),
         turn_tasks: Mutex::new(std::collections::HashMap::new()),
         admission: Mutex::new(()),
     });
@@ -454,12 +455,13 @@ fn submit_admitted(
     ) else {
         return BatchSubmission::Deferred;
     };
-    // The task this batch is about, from its own task_refs. It is held as this
-    // delivery's card for the length of its admission; whichever of the runtime's
-    // acceptance, start or completion resolves the turn claims it, and a delivery
-    // that starts no turn leaves nothing for a later one to inherit.
-    item.set_pending_turn_task(task_ref_in(source_events));
     if item.managed.structured_only() {
+        // The task this batch is about, from its own task_refs. Only this route
+        // names the turn it starts, so only this route holds a card: it is held
+        // for the length of the admission, and whichever of the runtime's
+        // acceptance, start or completion resolves the turn claims it. A batch
+        // that starts no turn leaves nothing for a later one to inherit.
+        item.set_pending_turn_task(task_ref_in(source_events));
         let id = format!(
             "actor-delivery:{}",
             source_events
@@ -559,15 +561,13 @@ fn submit_admitted(
             )
         });
         // A terminal route has no authoritative word on which turn a delivery
-        // started, so the batch's card is not guessed onto whatever turn is open.
-        item.set_pending_turn_task(None);
+        // started, so it never holds a card and its turns stay unattributed.
         return if accepted {
             BatchSubmission::Accepted
         } else {
             BatchSubmission::Deferred
         };
     }
-    item.set_pending_turn_task(None);
     BatchSubmission::Deferred
 }
 

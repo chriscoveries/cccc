@@ -44,6 +44,7 @@ impl Fixture {
             stop_lock: Mutex::new(()),
             startup_prompt: Mutex::new(None),
             active_turn: Mutex::new(None),
+            pending_turn_task: Mutex::new(None),
             turn_tasks: Mutex::new(std::collections::HashMap::new()),
             admission: Mutex::new(()),
         };
@@ -589,8 +590,8 @@ async fn a_metered_turn_is_charged_to_the_task_its_delivery_named() {
         );
     }
     assert!(
-        f.session.turn_task().is_none(),
-        "the batch's task is spent with its turn"
+        f.session.take_pending_turn_task().is_none(),
+        "the batch's card is spent with its turn"
     );
 }
 
