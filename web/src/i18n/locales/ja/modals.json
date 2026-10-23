@@ -312,6 +312,8 @@
     "cancel": "キャンセル",
     "checklist": "チェックリスト",
     "checklistItems": "チェック項目数",
+    "cost": "コスト",
+    "modelPriceCeiling": "モデル単価上限",
     "checklistPlaceholder": "必要に応じて [ ]、[~]、[x] の接頭辞を使ってください。",
     "clearFilters": "フィルターをクリア",
     "commitments": "コミットメント",
