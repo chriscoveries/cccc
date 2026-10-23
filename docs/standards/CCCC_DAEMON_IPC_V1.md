@@ -3379,6 +3379,10 @@ than waiting on transcript I/O; a later read can recover the same observation.
 Harness RAM over the last 72 hours, folded into hourly buckets per `(harness, mode)`.
 Display only: nothing in delivery, idling, health or dispatch reads it.
 
+The window is persisted per Group in `state/harness-ram-72h.json`, rewritten at the
+end of each sampling tick and again by this call when samples are not yet on disk, so
+a restart cannot drop history a reader has already been shown.
+
 Args:
 ```ts
 { group_id: string }
