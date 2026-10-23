@@ -86,6 +86,8 @@ pub enum BatchSubmission {
 #[derive(Debug)]
 struct ActiveTurn {
     turn_id: String,
+    /// The delivery this turn came from, when the runtime reported one.
+    delegation: Option<String>,
     /// The board task the delivery that started this turn named, taken from the
     /// batch's single task ref when the runtime reported the turn started. Bound
     /// to the turn itself, not to the session: a batch that is deferred while
@@ -114,25 +116,15 @@ struct Session {
     stop_lock: Mutex<()>,
     startup_prompt: Mutex<Option<String>>,
     active_turn: Mutex<Option<ActiveTurn>>,
-    /// The card of the delivery being admitted right now, if it named exactly one
-    /// task. It is claimed by whichever comes first — the runtime's acceptance of
-    /// the batch, its `turn/started`, or its completion — because any of the three
-    /// can be observed before the others.
-    pending_turn_task: Mutex<Option<String>>,
-    /// Cards by the runtime turn id that carries them. An entry is always made
-    /// when the runtime accepts a batch, with `None` when that batch named no
-    /// single card: a turn known to be unattributed must not be mistaken for one
-    /// whose card is still unresolved. The runtime's own turn id is never a task
-    /// id and is never used as one.
-    turn_tasks: Mutex<std::collections::HashMap<String, Option<String>>>,
-    /// Held across one delivery's admission, so only one delivery is ever pending
-    /// for this Actor and a card can never be read for someone else's turn.
+    /// Cards by the delivery id the runtime was asked to run. An entry is made
+    /// before the batch is submitted, with `None` when that batch named no single
+    /// card, so a turn the runtime starts carries its own card rather than being
+    /// matched against whatever was admitted last. The runtime's own turn id is
+    /// never a task id and is never used as one.
+    delivery_tasks: Mutex<std::collections::HashMap<String, Option<String>>>,
+    /// Held across one delivery's admission, so this Actor is asked to run one
+    /// batch at a time.
     admission: Mutex<()>,
-    /// Set when an admission ended without the runtime confirming it. The runtime
-    /// may still start that turn, and its events arrive without anything tying
-    /// them to the batch, so no start event may take a pending card until the
-    /// session has settled again. Cleared when a turn settles.
-    unresolved_admission: AtomicBool,
 }
 
 fn poisoned() -> std::io::Error {
