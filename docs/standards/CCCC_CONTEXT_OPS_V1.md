@@ -282,7 +282,10 @@ Rules:
 
 Permission: the daemon only. It is applied when a `turn.usage` event is
 committed, after the event is durable; a peer or user `context_sync` that names
-this op MUST be refused.
+this op MUST be refused. It is charged to the task that event's `task_ref`
+names — the board task the delivered batch referenced — and to nothing else: the
+provider's own `task_id` is a runtime token, not a task, and a turn whose
+delivery named no task accrues nothing.
 
 Rules:
 - `priced` adds `usd` to `cost_usd` and increments `cost_turns`.
