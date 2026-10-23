@@ -1,14 +1,22 @@
 use super::{ActiveTurn, Session, events};
 use serde_json::{Map, Value, json};
 
+#[cfg(test)]
 pub(super) fn handle_message(session: &Session, message: Value) {
+    handle_event(session, message, None);
+}
+
+/// Handle one event from the runtime, with the delivery the runtime says it belongs
+/// to when it says so. That id is the only thing that ties a turn to the batch that
+/// started it, so a turn whose events carry none stays unattributed.
+pub(super) fn handle_event(session: &Session, message: Value, delegation: Option<&str>) {
     if message.get("id").is_some() {
         if message.get("method").and_then(Value::as_str).is_some() {
             respond_unsupported_server_request(session, &message);
         }
         return;
     }
-    handle_announced_message(session, message);
+    handle_announced_message(session, message, delegation);
 }
 
 // Reuse the existing headless journal and frontend projection. Store only the
@@ -107,7 +115,7 @@ fn respond_unsupported_server_request(session: &Session, message: &Value) {
     );
 }
 
-fn handle_announced_message(session: &Session, message: Value) {
+fn handle_announced_message(session: &Session, message: Value, delegation: Option<&str>) {
     // Codex sub-agents run on their own threads and announce their own turns.
     // Those are not this Actor's terminal turn; treating one as an overlap
     // would stop a healthy session the moment the model delegates work.
@@ -115,7 +123,9 @@ fn handle_announced_message(session: &Session, message: Value) {
         return;
     }
     if message.get("method").and_then(Value::as_str) == Some("turn/started") {
-        if handle_managed_turn_started(session, &message) && session.managed.structured_only() {
+        if handle_managed_turn_started(session, &message, delegation)
+            && session.managed.structured_only()
+        {
             project_structured_event(session, &message);
         }
         return;
@@ -197,7 +207,11 @@ enum StartedTurnDisposition {
     Conflict,
 }
 
-fn handle_managed_turn_started(session: &Session, message: &Value) -> bool {
+fn handle_managed_turn_started(
+    session: &Session,
+    message: &Value,
+    delegation: Option<&str>,
+) -> bool {
     let turn_id = message
         .pointer("/params/turn/id")
         .and_then(Value::as_str)
@@ -206,16 +220,18 @@ fn handle_managed_turn_started(session: &Session, message: &Value) -> bool {
     let Some(turn_id) = turn_id else {
         return false;
     };
-    // A turn the runtime has already resolved — with a card, or with none —
-    // answers for itself. A turn that is not resolved can only take the pending
-    // card when no earlier admission is still unresolved, since that admission's
-    // events would arrive the same way and cannot be told apart from this one.
-    let task = match session.take_turn_task(turn_id) {
-        Some(resolved) => resolved,
-        None if !session.has_unresolved_admission() => session.take_pending_turn_task(),
-        None => None,
-    };
-    match observe_started_turn(&session.active_turn, turn_id, task) {
+    // The runtime names the delivery this turn came from, so the card is the one
+    // that delivery registered — never the one admitted most recently, and never a
+    // guess. A turn whose event names no delivery stays unattributed.
+    let task = delegation
+        .and_then(|id| session.take_delivery_task(id))
+        .unwrap_or(None);
+    match observe_started_turn(
+        &session.active_turn,
+        turn_id,
+        task,
+        delegation.map(str::to_owned),
+    ) {
         StartedTurnDisposition::Adopted => {
             session.set_status("working", Some(turn_id.to_owned()));
             true
@@ -238,6 +254,7 @@ fn observe_started_turn(
     active_turn: &std::sync::Mutex<Option<ActiveTurn>>,
     turn_id: &str,
     task: Option<String>,
+    delegation: Option<String>,
 ) -> StartedTurnDisposition {
     let Ok(mut active_turn) = active_turn.lock() else {
         return StartedTurnDisposition::Conflict;
@@ -252,6 +269,7 @@ fn observe_started_turn(
             // cannot rename what this turn's cost is charged to.
             *active_turn = Some(ActiveTurn {
                 turn_id: turn_id.to_owned(),
+                delegation,
                 task,
             });
             StartedTurnDisposition::Adopted
@@ -311,11 +329,11 @@ fn complete_turn(session: &Session, message: &Value) {
             }
         }
     }
-    // The batch is spent: its card belonged to this turn, and a binding no started
-    // event ever claimed is dropped so the map cannot grow. With the turn settled,
-    // an admission that was never confirmed can no longer surface.
-    session.forget_turn_task(&turn_id);
-    session.clear_unresolved_admission();
+    // The batch is spent: its card belonged to this turn, and the delivery's
+    // registration is dropped so the map cannot grow.
+    if let Some(delivery) = current.delegation.as_deref() {
+        session.forget_delivery_task(delivery);
+    }
     active_turn.take();
     // A completed turn is not automatically a successful turn. Providers report
     // failure out of band (ACP stopReason, a model API error surfaced as an
@@ -493,7 +511,7 @@ mod tests {
         let active_turn = std::sync::Mutex::new(None);
 
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-terminal", None),
+            observe_started_turn(&active_turn, "turn-terminal", None, None),
             StartedTurnDisposition::Adopted
         );
         let active = active_turn.lock().expect("active turn");
@@ -509,7 +527,7 @@ mod tests {
     fn a_later_batch_cannot_rename_the_running_turn() {
         let active_turn = std::sync::Mutex::new(None);
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-a", Some("T089".into())),
+            observe_started_turn(&active_turn, "turn-a", Some("T089".into()), None),
             StartedTurnDisposition::Adopted
         );
         // Turn A is running; the next batch's card never reaches it.
@@ -519,7 +537,7 @@ mod tests {
             assert_eq!(running.task.as_deref(), Some("T089"));
         }
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-a", Some("T090".into())),
+            observe_started_turn(&active_turn, "turn-a", Some("T090".into()), None),
             StartedTurnDisposition::Matched
         );
         let running = active_turn.lock().expect("active");
@@ -557,11 +575,11 @@ mod tests {
         }));
 
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-terminal", None),
+            observe_started_turn(&active_turn, "turn-terminal", None, None),
             StartedTurnDisposition::Matched
         );
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-overlap", None),
+            observe_started_turn(&active_turn, "turn-overlap", None, None),
             StartedTurnDisposition::Conflict
         );
     }

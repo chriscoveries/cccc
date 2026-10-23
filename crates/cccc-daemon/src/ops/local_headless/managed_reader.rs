@@ -35,7 +35,11 @@ pub(super) fn spawn(
                             )]),
                         );
                     }
-                    output::handle_message(&session, event.message);
+                    output::handle_event(
+                        &session,
+                        event.message,
+                        event.requested_delegation_id.as_deref(),
+                    );
                     if disconnected {
                         stop_after_provider_exit(&session);
                         break;
@@ -108,10 +112,8 @@ pub(crate) async fn verify_claude_reader_release(
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(None),
         active_turn: Mutex::new(None),
-        pending_turn_task: Mutex::new(None),
-        turn_tasks: Mutex::new(std::collections::HashMap::new()),
+        delivery_tasks: Mutex::new(std::collections::HashMap::new()),
         admission: Mutex::new(()),
-        unresolved_admission: AtomicBool::new(false),
     });
     let weak = Arc::downgrade(&session);
     let receiver = managed.subscribe();
