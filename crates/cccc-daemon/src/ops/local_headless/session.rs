@@ -53,17 +53,30 @@ impl Session {
         }
     }
 
-    /// Record which board task the admitted batch is about. Called for every
-    /// admission, including one that names no task, so a turn is never charged
-    /// to a batch before it.
+    /// Record which board task the batch about to be delivered is about. This is
+    /// the pending card, not the running turn's: it is handed to a turn only when
+    /// the runtime reports that turn started, and dropped if no turn starts, so a
+    /// deferred delivery never renames an open one.
     pub(super) fn set_turn_task(&self, task: Option<String>) {
-        if let Ok(mut current) = self.turn_task.lock() {
+        if let Ok(mut current) = self.pending_turn_task.lock() {
             *current = task;
         }
     }
 
     pub(super) fn turn_task(&self) -> Option<String> {
-        self.turn_task.lock().ok().and_then(|task| task.clone())
+        self.pending_turn_task
+            .lock()
+            .ok()
+            .and_then(|task| task.clone())
+    }
+
+    /// The task the running turn was started for, if any.
+    #[cfg(test)]
+    pub(super) fn running_turn_task(&self) -> Option<String> {
+        self.active_turn
+            .lock()
+            .ok()
+            .and_then(|turn| turn.as_ref().and_then(|turn| turn.task.clone()))
     }
 
     pub(super) fn set_status(&self, status: &str, task_id: Option<String>) {

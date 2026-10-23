@@ -44,7 +44,7 @@ impl Fixture {
             stop_lock: Mutex::new(()),
             startup_prompt: Mutex::new(None),
             active_turn: Mutex::new(None),
-            turn_task: Mutex::new(None),
+            pending_turn_task: Mutex::new(None),
         };
         Self {
             session,
@@ -198,6 +198,103 @@ async fn captured_pi_and_claude_turn_usage_is_committed_once_and_readable() {
         );
         assert_eq!(response.result["usage"][0]["id"], usage[0].id);
     }
+}
+
+/// A second delivery that arrives while a turn is running cannot take that turn
+/// over: the card is bound when the runtime reports the turn started, so a batch
+/// that ends up deferred — or refused — after naming its own card leaves the
+/// running turn's charge where it was.
+#[tokio::test]
+async fn a_deferred_batch_does_not_rename_the_running_turns_card() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    use cccc_contracts::ActorRuntime;
+
+    let mut f = Fixture::new(false, "");
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let thread = messages[0]["params"]["threadId"]
+        .as_str()
+        .expect("owned thread");
+    f.session.managed = Arc::new(AnalystSession::for_usage_test(
+        f._temp.path(),
+        ActorRuntime::Pi,
+        thread,
+    ));
+    let synced = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .sync(
+            &f.session.group_id,
+            &[
+                json!({"op":"task.create","title":"Running turn"})
+                    .as_object()
+                    .cloned()
+                    .expect("operation"),
+                json!({"op":"task.create","title":"Deferred batch"})
+                    .as_object()
+                    .cloned()
+                    .expect("operation"),
+            ],
+            None,
+            "user",
+            false,
+        )
+        .expect("create tasks");
+    let running_card = synced.changes[0]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+    let deferred_card = synced.changes[1]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+
+    f.session.set_turn_task(Some(running_card.clone()));
+    for message in &messages {
+        if message["method"] == "turn/completed" {
+            break;
+        }
+        handle_message(&f.session, message.clone());
+    }
+    assert_eq!(
+        f.session.running_turn_task().as_deref(),
+        Some(running_card.as_str()),
+        "the turn was started for the first card"
+    );
+
+    // A second delivery names its own card while the first turn is still open.
+    f.session.set_turn_task(Some(deferred_card.clone()));
+    for message in &messages {
+        if message["method"] != "turn/completed" {
+            continue;
+        }
+        handle_message(&f.session, message.clone());
+    }
+
+    let path = GroupStore::new(f.session.home.clone())
+        .expect("store")
+        .ledger_path(&f.session.group_id)
+        .expect("group ledger");
+    let usage = cccc_core::ledger::read_all(&path)
+        .expect("ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1, "one settled turn, one usage record");
+    assert_eq!(
+        usage[0].data["task_ref"], running_card,
+        "the running turn is charged to the card it started with"
+    );
+    assert_ne!(
+        usage[0].data["task_ref"], deferred_card,
+        "a batch that never became a turn does not take over an open one"
+    );
+    assert!(
+        f.session.turn_task().is_none(),
+        "the deferred card is dropped with the turn that ended"
+    );
+    assert!(
+        f.session.running_turn_task().is_none(),
+        "no turn is running any more"
+    );
 }
 
 /// What the stage found, as a test: the runtime reports its own turn token as
