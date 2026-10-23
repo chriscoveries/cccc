@@ -25,7 +25,10 @@ while it holds an open, planned, or active task. The optional action field
 `dispatch_cooldown_ms` defaults to 60000 and applies across dispatch rules.
 The assignment retains the task's other fields, including cost and provenance.
 It records `task.assign` with the rule id and Actor generation, together with
-the notification that pushes the task to that Actor.
+the notification that pushes the task to that Actor. That notification carries
+exactly one structured `task_ref` naming the assigned card. Delivery-bound cost
+attribution uses that ref; the runtime's turn token keeps its existing meaning.
+A delivery with zero or multiple task refs is unattributed.
 
 Task changes, cooldown state, and the notification ledger batch share a durable
 undo journal. The context lock serializes selection and assignment; a single

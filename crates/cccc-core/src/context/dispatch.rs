@@ -93,14 +93,21 @@ pub fn dispatch_ready_tasks(
             assigned.data = json!({"task_id":task_id,"actor_id":actor.actor_id,"generation":actor.generation,"rule_id":rule_id})
                 .as_object().expect("object").clone();
             events.push(assigned);
-            events.push(notice(
+            let mut push = notice(
                 group_id,
                 &actor.actor_id,
                 "task_dispatch",
                 &format!("Assigned {task_id}: {title}"),
                 &outcome,
                 json!({"task_id":task_id,"rule_id":rule_id,"generation":actor.generation}),
-            ));
+            );
+            // The delivery's explicit ref is the only board-task authority for
+            // the managed turn it starts. Runtime turn tokens stay separate.
+            push.data.insert(
+                "refs".into(),
+                json!([{"kind":"task_ref","task_id":task_id}]),
+            );
+            events.push(push);
             used.insert(actor.actor_id.clone());
             state
                 .last_dispatch_ms
