@@ -47,6 +47,7 @@ impl Fixture {
             pending_turn_task: Mutex::new(None),
             turn_tasks: Mutex::new(std::collections::HashMap::new()),
             admission: Mutex::new(()),
+            unresolved_admission: AtomicBool::new(false),
         };
         Self {
             session,
@@ -492,6 +493,77 @@ async fn an_unattributed_turn_never_claims_another_deliverys_card() {
         f.session.take_pending_turn_task().as_deref(),
         Some(next_card.as_str()),
         "the delivery being admitted keeps its own card"
+    );
+}
+
+/// An admission the runtime never confirmed may still start a turn, and that turn's
+/// events cannot be told apart from the next delivery's. Until the session settles,
+/// no start event takes a card, so the ambiguity costs attribution rather than
+/// charging one delivery's turn to another's card.
+#[tokio::test]
+async fn an_unconfirmed_admission_keeps_the_next_start_unattributed() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    use cccc_contracts::ActorRuntime;
+
+    let mut f = Fixture::new(false, "");
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let thread = messages[0]["params"]["threadId"]
+        .as_str()
+        .expect("owned thread");
+    f.session.managed = Arc::new(AnalystSession::for_usage_test(
+        f._temp.path(),
+        ActorRuntime::Pi,
+        thread,
+    ));
+    let synced = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .sync(
+            &f.session.group_id,
+            &[json!({"op":"task.create","title":"The next delivery"})
+                .as_object()
+                .cloned()
+                .expect("operation")],
+            None,
+            "user",
+            false,
+        )
+        .expect("create task");
+    let next_card = synced.changes[0]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+
+    // The previous admission was never confirmed, and another delivery now holds
+    // its own card while the session is still open.
+    f.session.quarantine_unresolved_admission();
+    f.session.set_pending_turn_task(Some(next_card.clone()));
+    for message in &messages {
+        handle_message(&f.session, message.clone());
+    }
+
+    let path = GroupStore::new(f.session.home.clone())
+        .expect("store")
+        .ledger_path(&f.session.group_id)
+        .expect("group ledger");
+    let usage = cccc_core::ledger::read_all(&path)
+        .expect("ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1, "one settled turn, one usage record");
+    assert!(
+        usage[0].data["task_ref"].is_null(),
+        "a turn that cannot be told apart from an unconfirmed admission is not charged, got {}",
+        usage[0].data["task_ref"]
+    );
+    assert_eq!(
+        f.session.take_pending_turn_task().as_deref(),
+        Some(next_card.as_str()),
+        "the delivery being admitted keeps its own card"
+    );
+    assert!(
+        !f.session.has_unresolved_admission(),
+        "a settled session is no longer holding an unconfirmed admission"
     );
 }
 

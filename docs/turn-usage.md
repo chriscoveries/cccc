@@ -30,7 +30,10 @@ running turn is charged to. A batch that named no single card still gets an entr
 holding nothing, so a turn resolved as unattributed never falls back to another
 delivery's card; a delivery that starts no turn leaves no entry at all, and a
 terminal route with no authoritative turn id leaves the turn unattributed rather
-than guessing. It stays null
+than guessing. An admission the runtime never confirms can still start a turn
+whose events cannot be told apart from the next delivery's, so no start event
+takes a card until the session settles: the ambiguity costs attribution, never
+charges one delivery's turn to another's card. It stays null
 unless the delivery named exactly one task: refs are counted, not deduplicated,
 so two refs that happen to name the same task leave it null just as two different
 tasks do, and a `task_ref` carrying no id counts as a ref but names nothing. A provider token is never read as a board task, and assigned cards are
