@@ -34,6 +34,7 @@ fn session(temp: &std::path::Path) -> (Session, super::control_fixture::ControlD
         startup_prompt: Mutex::new(None),
         active_turn: Mutex::new(None),
         turn_tasks: Mutex::new(std::collections::HashMap::new()),
+        admission: Mutex::new(()),
     };
     (session, directory)
 }

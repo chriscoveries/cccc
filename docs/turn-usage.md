@@ -17,12 +17,16 @@ number of usage snapshots.
 Two task fields are reported, and they are not the same thing. `task_id` is the
 provider's own task or turn authority, projected as `effective_active_task_id`,
 read before settlement clears it; absent authority stays null. `task_ref` is the
-board task the delivered batch named in its `task_refs`, read from the batch the
-runtime accepts, and it is the only field a turn's cost is charged to. The card is
-bound to the turn id the runtime names when it accepts the delivery, and looked up
-by that id when the turn is observed, so a second delivery — deferred, refused, or
-merely observed first — cannot rename what the running turn is charged to, even if
-its start event is read late. A delivery that starts no turn binds nothing, and a
+board task the delivered batch named in its `task_refs`, held for the length of that
+batch's admission, and it is the only field a turn's cost is charged to. The card is
+claimed by whichever comes first — the runtime's acceptance of the batch, its
+`turn/started`, or its completion — because any of the three can be observed before
+the others. When acceptance comes first the card is bound to the turn id the runtime
+named and looked up by that id when the turn starts; when the start event comes
+first it claims the card itself. Deliveries are admitted one at a time per Actor, so
+the card being claimed always belongs to the delivery being resolved: a second
+delivery — deferred, refused, or merely observed first — cannot rename what the
+running turn is charged to. A delivery that starts no turn binds nothing, and a
 terminal route with no authoritative turn id leaves the turn unattributed rather
 than guessing. It stays null
 unless the delivery named exactly one task: refs are counted, not deduplicated,

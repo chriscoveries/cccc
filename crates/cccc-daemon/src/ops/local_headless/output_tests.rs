@@ -45,6 +45,7 @@ impl Fixture {
             startup_prompt: Mutex::new(None),
             active_turn: Mutex::new(None),
             turn_tasks: Mutex::new(std::collections::HashMap::new()),
+            admission: Mutex::new(()),
         };
         Self {
             session,
@@ -321,6 +322,101 @@ async fn a_turn_keeps_its_card_even_when_it_is_observed_after_another_delivery()
     assert!(
         f.session.running_turn_task().is_none(),
         "no turn is running any more"
+    );
+}
+
+/// The other order the runtime can take: it reports the turn started before it
+/// answers the admission, so the card is claimed by the start event and the
+/// acceptance that arrives afterwards has nothing left to bind. The turn is
+/// still charged to the card its own delivery named.
+#[tokio::test]
+async fn a_turn_observed_before_its_acceptance_keeps_the_card_its_delivery_named() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    use cccc_contracts::ActorRuntime;
+
+    let mut f = Fixture::new(false, "");
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let thread = messages[0]["params"]["threadId"]
+        .as_str()
+        .expect("owned thread");
+    f.session.managed = Arc::new(AnalystSession::for_usage_test(
+        f._temp.path(),
+        ActorRuntime::Pi,
+        thread,
+    ));
+    let synced = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .sync(
+            &f.session.group_id,
+            &[json!({"op":"task.create","title":"Early observed turn"})
+                .as_object()
+                .cloned()
+                .expect("operation")],
+            None,
+            "user",
+            false,
+        )
+        .expect("create task");
+    let card = synced.changes[0]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+    let turn_id = messages
+        .iter()
+        .find_map(|message| message.pointer("/params/turn/id").and_then(Value::as_str))
+        .expect("captured turn id")
+        .to_owned();
+
+    // The delivery named this card and its admission is still open when the
+    // runtime reports the turn.
+    f.session.set_pending_turn_task(Some(card.clone()));
+    for message in &messages {
+        if message["method"] == "turn/completed" {
+            break;
+        }
+        handle_message(&f.session, message.clone());
+    }
+    assert_eq!(
+        f.session.running_turn_task().as_deref(),
+        Some(card.as_str()),
+        "the start event took the card of the delivery it belongs to"
+    );
+
+    // Acceptance arrives afterwards and finds the card already claimed.
+    assert_eq!(
+        f.session.take_pending_turn_task(),
+        None,
+        "a claimed card is not left for the acceptance to bind again"
+    );
+    f.session
+        .bind_turn_task(&turn_id, f.session.take_pending_turn_task());
+    assert_eq!(
+        f.session.running_turn_task().as_deref(),
+        Some(card.as_str()),
+        "binding nothing leaves the open turn's card as it was"
+    );
+
+    for message in &messages {
+        if message["method"] != "turn/completed" {
+            continue;
+        }
+        handle_message(&f.session, message.clone());
+    }
+
+    let path = GroupStore::new(f.session.home.clone())
+        .expect("store")
+        .ledger_path(&f.session.group_id)
+        .expect("group ledger");
+    let usage = cccc_core::ledger::read_all(&path)
+        .expect("ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1, "one settled turn, one usage record");
+    assert_eq!(
+        usage[0].data["task_ref"],
+        card.as_str(),
+        "the turn is charged to the card its early start event claimed"
     );
 }
 
