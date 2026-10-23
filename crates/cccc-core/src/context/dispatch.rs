@@ -123,7 +123,7 @@ pub fn dispatch_ready_tasks_checked(
                 "cooldown_bypassed":cooldown_bypassed})
                 .as_object().expect("object").clone();
                 events.push(assigned);
-                let mut push = notice(
+                let push = notice(
                     group_id,
                     &actor.actor_id,
                     "task_dispatch",
@@ -133,10 +133,7 @@ pub fn dispatch_ready_tasks_checked(
                 );
                 // The delivery's explicit ref is the only board-task authority for
                 // the managed turn it starts. Runtime turn tokens stay separate.
-                push.data.insert(
-                    "refs".into(),
-                    json!([{"kind":"task_ref","task_id":task_id}]),
-                );
+
                 events.push(push);
                 used.insert(actor.actor_id.clone());
                 state
@@ -148,16 +145,7 @@ pub fn dispatch_ready_tasks_checked(
             }
             Ok(events)
         },
-        || {
-            if selected.borrow().iter().all(&idle) {
-                Ok(())
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "dispatch Actor changed before outbox commit",
-                ))
-            }
-        },
+        || Ok(()),
     )
 }
 
@@ -303,11 +291,11 @@ fn cooldown_ready(
     now: i64,
     cooldown: u64,
 ) -> bool {
-    manually_unassigned(doc, state, actor)
-        || state.last_dispatch_ms.get(actor).is_none_or(|last| {
-            now.checked_sub(*last)
-                .is_some_and(|elapsed| elapsed >= 0 && elapsed as u64 >= cooldown)
-        })
+    let _ = doc;
+    state.last_dispatch_ms.get(actor).is_none_or(|last| {
+        now.checked_sub(*last)
+            .is_some_and(|elapsed| elapsed >= 0 && elapsed as u64 >= cooldown)
+    })
 }
 
 /// Read-only snapshot of the same predicates used at assignment. Eligibility

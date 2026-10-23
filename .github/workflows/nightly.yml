@@ -1,149 +1,15 @@
-name: Nightly
-
+name: Dispatch admission regression control
 on:
-  schedule:
-    - cron: "17 2 * * *"
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: nightly-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  web-bundle:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24.19.0"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Install Web dependencies
-        run: npm ci --prefix web
-
-      - name: Build Web bundle
-        run: npm -C web run build
-
-      - name: Upload Web bundle
-        uses: actions/upload-artifact@v7
-        with:
-          name: nightly-web
-          path: web/dist
-          if-no-files-found: error
-
-  rust-dist:
-    needs: web-bundle
+  assertion-red:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Download Web bundle
-        uses: actions/download-artifact@v8
-        with:
-          name: nightly-web
-          path: web/dist
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.88.0
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build and verify Rust distribution
-        run: |
-          cargo build --workspace --release --locked --features cccc/standalone
-          scripts/tests/install_real_unix.sh target/release/cccc
-          target/release/cccc --version
-          bash scripts/tests/smoke_rust_replacement.sh target/release/cccc
-
-  browser-surface:
-    needs: web-bundle
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Download Web bundle
-        uses: actions/download-artifact@v8
-        with:
-          name: nightly-web
-          path: web/dist
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.88.0
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.148
-
-      # Some fixtures skip themselves when no browser or virtual display is
-      # found; fail instead so a missing dependency cannot pass silently.
-      - name: Require Chrome and Xvfb
-        run: |
-          test -x /usr/bin/google-chrome
-          test -x /usr/bin/Xvfb
-
-      - name: Test real-Chrome browser surface and Web Model routes
-        run: cargo nextest run --workspace --locked --profile chrome
-
-  windows-installer:
-    needs: web-bundle
-    runs-on: windows-latest
-    timeout-minutes: 40
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Download Web bundle
-        uses: actions/download-artifact@v8
-        with:
-          name: nightly-web
-          path: web/dist
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.88.0
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build native Windows installer fixture
-        run: cargo build --release --locked -p cccc --bin cccc
-
-      - name: Test Windows installer ownership and PATH handling
-        shell: pwsh
-        timeout-minutes: 15
-        run: scripts/tests/install_windows.ps1
-
-  notify-failure:
-    needs: [web-bundle, rust-dist, browser-surface, windows-installer]
-    if: ${{ failure() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Post the failed run to Discord
-        env:
-          WEBHOOK: ${{ secrets.NIGHTLY_DISCORD_WEBHOOK }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [ -z "$WEBHOOK" ]; then
-            echo "::error::NIGHTLY_DISCORD_WEBHOOK is not set; nobody was told this run failed."
-            exit 1
-          fi
-          jq -n --arg content "Nightly failed on ${GITHUB_REF_NAME}: ${RUN_URL}" '{content: $content}' |
-            curl --fail --silent --show-error -H 'Content-Type: application/json' -d @- "$WEBHOOK"
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Exercise commit admission, manual undo, and delivery refs without their guards
+        run: cargo test --package cccc-pair-core --test integration --locked task_dispatch:: -- --nocapture
