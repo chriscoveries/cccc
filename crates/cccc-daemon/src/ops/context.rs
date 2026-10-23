@@ -213,6 +213,14 @@ fn authorize(
     };
     let name = operation.get("op").and_then(Value::as_str).unwrap_or("");
     match name {
+        // Written by the daemon itself as turns settle, never by a caller: an
+        // actor that could set this op could write its own bill.
+        "task.cost.accrue" => {
+            return Err(OpError::new(
+                "permission_denied",
+                "task.cost.accrue is recorded by the daemon from metered turns",
+            ));
+        }
         "coordination.brief.update" | "meta.merge" if role != ActorRole::Foreman => {
             return Err(OpError::new(
                 "permission_denied",
