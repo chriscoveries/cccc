@@ -8,13 +8,8 @@ pub(super) fn idle_generation(group: &GroupDoc, actor: &Actor) -> Option<String>
     if !actor.enabled || !super::actor_runtime_status::resolve(group, actor).running {
         return None;
     }
-    if super::local_headless::ready_for_mail_notice(&group.group_id, &actor.id) {
-        let actual = super::local_headless::structured_state(&group.group_id, &actor.id)?;
-        return actual
-            .get("generation")
-            .and_then(serde_json::Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned);
+    if let Some(generation) = super::local_headless::idle_generation(&group.group_id, &actor.id) {
+        return Some(generation);
     }
     if actor.runtime == ActorRuntime::Hermes {
         return super::turn_probe::idle_generation(&group.group_id, &actor.id);

@@ -23,7 +23,7 @@ pub(crate) use events::{
     contains_dedupe as contains_event_dedupe,
 };
 pub(crate) use supervisor::{
-    cancel_turn, respond_interaction, respond_permission, structured_state,
+    cancel_turn, idle_generation, respond_interaction, respond_permission, structured_state,
 };
 pub(crate) use supervisor::{has_no_registered_session, registered_running};
 
