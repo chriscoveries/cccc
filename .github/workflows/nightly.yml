@@ -14,3 +14,16 @@ jobs:
       - name: Exercise commit admission, manual undo, and delivery refs without their guards
         run: |
           cargo test --package cccc-pair-core --test integration --locked task_dispatch:: -- --nocapture
+  web-assertion-red:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.19.0"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
+      - name: Exercise task read without dispatch field decoding
+        run: npm -C web test -- src/services/api/dispatchTask.test.ts
