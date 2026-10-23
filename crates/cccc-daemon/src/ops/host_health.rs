@@ -12,6 +12,7 @@
 //! button in the pulldown is the existing stop operation, pressed by a person.
 
 use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 const MIB: u64 = 1024;
@@ -96,8 +97,14 @@ pub(crate) fn parse_cpu_count(stat: &str) -> Option<u32> {
 
 /// The `group_health` result: the Group's own total from the readings the
 /// sampler holds, plus the host figures read now.
-pub(crate) fn report(root: &Path, group_id: &str, actors_running: u64) -> Value {
-    let (rss_mib, pss_mib, sampled_actors) = super::actor_memory::group_totals(group_id);
+pub(crate) fn report(
+    root: &Path,
+    group_id: &str,
+    actors_running: u64,
+    live_actors: &BTreeSet<&str>,
+) -> Value {
+    let (rss_mib, pss_mib, sampled_actors) =
+        super::actor_memory::group_totals(group_id, live_actors);
     let host = read_host(root);
     let mut object = Map::new();
     object.insert("group_id".into(), Value::from(group_id));
@@ -202,7 +209,7 @@ mod tests {
 
     #[test]
     fn a_group_with_no_readings_reports_no_total_rather_than_zero() {
-        let report = report(&fixture(), "no-such-group", 0);
+        let report = report(&fixture(), "no-such-group", 0, &BTreeSet::new());
         assert_eq!(report["rss_mib"], Value::Null);
         assert_eq!(report["pss_mib"], Value::Null);
         assert_eq!(report["actors_sampled"], 0);
