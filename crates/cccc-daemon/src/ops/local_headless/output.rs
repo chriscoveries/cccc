@@ -223,9 +223,7 @@ fn handle_managed_turn_started(
     // The runtime names the delivery this turn came from, so the card is the one
     // that delivery registered — never the one admitted most recently, and never a
     // guess. A turn whose event names no delivery stays unattributed.
-    let task = delegation
-        .and_then(|id| session.take_delivery_task(id))
-        .unwrap_or(None);
+    let task = None;
     match observe_started_turn(
         &session.active_turn,
         turn_id,
