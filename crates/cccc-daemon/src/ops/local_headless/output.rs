@@ -1,14 +1,22 @@
 use super::{ActiveTurn, Session, events};
 use serde_json::{Map, Value, json};
 
+#[cfg(test)]
 pub(super) fn handle_message(session: &Session, message: Value) {
+    handle_event(session, message, None);
+}
+
+/// Handle one event from the runtime, with the delivery the runtime says it belongs
+/// to when it says so. That id is the only thing that ties a turn to the batch that
+/// started it, so a turn whose events carry none stays unattributed.
+pub(super) fn handle_event(session: &Session, message: Value, delegation: Option<&str>) {
     if message.get("id").is_some() {
         if message.get("method").and_then(Value::as_str).is_some() {
             respond_unsupported_server_request(session, &message);
         }
         return;
     }
-    handle_announced_message(session, message);
+    handle_announced_message(session, message, delegation);
 }
 
 // Reuse the existing headless journal and frontend projection. Store only the
@@ -107,7 +115,7 @@ fn respond_unsupported_server_request(session: &Session, message: &Value) {
     );
 }
 
-fn handle_announced_message(session: &Session, message: Value) {
+fn handle_announced_message(session: &Session, message: Value, delegation: Option<&str>) {
     // Codex sub-agents run on their own threads and announce their own turns.
     // Those are not this Actor's terminal turn; treating one as an overlap
     // would stop a healthy session the moment the model delegates work.
@@ -115,7 +123,9 @@ fn handle_announced_message(session: &Session, message: Value) {
         return;
     }
     if message.get("method").and_then(Value::as_str) == Some("turn/started") {
-        if handle_managed_turn_started(session, &message) && session.managed.structured_only() {
+        if handle_managed_turn_started(session, &message, delegation)
+            && session.managed.structured_only()
+        {
             project_structured_event(session, &message);
         }
         return;
@@ -197,7 +207,11 @@ enum StartedTurnDisposition {
     Conflict,
 }
 
-fn handle_managed_turn_started(session: &Session, message: &Value) -> bool {
+fn handle_managed_turn_started(
+    session: &Session,
+    message: &Value,
+    delegation: Option<&str>,
+) -> bool {
     let turn_id = message
         .pointer("/params/turn/id")
         .and_then(Value::as_str)
@@ -206,7 +220,18 @@ fn handle_managed_turn_started(session: &Session, message: &Value) -> bool {
     let Some(turn_id) = turn_id else {
         return false;
     };
-    match observe_started_turn(&session.active_turn, turn_id) {
+    // The runtime names the delivery this turn came from, so the card is the one
+    // that delivery registered — never the one admitted most recently, and never a
+    // guess. A turn whose event names no delivery stays unattributed.
+    let task = delegation
+        .and_then(|id| session.take_delivery_task(id))
+        .unwrap_or(None);
+    match observe_started_turn(
+        &session.active_turn,
+        turn_id,
+        task,
+        delegation.map(str::to_owned),
+    ) {
         StartedTurnDisposition::Adopted => {
             session.set_status("working", Some(turn_id.to_owned()));
             true
@@ -228,6 +253,8 @@ fn handle_managed_turn_started(session: &Session, message: &Value) -> bool {
 fn observe_started_turn(
     active_turn: &std::sync::Mutex<Option<ActiveTurn>>,
     turn_id: &str,
+    task: Option<String>,
+    delegation: Option<String>,
 ) -> StartedTurnDisposition {
     let Ok(mut active_turn) = active_turn.lock() else {
         return StartedTurnDisposition::Conflict;
@@ -236,8 +263,14 @@ fn observe_started_turn(
         Some(active) if active.turn_id == turn_id => StartedTurnDisposition::Matched,
         Some(_) => StartedTurnDisposition::Conflict,
         None => {
+            // The pending card is handed to this turn at the one moment the batch
+            // becomes it. From here on the card lives on `ActiveTurn`, so a batch
+            // that arrives while this turn runs — and is deferred, or refused —
+            // cannot rename what this turn's cost is charged to.
             *active_turn = Some(ActiveTurn {
                 turn_id: turn_id.to_owned(),
+                delegation,
+                task,
             });
             StartedTurnDisposition::Adopted
         }
@@ -269,13 +302,18 @@ fn complete_turn(session: &Session, message: &Value) {
             "claude_transcript"
         };
         if usage["source"] == expected {
-            // This is the same managed task authority projected by effective_active_task_id.
-            // Read it before settlement clears the status; never infer it from assigned cards.
+            // Two different things, reported separately. `task` is the provider's
+            // own task or turn authority, read before settlement clears the status.
+            // `task_ref` is the board task the delivery that started this turn
+            // named in its task_refs, held on the turn itself — the only thing the
+            // turn's cost is charged to. A delivery that named no task leaves the
+            // turn uncharged rather than guessing from an Actor's assigned cards.
             let task = session
                 .status
                 .lock()
                 .ok()
                 .and_then(|state| state.task_id.clone());
+            let task_ref = current.task.clone();
             if let Err(error) = super::super::turn_usage::record(
                 &session.home,
                 &session.group_id,
@@ -283,12 +321,18 @@ fn complete_turn(session: &Session, message: &Value) {
                 session.managed.generation(),
                 &turn_id,
                 task.as_deref(),
+                task_ref.as_deref(),
                 usage,
                 &settled.status,
             ) {
                 tracing::warn!(%error, group_id = %session.group_id, actor_id = %session.actor_id, "failed to append turn usage");
             }
         }
+    }
+    // The batch is spent: its card belonged to this turn, and the delivery's
+    // registration is dropped so the map cannot grow.
+    if let Some(delivery) = current.delegation.as_deref() {
+        session.forget_delivery_task(delivery);
     }
     active_turn.take();
     // A completed turn is not automatically a successful turn. Providers report
@@ -467,12 +511,41 @@ mod tests {
         let active_turn = std::sync::Mutex::new(None);
 
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-terminal"),
+            observe_started_turn(&active_turn, "turn-terminal", None, None),
             StartedTurnDisposition::Adopted
         );
         let active = active_turn.lock().expect("active turn");
         let active = active.as_ref().expect("adopted turn");
         assert_eq!(active.turn_id, "turn-terminal");
+        assert!(active.task.is_none(), "no batch named a task here");
+    }
+
+    /// The card belongs to the turn, not to the session: a batch that arrives
+    /// while a turn runs — and is deferred or refused — leaves that turn's
+    /// binding alone.
+    #[test]
+    fn a_later_batch_cannot_rename_the_running_turn() {
+        let active_turn = std::sync::Mutex::new(None);
+        assert_eq!(
+            observe_started_turn(&active_turn, "turn-a", Some("T089".into()), None),
+            StartedTurnDisposition::Adopted
+        );
+        // Turn A is running; the next batch's card never reaches it.
+        {
+            let running = active_turn.lock().expect("active");
+            let running = running.as_ref().expect("turn a");
+            assert_eq!(running.task.as_deref(), Some("T089"));
+        }
+        assert_eq!(
+            observe_started_turn(&active_turn, "turn-a", Some("T090".into()), None),
+            StartedTurnDisposition::Matched
+        );
+        let running = active_turn.lock().expect("active");
+        assert_eq!(
+            running.as_ref().expect("turn a").task.as_deref(),
+            Some("T089"),
+            "the deferred batch's card did not rename the running turn"
+        );
     }
 
     #[test]
@@ -498,14 +571,16 @@ mod tests {
     fn a_repeated_started_event_matches_the_active_turn_but_not_an_overlap() {
         let active_turn = std::sync::Mutex::new(Some(ActiveTurn {
             turn_id: "turn-terminal".into(),
+            delegation: None,
+            task: None,
         }));
 
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-terminal"),
+            observe_started_turn(&active_turn, "turn-terminal", None, None),
             StartedTurnDisposition::Matched
         );
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-overlap"),
+            observe_started_turn(&active_turn, "turn-overlap", None, None),
             StartedTurnDisposition::Conflict
         );
     }

@@ -184,7 +184,7 @@ pub enum GroupState {
     Stopped,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Actor {
     #[serde(default = "version")]
     pub v: u8,
@@ -193,6 +193,14 @@ pub struct Actor {
     pub role: Option<ActorRole>,
     #[serde(default)]
     pub title: String,
+    /// The model this Actor runs, as its operator names it. A label for
+    /// people and tools; launching does not read it. Empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default)]
+    pub model_cost_usd_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub model_strength: Option<u8>,
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
@@ -245,6 +253,9 @@ impl Actor {
             id: id.into(),
             role: None,
             title: String::new(),
+            model: String::new(),
+            model_cost_usd_per_mtok: None,
+            model_strength: None,
             command: Vec::new(),
             env: BTreeMap::new(),
             default_scope_key: String::new(),
