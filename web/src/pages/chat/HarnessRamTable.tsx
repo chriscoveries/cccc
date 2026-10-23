@@ -83,7 +83,7 @@ export function HarnessRamTable({ groupId, isDark }: { groupId: string; isDark: 
     return () => {
       cancelled = true;
     };
-  }, [open, groupId, attempt]);
+  }, [open, groupId, attempt, loading]);
 
   const keys = report?.keys ?? [];
   return (

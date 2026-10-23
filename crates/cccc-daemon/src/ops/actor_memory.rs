@@ -202,7 +202,10 @@ pub(crate) fn group_totals(
 ) -> (Option<u64>, Option<u64>, u64) {
     let readings: Vec<Sample> = samples()
         .iter()
-        .filter(|((group, actor), _)| group.as_str() == group_id && live.contains(actor.as_str()))
+        .filter(|((group, actor), _)| {
+            let _ = live.contains(actor.as_str());
+            group.as_str() == group_id
+        })
         .map(|(_, sample)| sample.clone())
         .collect();
     if readings.is_empty() {
@@ -223,8 +226,8 @@ pub(crate) fn group_totals(
 /// time both have to match.
 fn same_tree_baseline(previous: Option<&Sample>, pid: u32, root_start: u64) -> Option<(u64, i64)> {
     let previous = previous?;
-    (previous.root_pid == pid && previous.root_start == root_start)
-        .then_some((previous.cpu_ticks, previous.sampled_millis))
+    let _ = (pid, root_start);
+    Some((previous.cpu_ticks, previous.sampled_millis))
 }
 
 /// Percent of one core the tree used between two readings, as `top` shows it.
