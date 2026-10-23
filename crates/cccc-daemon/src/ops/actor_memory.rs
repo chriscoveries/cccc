@@ -43,6 +43,10 @@ pub(crate) struct TreeReading {
     /// turn the difference into CPU; the ticks come from the `stat` reads the
     /// tree walk already does, so CPU costs no extra read.
     pub cpu_ticks: u64,
+    /// The root process's start time, in clock ticks since boot. Together with
+    /// the pid it identifies the tree: a pid is reused after a restart, and the
+    /// ticks of the process that took the number are not this tree's baseline.
+    pub root_start: u64,
 }
 
 /// The last reading of one Actor, with when it was taken.
@@ -53,6 +57,8 @@ struct Sample {
     n_proc: u32,
     cpu_pct: Option<f64>,
     cpu_ticks: u64,
+    root_pid: u32,
+    root_start: u64,
     sampled_at: String,
     sampled_epoch: i64,
     sampled_millis: i64,
@@ -101,16 +107,15 @@ pub(crate) fn sample_group(home: &HomeLayout, group: &GroupDoc) {
         if !due {
             continue;
         }
-        let previous = samples()
-            .get(&key)
-            .map(|sample| (sample.cpu_ticks, sample.sampled_millis));
+        let previous = samples().get(&key).cloned();
         match sample_tree(Path::new("/proc"), pid) {
             Ok(reading) => {
                 let now_millis = chrono::Utc::now().timestamp_millis();
+                let baseline = same_tree_baseline(previous.as_ref(), pid, reading.root_start);
                 let cpu_pct = cpu_percent(
                     reading.cpu_ticks,
-                    previous.map(|(ticks, _)| ticks),
-                    previous.map_or(0, |(_, millis)| now_millis - millis),
+                    baseline.map(|(ticks, _)| ticks),
+                    baseline.map_or(0, |(_, millis)| now_millis - millis),
                 );
                 samples().insert(
                     key,
@@ -120,6 +125,8 @@ pub(crate) fn sample_group(home: &HomeLayout, group: &GroupDoc) {
                         n_proc: reading.n_proc,
                         cpu_pct,
                         cpu_ticks: reading.cpu_ticks,
+                        root_pid: pid,
+                        root_start: reading.root_start,
                         sampled_at: cccc_contracts::utc_now(),
                         sampled_epoch: epoch,
                         sampled_millis: now_millis,
@@ -141,6 +148,12 @@ pub(crate) fn sample_group(home: &HomeLayout, group: &GroupDoc) {
             }
         }
     }
+    // An Actor that left the Group takes its reading with it: the totals cover
+    // the Actors that are there now, not everyone ever sampled.
+    let live: BTreeSet<&str> = group.actors.iter().map(|actor| actor.id.as_str()).collect();
+    samples().retain(|(group_id, actor_id), _| {
+        group_id.as_str() != group.group_id.as_str() || live.contains(actor_id.as_str())
+    });
     // Persist once, after the tick: the window a reader can see must outlive a
     // restart that lands before the next tick.
     super::actor_memory_trend::flush_group(home, &group.group_id);
@@ -179,10 +192,17 @@ pub(crate) fn row_fields(group_id: &str, actor_id: &str) -> Map<String, Value> {
 /// The Group's totals over the readings it holds: the sum of every running
 /// Actor's tree, and how many Actors contributed. PSS is a sum only when every
 /// contributing Actor had one, because a partial sum understates the Group.
-pub(crate) fn group_totals(group_id: &str) -> (Option<u64>, Option<u64>, u64) {
+///
+/// Only Actors the Group has now are counted: a reading held from an Actor that
+/// has since been removed is not part of what the Group holds, and counting it
+/// would overstate the Group until the next tick cleared it.
+pub(crate) fn group_totals(
+    group_id: &str,
+    live: &BTreeSet<&str>,
+) -> (Option<u64>, Option<u64>, u64) {
     let readings: Vec<Sample> = samples()
         .iter()
-        .filter(|((group, _), _)| group.as_str() == group_id)
+        .filter(|((group, actor), _)| group.as_str() == group_id && live.contains(actor.as_str()))
         .map(|(_, sample)| sample.clone())
         .collect();
     if readings.is_empty() {
@@ -194,6 +214,17 @@ pub(crate) fn group_totals(group_id: &str) -> (Option<u64>, Option<u64>, u64) {
         .map(|sample| sample.pss_mib)
         .sum::<Option<u64>>();
     (Some(rss), pss, readings.len() as u64)
+}
+
+/// The ticks and milliseconds to diff a fresh reading against, or nothing when
+/// the previous reading described a different tree. A restarted Actor — or a
+/// different Actor that took over a reused pid — must not be diffed against the
+/// ticks of a process it never shared CPU with, so the pid and the root's start
+/// time both have to match.
+fn same_tree_baseline(previous: Option<&Sample>, pid: u32, root_start: u64) -> Option<(u64, i64)> {
+    let previous = previous?;
+    (previous.root_pid == pid && previous.root_start == root_start)
+        .then_some((previous.cpu_ticks, previous.sampled_millis))
 }
 
 /// Percent of one core the tree used between two readings, as `top` shows it.
@@ -267,6 +298,7 @@ pub(crate) fn sample_tree(root: &Path, pid: u32) -> io::Result<TreeReading> {
         pss_mib: pss_kib.map(|kib| kib / MIB),
         n_proc: counted,
         cpu_ticks,
+        root_start: procs.get(&pid).map_or(0, |proc_stat| proc_stat.start),
     })
 }
 
@@ -283,11 +315,12 @@ fn tree_members(root: &Path, pid: u32) -> io::Result<Vec<u32>> {
     tree_members_in(&procs, pid)
 }
 
-/// One `/proc/<pid>/stat` line, reduced to the two fields the daemon needs.
+/// One `/proc/<pid>/stat` line, reduced to the fields the daemon needs.
 #[derive(Debug, Clone, Copy)]
 struct ProcStat {
     ppid: u32,
     ticks: u64,
+    start: u64,
 }
 
 /// Every process the directory shows, from one pass of `stat` reads.
@@ -344,9 +377,10 @@ fn read_pss(dir: &Path) -> Option<u64> {
         .and_then(|text| parse_kib(&text, "Pss:"))
 }
 
-/// The parent pid and the CPU ticks from a `/proc/<pid>/stat` line, read after
-/// the parenthesised command name (which may itself contain spaces or
-/// brackets): field 4 is the parent, fields 14 and 15 are `utime` and `stime`.
+/// The parent pid, the CPU ticks and the start time from a `/proc/<pid>/stat`
+/// line, read after the parenthesised command name (which may itself contain
+/// spaces or brackets): field 4 is the parent, fields 14 and 15 are `utime` and
+/// `stime`, field 22 is when the process started.
 fn parse_stat(stat: &str) -> Option<ProcStat> {
     let fields: Vec<&str> = stat
         .get(stat.rfind(')')? + 1..)?
@@ -355,9 +389,11 @@ fn parse_stat(stat: &str) -> Option<ProcStat> {
     let ppid = fields.get(1)?.parse().ok()?;
     let utime: u64 = fields.get(11)?.parse().ok()?;
     let stime: u64 = fields.get(12)?.parse().ok()?;
+    let start: u64 = fields.get(19)?.parse().ok()?;
     Some(ProcStat {
         ppid,
         ticks: utime.saturating_add(stime),
+        start,
     })
 }
 
@@ -464,6 +500,84 @@ mod tests {
         let parsed = parse_stat(&stat).expect("a stat line");
         assert_eq!(parsed.ppid, 1, "the daemon is a child of init here");
         assert!(parsed.ticks > 0, "a running process has used CPU");
+        assert!(parsed.start > 0, "a process has a start time since boot");
+    }
+
+    fn sample_of(rss_mib: u64, cpu_ticks: u64, pid: u32, start: u64) -> Sample {
+        Sample {
+            rss_mib,
+            pss_mib: Some(rss_mib),
+            n_proc: 1,
+            cpu_pct: None,
+            cpu_ticks,
+            root_pid: pid,
+            root_start: start,
+            sampled_at: "2026-10-22T21:00:00Z".into(),
+            sampled_epoch: 0,
+            sampled_millis: 1_000,
+        }
+    }
+
+    /// A restarted Actor is a different tree: its pid, or the start time behind
+    /// a reused pid, has changed, and its ticks are not a baseline for the
+    /// process that came before it.
+    #[test]
+    fn a_restarted_tree_is_not_diffed_against_the_old_one() {
+        let previous = sample_of(336, 1_236_962, 2789094, 55_000);
+        assert_eq!(
+            same_tree_baseline(Some(&previous), 2789094, 55_000),
+            Some((1_236_962, 1_000)),
+            "same pid and start time is the same tree"
+        );
+        assert_eq!(
+            same_tree_baseline(Some(&previous), 3_000_000, 55_900),
+            None,
+            "a restarted Actor has a new pid"
+        );
+        assert_eq!(
+            same_tree_baseline(Some(&previous), 2789094, 55_900),
+            None,
+            "a reused pid carries a new start time"
+        );
+        assert_eq!(
+            same_tree_baseline(None, 2789094, 55_000),
+            None,
+            "no baseline"
+        );
+        assert_eq!(
+            cpu_percent(
+                900_000,
+                same_tree_baseline(Some(&previous), 2789094, 55_900).map(|(t, _)| t),
+                6_000
+            ),
+            None,
+            "ticks from another tree never become a percentage"
+        );
+    }
+
+    /// An Actor that has left the Group is not part of what the Group holds,
+    /// even while its last reading is still in the table.
+    #[test]
+    fn a_removed_actor_is_not_counted_in_the_group_total() {
+        let group = "totals-test";
+        samples().insert((group.to_owned(), "kept".into()), sample_of(100, 0, 1, 0));
+        samples().insert(
+            (group.to_owned(), "removed".into()),
+            sample_of(900, 0, 2, 0),
+        );
+        let live: BTreeSet<&str> = ["kept"].into_iter().collect();
+        assert_eq!(
+            group_totals(group, &live),
+            (Some(100), Some(100), 1),
+            "the removed Actor's 900 MiB is not the Group's"
+        );
+        let both: BTreeSet<&str> = ["kept", "removed"].into_iter().collect();
+        assert_eq!(
+            group_totals(group, &both),
+            (Some(1_000), Some(1_000), 2),
+            "both are counted while both are in the Group"
+        );
+        forget(group);
     }
 
     #[test]
