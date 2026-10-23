@@ -13,15 +13,21 @@ import { useGroupMenu } from "./useGroupMenu";
 import type { GroupControl } from "../../utils/groupControls";
 import { AppSettingsMenu } from "./AppSettingsMenu";
 import { fetchActors, stopActor } from "../../services/api/actors";
+import { fetchGroupHealth, type GroupHealth } from "../../services/api/groups";
 
 type ActorRow = {
   id: string;
   runtime?: string;
+  effective_runtime?: string;
+  runner_effective?: string;
   runtime_mode?: string;
+  effective_runtime_mode?: string;
   model?: string;
   model_cost_usd_per_mtok?: number | null;
   model_strength?: number | null;
   running?: boolean;
+  rss_mib?: number | null;
+  cpu_pct?: number | null;
 };
 
 export interface AppHeaderProps {
@@ -78,7 +84,17 @@ export function AppHeader({
   const controlsBusy = useUIStore((state) => state.busy.startsWith("group-"));
   const groupTitle = groupDoc?.title || (selectedGroupId ? selectedGroupId : t("selectGroup"));
   const canEditGroup = !!selectedGroupId && !webReadOnly && !!onOpenGroupEdit;
+  const selectedStatus = selectedGroupId
+    ? getGroupStatusFromSource({
+        running: selectedGroupRunning,
+        state:
+          (selectedGroupRuntimeStatus?.lifecycle_state as GroupDoc["state"] | undefined) ||
+          groupDoc?.state,
+        runtime_status: selectedGroupRuntimeStatus || undefined,
+      })
+    : null;
   const [actors, setActors] = useState<ActorRow[]>([]);
+  const [health, setHealth] = useState<GroupHealth | null>(null);
   useEffect(() => {
     if (!selectedGroupId) {
       setActors([]);
@@ -100,15 +116,38 @@ export function AppHeader({
       window.clearInterval(id);
     };
   }, [selectedGroupId]);
-  const selectedStatus = selectedGroupId
-    ? getGroupStatusFromSource({
-        running: selectedGroupRunning,
-        state:
-          (selectedGroupRuntimeStatus?.lifecycle_state as GroupDoc["state"] | undefined) ||
-          groupDoc?.state,
-        runtime_status: selectedGroupRuntimeStatus || undefined,
-      })
-    : null;
+  useEffect(() => {
+    if (!selectedGroupId) {
+      setHealth(null);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const resp = await fetchGroupHealth(selectedGroupId);
+        if (!cancelled && resp.ok) setHealth(resp.result);
+      } catch {
+        if (!cancelled) setHealth(null);
+      }
+    };
+    load();
+    const id = window.setInterval(load, 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [selectedGroupId]);
+
+  const healthText =
+    health && selectedStatus?.key === "run"
+      ? ` · ${health.rss_mib != null ? `${(health.rss_mib / 1024).toFixed(1)} GiB` : "—"}` +
+        (health.host_mem_available_mib != null
+          ? ` · ${(health.host_mem_available_mib / 1024).toFixed(1)} GiB free`
+          : "") +
+        (health.host_loadavg_1m != null && health.host_cpu_count != null
+          ? ` · load ${health.host_loadavg_1m.toFixed(1)}/${health.host_cpu_count}`
+          : "")
+      : "";
   const runLabel = selectedStatus
     ? t("groupRun.control", {
         group: groupTitle,
@@ -120,7 +159,7 @@ export function AppHeader({
             stop: "statusStopped",
           }[selectedStatus.key],
         ),
-      })
+      }) + (selectedStatus.key === "run" ? healthText : "")
     : "";
   const sseErrorDetail = useSseErrorDetailText();
   const statusControlLabel =
@@ -139,9 +178,7 @@ export function AppHeader({
     ...actors
       .filter((a: ActorRow) => a?.id && a.running)
       .map((a: ActorRow) => ({
-        label: `${a.id} · ${a.runtime ?? "—"} · ${a.runtime_mode ?? "—"} · ${a.model ?? "—"} · ${
-          a.model_cost_usd_per_mtok != null ? `$${a.model_cost_usd_per_mtok}/Mtok` : "—"
-        } · ${a.model_strength != null ? `str ${a.model_strength}` : "—"}`,
+        label: `${a.id} · ${a.effective_runtime ?? a.runtime ?? "—"} · ${a.runner_effective ?? a.effective_runtime_mode ?? a.runtime_mode ?? "—"} · ${a.model ?? "—"} · ${a.model_cost_usd_per_mtok != null ? `$${a.model_cost_usd_per_mtok}/Mtok` : "—"} · ${a.model_strength != null ? `str ${a.model_strength}` : "—"} · ${a.rss_mib != null ? `${a.rss_mib} MiB` : "—"} · ${a.cpu_pct != null ? `${a.cpu_pct}%` : "—"} · Stop`,
         onClick: () => {
           if (selectedGroupId && window.confirm(`Stop ${a.id}?`))
             void stopActor(selectedGroupId, a.id);
@@ -215,6 +252,11 @@ export function AppHeader({
                     variant="badge"
                     className="min-h-8 min-w-8 justify-center pointer-coarse:min-h-10 pointer-coarse:min-w-10 [&>span:last-child]:hidden @min-[480px]/group-work-header:[&>span:last-child]:inline !border-transparent !bg-transparent @min-[480px]/group-work-header:!rounded-full @min-[480px]/group-work-header:!border-[var(--glass-border-subtle)] @min-[480px]/group-work-header:pr-6 cursor-pointer transition-colors hover:text-[var(--color-text-primary)]"
                   />
+                  {selectedStatus?.key === "run" && healthText ? (
+                    <span className="hidden @min-[480px]/group-work-header:inline text-xs text-[var(--color-text-secondary)]">
+                      {healthText.trim()}
+                    </span>
+                  ) : null}
                   <ChevronDownIcon
                     size={13}
                     aria-hidden="true"

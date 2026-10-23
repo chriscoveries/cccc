@@ -1,4 +1,4 @@
-import type { Actor, ActorProfile, ActorProfileUsage } from "../../types";
+import type { Actor, ActorProfile, ActorProfileUsage, HarnessRamReport } from "../../types";
 import { actorProfileIdentityKey } from "../../utils/actorProfiles";
 import {
   actorsReadOnlyRequestKey,
@@ -480,4 +480,10 @@ export async function copyProfilePrivateEnvFromProfile(
       }),
     },
   );
+}
+
+/// Harness RAM over the last 72 hours: one row per (harness, mode).
+export async function fetchMemoryReport(groupId: string, init?: RequestInit) {
+  const gid = String(groupId || "").trim();
+  return apiJson<HarnessRamReport>(`/api/v1/groups/${encodeURIComponent(gid)}/actor_memory`, init);
 }

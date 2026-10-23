@@ -115,6 +115,8 @@ it("restores snapshots silently, ignores replayed deltas, and admits only fresh 
           runner: "pty",
           unreadCount: 0,
           webModelQueuedCount: 0,
+          memoryMib: null,
+          memoryLabel: "",
           liveWorkCard: card,
         })),
         b.rawHeadlessEventsByActorId,
