@@ -571,6 +571,7 @@ mod tests {
     fn a_repeated_started_event_matches_the_active_turn_but_not_an_overlap() {
         let active_turn = std::sync::Mutex::new(Some(ActiveTurn {
             turn_id: "turn-terminal".into(),
+            delegation: None,
             task: None,
         }));
 
