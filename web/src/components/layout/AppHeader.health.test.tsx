@@ -5,7 +5,10 @@ import { afterEach, expect, it, vi } from "vite-plus/test";
 import { AppHeader, type AppHeaderProps } from "./AppHeader";
 
 vi.mock("react-i18next", () => ({
-  useTranslation: () => ({ t: (k: string) => k, i18n: { language: "en", changeLanguage: vi.fn() } }),
+  useTranslation: () => ({
+    t: (k: string) => k,
+    i18n: { language: "en", changeLanguage: vi.fn() },
+  }),
 }));
 vi.mock("../../services/api/actors", () => ({
   fetchActors: vi.fn(async () => ({
@@ -93,10 +96,6 @@ it("renders actor rows and calls stopActor", async () => {
   expect(menu!.textContent).toContain("42%");
   expect(menu!.textContent).toContain("actor-b");
   expect(menu!.textContent).toContain("—");
-  const stopBtn = Array.from(menu!.querySelectorAll<HTMLButtonElement>("button")).find(
-    (b) => b.textContent?.trim() === "actor-a · 128 MiB · 42%",
-  );
-  // find a stop button near actor-a
   const buttons = Array.from(menu!.querySelectorAll<HTMLButtonElement>("button"));
   const target = buttons.find((b) => b.textContent?.includes("actor-a"));
   expect(target).toBeTruthy();
