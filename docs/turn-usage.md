@@ -26,7 +26,9 @@ named and looked up by that id when the turn starts; when the start event comes
 first it claims the card itself. Deliveries are admitted one at a time per Actor, so
 the card being claimed always belongs to the delivery being resolved: a second
 delivery — deferred, refused, or merely observed first — cannot rename what the
-running turn is charged to. A delivery that starts no turn binds nothing, and a
+running turn is charged to. A batch that named no single card still gets an entry,
+holding nothing, so a turn resolved as unattributed never falls back to another
+delivery's card; a delivery that starts no turn leaves no entry at all, and a
 terminal route with no authoritative turn id leaves the turn unattributed rather
 than guessing. It stays null
 unless the delivery named exactly one task: refs are counted, not deduplicated,

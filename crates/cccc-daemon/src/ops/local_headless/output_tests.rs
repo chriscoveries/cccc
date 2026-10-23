@@ -277,7 +277,10 @@ async fn a_turn_keeps_its_card_even_when_it_is_observed_after_another_delivery()
     // B never started here, so its binding is still waiting for its own turn and
     // is untouched by A's settlement.
     assert_eq!(
-        f.session.take_turn_task("captured-turn-b").as_deref(),
+        f.session
+            .take_turn_task("captured-turn-b")
+            .flatten()
+            .as_deref(),
         Some(deferred_card.as_str()),
         "another delivery's card is not spent on this turn"
     );
@@ -417,6 +420,77 @@ async fn a_turn_observed_before_its_acceptance_keeps_the_card_its_delivery_named
         usage[0].data["task_ref"],
         card.as_str(),
         "the turn is charged to the card its early start event claimed"
+    );
+}
+
+/// A turn whose own delivery named no card is unattributed and stays that way: it
+/// does not take the card of the delivery being admitted while it finishes.
+#[tokio::test]
+async fn an_unattributed_turn_never_claims_another_deliverys_card() {
+    use crate::ops::codex_voice_analyst::{CAPTURED_PI_TOOL_TURN, replay_captured_pi_turn};
+    use cccc_contracts::ActorRuntime;
+
+    let mut f = Fixture::new(false, "");
+    let messages = replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01");
+    let thread = messages[0]["params"]["threadId"]
+        .as_str()
+        .expect("owned thread");
+    f.session.managed = Arc::new(AnalystSession::for_usage_test(
+        f._temp.path(),
+        ActorRuntime::Pi,
+        thread,
+    ));
+    let synced = cccc_core::context::ContextStore::new(f.session.home.clone())
+        .expect("context store")
+        .sync(
+            &f.session.group_id,
+            &[json!({"op":"task.create","title":"The next delivery"})
+                .as_object()
+                .cloned()
+                .expect("operation")],
+            None,
+            "user",
+            false,
+        )
+        .expect("create task");
+    let next_card = synced.changes[0]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+    let turn_id = messages
+        .iter()
+        .find_map(|message| message.pointer("/params/turn/id").and_then(Value::as_str))
+        .expect("captured turn id")
+        .to_owned();
+
+    // This turn's delivery named no card, so its acceptance resolved it to
+    // nothing at all rather than leaving it unresolved.
+    f.session.bind_turn_task(&turn_id, None);
+    // Another delivery is now being admitted, holding its own card.
+    f.session.set_pending_turn_task(Some(next_card.clone()));
+    for message in &messages {
+        handle_message(&f.session, message.clone());
+    }
+
+    let path = GroupStore::new(f.session.home.clone())
+        .expect("store")
+        .ledger_path(&f.session.group_id)
+        .expect("group ledger");
+    let usage = cccc_core::ledger::read_all(&path)
+        .expect("ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1, "one settled turn, one usage record");
+    assert!(
+        usage[0].data["task_ref"].is_null(),
+        "a turn that named no card is charged to nothing, got {}",
+        usage[0].data["task_ref"]
+    );
+    assert_eq!(
+        f.session.take_pending_turn_task().as_deref(),
+        Some(next_card.as_str()),
+        "the delivery being admitted keeps its own card"
     );
 }
 
