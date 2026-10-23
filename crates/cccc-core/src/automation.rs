@@ -18,6 +18,18 @@ pub const STANDUP_SNIPPET: &str = "{{interval_minutes}} minutes have passed. Sta
 
 #[derive(Debug, Clone)]
 pub enum ScheduledAction {
+    DispatchReadyTask {
+        group_id: String,
+        rule_id: String,
+        fired_at: i64,
+        one_time: bool,
+        cooldown_ms: u64,
+        idle_actor_ids: HashSet<String>,
+    },
+    NotifyIdleHeldTasks {
+        group_id: String,
+        idle_actor_ids: HashSet<String>,
+    },
     GroupState {
         group_id: String,
         state: String,
@@ -241,7 +253,20 @@ fn tick_group_inner(
     }
     let mut state = state::load(&store, group_id)?;
     let previous = state.clone();
-    tick_rules(&store, &group, &mut state, &mut result)?;
+    tick_rules(&store, &group, &mut state, &mut result, idle_actor_ids)?;
+    if group
+        .extra
+        .get("delivery")
+        .and_then(|delivery| delivery.get("notify_idle_held_tasks"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        && !idle_actor_ids.is_empty()
+    {
+        result.actions.push(ScheduledAction::NotifyIdleHeldTasks {
+            group_id: group_id.to_owned(),
+            idle_actor_ids: idle_actor_ids.clone(),
+        });
+    }
     // Save before issuing unread notices: a notice written to the ledger counts
     // as issued, so no error may follow it and drop the result carrying it.
     if state != previous {
@@ -266,12 +291,22 @@ fn tick_rules(
     group: &GroupDoc,
     state: &mut RuntimeState,
     result: &mut TickResult,
+    idle_actor_ids: &HashSet<String>,
 ) -> io::Result<()> {
     let Some(rules) = group.automation.get("rules").and_then(Value::as_array) else {
         return Ok(());
     };
     let now = Utc::now();
     for rule in rules.iter().filter_map(Value::as_object) {
+        if rule
+            .get("action")
+            .and_then(|a| a.get("kind"))
+            .and_then(Value::as_str)
+            == Some("dispatch_ready_task")
+            && rule.get("enabled").and_then(Value::as_bool) != Some(true)
+        {
+            continue;
+        }
         if rule.get("enabled").and_then(Value::as_bool) == Some(false) {
             continue;
         }
@@ -303,6 +338,21 @@ fn tick_rules(
         let one_time = trigger_kind == "at";
         let mut completed = false;
         match kind {
+            "dispatch_ready_task" => {
+                if !idle_actor_ids.is_empty() {
+                    result.actions.push(ScheduledAction::DispatchReadyTask {
+                        group_id: group.group_id.clone(),
+                        rule_id: id.into(),
+                        fired_at: now.timestamp(),
+                        one_time,
+                        cooldown_ms: action
+                            .and_then(|a| a.get("dispatch_cooldown_ms"))
+                            .and_then(Value::as_u64)
+                            .unwrap_or(60_000),
+                        idle_actor_ids: idle_actor_ids.clone(),
+                    });
+                }
+            }
             "notify" => {
                 let scheduled_at = scheduled_at(trigger, last_fired, now);
                 let events = notify_events(group, id, rule, action, &scheduled_at);

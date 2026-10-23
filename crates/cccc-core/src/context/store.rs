@@ -22,6 +22,13 @@ impl ContextStore {
     pub fn load(&self, group_id: &str) -> io::Result<ContextDoc> {
         let paths = self.paths(group_id)?;
         with_exclusive_lock(&paths.lock_file, || {
+            super::dispatch_transaction::recover_locked(
+                paths
+                    .context_file
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .expect("group directory"),
+            )?;
             migrate_legacy_json(&paths)?;
             yaml_storage::load(&paths)
         })
@@ -30,6 +37,13 @@ impl ContextStore {
     pub fn load_overview(&self, group_id: &str) -> io::Result<ContextDoc> {
         let paths = self.paths(group_id)?;
         with_exclusive_lock(&paths.lock_file, || {
+            super::dispatch_transaction::recover_locked(
+                paths
+                    .context_file
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .expect("group directory"),
+            )?;
             migrate_legacy_json(&paths)?;
             yaml_storage::load_overview(&paths)
         })
@@ -67,6 +81,13 @@ impl ContextStore {
     ) -> io::Result<ContextSyncResult> {
         let paths = self.paths(group_id)?;
         with_exclusive_lock(&paths.lock_file, || {
+            super::dispatch_transaction::recover_locked(
+                paths
+                    .context_file
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .expect("group directory"),
+            )?;
             migrate_legacy_json(&paths)?;
             let before = yaml_storage::load(&paths)?;
             let current_version = self.version(&before)?;
