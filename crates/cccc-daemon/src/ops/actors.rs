@@ -2,12 +2,13 @@ use super::operation::{
     Operation,
     Policy::{Read, Write},
 };
-use cccc_contracts::{Actor, ActorRuntime, DaemonRequest, Event};
+use cccc_contracts::{Actor, ActorRole, ActorRuntime, DaemonRequest, Event};
 use cccc_core::actors;
+use cccc_core::context::ContextStore;
 use cccc_core::ledger;
 use cccc_core::permissions::{self, ActorAction};
 use cccc_core::{GroupDoc, GroupStore, HomeLayout, group_scope, web_model_connectors};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 use crate::dispatch::{OpError, OpResult, object, required_arg, store, string_arg};
@@ -193,6 +194,8 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         ));
     }
     patch.remove("runtime_state_source");
+    patch.remove("model_cost_usd_per_mtok");
+    patch.remove("model_strength");
     if let Some(value) = patch.get("default_scope_key") {
         let reference = value
             .as_str()
@@ -491,6 +494,13 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let actor_id = required_arg(request, "actor_id")?;
     let group = store(home)?.load(&group_id).map_err(OpError::not_found)?;
     authorize(&group, request, ActorAction::Remove, &actor_id)?;
+    // The Foreman is the first visible Actor: removing it hands the role on.
+    let succession =
+        (actors::effective_role(&group, &actor_id) == Some(ActorRole::Foreman)).then(|| {
+            actors::visible(&group)
+                .find(|actor| actor.id != actor_id)
+                .map(|actor| actor.id.clone())
+        });
     let index = group
         .actors
         .iter()
@@ -593,6 +603,18 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             ));
         }
     };
+    if let Some(successor) = succession
+        && let Err(error) = append_event(
+            home,
+            &group_id,
+            "group.foreman_change",
+            request,
+            json!({"from": actor_id, "to": successor}),
+        )
+    {
+        // The removal is committed; a missing record is not worth undoing it.
+        tracing::warn!(error = %error.message, %group_id, %actor_id, "foreman change not recorded");
+    }
     if let Err(error) = remove_persisted_headless_state(home, &group_id, &actor_id) {
         tracing::warn!(%error, %group_id, %actor_id, "post-commit headless state cleanup failed");
     }
@@ -605,7 +627,69 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     if let Err(error) = runtime_session::native_acp::retire_all(home, &group_id, &actor_id) {
         tracing::warn!(%error,%group_id,%actor_id,"post-commit native ACP receipt cleanup failed");
     }
+    if let Err(error) = release_open_tasks(home, &group_id, &actor_id, &event.by) {
+        tracing::warn!(%error, %group_id, %actor_id, "post-commit task release failed");
+    }
     object(json!({"actor_id": actor_id, "event": event}))
+}
+
+/// Active and planned tasks assigned to a removed Actor return to the board
+/// unassigned; their notes and every finished task stay as they are. One
+/// `context.sync` event records the release.
+fn release_open_tasks(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    by: &str,
+) -> std::io::Result<()> {
+    let contexts = ContextStore::new(home.clone())?;
+    // The version check retries when the board changes between read and write.
+    for _ in 0..3 {
+        let document = contexts.load(group_id)?;
+        let operations = document
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.get("assignee").and_then(Value::as_str) == Some(actor_id)
+                    && matches!(
+                        task.get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("planned"),
+                        "planned" | "active"
+                    )
+            })
+            .filter_map(|task| task.get("id").and_then(Value::as_str))
+            .map(|task_id| {
+                Map::from_iter([
+                    ("op".into(), json!("task.update")),
+                    ("task_id".into(), json!(task_id)),
+                    ("assignee".into(), Value::Null),
+                ])
+            })
+            .collect::<Vec<_>>();
+        if operations.is_empty() {
+            return Ok(());
+        }
+        let version = contexts.version(&document)?;
+        let result = match contexts.sync(group_id, &operations, Some(&version), by, false) {
+            Ok(result) => result,
+            Err(error) if error.to_string() == "version_conflict" => continue,
+            Err(error) => return Err(error),
+        };
+        let mut event = Event::new("context.sync", group_id);
+        event.by = by.to_owned();
+        event.data = Map::from_iter([
+            ("version".into(), json!(result.version)),
+            ("changes".into(), json!(result.changes)),
+        ]);
+        return ledger::append(
+            &GroupStore::new(home.clone())?.ledger_path(group_id)?,
+            &event,
+        );
+    }
+    Err(std::io::Error::other(
+        "tasks kept changing while releasing them",
+    ))
 }
 
 fn restore_removed_and_runtime(
@@ -937,7 +1021,10 @@ fn rollback_actor_lifecycle(
 
 fn actor_from_args(request: &DaemonRequest) -> Result<Actor, OpError> {
     if let Some(value) = request.args.get("actor") {
-        if value.get("runner").is_some() {
+        if value.get("runner").is_some()
+            || value.get("model_cost_usd_per_mtok").is_some()
+            || value.get("model_strength").is_some()
+        {
             return Err(OpError::new(
                 "unsupported_field",
                 "runner is derived from the Runtime and cannot be selected",
@@ -959,7 +1046,7 @@ fn actor_from_args(request: &DaemonRequest) -> Result<Actor, OpError> {
     for (key, item) in &request.args {
         if !matches!(
             key.as_str(),
-            "group_id" | "actor_id" | "by" | "env_private" | "runtime_state_source"
+            "group_id" | "actor_id" | "by" | "env_private" | "runtime_state_source" | "model_cost_usd_per_mtok" | "model_strength"
         ) {
             object.insert(key.clone(), item.clone());
         }
