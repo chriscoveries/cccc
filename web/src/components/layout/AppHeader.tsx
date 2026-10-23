@@ -1,5 +1,6 @@
 import { useUIStore } from "../../stores/useUIStore";
 import type { Ref } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getGroupStatusFromSource } from "../../utils/groupStatus";
 import { GroupDoc, GroupRuntimeStatus, TextScale, Theme } from "../../types";
@@ -11,6 +12,17 @@ import { groupRunMenuActions } from "./groupRunMenuActions";
 import { useGroupMenu } from "./useGroupMenu";
 import type { GroupControl } from "../../utils/groupControls";
 import { AppSettingsMenu } from "./AppSettingsMenu";
+import { fetchActors, stopActor } from "../../services/api/actors";
+
+type ActorRow = {
+  id: string;
+  runtime?: string;
+  runtime_mode?: string;
+  model?: string;
+  model_cost_usd_per_mtok?: number | null;
+  model_strength?: number | null;
+  running?: boolean;
+};
 
 export interface AppHeaderProps {
   theme: Theme;
@@ -66,6 +78,28 @@ export function AppHeader({
   const controlsBusy = useUIStore((state) => state.busy.startsWith("group-"));
   const groupTitle = groupDoc?.title || (selectedGroupId ? selectedGroupId : t("selectGroup"));
   const canEditGroup = !!selectedGroupId && !webReadOnly && !!onOpenGroupEdit;
+  const [actors, setActors] = useState<ActorRow[]>([]);
+  useEffect(() => {
+    if (!selectedGroupId) {
+      setActors([]);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const resp = await fetchActors(selectedGroupId);
+        if (!cancelled && resp?.ok) setActors(resp.result?.actors ?? []);
+      } catch {
+        if (!cancelled) setActors([]);
+      }
+    };
+    load();
+    const id = window.setInterval(load, 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [selectedGroupId]);
   const selectedStatus = selectedGroupId
     ? getGroupStatusFromSource({
         running: selectedGroupRunning,
@@ -93,17 +127,28 @@ export function AppHeader({
     sseStatus === "connected"
       ? runLabel
       : `${runLabel} · ${t(sseStatus === "connecting" ? "reconnecting" : "disconnected")}${sseErrorDetail ? ` · ${sseErrorDetail}` : ""}. ${t("connectionInterruptedHint")}`;
-  const runMenu = useGroupMenu(
-    runLabel,
-    selectedStatus && onControlGroup && !webReadOnly
+  const runMenu = useGroupMenu(runLabel, [
+    ...(selectedStatus && onControlGroup && !webReadOnly
       ? groupRunMenuActions(
           selectedStatus.key,
           t,
           (control) => onControlGroup(selectedGroupId, control),
           controlsBusy,
         )
-      : [],
-  );
+      : []),
+    ...actors
+      .filter((a: ActorRow) => a?.id && a.running)
+      .map((a: ActorRow) => ({
+        label: `${a.id} · ${a.runtime ?? "—"} · ${a.runtime_mode ?? "—"} · ${a.model ?? "—"} · ${
+          a.model_cost_usd_per_mtok != null ? `$${a.model_cost_usd_per_mtok}/Mtok` : "—"
+        } · ${a.model_strength != null ? `str ${a.model_strength}` : "—"}`,
+        onClick: () => {
+          if (selectedGroupId && window.confirm(`Stop ${a.id}?`)) void stopActor(selectedGroupId, a.id);
+        },
+        tone: "danger" as const,
+        section: "actors",
+      })),
+  ]);
   return (
     <header className="@container/group-header absolute inset-x-0 top-0 z-20 flex h-14 shrink-0 items-center px-3 glass-header md:relative md:inset-auto md:px-4">
       <div
