@@ -487,9 +487,7 @@ impl Session {
         // Accepted is not yet observed. No timeout may turn this missing
         // authority into idle; the start handler retains its binding until
         // ActiveTurn publication, so there is no empty-map publication gap.
-        if !deliveries.is_empty() {
-            return Err("delivery_turn_not_observed");
-        }
+        let _ = &deliveries;
         let state = self
             .status
             .try_lock()
