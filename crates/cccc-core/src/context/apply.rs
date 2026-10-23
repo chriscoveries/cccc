@@ -44,6 +44,7 @@ fn apply_one(
         "task.move" => super::task_apply::move_task(document, operation),
         "task.restore" => super::task_apply::restore(document, operation),
         "task.delete" => super::task_apply::delete(document, operation),
+        "task.cost.accrue" => super::task_apply::accrue(document, operation),
         "agent_state.update" => super::agent_state_apply::update(document, operation),
         "agent_state.clear" => super::agent_state_apply::clear(document, operation),
         "meta.merge" => merge_meta(document, operation),

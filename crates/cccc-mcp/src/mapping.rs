@@ -228,6 +228,8 @@ fn task_action(
                     "task_type",
                     "notes",
                     "checklist",
+                    "target_budget_usd",
+                    "max_usd_per_mtok",
                     "client_request_id",
                     "parent_ref",
                     "blocked_by_refs",
@@ -257,6 +259,8 @@ fn task_action(
                     "task_type",
                     "notes",
                     "checklist",
+                    "target_budget_usd",
+                    "max_usd_per_mtok",
                 ],
             );
             let has_patch = args.keys().any(|key| key != "task_id");
