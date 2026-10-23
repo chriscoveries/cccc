@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -8,10 +9,7 @@ import { apiJson } from "../services/api";
 import type { Actor } from "../types";
 
 const piCapture = readFileSync(
-  new URL(
-    "../../../crates/cccc-daemon/src/ops/codex_voice_analyst/pi_rpc/captured_tool_turn.jsonl",
-    import.meta.url,
-  ),
+  resolve("../crates/cccc-daemon/src/ops/codex_voice_analyst/pi_rpc/captured_tool_turn.jsonl"),
   "utf8",
 )
   .trim()
