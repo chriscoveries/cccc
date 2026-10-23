@@ -76,6 +76,10 @@ async function mount() {
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
+  vi.stubGlobal(
+    "confirm",
+    vi.fn(() => true),
+  );
   await act(async () => root.render(<AppHeader {...props} />));
   await new Promise((r) => setTimeout(r, 50));
   await act(async () => {});
