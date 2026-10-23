@@ -112,6 +112,41 @@ it("fetches once when opened and shows the harness cost", async () => {
   expect(mocks.calls).toBe(1);
 });
 
+// Regression: the panel survives a Group switch, so the report it held was the
+// previous Group's - shown as if it were the new Group's until the new answer
+// landed. A switch now starts from nothing.
+it("drops the previous group's rows when the group changes", async () => {
+  await act(async () => {
+    root.render(<HarnessRamTable groupId="g_one" isDark={false} />);
+  });
+  await act(async () => {
+    host.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+  });
+  expect(host.textContent).toContain("codex");
+
+  mocks.deferred = true;
+  mocks.report = {
+    ...mocks.report!,
+    keys: [{ ...mocks.report!.keys[0], harness: "claude", peak_rss_mib: 512, avg_rss_mib: 400 }],
+  };
+  await act(async () => {
+    root.render(<HarnessRamTable groupId="g_two" isDark={false} />);
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  const switched = host.textContent || "";
+  expect(switched).not.toContain("codex");
+  expect(switched).toContain("Loading");
+
+  await act(async () => {
+    mocks.settle?.(mocks.response);
+  });
+  expect(host.textContent).toContain("claude");
+});
+
 // Regression: the request used to be cancelled by the re-render its own
 // "loading" state caused, so a slow answer never landed and the panel sat on
 // "Loading" for as long as the fetch took.
