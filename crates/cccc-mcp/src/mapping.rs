@@ -229,6 +229,8 @@ fn task_action(
                     "notes",
                     "checklist",
                     "if_task_rev",
+                    "target_budget_usd",
+                    "max_usd_per_mtok",
                     "client_request_id",
                     "parent_ref",
                     "blocked_by_refs",
@@ -260,6 +262,8 @@ fn task_action(
                     "notes",
                     "checklist",
                     "if_task_rev",
+                    "target_budget_usd",
+                    "max_usd_per_mtok",
                 ],
             );
             let has_patch = args

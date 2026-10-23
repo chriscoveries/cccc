@@ -194,6 +194,8 @@ that bypass its storage lock and metadata.
   task_type?: TaskType
   notes?: string
   checklist?: Array<{ id?: string; text: string; status?: ChecklistStatus }>
+  target_budget_usd?: number | null
+  max_usd_per_mtok?: number | null
   client_request_id?: string
   parent_ref?: string
   blocked_by_refs?: string[]
@@ -225,6 +227,9 @@ Rules:
 - If `task_type` is omitted, the daemon MUST persist `standard` for a root task and `free` for a subtask.
 - `task_type` stores the durable work kind. It MUST NOT be treated as lifecycle state or parent/child structure.
 - `task_type` does not auto-seed `notes` or `checklist`; those remain ordinary editable task content.
+- A task is created with `cost_usd` `0.0` and `cost_turns`, `unpriced_turns` and
+  `unmetered_turns` at `0`. A caller MUST NOT set any of those, nor
+  `cost_updated_at`: see `task.cost.accrue`.
 
 #### `task.update`
 
@@ -244,6 +249,8 @@ Rules:
   task_type?: TaskType
   notes?: string
   checklist?: Array<{ id?: string; text: string; status?: ChecklistStatus }>
+  target_budget_usd?: number | null
+  max_usd_per_mtok?: number | null
 }
 ```
 
@@ -254,6 +261,38 @@ Rules:
 - If `parent_id` changes, the daemon MUST reject cycles.
 - `task.update` does not change lifecycle status.
 - If `task_type` is provided, it MUST be one of the allowed task-type ids above.
+- `target_budget_usd` and `max_usd_per_mtok` are recorded, never enforced: the
+  daemon stores them and reads nothing from them when it dispatches work. Each
+  MUST be a finite number of USD, not negative; `null` clears the field.
+- `cost_usd`, `cost_updated_at`, `cost_turns`, `unpriced_turns` and
+  `unmetered_turns` are written by the daemon from metered turns. A
+  `task.create` or `task.update` that carries one MUST be rejected, so a forged
+  figure cannot pass for a metered one.
+
+#### `task.cost.accrue`
+
+```ts
+{
+  op: "task.cost.accrue"
+  task_id: string
+  outcome: "priced" | "unpriced" | "unmetered"
+  usd?: number            // required when outcome is "priced"
+}
+```
+
+Permission: the daemon only. It is applied when a `turn.usage` event is
+committed, after the event is durable; a peer or user `context_sync` that names
+this op MUST be refused.
+
+Rules:
+- `priced` adds `usd` to `cost_usd` and increments `cost_turns`.
+- `unpriced` (tokens metered, no price for the model) increments
+  `unpriced_turns`; `unmetered` (the turn reported no token counts) increments
+  `unmetered_turns`. Neither touches `cost_usd`: an unpriced turn is not a free
+  turn.
+- Every outcome sets `cost_updated_at`.
+- A failed accrual MUST NOT fail the turn: the usage event is already written,
+  and the daemon logs the miss instead.
 
 #### `task.move`
 
