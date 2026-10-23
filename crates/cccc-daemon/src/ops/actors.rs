@@ -9,7 +9,7 @@ use cccc_core::ledger;
 use cccc_core::permissions::{self, ActorAction};
 use cccc_core::{GroupDoc, GroupStore, HomeLayout, group_scope, web_model_connectors};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::dispatch::{OpError, OpResult, object, required_arg, store, string_arg};
 use crate::ops::{
@@ -84,10 +84,12 @@ fn group_health(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             actor.enabled && super::actor_runtime_status::resolve(&group, actor).running
         })
         .count() as u64;
+    let live: BTreeSet<&str> = group.actors.iter().map(|actor| actor.id.as_str()).collect();
     object(super::host_health::report(
         std::path::Path::new("/proc"),
         &group.group_id,
         running,
+        &live,
     ))
 }
 
