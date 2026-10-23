@@ -9,6 +9,7 @@ import {
   type TaskTypeId,
 } from "../../../utils/taskWorkflow";
 import { SelectCombobox } from "../../SelectCombobox";
+import { taskPriceCeilingLabel, taskSpendLabel } from "../../../features/contextModal/taskCost";
 import {
   alignTaskDraftTaskType,
   getWaitingOnOptions,
@@ -726,6 +727,13 @@ export function TaskEditorPanel({
             <div>
               {tr("context.checklistItems", "Checklist items")}:{" "}
               {Array.isArray(selectedTask.checklist) ? selectedTask.checklist.length : 0}
+            </div>
+            <div data-testid="task-cost">
+              {tr("context.cost", "Cost")}: {taskSpendLabel(selectedTask)}
+            </div>
+            <div>
+              {tr("context.modelPriceCeiling", "Max model price")}:{" "}
+              {taskPriceCeilingLabel(selectedTask)}
             </div>
           </div>
         ) : null}
