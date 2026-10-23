@@ -206,8 +206,12 @@ fn handle_managed_turn_started(session: &Session, message: &Value) -> bool {
     let Some(turn_id) = turn_id else {
         return false;
     };
-    match observe_started_turn(&session.active_turn, turn_id) {
+    // Read the pending card before taking the turn lock, and hand it to the turn
+    // only when this message is what adopts it.
+    let pending = session.turn_task();
+    match observe_started_turn(&session.active_turn, turn_id, pending) {
         StartedTurnDisposition::Adopted => {
+            session.set_turn_task(None);
             session.set_status("working", Some(turn_id.to_owned()));
             true
         }
@@ -228,6 +232,7 @@ fn handle_managed_turn_started(session: &Session, message: &Value) -> bool {
 fn observe_started_turn(
     active_turn: &std::sync::Mutex<Option<ActiveTurn>>,
     turn_id: &str,
+    task: Option<String>,
 ) -> StartedTurnDisposition {
     let Ok(mut active_turn) = active_turn.lock() else {
         return StartedTurnDisposition::Conflict;
@@ -236,8 +241,13 @@ fn observe_started_turn(
         Some(active) if active.turn_id == turn_id => StartedTurnDisposition::Matched,
         Some(_) => StartedTurnDisposition::Conflict,
         None => {
+            // The pending card is handed to this turn at the one moment the batch
+            // becomes it. From here on the card lives on `ActiveTurn`, so a batch
+            // that arrives while this turn runs — and is deferred, or refused —
+            // cannot rename what this turn's cost is charged to.
             *active_turn = Some(ActiveTurn {
                 turn_id: turn_id.to_owned(),
+                task,
             });
             StartedTurnDisposition::Adopted
         }
@@ -271,8 +281,8 @@ fn complete_turn(session: &Session, message: &Value) {
         if usage["source"] == expected {
             // Two different things, reported separately. `task` is the provider's
             // own task or turn authority, read before settlement clears the status.
-            // `task_ref` is the board task the delivered batch named in its
-            // task_refs, captured when that batch was admitted — the only thing the
+            // `task_ref` is the board task the delivery that started this turn
+            // named in its task_refs, held on the turn itself — the only thing the
             // turn's cost is charged to. A delivery that named no task leaves the
             // turn uncharged rather than guessing from an Actor's assigned cards.
             let task = session
@@ -280,7 +290,7 @@ fn complete_turn(session: &Session, message: &Value) {
                 .lock()
                 .ok()
                 .and_then(|state| state.task_id.clone());
-            let task_ref = session.turn_task();
+            let task_ref = current.task.clone();
             if let Err(error) = super::super::turn_usage::record(
                 &session.home,
                 &session.group_id,
@@ -296,7 +306,7 @@ fn complete_turn(session: &Session, message: &Value) {
             }
         }
     }
-    // The batch is spent: whatever task it named belongs to this turn, not the next.
+    // The batch is spent: whatever task it named belonged to this turn, not the next.
     session.set_turn_task(None);
     active_turn.take();
     // A completed turn is not automatically a successful turn. Providers report
@@ -475,12 +485,41 @@ mod tests {
         let active_turn = std::sync::Mutex::new(None);
 
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-terminal"),
+            observe_started_turn(&active_turn, "turn-terminal", None),
             StartedTurnDisposition::Adopted
         );
         let active = active_turn.lock().expect("active turn");
         let active = active.as_ref().expect("adopted turn");
         assert_eq!(active.turn_id, "turn-terminal");
+        assert!(active.task.is_none(), "no batch named a task here");
+    }
+
+    /// The card belongs to the turn, not to the session: a batch that arrives
+    /// while a turn runs — and is deferred or refused — leaves that turn's
+    /// binding alone.
+    #[test]
+    fn a_later_batch_cannot_rename_the_running_turn() {
+        let active_turn = std::sync::Mutex::new(None);
+        assert_eq!(
+            observe_started_turn(&active_turn, "turn-a", Some("T089".into())),
+            StartedTurnDisposition::Adopted
+        );
+        // Turn A is running; the next batch's card never reaches it.
+        {
+            let running = active_turn.lock().expect("active");
+            let running = running.as_ref().expect("turn a");
+            assert_eq!(running.task.as_deref(), Some("T089"));
+        }
+        assert_eq!(
+            observe_started_turn(&active_turn, "turn-a", Some("T090".into())),
+            StartedTurnDisposition::Matched
+        );
+        let running = active_turn.lock().expect("active");
+        assert_eq!(
+            running.as_ref().expect("turn a").task.as_deref(),
+            Some("T089"),
+            "the deferred batch's card did not rename the running turn"
+        );
     }
 
     #[test]
@@ -506,14 +545,15 @@ mod tests {
     fn a_repeated_started_event_matches_the_active_turn_but_not_an_overlap() {
         let active_turn = std::sync::Mutex::new(Some(ActiveTurn {
             turn_id: "turn-terminal".into(),
+            task: None,
         }));
 
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-terminal"),
+            observe_started_turn(&active_turn, "turn-terminal", None),
             StartedTurnDisposition::Matched
         );
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-overlap"),
+            observe_started_turn(&active_turn, "turn-overlap", None),
             StartedTurnDisposition::Conflict
         );
     }
