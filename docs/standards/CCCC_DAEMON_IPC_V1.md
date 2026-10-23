@@ -3414,7 +3414,7 @@ Result:
 ```ts
 {
   group_id: string
-  rss_mib: number | null // the Group's running Actors' process trees, summed; null when no Actor has a reading
+  rss_mib: number | null // the process trees of the Actors the Group has now, summed; null when none has a reading
   pss_mib: number | null // the same sum, only when every contributing Actor had a PSS reading
   actors_running: number // running Actors in the Group
   actors_sampled: number // how many of them contributed a reading
@@ -3432,8 +3432,14 @@ Notes:
 - A figure the kernel did not give is `null`, never `0`: `0` free memory would
   read as a dying host.
 - `cpu_pct` on an Actor row is the percentage of one core its process tree used
-  between two readings, as `top` shows it — not divided by the CPU count — and
-  is `null` when there is no earlier reading to subtract.
+  between two readings, as `top` shows it — not divided by the CPU count. It is
+  `null` when there is no earlier reading to subtract, and `null` again when the
+  pid or that process's start time has changed since the earlier reading: the
+  ticks of a restarted tree, or of a process that took over a reused pid, are
+  not a baseline for the one before it.
+- Only Actors the Group has now contribute to its total. An Actor that has been
+  removed takes its last reading with it, so a total never includes memory the
+  Group no longer holds.
 
 #### `actor_add`
 
