@@ -598,10 +598,20 @@ mod tests {
 
         let task = task(&home, &group_id, "T089");
         assert_eq!(task["cost_usd"].as_f64().unwrap_or(0.0), 0.0, "no spend");
-        assert!(task.get("cost_turns").is_none(), "no metered turn counted");
-        assert!(
-            task.get("unpriced_turns").is_none(),
+        assert_eq!(
+            task["cost_turns"].as_u64().unwrap_or(0),
+            0,
+            "no metered turn counted"
+        );
+        assert_eq!(
+            task["unpriced_turns"].as_u64().unwrap_or(0),
+            0,
             "nothing priced or unpriced was counted"
+        );
+        assert_eq!(
+            task["unmetered_turns"].as_u64().unwrap_or(0),
+            0,
+            "and nothing counted as unmetered"
         );
 
         // The usage is still recorded, so nothing is lost by leaving it unattributed.
