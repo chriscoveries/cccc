@@ -7,7 +7,7 @@ pub struct ModelSpec {
     /// Blended USD per million tokens. None when unset (unpriced).
     #[serde(default)]
     pub usd_per_mtok: Option<f64>,
-    /// Flat USD per month for subscription models (Devin). None for token-priced.
+    /// Flat USD per month for subscription models. None when unset.
     #[serde(default)]
     pub usd_per_month: Option<f64>,
     /// 1 (weak) .. 5 (strongest). None when unset.
