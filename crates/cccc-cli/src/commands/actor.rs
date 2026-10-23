@@ -17,6 +17,14 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             )
             .await?
         }
+        ActorAction::Memory { group_id } => {
+            call(
+                client,
+                "actor_memory_report",
+                json!({"group_id":group(home,group_id)?,"by":"user"}),
+            )
+            .await?
+        }
         ActorAction::Add {
             actor_id,
             title,

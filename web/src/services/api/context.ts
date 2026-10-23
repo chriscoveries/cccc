@@ -143,6 +143,10 @@ export async function updateCoordinationTask(groupId: string, task: Task) {
           status: String(item.status || "pending"),
         }))
       : [],
+    // The owner's budget, never the daemon's spend: a null clears the field,
+    // and the cost fields are refused from a caller and are not sent at all.
+    target_budget_usd: typeof task.target_budget_usd === "number" ? task.target_budget_usd : null,
+    max_usd_per_mtok: typeof task.max_usd_per_mtok === "number" ? task.max_usd_per_mtok : null,
   };
   const ops: Array<Record<string, unknown>> = [updateOp];
   if (task.status) {

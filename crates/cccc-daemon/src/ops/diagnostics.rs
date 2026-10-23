@@ -40,7 +40,7 @@ fn snapshot(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             .iter()
             .map(|actor| {
                 let status = crate::ops::actor_runtime_status::resolve(&group, actor);
-                json!({
+                let mut row = json!({
                     "id":actor.id,
                     "role":actor.role,
                     "runtime":actor.runtime,
@@ -48,7 +48,14 @@ fn snapshot(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                     "enabled":actor.enabled,
                     "running":status.running,
                     "pid":status.pid
-                })
+                });
+                if let Some(object) = row.as_object_mut() {
+                    object.extend(crate::ops::actor_memory::row_fields(
+                        &group.group_id,
+                        &actor.id,
+                    ));
+                }
+                row
             })
             .collect::<Vec<_>>();
         result["group"] = json!({
