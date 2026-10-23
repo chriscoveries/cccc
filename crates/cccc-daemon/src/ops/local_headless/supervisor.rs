@@ -5,7 +5,7 @@ use super::{
 };
 use cccc_contracts::{Actor, ActorRuntime, Event, RunnerKind, utc_now};
 use cccc_core::{GroupDoc, HomeLayout};
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -163,6 +163,7 @@ pub(super) fn attach_managed(
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
+        turn_task: Mutex::new(None),
     });
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
@@ -449,6 +450,9 @@ fn submit_admitted(
     ) else {
         return BatchSubmission::Deferred;
     };
+    // The task this batch is about, from its own task_refs, taken before the turn
+    // starts: it is what the turn's metered usage is charged to.
+    item.set_turn_task(task_ref_in(source_events));
     if item.managed.structured_only() {
         let id = format!(
             "actor-delivery:{}",
@@ -546,6 +550,32 @@ fn submit_admitted(
         };
     }
     BatchSubmission::Deferred
+}
+
+/// The board task a delivered batch names: the single `task_ref` id across its
+/// messages. A batch naming two tasks, or none, leaves the turn unattributed
+/// rather than picking one — and an id that is not a `task_ref` is never one.
+pub(super) fn task_ref_in(events: &[Event]) -> Option<String> {
+    let mut ids = std::collections::BTreeSet::new();
+    for event in events {
+        let Some(refs) = event.data.get("refs").and_then(Value::as_array) else {
+            continue;
+        };
+        for reference in refs {
+            if reference.get("kind").and_then(Value::as_str) != Some("task_ref") {
+                continue;
+            }
+            if let Some(task_id) = reference
+                .get("task_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                ids.insert(task_id.to_owned());
+            }
+        }
+    }
+    (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
 }
 
 fn submit_with_startup_prompt(
@@ -728,6 +758,44 @@ mod tests {
         assert_eq!(*startup_prompt.lock().expect("startup prompt"), None);
     }
 }
+/// A batch is about one task or none. Two task refs in one batch are two
+/// tasks, and picking either would charge a turn to work it never did.
+#[test]
+fn a_batch_names_at_most_one_task() {
+    let message = |refs: Value| {
+        let mut event = Event::new("chat.message", "g_demo");
+        event.by = "user".into();
+        event.data = json!({"text":"work","to":["architect"],"refs":refs})
+            .as_object()
+            .cloned()
+            .expect("message");
+        event
+    };
+    let one = message(json!([{"kind":"task_ref","task_id":"t_1","title":"Review"}]));
+    assert_eq!(task_ref_in(std::slice::from_ref(&one)), Some("t_1".into()));
+
+    let two = message(json!([{"kind":"task_ref","task_id":"t_2"}]));
+    assert_eq!(
+        task_ref_in(&[one.clone(), two.clone()]),
+        None,
+        "two tasks in one batch is not one task"
+    );
+
+    let other_kind = message(json!([{"kind":"message_ref","task_id":"t_3"}]));
+    assert_eq!(
+        task_ref_in(std::slice::from_ref(&other_kind)),
+        None,
+        "only a task_ref names a task"
+    );
+
+    let mut nudge = Event::new("system.notify", "g_demo");
+    nudge.data = json!({"kind":"nudge","message":"check status"})
+        .as_object()
+        .cloned()
+        .expect("notify");
+    assert_eq!(task_ref_in(std::slice::from_ref(&nudge)), None);
+}
+
 #[test]
 fn headless_turn_uses_complete_envelope_and_control_semantics() {
     let mut message = Event::new("chat.message", "g_demo");
