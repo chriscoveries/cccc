@@ -269,13 +269,18 @@ fn complete_turn(session: &Session, message: &Value) {
             "claude_transcript"
         };
         if usage["source"] == expected {
-            // This is the same managed task authority projected by effective_active_task_id.
-            // Read it before settlement clears the status; never infer it from assigned cards.
+            // Two different things, reported separately. `task` is the provider's
+            // own task or turn authority, read before settlement clears the status.
+            // `task_ref` is the board task the delivered batch named in its
+            // task_refs, captured when that batch was admitted — the only thing the
+            // turn's cost is charged to. A delivery that named no task leaves the
+            // turn uncharged rather than guessing from an Actor's assigned cards.
             let task = session
                 .status
                 .lock()
                 .ok()
                 .and_then(|state| state.task_id.clone());
+            let task_ref = session.turn_task();
             if let Err(error) = super::super::turn_usage::record(
                 &session.home,
                 &session.group_id,
@@ -283,6 +288,7 @@ fn complete_turn(session: &Session, message: &Value) {
                 session.managed.generation(),
                 &turn_id,
                 task.as_deref(),
+                task_ref.as_deref(),
                 usage,
                 &settled.status,
             ) {
@@ -290,6 +296,8 @@ fn complete_turn(session: &Session, message: &Value) {
             }
         }
     }
+    // The batch is spent: whatever task it named belongs to this turn, not the next.
+    session.set_turn_task(None);
     active_turn.take();
     // A completed turn is not automatically a successful turn. Providers report
     // failure out of band (ACP stopReason, a model API error surfaced as an

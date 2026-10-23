@@ -125,6 +125,7 @@ async fn shutdown_requests_all_jobs_and_confirms_stops_concurrently() {
                 stop_lock: Mutex::new(()),
                 startup_prompt: Mutex::new(None),
                 active_turn: Mutex::new(None),
+                turn_task: Mutex::new(None),
             });
             sessions()
                 .write()
