@@ -40,6 +40,10 @@ let host: HTMLDivElement;
 
 async function mount(overrides: Partial<AppHeaderProps> = {}) {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  vi.stubGlobal(
+    "confirm",
+    vi.fn(() => true),
+  );
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
