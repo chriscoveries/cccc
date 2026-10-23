@@ -163,7 +163,7 @@ pub(super) fn attach_managed(
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
-        turn_task: Mutex::new(None),
+        pending_turn_task: Mutex::new(None),
     });
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
@@ -469,6 +469,24 @@ fn submit_admitted(
     cancelled: &AtomicBool,
     item: &Session,
 ) -> BatchSubmission {
+    let submitted = submit_delivery(home, group, actor, source_events, cancelled, item);
+    if !matches!(submitted, BatchSubmission::Accepted) {
+        // No turn started for this batch, so the card it named is owed to nothing.
+        // Dropping it here keeps a deferred or refused delivery from riding the
+        // next turn that does start.
+        item.set_turn_task(None);
+    }
+    submitted
+}
+
+fn submit_delivery(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    source_events: &[Event],
+    cancelled: &AtomicBool,
+    item: &Session,
+) -> BatchSubmission {
     let Some(delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
         home,
         group,
@@ -477,8 +495,9 @@ fn submit_admitted(
     ) else {
         return BatchSubmission::Deferred;
     };
-    // The task this batch is about, from its own task_refs, taken before the turn
-    // starts: it is what the turn's metered usage is charged to.
+    // The task this batch is about, from its own task_refs. It is held as the
+    // pending card and belongs to whichever turn this batch actually starts; if
+    // no turn starts, it is dropped below rather than left for the next one.
     item.set_turn_task(task_ref_in(source_events));
     if item.managed.structured_only() {
         let id = format!(

@@ -109,7 +109,7 @@ async fn a_reaped_viewer_detaches_without_stopping_the_provider_job() {
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(None),
         active_turn: Mutex::new(None),
-        turn_task: Mutex::new(None),
+        pending_turn_task: Mutex::new(None),
     });
     sessions().write().expect("registry").insert(
         (group.group_id.clone(), "claude-1".into()),
