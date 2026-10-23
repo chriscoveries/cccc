@@ -102,6 +102,7 @@ pub(super) fn record(
     generation: &str,
     turn_id: &str,
     task_id: Option<&str>,
+    task_ref: Option<&str>,
     usage: &Value,
     status: &str,
 ) -> io::Result<()> {
@@ -113,8 +114,11 @@ pub(super) fn record(
     let mut event = Event::new("turn.usage", group_id);
     event.id = id;
     event.by = actor_id.to_owned();
-    event.data = json!({"actor_id":actor_id,"task_id":task_id,"turn_id":turn_id,
-        "generation":generation,"turn_count":1,"status":status})
+    // `task_id` stays what the provider reports — its own task or turn authority.
+    // `task_ref` is the board task the delivered batch named, and it is the only
+    // thing a turn's cost is charged to.
+    event.data = json!({"actor_id":actor_id,"task_id":task_id,"task_ref":task_ref,
+        "turn_id":turn_id,"generation":generation,"turn_count":1,"status":status})
     .as_object()
     .expect("object")
     .clone();
@@ -146,14 +150,15 @@ pub(super) fn record(
         deliver(&path, &directory, &pending, recovering)
     });
     recorded?;
-    if let Some(task_id) = task_id {
+    if let Some(task_ref) = task_ref {
         // After the event is durable, so a turn nobody recorded never moves a
         // task's spend. Best effort: a task store that will not take the write
-        // must not cost the turn its usage record.
+        // must not cost the turn its usage record. Charged to the board task the
+        // delivery named, never to the provider's own task or turn token.
         accrue_task_cost(
             home,
             group_id,
-            task_id,
+            task_ref,
             usage,
             std::path::Path::new(super::MODELS_PATH),
         );
@@ -320,6 +325,7 @@ mod tests {
                 "peer",
                 "generation",
                 "captured",
+                None,
                 None,
                 &captured_usage(),
                 "completed"
