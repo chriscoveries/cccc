@@ -49,7 +49,7 @@ const props: AppHeaderProps = {
   onThemeChange: noop,
   onTextScaleChange: noop,
   selectedGroupId: "g",
-  groupDoc: { group_id: "g", title: "g", state: "run" },
+  groupDoc: { group_id: "g", title: "g", state: "active" },
   selectedGroupRunning: true,
   selectedGroupRuntimeStatus: null,
   sseStatus: "connected",
