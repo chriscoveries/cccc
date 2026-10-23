@@ -110,6 +110,7 @@ async fn a_reaped_viewer_detaches_without_stopping_the_provider_job() {
         startup_prompt: Mutex::new(None),
         active_turn: Mutex::new(None),
         turn_tasks: Mutex::new(std::collections::HashMap::new()),
+        admission: Mutex::new(()),
     });
     sessions().write().expect("registry").insert(
         (group.group_id.clone(), "claude-1".into()),

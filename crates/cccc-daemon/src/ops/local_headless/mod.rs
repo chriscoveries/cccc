@@ -115,12 +115,18 @@ struct Session {
     stop_lock: Mutex<()>,
     startup_prompt: Mutex<Option<String>>,
     active_turn: Mutex<Option<ActiveTurn>>,
-    /// Board tasks by the runtime turn id that carries them, filled when a turn
-    /// is accepted and emptied when that turn is observed. Keyed by turn id so a
-    /// `turn/started` observed later still resolves to the delivery that started
-    /// it, instead of to whichever batch was admitted last. The runtime's own turn
-    /// id is never a task id and is never used as one.
+    /// The card of the delivery being admitted right now, if it named exactly one
+    /// task. It is claimed by whichever comes first — the runtime's acceptance of
+    /// the batch, its `turn/started`, or its completion — because any of the three
+    /// can be observed before the others.
+    pending_turn_task: Mutex<Option<String>>,
+    /// Cards by the runtime turn id that carries them, for a turn whose
+    /// `turn/started` has been observed but whose acceptance has not yet named it.
+    /// The runtime's own turn id is never a task id and is never used as one.
     turn_tasks: Mutex<std::collections::HashMap<String, String>>,
+    /// Held across one delivery's admission, so only one delivery is ever pending
+    /// for this Actor and a card can never be read for someone else's turn.
+    admission: Mutex<()>,
 }
 
 fn poisoned() -> std::io::Error {

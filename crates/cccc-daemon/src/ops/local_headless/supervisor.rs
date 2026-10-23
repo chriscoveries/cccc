@@ -164,6 +164,7 @@ pub(super) fn attach_managed(
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
         turn_tasks: Mutex::new(std::collections::HashMap::new()),
+        admission: Mutex::new(()),
     });
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
@@ -469,6 +470,9 @@ fn submit_admitted(
     cancelled: &AtomicBool,
     item: &Session,
 ) -> BatchSubmission {
+    // One delivery is admitted at a time per Actor, so a card cannot be claimed
+    // for a turn another delivery started.
+    let _admission = item.begin_admission();
     let Some(delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
         home,
         group,
@@ -477,10 +481,11 @@ fn submit_admitted(
     ) else {
         return BatchSubmission::Deferred;
     };
-    // The task this batch is about, from its own task_refs. It is bound only once
-    // the runtime accepts the batch and names the turn it started, so a delivery
-    // that starts no turn leaves nothing behind for a later one to inherit.
-    let task = task_ref_in(source_events);
+    // The task this batch is about, from its own task_refs. It is held as this
+    // delivery's card for the length of its admission; whichever of the runtime's
+    // acceptance, start or completion resolves the turn claims it, and a delivery
+    // that starts no turn leaves nothing for a later one to inherit.
+    item.set_pending_turn_task(task_ref_in(source_events));
     if item.managed.structured_only() {
         let id = format!(
             "actor-delivery:{}",
@@ -510,7 +515,10 @@ fn submit_admitted(
                 }
             }) {
                 Ok(receipt) => {
-                    item.bind_turn_task(&receipt.turn_id, task);
+                    // A turn observed before this point already claimed the card,
+                    // in which case there is nothing left to bind.
+                    let claimed = item.take_pending_turn_task();
+                    item.bind_turn_task(&receipt.turn_id, claimed);
                     outcome = BatchSubmission::Accepted;
                     true
                 }
@@ -552,6 +560,10 @@ fn submit_admitted(
                 }
             }
         });
+        if !matches!(outcome, BatchSubmission::Accepted) {
+            // No turn took this batch, so its card is owed to nothing.
+            item.set_pending_turn_task(None);
+        }
         return outcome;
     }
     if let Err(error) = item.reattach_viewer() {
@@ -561,6 +573,7 @@ fn submit_admitted(
             actor_id = %actor.id,
             "failed to re-attach managed Actor viewer for delivery"
         );
+        item.set_pending_turn_task(None);
         return BatchSubmission::Deferred;
     }
     if item.has_terminal() {
@@ -574,12 +587,14 @@ fn submit_admitted(
         });
         // A terminal route has no authoritative word on which turn a delivery
         // started, so the batch's card is not guessed onto whatever turn is open.
+        item.set_pending_turn_task(None);
         return if accepted {
             BatchSubmission::Accepted
         } else {
             BatchSubmission::Deferred
         };
     }
+    item.set_pending_turn_task(None);
     BatchSubmission::Deferred
 }
 
