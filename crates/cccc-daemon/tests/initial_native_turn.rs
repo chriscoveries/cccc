@@ -19,7 +19,7 @@ fn fixture() -> Fixture {
 }
 
 fn arm<'a>(f: &'a Fixture, name: &str) -> &'a Capture {
-    f.cases.iter().find(|c| c.name == name).unwrap()
+    f.cases.iter().find(|c| c.name == name).expect(name)
 }
 
 fn early(runtime: &str) {
@@ -41,7 +41,7 @@ fn early(runtime: &str) {
         "accepted transport is not initial-turn execution"
     );
     assert_eq!(r.full_proof, "INCONCLUSIVE");
-    eprintln!("{}", serde_json::to_string(&r).unwrap());
+    eprintln!("{r:?}");
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn rendered(runtime: &str) {
         r.full_proof, "INCONCLUSIVE",
         "a scripted capture cannot certify real inference"
     );
-    eprintln!("{}", serde_json::to_string(&r).unwrap());
+    eprintln!("{r:?}");
 }
 
 #[test]
