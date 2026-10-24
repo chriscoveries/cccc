@@ -1,0 +1,425 @@
+{
+  "schema": 1,
+  "provider": "historical_scripted_loopback",
+  "source_sha": "479b3160a857644af912625829d0b00592146551",
+  "binary_sha256": "f7614f936454363e5e020dab5512fa87067afb629a52b25a2ba8c6383da760b3",
+  "provider_fixture_sha256": "015b289337135e9026c890d8aaf5b6f306da5ac0ed05d4f5515918d5241529db",
+  "cases": [
+    {
+      "name": "opencode-mcp",
+      "runtime": "opencode",
+      "runtime_version": "1.19.0",
+      "runtime_sha256": "135ac3f86c43f2a22328a3554fec5f0bc57d71576077902661bc38dac34871fd",
+      "source": {
+        "event_id": "b5768a9186e04681a62c5e8546e04f47",
+        "at": "2026-10-17T10:07:27.719676Z"
+      },
+      "observation_end": "2026-10-17T10:08:57.734180+00:00",
+      "deliveries": [
+        {
+          "id": "c7ed063af6de4e228f4d04146fd5e330",
+          "at": "2026-10-17T10:07:27.721106Z",
+          "source_event_id": "b5768a9186e04681a62c5e8546e04f47",
+          "state": "claimed"
+        },
+        {
+          "id": "0f371f4f13bf4c08b6864a1a0818b550",
+          "at": "2026-10-17T10:07:30.461362Z",
+          "source_event_id": "b5768a9186e04681a62c5e8546e04f47",
+          "state": "accepted"
+        }
+      ],
+      "native": {
+        "snapshot_sha256": "4f947ab1b00bb3050a570b2def8feedba5c16581e34724fd80d979af73a022f1",
+        "session_id": "ses_eb6ab56dbffezbeoLfM1aiSUSP",
+        "users": [],
+        "assistants": []
+      },
+      "authenticated_requests": 0
+    },
+    {
+      "name": "opencode-rendered",
+      "runtime": "opencode",
+      "runtime_version": "1.19.0",
+      "runtime_sha256": "135ac3f86c43f2a22328a3554fec5f0bc57d71576077902661bc38dac34871fd",
+      "source": {
+        "event_id": "4f16536839ce457f91b74e793f24e107",
+        "at": "2026-10-17T10:09:23.190095Z"
+      },
+      "observation_end": "2026-10-17T10:09:27.909010+00:00",
+      "deliveries": [
+        {
+          "id": "1e3c292cee954acf824291644cfdad64",
+          "at": "2026-10-17T10:09:23.192311Z",
+          "source_event_id": "4f16536839ce457f91b74e793f24e107",
+          "state": "claimed"
+        },
+        {
+          "id": "02a916fcfee04894aec6c48ade459600",
+          "at": "2026-10-17T10:09:24.695600Z",
+          "source_event_id": "4f16536839ce457f91b74e793f24e107",
+          "state": "accepted"
+        }
+      ],
+      "native": {
+        "snapshot_sha256": "ca648a5d5042e3bd35a60adf96b8a8a53be5b0d48a3b9412f21804f5dbc1dac2",
+        "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+        "users": [
+          {
+            "id": "msg_149567635001nQAXmxQEvm0CGl",
+            "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+            "created_ms": 1792231765557,
+            "parts": [
+              {
+                "id": "prt_1495676380011btQrmZ1l5udmS",
+                "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+                "kind": "text",
+                "text_bytes": 1370,
+                "text_sha256": "5210b86f3a392db4da0450481ca045e96ac2acf1823f566795ab5a1d03c6b64a",
+                "source_event_ids": [
+                  "4f16536839ce457f91b74e793f24e107"
+                ],
+                "startup_headers": 1,
+                "tool_status": null
+              }
+            ]
+          }
+        ],
+        "assistants": [
+          {
+            "id": "msg_1495676630018LHglEerCyHGod",
+            "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+            "created_ms": 1792231765603,
+            "parts": [
+              {
+                "id": "prt_149567de9001SqbgoulTSsFEAJ",
+                "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+                "kind": "step-start",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              },
+              {
+                "id": "prt_149567ded001835KgzKx4bq1Ea",
+                "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+                "kind": "tool",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": "completed"
+              },
+              {
+                "id": "prt_149567e20001koXfZCpJf4QJK2",
+                "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+                "kind": "step-finish",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              }
+            ],
+            "parent_id": "msg_149567635001nQAXmxQEvm0CGl",
+            "completed_ms": 1792231767594,
+            "finish": "tool-calls",
+            "error_present": false
+          },
+          {
+            "id": "msg_149567e2f001FyN454gnxeAovb",
+            "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+            "created_ms": 1792231767599,
+            "parts": [
+              {
+                "id": "prt_149567e7c001jJc9wxWRUZzNUP",
+                "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+                "kind": "step-start",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              },
+              {
+                "id": "prt_149567e7f001YyvsWfjOkmzFUQ",
+                "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+                "kind": "tool",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": "completed"
+              },
+              {
+                "id": "prt_149567ea2001GymKGjuNQ0L3GS",
+                "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+                "kind": "step-finish",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              }
+            ],
+            "parent_id": "msg_149567635001nQAXmxQEvm0CGl",
+            "completed_ms": 1792231767719,
+            "finish": "tool-calls",
+            "error_present": false
+          },
+          {
+            "id": "msg_149567eac001o17qYHlu7cPiHT",
+            "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+            "created_ms": 1792231767724,
+            "parts": [
+              {
+                "id": "prt_149567f05001PXXNxytkpQKCQ7",
+                "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+                "kind": "step-start",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              },
+              {
+                "id": "prt_149567f080012gBKe8ZzDVSzU2",
+                "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+                "kind": "text",
+                "text_bytes": 17,
+                "text_sha256": "339a9d067af8adf52a94ebd63490c9ac29d2443a85477aaafc29296242803320",
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              },
+              {
+                "id": "prt_149567f0f001SjntEDeC00HqrD",
+                "session_id": "ses_eb6a99dcdffe37DE13QD1ojIv6",
+                "kind": "step-finish",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              }
+            ],
+            "parent_id": "msg_149567635001nQAXmxQEvm0CGl",
+            "completed_ms": 1792231767829,
+            "finish": "stop",
+            "error_present": false
+          }
+        ]
+      },
+      "authenticated_requests": 3
+    },
+    {
+      "name": "kilo-mcp",
+      "runtime": "kilo",
+      "runtime_version": "7.8.8",
+      "runtime_sha256": "d734bdfd765781457034fa0b8fd5bd28fa4d21472eab0ac030a1db7f571bfded",
+      "source": {
+        "event_id": "950588c7e612426985d037a061c109eb",
+        "at": "2026-10-17T10:10:09.109181Z"
+      },
+      "observation_end": "2026-10-17T10:11:39.146194+00:00",
+      "deliveries": [
+        {
+          "id": "e40633fef0db4b58ae7ae870cdfa8b24",
+          "at": "2026-10-17T10:10:09.111036Z",
+          "source_event_id": "950588c7e612426985d037a061c109eb",
+          "state": "claimed"
+        },
+        {
+          "id": "f7d11ebd505448c28b1ad4f234044420",
+          "at": "2026-10-17T10:10:12.656017Z",
+          "source_event_id": "950588c7e612426985d037a061c109eb",
+          "state": "accepted"
+        }
+      ],
+      "native": {
+        "snapshot_sha256": "ee4366fadbc83bae4f971c9650c53886caa293fa06ff1c792cb5ee492c7ce8f3",
+        "session_id": "ses_eb6a8e06fffecVa7H5oQgTzSvh",
+        "users": [],
+        "assistants": []
+      },
+      "authenticated_requests": 0
+    },
+    {
+      "name": "kilo-rendered",
+      "runtime": "kilo",
+      "runtime_version": "7.8.8",
+      "runtime_sha256": "d734bdfd765781457034fa0b8fd5bd28fa4d21472eab0ac030a1db7f571bfded",
+      "source": {
+        "event_id": "033f9a9f3860465e888dffac4679f5db",
+        "at": "2026-10-17T10:12:17.344729Z"
+      },
+      "observation_end": "2026-10-17T10:12:19.458922+00:00",
+      "deliveries": [
+        {
+          "id": "aa26073dbaf94caa8a6fb5dccfc82b91",
+          "at": "2026-10-17T10:12:17.346769Z",
+          "source_event_id": "033f9a9f3860465e888dffac4679f5db",
+          "state": "claimed"
+        },
+        {
+          "id": "846e329ea43b4e209465a2a1a5149c85",
+          "at": "2026-10-17T10:12:18.850767Z",
+          "source_event_id": "033f9a9f3860465e888dffac4679f5db",
+          "state": "accepted"
+        }
+      ],
+      "native": {
+        "snapshot_sha256": "cdd32ec31456c08cfa37e6c18d6f1aab78b748eba9831ada3b655c85982fb2fe",
+        "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+        "users": [
+          {
+            "id": "msg_149591b50001Wwdn50mpFBohXu",
+            "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+            "created_ms": 1792231938896,
+            "parts": [
+              {
+                "id": "prt_149591b57001t8InlD3vU4gtfi",
+                "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+                "kind": "text",
+                "text_bytes": 1366,
+                "text_sha256": "bf518146d25ad12122054f5cf2dcf3f071dc4ef4f10694fcb506aead777cd8fc",
+                "source_event_ids": [
+                  "033f9a9f3860465e888dffac4679f5db"
+                ],
+                "startup_headers": 1,
+                "tool_status": null
+              }
+            ]
+          }
+        ],
+        "assistants": [
+          {
+            "id": "msg_149591b97001xjjX8jDsOxdwUz",
+            "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+            "created_ms": 1792231938967,
+            "parts": [
+              {
+                "id": "prt_149591c0d0016cfBBAVvQCUSiN",
+                "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+                "kind": "step-start",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              },
+              {
+                "id": "prt_149591c110015nyowgDeu0AQPC",
+                "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+                "kind": "tool",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": "completed"
+              },
+              {
+                "id": "prt_149591c52001Fi11FiTaZNUspT",
+                "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+                "kind": "step-finish",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              }
+            ],
+            "parent_id": "msg_149591b50001Wwdn50mpFBohXu",
+            "completed_ms": 1792231939176,
+            "finish": "tool-calls",
+            "error_present": false
+          },
+          {
+            "id": "msg_149591c730013i3wP0igUbomwC",
+            "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+            "created_ms": 1792231939187,
+            "parts": [
+              {
+                "id": "prt_149591ca5001pItci4qDypDw2X",
+                "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+                "kind": "step-start",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              },
+              {
+                "id": "prt_149591ca7001MUYBsepZ6sFzpN",
+                "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+                "kind": "tool",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": "completed"
+              },
+              {
+                "id": "prt_149591cd50013M9UBctdCfxGlS",
+                "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+                "kind": "step-finish",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              }
+            ],
+            "parent_id": "msg_149591b50001Wwdn50mpFBohXu",
+            "completed_ms": 1792231939291,
+            "finish": "tool-calls",
+            "error_present": false
+          },
+          {
+            "id": "msg_149591ce1001EDYxLHLkGDMx9v",
+            "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+            "created_ms": 1792231939297,
+            "parts": [
+              {
+                "id": "prt_149591d09001W52Z5ZHe1Yel35",
+                "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+                "kind": "step-start",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              },
+              {
+                "id": "prt_149591d0b001D4ZapgLbbEcBMy",
+                "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+                "kind": "text",
+                "text_bytes": 17,
+                "text_sha256": "339a9d067af8adf52a94ebd63490c9ac29d2443a85477aaafc29296242803320",
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              },
+              {
+                "id": "prt_149591d13001c5hH2Az4nup1HO",
+                "session_id": "ses_eb6a6faadffeqISO3CM019yBbI",
+                "kind": "step-finish",
+                "text_bytes": 0,
+                "text_sha256": null,
+                "source_event_ids": [],
+                "startup_headers": 0,
+                "tool_status": null
+              }
+            ],
+            "parent_id": "msg_149591b50001Wwdn50mpFBohXu",
+            "completed_ms": 1792231939354,
+            "finish": "stop",
+            "error_present": false
+          }
+        ]
+      },
+      "authenticated_requests": 3
+    }
+  ]
+}
