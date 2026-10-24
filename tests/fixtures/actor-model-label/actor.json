@@ -1,0 +1,17 @@
+{
+  "id": "worker",
+  "runtime": "devin",
+  "command": [
+    "devin",
+    "--permission-mode",
+    "dangerous",
+    "--respect-workspace-trust",
+    "false",
+    "--model",
+    "swe-2-medium"
+  ],
+  "submit": "enter",
+  "enabled": false,
+  "runner": "pty",
+  "runtime_state_source": "terminal"
+}
