@@ -391,6 +391,11 @@ pub(crate) fn registered_running(group_id: &str, actor_id: &str) -> Option<bool>
     lookup(&(group_id.to_owned(), actor_id.to_owned())).map(|item| item.running())
 }
 
+pub(crate) fn session_generation(group_id: &str, actor_id: &str) -> Option<String> {
+    lookup(&(group_id.to_owned(), actor_id.to_owned()))
+        .map(|item| item.managed.generation().to_owned())
+}
+
 #[must_use]
 pub fn status(group_id: &str, actor_id: &str) -> Option<HeadlessStatus> {
     let item = lookup(&(group_id.to_owned(), actor_id.to_owned()))?;

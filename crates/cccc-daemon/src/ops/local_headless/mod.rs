@@ -22,10 +22,10 @@ pub(crate) use events::{
     append as append_event, append_with_dedupe as append_event_with_dedupe,
     contains_dedupe as contains_event_dedupe,
 };
-pub(crate) use supervisor::registered_running;
 pub(crate) use supervisor::{
     cancel_turn, respond_interaction, respond_permission, structured_state,
 };
+pub(crate) use supervisor::{registered_running, session_generation};
 
 use cccc_core::HomeLayout;
 use serde::Serialize;

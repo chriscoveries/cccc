@@ -182,6 +182,14 @@ pub fn running(group_id: &str, actor_id: &str) -> bool {
         })
 }
 
+pub(super) fn session_generation(group_id: &str, actor_id: &str) -> Option<String> {
+    sessions()
+        .read()
+        .ok()?
+        .get(&(group_id.to_owned(), actor_id.to_owned()))
+        .map(|entry| entry.generation.clone())
+}
+
 pub(super) fn manual_restart_required(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> bool {
     let key = (group.group_id.clone(), actor.id.clone());
     if sessions()

@@ -39,6 +39,38 @@ fn terminal_reason(error: &crate::dispatch::OpError) -> Option<String> {
     .then(|| error.message.clone())
 }
 
+fn respawn_backoff(
+    group: &cccc_core::GroupDoc,
+    actor: &Actor,
+    cancelled: &AtomicBool,
+) -> Option<super::actor_respawn_backoff::Attempt> {
+    let attempt = super::actor_respawn_backoff::begin(&group.group_id, &actor.id)?;
+    (interruptible_sleep(attempt.delay, cancelled) && !cancelled.load(Ordering::Acquire))
+        .then_some(attempt)
+}
+
+fn launch_runtime(
+    home: &cccc_core::HomeLayout,
+    group: &cccc_core::GroupDoc,
+    actor: &Actor,
+    attempt: super::actor_respawn_backoff::Attempt,
+) -> Result<Option<cccc_runtime::SessionStatus>, crate::dispatch::OpError> {
+    let before_managed = super::local_headless::session_generation(&group.group_id, &actor.id);
+    let before_deepseek = super::deepseek_runtime::session_generation(&group.group_id, &actor.id);
+    let started = actor_runtime::apply(home, group, &actor.id, "actor.start");
+    let managed = super::local_headless::session_generation(&group.group_id, &actor.id);
+    let deepseek = super::deepseek_runtime::session_generation(&group.group_id, &actor.id);
+    // Admission, not a later liveness sample, also covers immediate exit and
+    // saved Profile changes that select a different backend for this launch.
+    attempt.complete(
+        started.is_ok()
+            && (matches!(&started, Ok(Some(_)))
+                || (managed.is_some() && managed != before_managed)
+                || (deepseek.is_some() && deepseek != before_deepseek)),
+    );
+    started
+}
+
 /// Deliver `jobs`. Jobs settled here for good (stale Mail notices) are removed
 /// from `jobs`, so a caller that retries the batch never offers them again.
 pub fn process_batch(
@@ -88,7 +120,7 @@ pub fn process_batch(
     if crate::ops::local_headless::uses_managed_delivery(&current_group.group_id, &current_actor) {
         return process_managed_batch(jobs, &job.home, &current_group, &current_actor, cancelled);
     }
-    let status = match ensure_running(&job.home, &current_group, &current_actor) {
+    let status = match ensure_running(&job.home, &current_group, &current_actor, cancelled) {
         Ok(Some(status)) => status,
         Ok(None) => return BatchOutcome::Retry,
         Err(reason) => return BatchOutcome::Terminal(reason),
@@ -168,14 +200,20 @@ fn process_deepseek_batch(
         if crate::ops::deepseek_runtime::manual_restart_required(home, group, actor) {
             return BatchOutcome::Retry;
         }
-        match actor_runtime::apply(home, group, &actor.id, "actor.start") {
-            Ok(_) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
-            Ok(_) => return BatchOutcome::Retry,
-            Err(error) => {
-                return match terminal_reason(&error) {
-                    Some(reason) => BatchOutcome::Terminal(reason),
-                    None => BatchOutcome::Retry,
-                };
+        let Some(attempt) = respawn_backoff(group, actor, cancelled) else {
+            return BatchOutcome::Retry;
+        };
+        if !crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) {
+            let started = launch_runtime(home, group, actor, attempt);
+            match started {
+                Ok(_) if crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) => {}
+                Ok(_) => return BatchOutcome::Retry,
+                Err(error) => {
+                    return match terminal_reason(&error) {
+                        Some(reason) => BatchOutcome::Terminal(reason),
+                        None => BatchOutcome::Retry,
+                    };
+                }
             }
         }
     }
@@ -200,29 +238,35 @@ fn process_managed_batch(
     cancelled: &AtomicBool,
 ) -> BatchOutcome {
     if !crate::ops::local_headless::running(&group.group_id, &actor.id) {
-        match actor_runtime::apply(home, group, &actor.id, "actor.start") {
-            Ok(None) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {}
-            Ok(_) => return BatchOutcome::Retry,
-            Err(error) => {
-                if let Some(reason) = terminal_reason(&error) {
-                    return BatchOutcome::Terminal(reason);
+        let Some(attempt) = respawn_backoff(group, actor, cancelled) else {
+            return BatchOutcome::Retry;
+        };
+        if !crate::ops::local_headless::running(&group.group_id, &actor.id) {
+            let started = launch_runtime(home, group, actor, attempt);
+            match started {
+                Ok(None) if crate::ops::local_headless::running(&group.group_id, &actor.id) => {}
+                Ok(_) => return BatchOutcome::Retry,
+                Err(error) => {
+                    if let Some(reason) = terminal_reason(&error) {
+                        return BatchOutcome::Terminal(reason);
+                    }
+                    if matches!(
+                        error.code.as_str(),
+                        actor_runtime::CLAUDE_RESUME_FAILED | actor_runtime::RUNTIME_RESUME_FAILED
+                    ) {
+                        // Release this worker's claims but leave inbox/ledger messages pending.
+                        // Explicit recovery redispatches them; automatic startup must stop.
+                        super::actor_delivery::fail_jobs(jobs, &error.message);
+                        return BatchOutcome::Delivered;
+                    }
+                    tracing::warn!(
+                        group_id = %group.group_id,
+                        actor_id = %actor.id,
+                        message = %error.message,
+                        "failed to auto-wake managed actor for message delivery"
+                    );
+                    return BatchOutcome::Retry;
                 }
-                if matches!(
-                    error.code.as_str(),
-                    actor_runtime::CLAUDE_RESUME_FAILED | actor_runtime::RUNTIME_RESUME_FAILED
-                ) {
-                    // Release this worker's claims but leave inbox/ledger messages pending.
-                    // Explicit recovery redispatches them; automatic startup must stop.
-                    super::actor_delivery::fail_jobs(jobs, &error.message);
-                    return BatchOutcome::Delivered;
-                }
-                tracing::warn!(
-                    group_id = %group.group_id,
-                    actor_id = %actor.id,
-                    message = %error.message,
-                    "failed to auto-wake managed actor for message delivery"
-                );
-                return BatchOutcome::Retry;
             }
         }
     }
@@ -304,13 +348,23 @@ fn ensure_running(
     home: &cccc_core::HomeLayout,
     group: &cccc_core::GroupDoc,
     actor: &Actor,
+    cancelled: &AtomicBool,
 ) -> Result<Option<cccc_runtime::SessionStatus>, String> {
     if let Ok(status) = cccc_runtime::status(&group.group_id, &actor.id)
         && status.running
     {
         return Ok(Some(status));
     }
-    let status = match actor_runtime::apply(home, group, &actor.id, "actor.start") {
+    let Some(attempt) = respawn_backoff(group, actor, cancelled) else {
+        return Ok(None);
+    };
+    if let Ok(status) = cccc_runtime::status(&group.group_id, &actor.id)
+        && status.running
+    {
+        return Ok(Some(status));
+    }
+    let started = launch_runtime(home, group, actor, attempt);
+    let status = match started {
         Ok(Some(status)) if status.running => status,
         Ok(_) => return Ok(None),
         Err(error) => {

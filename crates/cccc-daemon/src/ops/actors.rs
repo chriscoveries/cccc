@@ -512,6 +512,7 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let original_secrets = actor_secrets::values(home, &group_id, &actor_id)?;
     let runtime_was_running = actor_process_running(&group, &original_actor);
     actor_delivery::shutdown_actor(&group_id, &actor_id);
+    super::actor_respawn_backoff::forget(&group_id, &actor_id);
     if let Err(error) = actor_runtime::apply(home, &group, &actor_id, "actor.stop") {
         actor_delivery::dispatch_group_unread(home, &group);
         return Err(error);
@@ -836,6 +837,9 @@ fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult
             Ok(())
         })
         .map_err(OpError::io)?;
+        // The worker is joined before invalidating its pending reservation.
+        // A healthy idempotent Start preserves the automatic worker and history.
+        super::actor_respawn_backoff::forget(&group_id, &actor_id);
     }
     let retried_claude_resume = if let Some(runtime) = retry_runtime
         .filter(|_| kind == "actor.restart" || !runtime_was_running || retry_claude_trust)
