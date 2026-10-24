@@ -16,6 +16,9 @@ pub enum ActorAction {
         actor_id: String,
         #[arg(long, default_value = "")]
         title: String,
+        /// Optional operator-maintained declaration; does not select or verify the serving model.
+        #[arg(long, default_value = "")]
+        model_label: String,
         #[arg(long, default_value = "codex")]
         runtime: String,
         #[arg(long, default_value = "default", value_parser = ["default", "acp"])]
@@ -43,6 +46,9 @@ pub enum ActorAction {
         group_id: Option<String>,
         #[arg(long)]
         title: Option<String>,
+        /// Update the operator-maintained declaration (empty clears it); does not restart the Actor or change launch configuration.
+        #[arg(long)]
+        model_label: Option<String>,
         #[arg(long)]
         runtime: Option<String>,
         #[arg(long, value_parser = ["default", "acp"])]

@@ -3351,6 +3351,20 @@ Result:
 
 ### 8.4 Actors
 
+`model_label` is an optional, operator-maintained declaration, independent of
+the Actor's human-facing title. Absence means undeclared. It neither configures
+launching nor verifies the model serving a turn, and is not billing evidence.
+The operator must update or clear it after a model change; no automatic
+synchronization is performed. Values are trimmed, limited to 128 Unicode
+characters, and must contain no control characters. Empty or space-only values
+clear the declaration, and undeclared records omit the field. A label-only
+update MUST NOT restart the Actor or alter its launch configuration.
+
+The CLI accepts `--model-label` on `cccc actor add` and `cccc actor update`;
+omitting it on update preserves the declaration, while `--model-label ""`
+clears it. The MCP `cccc_actor` tool accepts `model_label` on `add` and `update`
+with the same semantics. The unmerged `model` / `--model` name is not an alias.
+
 #### `actor_list`
 
 Args:
@@ -3362,6 +3376,9 @@ Result:
 ```ts
 { actors: Array<Record<string, unknown>> } // includes at least id/title/runtime/enabled + role/running
 ```
+
+Declared Actors also include `model_label`; it is persisted with the Actor and
+included in `actor.add` event data.
 
 Running terminal Actors also expose `pty_last_output_at: string | null` and
 `pty_quiet_seconds: number | null` as diagnostic observations. The timestamp is
@@ -3382,6 +3399,7 @@ Args:
   group_id: string
   actor_id?: string
   title?: string
+  model_label?: string // optional operator-maintained declaration; see above
   runtime?: string
   runtime_mode?: "default" | "acp" // optional headless ACP for Antigravity, Auggie, Copilot, Devin, Cursor, Kimi Code, Kiro, Hermes and Droid
   command?: string[]
@@ -3436,7 +3454,7 @@ Args:
 ```
 
 Patch keys used by CCCC v0.4.x include:
-- Identity/UI: `title`
+- Identity/UI: `title`, `model_label` (omit to preserve; empty string clears)
 - Runtime: `runtime`, `runtime_mode`, `command`, `submit`
 - Scope: `default_scope_key`
 - Enable/disable: `enabled`
@@ -3444,7 +3462,7 @@ Patch keys used by CCCC v0.4.x include:
 - Capability startup baseline: `capability_autoload`
 
 A linked Profile owns `runtime`, `runtime_mode`, `command`, `submit` and its explicit environment.
-Actor-local `title`, notes, Web Model conversation bindings and `capability_autoload` remain editable; the Actor's
+Actor-local `title`, `model_label`, notes, Web Model conversation bindings and `capability_autoload` remain editable; the Actor's
 capability baseline is additive to Profile defaults. A linked Actor MUST NOT
 merge dormant custom environment values over the Profile. Converting to custom
 snapshots the effective Profile configuration and secrets, replacing dormant

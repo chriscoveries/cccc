@@ -327,6 +327,55 @@ fn actor_update_enabled_keeps_persisted_and_live_lifecycle_in_sync() {
         );
     }
 
+    // Reuse this process-control harness; declarations come from captured inputs.
+    // Only CI runs this test: no provider process or external model is needed.
+    let labels: Vec<String> = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/actor-model-label/labels.json"
+    ))
+    .expect("captured tokens");
+    let before = cccc_runtime::status(&group_id, "peer1").expect("running actor");
+    assert!(before.running && before.pid.is_some());
+    let keeper = cccc_runtime::status(&group_id, "keeper").expect("keeper");
+    let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+    let snapshot = |actor: &cccc_contracts::Actor| {
+        let mut value = serde_json::to_value(actor).expect("actor");
+        let object = value.as_object_mut().expect("object");
+        object.remove("model_label");
+        object.remove("updated_at");
+        value
+    };
+    let baseline = snapshot(&store.load(&group_id).expect("group").actors[0]);
+    for label in [labels[0].as_str(), labels[1].as_str(), ""] {
+        call(
+            &home,
+            "actor_update",
+            json!({"group_id":group_id,"actor_id":"peer1","patch":{"model_label":label},"by":"user"}),
+        );
+        let after = cccc_runtime::status(&group_id, "peer1").expect("same process");
+        assert!(after.running);
+        assert_eq!(after.pid, before.pid);
+        assert_eq!(after.started_at, before.started_at);
+        assert_eq!(
+            cccc_runtime::status(&group_id, "keeper")
+                .expect("keeper")
+                .pid,
+            keeper.pid
+        );
+        assert_eq!(
+            snapshot(&store.load(&group_id).expect("group").actors[0]),
+            baseline
+        );
+        let listed = call(&home, "actor_list", json!({"group_id":group_id}));
+        let actor = &listed.result["actors"][0];
+        assert_eq!(actor["running"], true);
+        assert_eq!(actor["pid"], json!(before.pid));
+        if label.is_empty() {
+            assert!(actor.get("model_label").is_none());
+        } else {
+            assert_eq!(actor["model_label"], label);
+        }
+    }
+
     let disabled = call(
         &home,
         "actor_update",

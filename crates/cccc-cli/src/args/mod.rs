@@ -450,4 +450,56 @@ mod tests {
         };
         assert_eq!(args.event_id, "event-2");
     }
+
+    #[test]
+    fn parses_actor_model_label_without_the_unmerged_alias() {
+        let labels: Vec<String> = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/actor-model-label/labels.json"
+        )))
+        .expect("captured tokens");
+        let cli = Cli::try_parse_from([
+            "cccc",
+            "actor",
+            "add",
+            "worker",
+            "--model-label",
+            &labels[0],
+        ])
+        .expect("add declaration");
+        let Some(CommandKind::Actor(ActorArgs {
+            action: ActorAction::Add { model_label, .. },
+        })) = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(model_label, labels[0]);
+        for value in [labels[1].as_str(), ""] {
+            let cli =
+                Cli::try_parse_from(["cccc", "actor", "update", "worker", "--model-label", value])
+                    .expect("update declaration");
+            let Some(CommandKind::Actor(ActorArgs {
+                action: ActorAction::Update { model_label, .. },
+            })) = cli.command
+            else {
+                panic!("wrong command");
+            };
+            assert_eq!(model_label.as_deref(), Some(value));
+        }
+        let cli =
+            Cli::try_parse_from(["cccc", "actor", "update", "worker"]).expect("omit declaration");
+        let Some(CommandKind::Actor(ActorArgs {
+            action: ActorAction::Update { model_label, .. },
+        })) = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(model_label, None);
+        for action in ["add", "update"] {
+            assert!(
+                Cli::try_parse_from(["cccc", "actor", action, "worker", "--model", &labels[0]])
+                    .is_err()
+            );
+        }
+    }
 }
