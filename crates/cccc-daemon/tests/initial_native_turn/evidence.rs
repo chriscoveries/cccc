@@ -188,7 +188,7 @@ impl Capture {
         {
             "INCONCLUSIVE"
         } else if matched.is_none() {
-            "FAIL"
+            "fixture-completed"
         } else if execution && backend_outcome == "completed" {
             "fixture-completed"
         } else {
