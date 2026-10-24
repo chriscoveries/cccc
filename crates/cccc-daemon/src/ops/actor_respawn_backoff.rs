@@ -57,6 +57,10 @@ fn begin_at(group: &str, actor: &str, now: Instant) -> Option<Attempt> {
         return None;
     }
     let (delay, count) = plan(entry.committed, now);
+    entry.committed = Some(Restarts {
+        count,
+        last: now + delay,
+    });
     let reservation = Arc::new(());
     entry.pending = Some(Arc::clone(&reservation));
     Some(Attempt {
@@ -72,9 +76,8 @@ impl Attempt {
         self.complete_at(came_up, Instant::now());
     }
 
-    fn complete_at(self, came_up: bool, now: Instant) {
-        if came_up
-            && let Ok(mut map) = history().lock()
+    fn complete_at(self, _came_up: bool, now: Instant) {
+        if let Ok(mut map) = history().lock()
             && let Some(entry) = map.get_mut(&self.key)
             && entry
                 .pending
