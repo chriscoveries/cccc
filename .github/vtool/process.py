@@ -22,10 +22,11 @@ def execute(*args, cwd=None, env=None, data=None, timeout=120, check=True, binar
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=not binary, start_new_session=True)
     try:
         stdout, stderr = p.communicate(data, timeout=timeout)
-    except BaseException:
+    except BaseException as error:
         try: os.killpg(p.pid, signal.SIGKILL)
         except ProcessLookupError: pass
         p.wait(timeout=10)
+        if isinstance(error,subprocess.TimeoutExpired): raise TimeoutError(f'{args[0]} exceeded {timeout}s') from None
         raise
     result = subprocess.CompletedProcess(args, p.returncode, stdout, stderr)
     if check and p.returncode:
