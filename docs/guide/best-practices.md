@@ -178,6 +178,44 @@ For each task, define "done":
 - Documentation updated
 - Code reviewed
 
+### Recording a review bound to an exact head
+
+Integrations can agree on one versioned JSON object per line in a task's
+`outcome` or `notes`, preserving any other text in that field:
+
+```text
+review: {"schema":"cccc.review.v1","reviewer":"<actor-id>","verdict":"PASS","head_sha":"<full-commit-sha>","evidence":"<stable-review-receipt-URL>"}
+```
+
+Read the complete stored task with `cccc_task(action="list", task_id="<task-id>",
+include_archived=true)`; `include_archived=true` is needed for archived tasks.
+Bootstrap summaries can clip or omit these fields. Readers implementing this
+convention should parse the agreed schema, check that the full `head_sha`
+matches the artifact being reviewed, and verify the referenced review receipt.
+The receipt remains the authoritative evidence.
+
+Updates replace the **whole value** of `outcome` or `notes`; they do not append.
+To preserve concurrent edits:
+
+1. Read `cccc_context_get(detail="full", include_archived=true)`, following
+   `next_cursor` until the target task appears. Use its complete field text
+   and the `version` returned in that same response. If text is marked
+   `[clipped to fit the page]`, obtain an unpaged daemon `context_get` snapshot
+   by omitting `limit`, `cursor`, and `max_bytes` before merging.
+2. Merge the review line into the existing text. Submit a `task.update` op
+   through `cccc_context_sync`, with `if_version` set to that context `version`
+   and the merged whole field value. The task read's `tasks_version` is a
+   different token. The `cccc_task(action="update")` convenience action does
+   not expose `if_version`.
+3. On `version_conflict`, reload and merge again. After a storage error, reload
+   before deciding what to retry. See the [Context ops contract](../standards/CCCC_CONTEXT_OPS_V1.md).
+
+The writer must be the task's assignee, handoff target, foreman, or user; a
+reviewer can use their own assigned review task or ask an authorized writer.
+This is a client convention: **CCCC does not validate the review schema or
+authenticate the `reviewer` value**. Quorum, veto, attempt resets, and closure
+gates remain policy in board tooling or CI.
+
 ### Use the Context Panel
 
 - **Vision**: Keep the project goal visible
