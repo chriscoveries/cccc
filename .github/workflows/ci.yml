@@ -5,6 +5,11 @@ on:
     branches: [main, rust]
   pull_request:
   workflow_dispatch:
+    inputs:
+      vtool_request:
+        description: 'Resolved version integration request; empty runs normal CI'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -15,6 +20,7 @@ concurrency:
 
 jobs:
   quality:
+    if: ${{ !inputs.vtool_request }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -40,6 +46,7 @@ jobs:
         run: python -m pytest -q
 
   web:
+    if: ${{ !inputs.vtool_request }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -73,6 +80,7 @@ jobs:
           if-no-files-found: error
 
   package:
+    if: ${{ !inputs.vtool_request }}
     needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -121,6 +129,7 @@ jobs:
           PY
 
   windows-smoke:
+    if: ${{ !inputs.vtool_request }}
     needs: web
     runs-on: windows-latest
     timeout-minutes: 30
@@ -191,6 +200,7 @@ jobs:
           opencode::launch_tests:: -- --test-threads=1
 
   rust-linux:
+    if: ${{ !inputs.vtool_request }}
     needs: web
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -259,7 +269,7 @@ jobs:
             live_kilo -- --test-threads=1
 
   ci-required:
-    if: always()
+    if: always() && !inputs.vtool_request
     needs:
       - quality
       - web
@@ -287,3 +297,30 @@ jobs:
             exit 1
           fi
           echo "All required CI jobs succeeded."
+
+  vtool-integration:
+    if: ${{ inputs.vtool_request != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Resolve version integration on the hosted runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VTOOL_REQUEST: ${{ inputs.vtool_request }}
+          GIT_TERMINAL_PROMPT: '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TMPDIR=$(mktemp -d)
+          trap 'rm -rf -- "$TMPDIR"' EXIT
+          python3 .github/vtool/integration.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vtool-result
+          path: plan.json
+          if-no-files-found: error
