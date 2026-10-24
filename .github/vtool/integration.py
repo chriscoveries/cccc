@@ -116,7 +116,8 @@ def worker(request):
                     git(repo,'push',url,sha+':'+staging)
                     run('gh','api','-X','POST','repos/chriscoveries/cccc/git/refs','-f','ref=refs/heads/'+branch,'-f','sha='+sha)
                 finally:
-                    run('gh','api','-X','DELETE','repos/chriscoveries/cccc/git/'+staging.removeprefix('refs/'))
+                    if run('git','ls-remote',url,staging):
+                        run('gh','api','-X','DELETE','repos/chriscoveries/cccc/git/refs/'+staging.removeprefix('refs/'))
     return plan
 
 
