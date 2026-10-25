@@ -440,8 +440,8 @@ async fn named_tool_activity_finishes_without_journaling_transient_or_foreign_up
     assert_eq!(f.terminals().len(), 1);
 }
 
-#[test]
-fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
+#[tokio::test]
+async fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
     let captured: Value = serde_json::from_str(include_str!("../turn_usage/deliveries.json"))
         .expect("captured deliveries are valid JSON");
     let fixture = Fixture::new(false, "unused");
@@ -521,8 +521,8 @@ fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
     assert!(session.take_delivery_task("rejected").is_none());
 }
 
-#[test]
-fn consumed_delivery_cannot_be_rebound_to_another_task() {
+#[tokio::test]
+async fn consumed_delivery_cannot_be_rebound_to_another_task() {
     let fixture = Fixture::new(false, "unused");
     let session = &fixture.session;
     session.bind_delivery_task("delivery", Some("T001".into()));
