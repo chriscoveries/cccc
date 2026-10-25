@@ -2,20 +2,27 @@ use super::LedgerIndex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 const MAX_ENTRIES: usize = 32;
 const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
+// An index not touched for this long forfeits its cache slot even while a
+// reader still borrows it: the borrower keeps its Arc and finishes on its own
+// copy, so correctness is unaffected — only the shared fast path is dropped.
+// Without this, overlapping readers pin every entry (`strong_count == 1` is
+// never true mid-storm) and the cache retains every decoded ledger at once.
+const IDLE_TTL: Duration = Duration::from_secs(60);
 
 struct CacheEntry {
     index: Arc<RwLock<LedgerIndex>>,
     source_bytes: u64,
-    last_used: u64,
+    last_used: Instant,
 }
 
 struct IndexCache {
     entries: HashMap<PathBuf, CacheEntry>,
     source_bytes: u64,
-    clock: u64,
+    idle_ttl: Duration,
     max_entries: usize,
     max_source_bytes: u64,
 }
@@ -25,7 +32,7 @@ impl IndexCache {
         Self {
             entries: HashMap::new(),
             source_bytes: 0,
-            clock: 0,
+            idle_ttl: IDLE_TTL,
             max_entries,
             max_source_bytes,
         }
@@ -36,7 +43,7 @@ impl IndexCache {
         path: &Path,
         source_bytes: u64,
     ) -> (Arc<RwLock<LedgerIndex>>, Vec<CacheEntry>) {
-        self.clock = self.clock.wrapping_add(1);
+        let now = Instant::now();
         let index = if let Some(cached) = self.entries.get_mut(path) {
             let source_bytes = source_bytes.max(cached.source_bytes);
             self.source_bytes = self
@@ -44,7 +51,7 @@ impl IndexCache {
                 .saturating_sub(cached.source_bytes)
                 .saturating_add(source_bytes);
             cached.source_bytes = source_bytes;
-            cached.last_used = self.clock;
+            cached.last_used = now;
             Arc::clone(&cached.index)
         } else {
             let index = Arc::new(RwLock::new(LedgerIndex::default()));
@@ -53,20 +60,19 @@ impl IndexCache {
                 CacheEntry {
                     index: Arc::clone(&index),
                     source_bytes,
-                    last_used: self.clock,
+                    last_used: now,
                 },
             );
             self.source_bytes = self.source_bytes.saturating_add(source_bytes);
             index
         };
-        let retired = self.evict(path);
+        let retired = self.evict(path, now);
         (index, retired)
     }
 
     fn get(&mut self, path: &Path) -> Option<Arc<RwLock<LedgerIndex>>> {
-        self.clock = self.clock.wrapping_add(1);
         let cached = self.entries.get_mut(path)?;
-        cached.last_used = self.clock;
+        cached.last_used = Instant::now();
         Some(Arc::clone(&cached.index))
     }
 
@@ -76,7 +82,7 @@ impl IndexCache {
         source_bytes: u64,
         expected: &Arc<RwLock<LedgerIndex>>,
     ) -> Vec<CacheEntry> {
-        self.clock = self.clock.wrapping_add(1);
+        let now = Instant::now();
         let Some(cached) = self.entries.get_mut(path) else {
             return Vec::new();
         };
@@ -88,8 +94,8 @@ impl IndexCache {
             .saturating_sub(cached.source_bytes)
             .saturating_add(source_bytes);
         cached.source_bytes = source_bytes;
-        cached.last_used = self.clock;
-        self.evict(path)
+        cached.last_used = now;
+        self.evict(path, now)
     }
 
     fn remove(&mut self, path: &Path) -> Option<CacheEntry> {
@@ -98,16 +104,31 @@ impl IndexCache {
         Some(removed)
     }
 
-    fn evict(&mut self, protected: &Path) -> Vec<CacheEntry> {
-        let mut retired = Vec::new();
+    fn evict(&mut self, protected: &Path, now: Instant) -> Vec<CacheEntry> {
+        let mut retired: Vec<CacheEntry> = self
+            .entries
+            .keys()
+            .filter(|path| {
+                path.as_path() != protected
+                    && now.duration_since(self.entries[path.as_path()].last_used) > self.idle_ttl
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|path| self.remove(&path))
+            .collect();
         while self.entries.len() > self.max_entries
             || (self.source_bytes > self.weight_limit() && self.entries.len() > 1)
         {
+            // Soft evictions prefer unborrowed entries, but overlapping readers can
+            // hold every slot at once. Past twice the soft weight limit a borrowed entry
+            // can retire too; its reader finishes on its own Arc.
+            let hard = self.source_bytes > self.weight_limit().saturating_mul(2);
             let candidate = self
                 .entries
                 .iter()
                 .filter(|(path, cached)| {
-                    path.as_path() != protected && Arc::strong_count(&cached.index) == 1
+                    path.as_path() != protected && (hard || Arc::strong_count(&cached.index) == 1)
                 })
                 .min_by_key(|(_, cached)| cached.last_used)
                 .map(|(path, _)| path.clone());
@@ -173,6 +194,93 @@ pub(super) fn invalidate(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn captured() -> Vec<cccc_contracts::Event> {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/mail_notice_history.json"
+        ))
+        .expect("captured notice history")
+    }
+
+    fn recorded(
+        cache: &mut IndexCache,
+        path: &Path,
+        events: &[cccc_contracts::Event],
+    ) -> Arc<RwLock<LedgerIndex>> {
+        let weight = super::super::estimate_events_bytes(events);
+        let index = cache.entry(path, weight).0;
+        let mut guard = index.write().expect("index writer");
+        guard.events = events.to_vec();
+        guard.reindex();
+        guard.estimated_bytes = weight;
+        drop(guard);
+        index
+    }
+
+    #[test]
+    fn an_idle_slot_retires_while_its_captured_snapshot_is_borrowed() {
+        let events = captured();
+        let weight = super::super::estimate_events_bytes(&events);
+        let mut cache = IndexCache::new(8, weight * 8);
+        let old = Path::new("old");
+        let current = Path::new("current");
+        let reader = recorded(&mut cache, old, &events);
+        let protected = recorded(&mut cache, current, &events);
+        let retired = cache.evict(current, Instant::now() + IDLE_TTL + Duration::from_secs(1));
+        assert!(!cache.entries.contains_key(old));
+        assert!(cache.entries.contains_key(current));
+        drop(retired);
+        assert_eq!(Arc::strong_count(&reader), 1);
+        let snapshot = reader.read().expect("retired reader");
+        assert_eq!(snapshot.events.len(), events.len());
+        for event in &events {
+            assert_eq!(snapshot.events[snapshot.positions[&event.id]].id, event.id);
+        }
+        assert_eq!(Arc::strong_count(&protected), 2);
+    }
+
+    #[test]
+    fn overlapping_captured_readers_detach_only_above_twice_the_weight_limit() {
+        let events = captured();
+        let weight = super::super::estimate_events_bytes(&events);
+        let mut cache = IndexCache::new(8, weight);
+        let first = recorded(&mut cache, Path::new("first"), &events);
+        let second = recorded(&mut cache, Path::new("second"), &events);
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(Arc::strong_count(&first), 2);
+        let current = recorded(&mut cache, Path::new("current"), &events);
+        assert!(!cache.entries.contains_key(Path::new("first")));
+        assert_eq!(Arc::strong_count(&first), 1);
+        assert_eq!(cache.source_bytes, weight * 2);
+        assert_eq!(first.read().expect("reader").events.len(), events.len());
+        assert_eq!(Arc::strong_count(&second), 2);
+        assert_eq!(Arc::strong_count(&current), 2);
+        drop(first);
+        drop(second);
+        drop(cache.entry(Path::new("current"), weight));
+        assert_eq!(cache.source_bytes, weight);
+    }
+
+    #[test]
+    fn retired_reader_weight_cannot_change_a_replacement_slot() {
+        let events = captured();
+        let weight = super::super::estimate_events_bytes(&events);
+        let mut cache = IndexCache::new(8, weight * 8);
+        let path = Path::new("replaced");
+        let old = recorded(&mut cache, path, &events);
+        drop(cache.evict(
+            Path::new("other"),
+            Instant::now() + IDLE_TTL + Duration::from_secs(1),
+        ));
+        let replacement = recorded(&mut cache, path, &events);
+        assert!(!Arc::ptr_eq(&old, &replacement));
+        assert!(cache.update_weight(path, 1, &old).is_empty());
+        assert_eq!(cache.source_bytes, weight);
+        assert!(Arc::ptr_eq(
+            &cache.get(path).expect("replacement"),
+            &replacement
+        ));
+    }
 
     #[test]
     fn evicts_least_recently_used_entries_by_count_and_weight() {
