@@ -258,7 +258,10 @@ fn observe_started_turn(
         return StartedTurnDisposition::Conflict;
     };
     match active_turn.as_mut() {
-        Some(active) if active.turn_id == turn_id => StartedTurnDisposition::Matched,
+        Some(active) if active.turn_id == turn_id => {
+            active.task = task;
+            StartedTurnDisposition::Matched
+        }
         Some(_) => StartedTurnDisposition::Conflict,
         None => {
             // The pending card is handed to this turn at the one moment the batch
