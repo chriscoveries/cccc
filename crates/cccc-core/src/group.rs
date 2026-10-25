@@ -5,8 +5,9 @@ use std::fs;
 use std::io;
 use uuid::Uuid;
 
-use crate::fs::{read_yaml, with_exclusive_lock, write_yaml, write_yaml_committed};
+use crate::fs::{with_exclusive_lock, write_yaml, write_yaml_committed};
 use crate::home::HomeLayout;
+use crate::parse_cache::read_yaml;
 use crate::registry::{GroupMeta, Registry};
 
 pub const AUTOMATION_TIMING_KEYS: &[&str] = &[

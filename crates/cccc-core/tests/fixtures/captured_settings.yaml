@@ -1,0 +1,7 @@
+{
+  "observability": {
+    "terminal_transcript": {
+      "per_actor_bytes": 2000000
+    }
+  }
+}

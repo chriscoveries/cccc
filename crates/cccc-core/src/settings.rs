@@ -4,7 +4,8 @@ use serde_json::{Map, Value};
 use std::io;
 
 use crate::HomeLayout;
-use crate::fs::{read_json, read_yaml, with_exclusive_lock, write_yaml};
+use crate::fs::{read_json, with_exclusive_lock, write_yaml};
+use crate::parse_cache::read_yaml;
 use cccc_contracts::CodexVoiceSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

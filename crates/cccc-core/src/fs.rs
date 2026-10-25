@@ -77,7 +77,9 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
 pub fn write_yaml<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let text = serde_yaml::to_string(value).map_err(io::Error::other)?;
     let text = quote_rfc3339_yaml_scalars(&text);
-    atomic_write(path, text.as_bytes())
+    atomic_write(path, text.as_bytes())?;
+    crate::parse_cache::invalidate(path);
+    Ok(())
 }
 
 fn quote_rfc3339_yaml_scalars(text: &str) -> String {
@@ -118,7 +120,10 @@ where
     match write_yaml(path, value) {
         Ok(()) => Ok(()),
         Err(error) => match read_yaml::<T>(path) {
-            Ok(actual) if actual == *value => Ok(()),
+            Ok(actual) if actual == *value => {
+                crate::parse_cache::invalidate(path);
+                Ok(())
+            }
             _ => Err(error),
         },
     }
