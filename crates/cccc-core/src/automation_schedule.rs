@@ -138,15 +138,7 @@ fn posix_dow_field(field: &str) -> String {
 }
 
 fn dow_index(value: &str) -> Option<usize> {
-    let lower = value.to_ascii_lowercase();
-    if let Some(index) = DOW_NAMES.iter().position(|name| *name == lower) {
-        return Some(index);
-    }
-    lower
-        .parse::<usize>()
-        .ok()
-        .filter(|day| *day <= 7)
-        .map(|day| day % 7)
+    dow_raw(value).map(|day| day % 7)
 }
 
 fn dow_name(index: usize) -> &'static str {
