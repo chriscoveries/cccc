@@ -41,7 +41,7 @@ jobs:
         run: |
           dnf install -y git cmake perl-core time
           test -x /usr/bin/git
-          /usr/bin/git --version
+          timeout 30 /usr/bin/git --version
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0

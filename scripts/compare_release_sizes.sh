@@ -11,7 +11,7 @@ worktrees=()
 cleanup() {
     local checkout failed=0
     for checkout in "${worktrees[@]}"; do
-        timeout 30 /usr/bin/git -c credential.helper='!/usr/bin/gh auth git-credential' -C "$repo_root" worktree remove --force "$checkout" || failed=1
+        git_read -C "$repo_root" worktree remove --force "$checkout" || failed=1
     done
     (( failed == 0 )) || return 1
     rm -rf -- "$measurement_root"
@@ -19,7 +19,10 @@ cleanup() {
 trap cleanup EXIT
 
 git_read() {
-    timeout 30 /usr/bin/git -c credential.helper='!/usr/bin/gh auth git-credential' "$@"
+    timeout 30 /usr/bin/git \
+        -c safe.directory="$repo_root" \
+        -c safe.directory="$measurement_root/source" \
+        -c credential.helper='!/usr/bin/gh auth git-credential' "$@"
 }
 
 base=8b2d0b0fb984189f49337206e285bb61349f4457
