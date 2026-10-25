@@ -26,7 +26,7 @@ impl StateDecode {
                 .map(str::to_owned);
             self.bytes.clear();
             self.bytes.extend_from_slice(bytes);
-            self.initialized = true;
+            self.initialized = false;
         }
         Some(self.published.as_deref())
     }
