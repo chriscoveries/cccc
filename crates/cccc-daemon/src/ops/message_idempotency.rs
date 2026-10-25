@@ -37,16 +37,10 @@ pub(super) fn find_cancellation(
     path: &std::path::Path,
     source_event_id: &str,
 ) -> std::io::Result<Option<Event>> {
-    ledger::inspect(path, |events, _| {
-        events
-            .iter()
-            .find(|event| {
-                event.kind == "chat.reply_request.cancelled"
-                    && event.data.get("source_event_id").and_then(Value::as_str)
-                        == Some(source_event_id)
-            })
-            .cloned()
-    })
+    Ok(ledger::read_all(path)?.into_iter().find(|event| {
+        event.kind == "chat.reply_request.cancelled"
+            && event.data.get("source_event_id").and_then(Value::as_str) == Some(source_event_id)
+    }))
 }
 
 pub fn tracked_client_id(group_id: &str, by: &str, key: &str) -> String {
