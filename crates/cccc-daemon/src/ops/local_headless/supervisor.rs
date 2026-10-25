@@ -816,12 +816,15 @@ fn headless_turn_uses_complete_envelope_and_control_semantics() {
 
 #[test]
 fn captured_task_refs_require_exactly_one_valid_entry() {
-    let captured: Value =
-        serde_json::from_str(include_str!("../turn_usage/deliveries.json")).unwrap();
+    let captured: Value = serde_json::from_str(include_str!("../turn_usage/deliveries.json"))
+        .expect("captured deliveries are valid JSON");
     let first = captured["turns"][0]["board_task"].clone();
     let second = captured["turns"][1]["board_task"].clone();
     let mut malformed = first.clone();
-    malformed.as_object_mut().unwrap().remove("task_id");
+    malformed
+        .as_object_mut()
+        .expect("captured task reference is an object")
+        .remove("task_id");
     for (refs, expected) in [
         (json!([first]), Some("T001")),
         (json!([first, second]), None),

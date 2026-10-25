@@ -442,13 +442,13 @@ async fn named_tool_activity_finishes_without_journaling_transient_or_foreign_up
 
 #[test]
 fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
-    let captured: Value =
-        serde_json::from_str(include_str!("../turn_usage/deliveries.json")).unwrap();
+    let captured: Value = serde_json::from_str(include_str!("../turn_usage/deliveries.json"))
+        .expect("captured deliveries are valid JSON");
     let fixture = Fixture::new(false, "unused");
     let session = &fixture.session;
     let mut totals = crate::ops::turn_usage::Accumulator::new();
     for row in include_str!("../turn_usage/claude.jsonl").lines() {
-        let row: Value = serde_json::from_str(row).unwrap();
+        let row: Value = serde_json::from_str(row).expect("captured Claude metadata is valid JSON");
         if row["type"] == "assistant" {
             totals.claude(&row);
         }
@@ -456,7 +456,7 @@ fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
     let usage = totals.summary("claude_transcript");
     let task_ref = captured["turns"][0]["board_task"]["task_id"]
         .as_str()
-        .unwrap();
+        .expect("captured delivery names a task");
     session.bind_delivery_task("delivery", Some(task_ref.into()));
     session.bind_delivery_task("unconfirmed", Some("T002".into()));
     let start = json!({"method":"turn/started","params":{"turn":{"id":"runtime-turn"}}});
@@ -472,11 +472,11 @@ fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
     handle_event(session, completed.clone(), None);
     handle_event(session, completed, None);
     let ledger = GroupStore::new(session.home.clone())
-        .unwrap()
+        .expect("test group store opens")
         .ledger_path(&session.group_id)
-        .unwrap();
+        .expect("test group has a ledger path");
     let events = cccc_core::ledger::read_all(&ledger)
-        .unwrap()
+        .expect("test usage ledger reads")
         .into_iter()
         .filter(|event| event.kind == "turn.usage")
         .collect::<Vec<_>>();
@@ -497,7 +497,7 @@ fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
         None,
     );
     let events = cccc_core::ledger::read_all(&ledger)
-        .unwrap()
+        .expect("test usage ledger reads")
         .into_iter()
         .filter(|event| event.kind == "turn.usage")
         .collect::<Vec<_>>();
@@ -536,9 +536,9 @@ fn consumed_delivery_cannot_be_rebound_to_another_task() {
         session
             .active_turn
             .lock()
-            .unwrap()
+            .expect("active turn lock")
             .as_ref()
-            .unwrap()
+            .expect("started turn is active")
             .task
             .is_none()
     );
@@ -549,7 +549,19 @@ fn consumed_delivery_cannot_be_rebound_to_another_task() {
         json!({"method":"turn/started","params":{"turn":{"id":"later"}}}),
         Some("delivery"),
     );
-    let active = session.active_turn.lock().unwrap();
-    assert!(active.as_ref().unwrap().task.is_none());
-    assert!(active.as_ref().unwrap().delegation.is_none());
+    let active = session.active_turn.lock().expect("active turn lock");
+    assert!(
+        active
+            .as_ref()
+            .expect("later turn is active")
+            .task
+            .is_none()
+    );
+    assert!(
+        active
+            .as_ref()
+            .expect("later turn is active")
+            .delegation
+            .is_none()
+    );
 }

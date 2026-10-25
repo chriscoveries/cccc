@@ -656,7 +656,7 @@ fn captured_usage_reaches_pi_settlement() {
     let settled = events
         .iter()
         .find(|event| event["method"] == "turn/completed")
-        .unwrap();
+        .expect("captured Pi turn settles");
     let usage = &settled["params"]["turn"]["usage"];
     assert_eq!(usage["source"], "pi_rpc");
     assert_eq!(usage["input_tokens"], 1852);
@@ -670,24 +670,24 @@ fn captured_usage_reaches_pi_settlement() {
 fn captured_pi_unfinished_assistant_cannot_report_partial_totals_as_complete() {
     let mut records = CAPTURED_TOOL_TURN
         .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .map(|line| serde_json::from_str::<Value>(line).expect("captured Pi events are valid JSON"))
         .collect::<Vec<_>>();
     // Derived fault control: omit only the last authoritative assistant end.
     let end = records
         .iter()
         .rposition(|row| row["type"] == "message_end" && row["message"]["role"] == "assistant")
-        .unwrap();
+        .expect("captured Pi turn has an assistant end");
     records.remove(end);
     let input = records
         .iter()
-        .map(|row| serde_json::to_string(row).unwrap())
+        .map(|row| serde_json::to_string(row).expect("captured Pi event serializes"))
         .collect::<Vec<_>>()
         .join("\n");
     let events = replay_captured_turn(&input, "s");
     let settled = events
         .iter()
         .find(|event| event["method"] == "turn/completed")
-        .unwrap();
+        .expect("captured Pi turn settles");
     let usage = &settled["params"]["turn"]["usage"];
     for field in [
         "model_id",

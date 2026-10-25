@@ -246,7 +246,7 @@ mod tests {
             let mut row = captured[0].clone();
             row["message"]["usage"]
                 .as_object_mut()
-                .unwrap()
+                .expect("captured usage is an object")
                 .remove(field);
             let mut totals = Accumulator::new();
             totals.claude(&row);
@@ -259,7 +259,10 @@ mod tests {
         }
         for field in ["id", "usage"] {
             let mut row = captured[1].clone();
-            row["message"].as_object_mut().unwrap().remove(field);
+            row["message"]
+                .as_object_mut()
+                .expect("captured message is an object")
+                .remove(field);
             let mut totals = Accumulator::new();
             totals.claude(&captured[0]);
             totals.claude(&row);
@@ -285,17 +288,20 @@ mod tests {
 
     #[test]
     fn captured_usage_retries_append_and_marker_crash_boundaries_once() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = HomeLayout::from_path(temp.path().join("home")).unwrap();
-        let store = GroupStore::new(home.clone()).unwrap();
-        let group = store.create("usage retry", "").unwrap().group_id;
-        let path = store.ledger_path(&group).unwrap();
-        let state = store.state_dir(&group).unwrap();
+        let temp = tempfile::tempdir().expect("create temporary test directory");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("create test home");
+        let store = GroupStore::new(home.clone()).expect("open test group store");
+        let group = store
+            .create("usage retry", "")
+            .expect("create test group")
+            .group_id;
+        let path = store.ledger_path(&group).expect("test group ledger path");
+        let state = store.state_dir(&group).expect("test group state path");
         let lock = state.join("ledger/ledger.lock");
         if lock.is_file() {
-            std::fs::remove_file(&lock).unwrap();
+            std::fs::remove_file(&lock).expect("remove test ledger lock file");
         }
-        std::fs::create_dir_all(&lock).unwrap();
+        std::fs::create_dir_all(&lock).expect("install deliberate ledger lock obstruction");
         assert!(
             record(
                 &home,
@@ -311,13 +317,13 @@ mod tests {
             )
             .is_err()
         );
-        std::fs::remove_dir(&lock).unwrap();
+        std::fs::remove_dir(&lock).expect("remove deliberate ledger lock obstruction");
         crate::ops::actor_activity::Publisher::default()
             .tick(&home)
-            .unwrap();
+            .expect("activity tick retries pending usage");
         let read = || {
             ledger::read_all(&path)
-                .unwrap()
+                .expect("read test usage ledger")
                 .into_iter()
                 .filter(|event| event.kind == "turn.usage")
                 .collect::<Vec<_>>()
@@ -330,9 +336,11 @@ mod tests {
         assert_eq!(event.data["delivery_id"], "delivery");
         assert_eq!(event.data["status"], "failed");
         let directory = state.join("turn-usage");
-        std::fs::remove_file(directory.join("committed").join(&event.id)).unwrap();
-        cccc_core::fs::write_json(&directory.join("pending").join(&event.id), event).unwrap();
-        flush(&home, &group).unwrap();
+        std::fs::remove_file(directory.join("committed").join(&event.id))
+            .expect("remove commit marker to model crash boundary");
+        cccc_core::fs::write_json(&directory.join("pending").join(&event.id), event)
+            .expect("restore captured event as pending");
+        flush(&home, &group).expect("recover pending usage after append");
         record(
             &home,
             &group,
@@ -345,7 +353,7 @@ mod tests {
             &usage(),
             "failed",
         )
-        .unwrap();
+        .expect("retry identical settled usage");
         assert_eq!(read().len(), 1);
         for status in ["completed", "cancelled"] {
             record(
@@ -360,7 +368,7 @@ mod tests {
                 &usage(),
                 status,
             )
-            .unwrap();
+            .expect("record settled status with unknown attribution");
         }
         let events = read();
         assert_eq!(events.len(), 3);
@@ -372,7 +380,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_dir(directory.join("pending"))
-                .unwrap()
+                .expect("read pending usage directory")
                 .count(),
             0
         );

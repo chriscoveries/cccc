@@ -919,20 +919,22 @@ mod autonomous_tests;
 fn captured_usage_reaches_claude_settlement() {
     let records = include_str!("../../turn_usage/claude.jsonl")
         .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .map(|line| serde_json::from_str::<Value>(line).expect("captured Claude JSON parses"))
         .collect::<Vec<_>>();
     let (events, mut receiver) = broadcast::channel(64);
     let mut state = TranscriptState::new("generation".into(), "redacted-session".into(), events);
     // Harness boundary only: no user prompt or assistant content is introduced.
     state.open_turn("captured-turn".into(), HashSet::new(), None);
     for record in records {
-        state.ingest(&record, None).unwrap();
+        state
+            .ingest(&record, None)
+            .expect("captured Claude metadata ingests");
     }
     let events = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
     let settled = events
         .iter()
         .find(|event| event.message["method"] == "turn/completed")
-        .unwrap();
+        .expect("captured Claude turn settles");
     let usage = &settled.message["params"]["turn"]["usage"];
     assert_eq!(usage["source"], "claude_transcript");
     assert_eq!(usage["output_tokens"], 4698);
