@@ -5,7 +5,7 @@ use super::{
 };
 use cccc_contracts::{Actor, ActorRuntime, Event, RunnerKind, utc_now};
 use cccc_core::{GroupDoc, HomeLayout};
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -163,6 +163,8 @@ pub(super) fn attach_managed(
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
+        delivery_tasks: Mutex::new(std::collections::HashMap::new()),
+        admission: Mutex::new(()),
     });
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
@@ -441,6 +443,7 @@ fn submit_admitted(
     cancelled: &AtomicBool,
     item: &Session,
 ) -> BatchSubmission {
+    let _admission = item.begin_admission();
     let Some(delivery) = super::super::actor_delivery_render::render_batch_with_mail_context(
         home,
         group,
@@ -458,6 +461,7 @@ fn submit_admitted(
                 .collect::<Vec<_>>()
                 .join(",")
         );
+        item.bind_delivery_task(&id, task_ref_in(source_events));
         let mut outcome = BatchSubmission::Deferred;
         submit_with_startup_prompt(&item.startup_prompt, &delivery, |prepared| {
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
@@ -519,6 +523,9 @@ fn submit_admitted(
                 }
             }
         });
+        if matches!(outcome, BatchSubmission::Deferred) {
+            item.forget_delivery_task(&id);
+        }
         return outcome;
     }
     if let Err(error) = item.reattach_viewer() {
@@ -546,6 +553,41 @@ fn submit_admitted(
         };
     }
     BatchSubmission::Deferred
+}
+
+/// The board task a delivered batch names: the id of the single `task_ref` entry
+/// across its messages. Exactly one entry, counted rather than deduplicated: two
+/// refs that happen to name the same task are still two refs, and collapsing
+/// them by id would make a delivery that broke the rule look like one that kept
+/// it. Any other count — two entries, or none — leaves the turn unattributed, and
+/// a ref of another kind is never a task.
+pub(super) fn task_ref_in(events: &[Event]) -> Option<String> {
+    let mut named: Option<String> = None;
+    let mut entries = 0usize;
+    for event in events {
+        let refs = match event.data.get("refs") {
+            None | Some(Value::Null) => continue,
+            Some(Value::Array(refs)) => refs,
+            Some(_) => return None,
+        };
+        for reference in refs {
+            if reference.get("kind").and_then(Value::as_str) != Some("task_ref") {
+                continue;
+            }
+            // Every task_ref entry counts, usable or not: a malformed one beside
+            // a good one makes two refs, and two refs are not one task.
+            entries += 1;
+            let task_id = reference
+                .get("task_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty());
+            if named.is_none() {
+                named = task_id.map(str::to_owned);
+            }
+        }
+    }
+    (entries == 1).then_some(named)?
 }
 
 fn submit_with_startup_prompt(
@@ -770,4 +812,29 @@ fn headless_turn_uses_complete_envelope_and_control_semantics() {
         render_turn(&notify).expect("notify turn").1,
         "system_notify"
     );
+}
+
+#[test]
+fn captured_task_refs_require_exactly_one_valid_entry() {
+    let captured: Value = serde_json::from_str(include_str!("../turn_usage/deliveries.json"))
+        .expect("captured deliveries are valid JSON");
+    let first = captured["turns"][0]["board_task"].clone();
+    let second = captured["turns"][1]["board_task"].clone();
+    let mut malformed = first.clone();
+    malformed
+        .as_object_mut()
+        .expect("captured task reference is an object")
+        .remove("task_id");
+    for (refs, expected) in [
+        (json!([first]), Some("T001")),
+        (json!([first, second]), None),
+        (json!([first, first]), None),
+        (json!([first, malformed]), None),
+        (json!([malformed]), None),
+        (json!([]), None),
+    ] {
+        let mut event = Event::new("chat.message", "capture");
+        event.data.insert("refs".into(), refs);
+        assert_eq!(task_ref_in(&[event]).as_deref(), expected);
+    }
 }

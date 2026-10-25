@@ -29,6 +29,10 @@ impl Session {
                 Err(error) => return Err(io::Error::other(error)),
             }
         }
+        self.delivery_tasks
+            .lock()
+            .map_err(|_| super::poisoned())?
+            .clear();
         self.stopped.store(true, Ordering::Release);
         self.set_status("stopped", None);
         output::emit(self, "headless.session.stopped", serde_json::Map::new());
@@ -51,6 +55,59 @@ impl Session {
                 false
             }
         }
+    }
+
+    /// Session fixes group/actor/generation; only outbound metadata grants a task ref.
+    pub(super) fn bind_delivery_task(&self, delivery_id: &str, task: Option<String>) {
+        let Ok(mut active) = self.active_turn.lock() else {
+            return;
+        };
+        let Ok(mut tasks) = self.delivery_tasks.lock() else {
+            return;
+        };
+        if let Some(turn) = active.as_mut()
+            && turn.delegation.as_deref() == Some(delivery_id)
+        {
+            if turn.task != task {
+                turn.task = None;
+            }
+            return;
+        }
+        if tasks.len() >= 16 && !tasks.contains_key(delivery_id) {
+            return;
+        }
+        tasks
+            .entry(delivery_id.to_owned())
+            .and_modify(|previous| {
+                if *previous != task {
+                    *previous = None;
+                }
+            })
+            .or_insert(task);
+    }
+
+    /// The card of the delivery the runtime named, taken out so it is used once.
+    /// The outer option says whether that delivery was registered at all; the inner
+    /// one is the card, `None` when the delivery named no single task.
+    pub(super) fn take_delivery_task(&self, delivery_id: &str) -> Option<Option<String>> {
+        self.delivery_tasks
+            .lock()
+            .ok()
+            .and_then(|mut tasks| tasks.remove(delivery_id))
+    }
+
+    /// Drop the card of a delivery that will never start a turn.
+    pub(super) fn forget_delivery_task(&self, delivery_id: &str) {
+        if let Ok(mut tasks) = self.delivery_tasks.lock() {
+            tasks.remove(delivery_id);
+        }
+    }
+
+    /// Hold the door for one delivery's admission.
+    pub(super) fn begin_admission(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub(super) fn set_status(&self, status: &str, task_id: Option<String>) {
