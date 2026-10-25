@@ -33,13 +33,8 @@ pub(super) fn accept(
     let path = store.ledger_path(&group.group_id).map_err(OpError::io)?;
     let key = format!("connect:cancel:{}", original.delivery_id);
     // Either a sender or a Group user may repeat the same cancellation intent.
-    let existing = ledger::read_all(&path)
-        .map_err(OpError::io)?
-        .into_iter()
-        .find(|event| {
-            event.kind == "chat.reply_request.cancelled"
-                && event.data.get("source_event_id").and_then(Value::as_str) == Some(&source.id)
-        });
+    let existing =
+        super::message_idempotency::find_cancellation(&path, &source.id).map_err(OpError::io)?;
     if let Some(event) = existing {
         return object(json!({"event":event,"duplicate":true}));
     }

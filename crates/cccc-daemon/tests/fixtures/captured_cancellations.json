@@ -1,0 +1,68 @@
+[
+  {
+    "v": 1,
+    "id": "884b2c58af2b45bcbff476bcb66d4779",
+    "ts": "2026-09-22T22:17:37.826758Z",
+    "kind": "chat.message",
+    "group_id": "g_capture",
+    "by": "actor-0",
+    "data": {
+      "message_mode": "request_reply"
+    }
+  },
+  {
+    "v": 1,
+    "id": "298903bd13f74877966a0440ffb2f427",
+    "ts": "2026-09-22T22:30:17.107847Z",
+    "kind": "chat.reply_request.cancelled",
+    "group_id": "g_capture",
+    "by": "actor-0",
+    "data": {
+      "source_event_id": "884b2c58af2b45bcbff476bcb66d4779"
+    }
+  },
+  {
+    "v": 1,
+    "id": "7e71babd94f847f890947d5bb112ed33",
+    "ts": "2026-09-22T22:37:23.426937Z",
+    "kind": "chat.message",
+    "group_id": "g_capture",
+    "by": "actor-0",
+    "data": {
+      "message_mode": "request_reply"
+    }
+  },
+  {
+    "v": 1,
+    "id": "6a30220dcdb34d4694ef4001da82433e",
+    "ts": "2026-09-22T22:41:48.243576Z",
+    "kind": "chat.reply_request.cancelled",
+    "group_id": "g_capture",
+    "by": "actor-0",
+    "data": {
+      "source_event_id": "7e71babd94f847f890947d5bb112ed33"
+    }
+  },
+  {
+    "v": 1,
+    "id": "de2d0e87472246bda952dda134040480",
+    "ts": "2026-09-29T04:00:45.875984Z",
+    "kind": "chat.message",
+    "group_id": "g_capture",
+    "by": "actor-1",
+    "data": {
+      "message_mode": "request_reply"
+    }
+  },
+  {
+    "v": 1,
+    "id": "8120f67c285d482984ab7d21963f0500",
+    "ts": "2026-09-29T04:01:18.291871Z",
+    "kind": "chat.reply_request.cancelled",
+    "group_id": "g_capture",
+    "by": "actor-1",
+    "data": {
+      "source_event_id": "de2d0e87472246bda952dda134040480"
+    }
+  }
+]
