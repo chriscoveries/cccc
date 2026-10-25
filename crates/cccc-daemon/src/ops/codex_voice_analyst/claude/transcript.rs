@@ -57,6 +57,7 @@ struct ActiveTurn {
     turn_id: String,
     prompt_ids: HashSet<String>,
     text: String,
+    usage: crate::ops::turn_usage::Accumulator,
     error: Option<String>,
     tools: HashMap<String, ToolCall>,
 }
@@ -261,6 +262,7 @@ impl TranscriptState {
             self.open_turn(format!("claude-{first}"), prompt_ids, None);
         }
         let active = self.active.as_mut().expect("active turn");
+        active.usage.claude(record);
         let content = record.pointer("/message/content").unwrap_or(&Value::Null);
         for block in content.as_array().into_iter().flatten() {
             match block.get("type").and_then(Value::as_str) {
@@ -369,6 +371,7 @@ impl TranscriptState {
             turn_id: turn_id.clone(),
             prompt_ids,
             text: String::new(),
+            usage: crate::ops::turn_usage::Accumulator::new(),
             error: None,
             tools: HashMap::new(),
         });
@@ -449,6 +452,7 @@ impl TranscriptState {
         } else {
             requested_status
         };
+        let usage = active.usage.summary("claude_transcript");
         self.publish(
             json!({
                 "method":"item/completed",
@@ -473,6 +477,7 @@ impl TranscriptState {
                         "id":active.turn_id,
                         "status":status,
                         "error":error,
+                        "usage":usage,
                     }
                 }
             }),
@@ -909,3 +914,27 @@ mod interrupt_tests;
 #[cfg(test)]
 #[path = "transcript_autonomous_tests.rs"]
 mod autonomous_tests;
+
+#[test]
+fn captured_usage_reaches_claude_settlement() {
+    let records = include_str!("../../turn_usage/claude.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let (events, mut receiver) = broadcast::channel(64);
+    let mut state = TranscriptState::new("generation".into(), "redacted-session".into(), events);
+    // Harness boundary only: no user prompt or assistant content is introduced.
+    state.open_turn("captured-turn".into(), HashSet::new(), None);
+    for record in records {
+        state.ingest(&record, None).unwrap();
+    }
+    let events = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+    let settled = events
+        .iter()
+        .find(|event| event.message["method"] == "turn/completed")
+        .unwrap();
+    let usage = &settled.message["params"]["turn"]["usage"];
+    assert_eq!(usage["source"], "claude_transcript");
+    assert_eq!(usage["output_tokens"], 4698);
+    assert_eq!(usage["usage_samples"], 7);
+}
