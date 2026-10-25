@@ -1667,13 +1667,13 @@ fn task_revision_is_exposed_and_conflicts_name_the_recorded_task() {
         "context_sync",
         json!({"group_id":id,"by":"user","ops":[{"op":"agent_state.update","actor_id":"peer","focus":"unrelated context"}]}),
     );
-    let patch = json!({"group_id":id,"by":"user","ops":[{"op":"task.update","task_id":"T792","waiting_on":"none","if_task_rev":0}]});
+    let patch = json!({"group_id":id,"by":"user","ops":[{"op":"task.update","task_id":"T001","waiting_on":"none","if_task_rev":0}]});
     call(&home, "context_sync", patch.clone());
     let before = call(&home, "context_get", json!({"group_id":id,"detail":"full"}));
     let conflict = raw_call(&home, "context_sync", patch);
     let error = conflict.error.expect("conflict");
     assert_eq!(error.code, "task_conflict");
-    assert_eq!(error.details["task_id"], "T792");
+    assert_eq!(error.details["task_id"], "T001");
     assert_eq!(error.details["expected"], 0);
     assert_eq!(error.details["actual"], 1);
     assert_eq!(
