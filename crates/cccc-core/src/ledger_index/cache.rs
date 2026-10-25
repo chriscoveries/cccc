@@ -17,12 +17,14 @@ struct CacheEntry {
     index: Arc<RwLock<LedgerIndex>>,
     source_bytes: u64,
     last_used: Instant,
+    order: u64,
 }
 
 struct IndexCache {
     entries: HashMap<PathBuf, CacheEntry>,
     source_bytes: u64,
     idle_ttl: Duration,
+    clock: u64,
     max_entries: usize,
     max_source_bytes: u64,
 }
@@ -33,6 +35,7 @@ impl IndexCache {
             entries: HashMap::new(),
             source_bytes: 0,
             idle_ttl: IDLE_TTL,
+            clock: 0,
             max_entries,
             max_source_bytes,
         }
@@ -44,6 +47,7 @@ impl IndexCache {
         source_bytes: u64,
     ) -> (Arc<RwLock<LedgerIndex>>, Vec<CacheEntry>) {
         let now = Instant::now();
+        self.clock = self.clock.wrapping_add(1);
         let index = if let Some(cached) = self.entries.get_mut(path) {
             let source_bytes = source_bytes.max(cached.source_bytes);
             self.source_bytes = self
@@ -52,6 +56,7 @@ impl IndexCache {
                 .saturating_add(source_bytes);
             cached.source_bytes = source_bytes;
             cached.last_used = now;
+            cached.order = self.clock;
             Arc::clone(&cached.index)
         } else {
             let index = Arc::new(RwLock::new(LedgerIndex::default()));
@@ -61,6 +66,7 @@ impl IndexCache {
                     index: Arc::clone(&index),
                     source_bytes,
                     last_used: now,
+                    order: self.clock,
                 },
             );
             self.source_bytes = self.source_bytes.saturating_add(source_bytes);
@@ -72,7 +78,9 @@ impl IndexCache {
 
     fn get(&mut self, path: &Path) -> Option<Arc<RwLock<LedgerIndex>>> {
         let cached = self.entries.get_mut(path)?;
+        self.clock = self.clock.wrapping_add(1);
         cached.last_used = Instant::now();
+        cached.order = self.clock;
         Some(Arc::clone(&cached.index))
     }
 
@@ -94,7 +102,9 @@ impl IndexCache {
             .saturating_sub(cached.source_bytes)
             .saturating_add(source_bytes);
         cached.source_bytes = source_bytes;
+        self.clock = self.clock.wrapping_add(1);
         cached.last_used = now;
+        cached.order = self.clock;
         self.evict(path, now)
     }
 
@@ -131,7 +141,7 @@ impl IndexCache {
                 .filter(|(path, cached)| {
                     path.as_path() != protected && (hard || Arc::strong_count(&cached.index) == 1)
                 })
-                .min_by_key(|(_, cached)| cached.last_used)
+                .min_by_key(|(_, cached)| cached.order)
                 .map(|(path, _)| path.clone());
             let Some(candidate) = candidate else { break };
             if let Some(removed) = self.remove(&candidate) {
