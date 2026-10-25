@@ -18,6 +18,9 @@ pub(super) struct Turn {
     pub cancelling: bool,
     pub admission: Option<oneshot::Sender<io::Result<String>>>,
     final_text: String,
+    assistant_open: bool,
+    incomplete_message: bool,
+    totals: crate::ops::turn_usage::Accumulator,
     failure: Option<&'static str>,
     message: u64,
     tools: BTreeMap<String, Value>,
@@ -39,6 +42,9 @@ impl Turn {
             cancelling: false,
             admission: Some(admission),
             final_text: String::new(),
+            assistant_open: false,
+            incomplete_message: false,
+            totals: crate::ops::turn_usage::Accumulator::new(),
             failure: None,
             message: 0,
             tools: BTreeMap::new(),
@@ -113,6 +119,8 @@ impl Turn {
         }
         match typ {
             "message_start" if record["message"]["role"] == "assistant" => {
+                self.incomplete_message |= self.assistant_open;
+                self.assistant_open = true;
                 self.message += 1;
             }
             "message_update" => {
@@ -130,6 +138,12 @@ impl Turn {
             "message_end" if record["message"]["role"] == "assistant" => {
                 // Authoritative snapshots replace the streamed reconstruction.
                 self.final_text = message_text(&record["message"]);
+                let id = record["message"]["responseId"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("message-{}", self.message));
+                self.totals.pi(id, &record["message"]);
+                self.assistant_open = false;
                 self.failure = match record["message"]["stopReason"].as_str() {
                     Some("error" | "aborted") => Some(PROVIDER_FAILED),
                     // The model's context or output budget ran out before it
@@ -218,13 +232,25 @@ impl Turn {
         session: &str,
         status: &str,
     ) {
+        let mut usage = self.totals.summary("pi_rpc");
+        if self.assistant_open || self.incomplete_message {
+            for field in [
+                "model_id",
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+            ] {
+                usage[field] = Value::Null;
+            }
+        }
         let reason = self.failure.unwrap_or(PROVIDER_FAILED);
         let error = (status == "failed").then(|| json!({"message": reason}));
         publish(
             sender,
             generation,
             None,
-            json!({"method":"turn/completed","params":{"threadId":session,"turn":{"id":self.id,"status":status,"error":error}}}),
+            json!({"method":"turn/completed","params":{"threadId":session,"turn":{"id":self.id,"status":status,"error":error,"usage":usage}}}),
         );
     }
 }
@@ -621,5 +647,55 @@ mod tests {
             terminals += usize::from(event.message["method"] == "turn/completed");
         }
         assert_eq!(terminals, 1);
+    }
+}
+
+#[test]
+fn captured_usage_reaches_pi_settlement() {
+    let events = replay_captured_turn(CAPTURED_TOOL_TURN, "s");
+    let settled = events
+        .iter()
+        .find(|event| event["method"] == "turn/completed")
+        .unwrap();
+    let usage = &settled["params"]["turn"]["usage"];
+    assert_eq!(usage["source"], "pi_rpc");
+    assert_eq!(usage["input_tokens"], 1852);
+    assert_eq!(usage["output_tokens"], 90);
+    assert_eq!(usage["cache_read_tokens"], 1536);
+    assert_eq!(usage["cache_write_tokens"], 0);
+    assert_eq!(usage["usage_samples"], 2);
+}
+
+#[test]
+fn captured_pi_unfinished_assistant_cannot_report_partial_totals_as_complete() {
+    let mut records = CAPTURED_TOOL_TURN
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    // Derived fault control: omit only the last authoritative assistant end.
+    let end = records
+        .iter()
+        .rposition(|row| row["type"] == "message_end" && row["message"]["role"] == "assistant")
+        .unwrap();
+    records.remove(end);
+    let input = records
+        .iter()
+        .map(|row| serde_json::to_string(row).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let events = replay_captured_turn(&input, "s");
+    let settled = events
+        .iter()
+        .find(|event| event["method"] == "turn/completed")
+        .unwrap();
+    let usage = &settled["params"]["turn"]["usage"];
+    for field in [
+        "model_id",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+    ] {
+        assert!(usage[field].is_null(), "{field} is incomplete");
     }
 }
