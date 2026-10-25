@@ -140,7 +140,7 @@ impl Snapshot {
             return Ok(None);
         };
         if is_gzip(&self.sources[*active].path)
-            || self.sources[*active].len <= previous[*active].len
+            || self.sources[*active].len >= previous[*active].len
             || !previous.iter().zip(offsets).all(|(source, end)| {
                 *end == if is_gzip(&source.path) {
                     u64::MAX
