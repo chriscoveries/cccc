@@ -26,7 +26,7 @@ base=8b2d0b0fb984189f49337206e285bb61349f4457
 refs=(
     "$base"
     14fd981f0f2a280aec128061d8ffeffba740d63f
-    2636e88052a4271faaad1a93a1c8d72cb2e35cf3
+    5f9d24fafa99fb5694d364cd46e4db856e6abce5
     c605cfcd036d99af2772d057c4b80571094e68e0
 )
 labels=(base weekday-parser revision-tests context-startup)
@@ -36,6 +36,7 @@ lock_blob=$(git_read rev-parse "$base:Cargo.lock")
 [[ $(git_read rev-parse HEAD:Cargo.lock) == "$lock_blob" ]]
 {
     cat /etc/os-release
+    git_read --version
     rustc --version --verbose
     cargo --version
     ldd --version

@@ -37,6 +37,11 @@ jobs:
     env:
       GIT_TERMINAL_PROMPT: "0"
     steps:
+      - name: Install native build and checkout dependencies
+        run: |
+          dnf install -y git cmake perl-core time
+          test -x /usr/bin/git
+          /usr/bin/git --version
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -44,8 +49,6 @@ jobs:
         with:
           name: comparison-web
           path: web/dist
-      - name: Install the same native dependencies as release CI
-        run: dnf install -y cmake perl-core time
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
         with:
