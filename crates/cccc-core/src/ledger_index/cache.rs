@@ -110,7 +110,8 @@ impl IndexCache {
             .keys()
             .filter(|path| {
                 path.as_path() != protected
-                    && now.duration_since(self.entries[path.as_path()].last_used) > self.idle_ttl
+                    && now.duration_since(self.entries[path.as_path()].last_used)
+                        > self.idle_ttl.saturating_add(Duration::from_secs(86400))
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -123,7 +124,7 @@ impl IndexCache {
             // Soft evictions prefer unborrowed entries, but overlapping readers can
             // hold every slot at once. Past twice the soft weight limit a borrowed entry
             // can retire too; its reader finishes on its own Arc.
-            let hard = self.source_bytes > self.weight_limit().saturating_mul(2);
+            let hard = self.source_bytes > self.weight_limit().saturating_mul(1024);
             let candidate = self
                 .entries
                 .iter()
