@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 mod command;
 mod control;
 mod resume_failure;
+mod state_decode;
 mod transcript;
 mod transcript_ack;
 #[cfg(all(test, unix))]
@@ -1225,6 +1226,8 @@ async fn transcript_file_identity(file: &tokio::fs::File) -> io::Result<same_fil
 }
 
 struct TranscriptFollower {
+    state_decode: state_decode::StateDecode,
+    state_input: Vec<u8>,
     state_path: PathBuf,
     config_dir: PathBuf,
     session_id: String,
@@ -1247,6 +1250,8 @@ impl TranscriptFollower {
         skip_existing: bool,
     ) -> Self {
         Self {
+            state_decode: state_decode::StateDecode::default(),
+            state_input: Vec::new(),
             state_path,
             config_dir,
             session_id,
@@ -1364,17 +1369,29 @@ impl TranscriptFollower {
                 "Claude Agent View state file failed validation",
             ));
         }
-        let bytes = tokio::fs::read(&self.state_path).await?;
-        let Ok(state) = serde_json::from_slice::<Value>(&bytes) else {
-            // Agent View may replace this small file while it is being read;
-            // retry on the next poll before declaring transcript corruption.
+        // Inspect and read the same open file, with a hard read bound even if it grows.
+        let file = tokio::fs::File::open(&self.state_path).await?;
+        let opened = file.metadata().await?;
+        if !opened.is_file() || opened.len() > MAX_STATE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Claude Agent View state file failed validation",
+            ));
+        }
+        self.state_input.clear();
+        file.take(MAX_STATE_BYTES + 1)
+            .read_to_end(&mut self.state_input)
+            .await?;
+        if self.state_input.len() as u64 > MAX_STATE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Claude Agent View state file exceeded its read bound",
+            ));
+        }
+        let Some(published) = self.state_decode.published(&self.state_input) else {
+            // Transient malformed state is retried without poisoning the last valid decode.
             return Ok(());
         };
-        let published = state
-            .get("linkScanPath")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
         let path = if let Some(value) = published {
             PathBuf::from(value)
         } else {
@@ -2708,3 +2725,7 @@ mod tests {
 #[cfg(test)]
 #[path = "claude/transcript_buffer_tests.rs"]
 mod transcript_buffer_tests;
+
+#[cfg(test)]
+#[path = "claude/state_decode_tests.rs"]
+mod state_decode_tests;
