@@ -11,7 +11,7 @@ pub(super) struct StateDecode {
 }
 
 impl StateDecode {
-    pub(super) fn published<'a>(&'a mut self, bytes: &[u8]) -> Option<Option<&'a str>> {
+    pub(super) fn published(&mut self, bytes: &[u8]) -> Option<Option<&str>> {
         if !self.initialized || self.bytes != bytes {
             #[cfg(test)]
             {
