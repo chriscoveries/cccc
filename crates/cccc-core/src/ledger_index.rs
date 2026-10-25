@@ -4,7 +4,9 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use crate::ledger::snapshot::{Snapshot, Source};
 use crate::ledger::{SourceRevision, read_all_uncached, revisions};
+use std::ops::ControlFlow;
 
 mod cache;
 mod queries;
@@ -15,6 +17,8 @@ type ClientKey = (String, String, String);
 #[derive(Default)]
 struct LedgerIndex {
     revisions: Vec<SourceRevision>,
+    sources: Vec<Source>,
+    offsets: Vec<u64>,
     events: Vec<Event>,
     positions: HashMap<String, usize>,
     client_ids: HashMap<ClientKey, usize>,
@@ -24,16 +28,56 @@ struct LedgerIndex {
 }
 
 impl LedgerIndex {
-    fn rebuild(path: &Path, revisions: Vec<SourceRevision>) -> io::Result<Self> {
-        let events = read_all_uncached(path)?;
+    fn rebuild(
+        path: &Path,
+        revisions: Vec<SourceRevision>,
+        snapshot: Option<&Snapshot>,
+    ) -> io::Result<Self> {
         let mut index = Self {
             revisions,
-            events,
             ..Self::default()
         };
+        if let Some(snapshot) = snapshot {
+            index.offsets = snapshot.visit(&[], |event, _| {
+                index.events.push(event);
+                ControlFlow::Continue(())
+            })?;
+            index.sources = snapshot.sources.clone();
+        } else {
+            // Identity uncertainty disables reuse rather than hiding otherwise readable records.
+            index.events = read_all_uncached(path)?;
+        }
         index.reindex();
         index.estimated_bytes = estimate_events_bytes(&index.events);
         Ok(index)
+    }
+
+    fn refresh(
+        &mut self,
+        path: &Path,
+        revisions: Vec<SourceRevision>,
+        snapshot: Option<&Snapshot>,
+    ) -> io::Result<()> {
+        if let Some(snapshot) = snapshot
+            && let Some(offsets) = snapshot.append_offsets(&self.sources, &self.offsets)?
+        {
+            let mut tail = Vec::new();
+            let ends = snapshot.visit(&offsets, |event, _| {
+                tail.push(event);
+                ControlFlow::Continue(())
+            })?;
+            if snapshot.fully_consumed(&ends)? {
+                for event in tail {
+                    self.push(event);
+                }
+                self.sources = snapshot.sources.clone();
+                self.offsets = ends;
+                self.revisions = revisions;
+                return Ok(());
+            }
+        }
+        *self = Self::rebuild(path, revisions, snapshot)?;
+        Ok(())
     }
 
     fn reindex(&mut self) {
@@ -65,7 +109,7 @@ impl LedgerIndex {
         }
     }
 
-    fn push(&mut self, event: Event, next_revisions: Vec<SourceRevision>) {
+    fn push(&mut self, event: Event) {
         let position = self.events.len();
         self.positions.insert(event.id.clone(), position);
         if let Some(client_id) = event
@@ -91,7 +135,6 @@ impl LedgerIndex {
             .estimated_bytes
             .saturating_add(estimate_event_bytes(&event));
         self.events.push(event);
-        self.revisions = next_revisions;
     }
 }
 
@@ -161,36 +204,43 @@ fn estimate_value_bytes(value: &serde_json::Value) -> u64 {
 }
 
 fn current(path: &Path) -> io::Result<Arc<RwLock<LedgerIndex>>> {
-    // Observe the sources under the stable ledger lock, then release it before
-    // taking the index lock below so the lock order stays index -> ledger.
-    // Compaction renames the active file and adds segments; outside the lock a
-    // look can miss a source, and a partial list can even match a cached one
-    // (path, length and mtime are not a file generation), returning stale events.
-    let observed = {
+    // Observe under the ledger lock, then release it before taking the index
+    // lock. Appenders also release their writer lock before notifying the index.
+    let (observed, sources) = {
         let _source_lock = crate::ledger::acquire_reader_lock(path)?;
-        revisions(path)?
+        (
+            revisions(path)?,
+            Snapshot::open_locked(path)
+                .ok()
+                .map(|snapshot| snapshot.sources),
+        )
     };
     let weight = observed.iter().map(|revision| revision.len).sum();
     let entry = cache::entry(path, weight);
-    if entry
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .revisions
-        == observed
     {
-        return Ok(entry);
+        let index = entry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if index.revisions == observed
+            && sources
+                .as_ref()
+                .is_some_and(|sources| *sources == index.sources)
+        {
+            return Ok(Arc::clone(&entry));
+        }
     }
     let mut index = entry
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Metadata and events must describe the same committed history. Refresh
-    // after both locks: another reader or append may have updated the index
-    // while this reader waited. Appenders release the writer lock before
-    // note_append takes the index lock, so this order cannot form a lock cycle.
     let source_lock = crate::ledger::acquire_reader_lock(path)?;
     let next_revisions = revisions(path)?;
-    if index.revisions != next_revisions {
-        *index = LedgerIndex::rebuild(path, next_revisions)?;
+    let snapshot = Snapshot::open_locked(path).ok();
+    if index.revisions != next_revisions
+        || snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.sources != index.sources)
+    {
+        index.refresh(path, next_revisions, snapshot.as_ref())?;
     }
     let weight = index
         .revisions
@@ -204,48 +254,45 @@ fn current(path: &Path) -> io::Result<Arc<RwLock<LedgerIndex>>> {
     Ok(entry)
 }
 
-pub(crate) fn note_append(path: &Path, event: &Event, encoded_len: usize) {
-    let cached = cache::get(path);
-    let Some(cached) = cached else { return };
-    let Ok(next_revisions) = revisions(path) else {
+pub(crate) fn note_append(path: &Path, _event: &Event, _encoded_len: usize) {
+    let Some(cached) = cache::get(path) else {
         return;
     };
-    let source_bytes: u64 = next_revisions.iter().map(|revision| revision.len).sum();
     let mut index = cached
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if index.revisions == next_revisions {
-        // A rebuild already included this committed append.
-        return;
-    }
-    let previous_len = index
-        .revisions
-        .iter()
-        .find(|revision| revision.path == path)
-        .map(|revision| revision.len);
-    let next_len = next_revisions
-        .iter()
-        .find(|revision| revision.path == path)
-        .map(|revision| revision.len);
-    let other_sources_unchanged = index
-        .revisions
-        .iter()
-        .filter(|revision| revision.path != path)
-        .eq(next_revisions
-            .iter()
-            .filter(|revision| revision.path != path));
-    let exact_append = previous_len
-        .zip(next_len)
-        .is_some_and(|(before, after)| after == before.saturating_add(encoded_len as u64));
-    // A delayed callback may describe an event already loaded by a rebuild,
-    // while the file has grown by a different event of the same encoded size.
-    if exact_append && other_sources_unchanged && !index.positions.contains_key(&event.id) {
-        index.push(event.clone(), next_revisions);
-        let weight = source_bytes.max(index.estimated_bytes);
-        drop(index);
-        cache::update_weight(path, weight, &cached);
-    } else {
-        index.revisions.clear();
+    // Callbacks are hints, not authority for the bytes or file generation.
+    // Use the same ordered-source/identity/consumed-offset validation as queries.
+    let result = (|| {
+        let _source_lock = crate::ledger::acquire_reader_lock(path)?;
+        let next = revisions(path)?;
+        let snapshot = Snapshot::open_locked(path).ok();
+        if index.revisions != next
+            || snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.sources != index.sources)
+        {
+            index.refresh(path, next, snapshot.as_ref())?;
+        }
+        Ok::<_, io::Error>(
+            index
+                .revisions
+                .iter()
+                .map(|revision| revision.len)
+                .sum::<u64>()
+                .max(index.estimated_bytes),
+        )
+    })();
+    match result {
+        Ok(weight) => {
+            drop(index);
+            cache::update_weight(path, weight, &cached);
+        }
+        Err(_) => {
+            index.revisions.clear();
+            index.sources.clear();
+            index.offsets.clear();
+        }
     }
 }
 
@@ -257,6 +304,10 @@ pub(crate) fn invalidate_path(path: &Path) {
 pub(crate) fn is_cached(path: &Path) -> bool {
     cache::get(path).is_some()
 }
+
+#[cfg(test)]
+#[path = "ledger_index/tail_tests.rs"]
+mod tail_tests;
 
 #[cfg(test)]
 mod tests {

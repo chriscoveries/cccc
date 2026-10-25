@@ -81,6 +81,11 @@ pub(crate) struct Snapshot {
 impl Snapshot {
     pub fn open(path: &Path) -> io::Result<Self> {
         let _lock = acquire_reader_lock(path)?;
+        Self::open_locked(path)
+    }
+
+    // Caller holds the stable ledger reader/writer lock.
+    pub(crate) fn open_locked(path: &Path) -> io::Result<Self> {
         let mut sources = Vec::new();
         let mut active = None;
         for source_path in source_paths(path)? {
@@ -118,6 +123,65 @@ impl Snapshot {
                         next == old
                     }
                 })
+    }
+
+    /// Reuse committed offsets only for strict growth of the same active file,
+    /// with the same ordered immutable archives and a newline-aligned prefix.
+    /// This assumes append-only source content; it cannot detect prefix rewrites.
+    pub(crate) fn append_offsets(
+        &self,
+        previous: &[Source],
+        offsets: &[u64],
+    ) -> io::Result<Option<Vec<u64>>> {
+        if !self.extends(previous) || offsets.len() != previous.len() {
+            return Ok(None);
+        }
+        let Some((active, _)) = &self.active else {
+            return Ok(None);
+        };
+        if is_gzip(&self.sources[*active].path)
+            || self.sources[*active].len <= previous[*active].len
+            || !previous.iter().zip(offsets).all(|(source, end)| {
+                *end == if is_gzip(&source.path) {
+                    u64::MAX
+                } else {
+                    source.len
+                }
+            })
+            || !self.aligned(*active, previous[*active].len)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(offsets.to_vec()))
+    }
+
+    pub(crate) fn fully_consumed(&self, ends: &[u64]) -> io::Result<bool> {
+        if self.sources.len() != ends.len()
+            || !self.sources.iter().zip(ends).all(|(source, end)| {
+                *end == if is_gzip(&source.path) {
+                    u64::MAX
+                } else {
+                    source.len
+                }
+            })
+        {
+            return Ok(false);
+        }
+        match &self.active {
+            Some((index, _)) => self.aligned(*index, self.sources[*index].len),
+            None => Ok(true),
+        }
+    }
+
+    fn aligned(&self, source: usize, end: u64) -> io::Result<bool> {
+        if end == 0 {
+            return Ok(true);
+        }
+        let mut file = self.file(source)?;
+        file.seek(SeekFrom::Start(end - 1))?;
+        let mut last = [0];
+        file.read_exact(&mut last)?;
+        Ok(last[0] == b'\n')
     }
 
     fn file(&self, source: usize) -> io::Result<File> {
