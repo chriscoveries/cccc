@@ -10,16 +10,7 @@ fn payload(response: &Value) -> &Value {
     &response["result"]["structuredContent"]
 }
 
-#[tokio::test]
-async fn declared_context_tools_preserve_authority_recovery_and_query_semantics() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let home = HomeLayout::from_path(temp.path()).expect("home");
-    let groups = GroupStore::new(home.clone()).expect("groups");
-    let mut group = groups.create("context workflow", "").expect("group");
-    for id in ["lead", "peer", "other"] {
-        cccc_core::actors::add(&mut group, cccc_contracts::Actor::new(id)).expect("actor");
-    }
-    groups.save(&group).expect("save group");
+async fn start_daemon(home: &HomeLayout) -> tokio::task::JoinHandle<anyhow::Result<()>> {
     let daemon_home = home.clone();
     let daemon_task = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
     let client = cccc_client::DaemonClient::new(home.clone());
@@ -37,6 +28,20 @@ async fn declared_context_tools_preserve_authority_recovery_and_query_semantics(
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
+    daemon_task
+}
+
+#[tokio::test]
+async fn declared_context_tools_preserve_authority_recovery_and_query_semantics() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path()).expect("home");
+    let groups = GroupStore::new(home.clone()).expect("groups");
+    let mut group = groups.create("context workflow", "").expect("group");
+    for id in ["lead", "peer", "other"] {
+        cccc_core::actors::add(&mut group, cccc_contracts::Actor::new(id)).expect("actor");
+    }
+    groups.save(&group).expect("save group");
+    let daemon_task = start_daemon(&home).await;
     let outcome = tokio::spawn(async move {
         let id = group.group_id.as_str();
         let catalog = cccc_mcp::handle_request_for_actor(
@@ -308,20 +313,7 @@ async fn context_get_pages_a_captured_board_within_its_byte_bound() {
     }
     groups.save(&group).expect("save group");
     let fixture = install_captured_context(&groups, &group.group_id);
-    let daemon_home = home.clone();
-    let daemon_task = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
-    let client = cccc_client::DaemonClient::new(home.clone());
-    for _ in 0..100 {
-        let ping = cccc_contracts::DaemonRequest {
-            v: 1,
-            op: "ping".into(),
-            args: Default::default(),
-        };
-        if client.call(&ping).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+    let daemon_task = start_daemon(&home).await;
     let outcome = tokio::spawn(async move {
         let id = group.group_id.as_str();
         let tasks = fixture["tasks"].as_array().expect("tasks");
