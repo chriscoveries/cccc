@@ -234,6 +234,47 @@ mod tests {
     }
 
     #[test]
+    fn captured_claude_snapshot_model_follows_the_latest_message_sample() {
+        let rows = claude();
+        let captured = &rows[0];
+        let mut missing = captured.clone();
+        missing["message"]
+            .as_object_mut()
+            .expect("captured message is an object")
+            .remove("model");
+        let mut totals = Accumulator::new();
+        totals.claude(&missing);
+        assert!(totals.summary("claude_transcript")["model_id"].is_null());
+        totals.claude(captured);
+        let summary = totals.summary("claude_transcript");
+        assert_eq!(
+            summary["model_id"], captured["message"]["model"],
+            "latest captured snapshot restores the model"
+        );
+        assert_eq!(summary["usage_samples"], 1);
+        assert_eq!(
+            summary["input_tokens"],
+            captured["message"]["usage"]["input_tokens"]
+        );
+        totals.claude(&missing);
+        assert!(totals.summary("claude_transcript")["model_id"].is_null());
+        // A superseded conflicting label cannot outlive the message snapshot.
+        let mut changed = captured.clone();
+        changed["message"]["model"] = rows[1]["message"]["id"].clone();
+        totals.claude(&changed);
+        totals.claude(captured);
+        assert_eq!(
+            totals.summary("claude_transcript")["model_id"],
+            captured["message"]["model"]
+        );
+        assert_ne!(captured["message"]["id"], rows[1]["message"]["id"]);
+        let mut distinct = rows[1].clone();
+        distinct["message"]["model"] = Value::Null;
+        totals.claude(&distinct);
+        assert!(totals.summary("claude_transcript")["model_id"].is_null());
+    }
+
+    #[test]
     fn capture_mutations_preserve_unknown_counters_and_identity() {
         let captured = claude();
         // Each negative control changes one field of actual assistant metadata.
