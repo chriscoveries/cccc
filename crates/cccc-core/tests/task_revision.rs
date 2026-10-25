@@ -4,6 +4,13 @@ use serde_json::{Map, Value, json};
 fn operation(value: Value) -> Map<String, Value> {
     value.as_object().expect("op").clone()
 }
+fn apply(
+    store: &ContextStore,
+    group: &str,
+    operations: &[Map<String, Value>],
+) -> std::io::Result<cccc_core::context::ContextSyncResult> {
+    store.sync(group, operations, None, "user", false)
+}
 fn fixture() -> (tempfile::TempDir, ContextStore, String) {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path()).expect("home");
@@ -43,13 +50,25 @@ fn revision(store: &ContextStore, group: &str, id: &str) -> u64 {
 #[test]
 fn task_revision_fences_recorded_task_without_conflicting_on_other_context_writes() {
     let (_temp, store, group) = fixture();
-    assert_eq!(revision(&store, &group, "T792"), 0);
+    assert_eq!(revision(&store, &group, "T001"), 0);
     let version = store
         .version(&store.load(&group).expect("load"))
         .expect("version");
-    store.sync(&group,&[operation(json!({"op":"agent_state.update","actor_id":"peer","focus":"revision check"})),operation(json!({"op":"task.update","task_id":"T898","waiting_on":"user","if_task_rev":0}))],None,"user",false).expect("unrelated changes");
+    apply(
+        &store,
+        &group,
+        &[
+            operation(
+                json!({"op":"agent_state.update","actor_id":"peer","focus":"revision check"}),
+            ),
+            operation(
+                json!({"op":"task.update","task_id":"T003","waiting_on":"user","if_task_rev":0}),
+            ),
+        ],
+    )
+    .expect("unrelated changes");
     let change =
-        operation(json!({"op":"task.update","task_id":"T792","waiting_on":"none","if_task_rev":0}));
+        operation(json!({"op":"task.update","task_id":"T001","waiting_on":"none","if_task_rev":0}));
     assert!(
         store
             .sync(
@@ -65,18 +84,16 @@ fn task_revision_fences_recorded_task_without_conflicting_on_other_context_write
     store
         .sync(&group, std::slice::from_ref(&change), None, "user", true)
         .expect("preview");
-    assert_eq!(revision(&store, &group, "T792"), 0);
-    store
-        .sync(&group, std::slice::from_ref(&change), None, "user", false)
-        .expect("fresh task guard");
-    assert_eq!(revision(&store, &group, "T792"), 1);
+    assert_eq!(revision(&store, &group, "T001"), 0);
+    apply(&store, &group, std::slice::from_ref(&change)).expect("fresh task guard");
+    assert_eq!(revision(&store, &group, "T001"), 1);
     let before = store.load(&group).expect("before");
     for dry in [true, false] {
         let error = store
             .sync(&group, std::slice::from_ref(&change), None, "user", dry)
             .expect_err("stale task");
         assert!(
-            error.to_string().contains("T792"),
+            error.to_string().contains("T001"),
             "conflict must name the task: {error}"
         );
         assert_eq!(store.load(&group).expect("unchanged").tasks, before.tasks);
@@ -88,42 +105,30 @@ fn task_revision_batch_reads_prior_revisions_and_rejects_atomically() {
     let (_temp, store, group) = fixture();
     let before = store.load(&group).expect("before");
     let first =
-        operation(json!({"op":"task.update","task_id":"T792","waiting_on":"none","if_task_rev":0}));
+        operation(json!({"op":"task.update","task_id":"T001","waiting_on":"none","if_task_rev":0}));
     let stale =
-        operation(json!({"op":"task.move","task_id":"T792","status":"active","if_task_rev":0}));
-    assert!(
-        store
-            .sync(&group, &[first.clone(), stale], None, "user", false)
-            .is_err()
-    );
+        operation(json!({"op":"task.move","task_id":"T001","status":"active","if_task_rev":0}));
+    assert!(apply(&store, &group, &[first.clone(), stale]).is_err());
     assert_eq!(store.load(&group).expect("unchanged").tasks, before.tasks);
-    store
-        .sync(
-            &group,
-            &[
-                first,
-                operation(
-                    json!({"op":"task.move","task_id":"T792","status":"active","if_task_rev":1}),
-                ),
-            ],
-            None,
-            "user",
-            false,
-        )
-        .expect("sequential guards");
-    assert_eq!(revision(&store, &group, "T792"), 2);
-    store
-        .sync(
-            &group,
-            &[operation(
-                json!({"op":"task.move","task_id":"T792","status":"active","if_task_rev":2}),
-            )],
-            None,
-            "user",
-            false,
-        )
-        .expect("no-op");
-    assert_eq!(revision(&store, &group, "T792"), 2);
+    apply(
+        &store,
+        &group,
+        &[
+            first,
+            operation(json!({"op":"task.move","task_id":"T001","status":"active","if_task_rev":1})),
+        ],
+    )
+    .expect("sequential guards");
+    assert_eq!(revision(&store, &group, "T001"), 2);
+    apply(
+        &store,
+        &group,
+        &[operation(
+            json!({"op":"task.move","task_id":"T001","status":"active","if_task_rev":2}),
+        )],
+    )
+    .expect("no-op");
+    assert_eq!(revision(&store, &group, "T001"), 2);
 }
 
 #[test]
@@ -131,103 +136,82 @@ fn task_revision_covers_create_restore_delete_and_rejects_invalid_guards() {
     let (_temp, store, group) = fixture();
     for invalid in [json!(-1), json!("0"), Value::Null] {
         assert!(
-            store
-                .sync(
-                    &group,
-                    &[operation(
-                        json!({"op":"task.update","task_id":"T792","if_task_rev":invalid})
-                    )],
-                    None,
-                    "user",
-                    false
-                )
-                .is_err()
+            apply(
+                &store,
+                &group,
+                &[operation(
+                    json!({"op":"task.update","task_id":"T001","if_task_rev":invalid})
+                )],
+            )
+            .is_err()
         );
     }
     assert!(
-        store
-            .sync(
-                &group,
-                &[operation(
-                    json!({"op":"task.create","title":"revision","if_task_rev":0})
-                )],
-                None,
-                "user",
-                false
-            )
-            .is_err()
+        apply(
+            &store,
+            &group,
+            &[operation(
+                json!({"op":"task.create","title":"revision","if_task_rev":0})
+            )],
+        )
+        .is_err()
     );
     assert!(
-        store
-            .sync(
-                &group,
-                &[operation(
-                    json!({"op":"task.update","task_id":"T792","rev":42})
-                )],
-                None,
-                "user",
-                false
-            )
-            .is_err()
+        apply(
+            &store,
+            &group,
+            &[operation(
+                json!({"op":"task.update","task_id":"T001","rev":42})
+            )],
+        )
+        .is_err()
     );
-    store
-        .sync(
-            &group,
-            &[operation(json!({"op":"task.create","title":"revision"}))],
-            None,
-            "user",
-            false,
-        )
-        .expect("create");
-    assert_eq!(revision(&store, &group, "T899"), 1);
-    store
-        .sync(
-            &group,
-            &[
-                operation(
-                    json!({"op":"task.move","task_id":"T899","status":"archived","if_task_rev":1}),
-                ),
-                operation(json!({"op":"task.restore","task_id":"T899","if_task_rev":2})),
-            ],
-            None,
-            "user",
-            false,
-        )
-        .expect("restore");
-    assert_eq!(revision(&store, &group, "T899"), 3);
+    apply(
+        &store,
+        &group,
+        &[operation(json!({"op":"task.create","title":"revision"}))],
+    )
+    .expect("create");
+    assert_eq!(revision(&store, &group, "T004"), 1);
+    apply(
+        &store,
+        &group,
+        &[
+            operation(
+                json!({"op":"task.move","task_id":"T004","status":"archived","if_task_rev":1}),
+            ),
+            operation(json!({"op":"task.restore","task_id":"T004","if_task_rev":2})),
+        ],
+    )
+    .expect("restore");
+    assert_eq!(revision(&store, &group, "T004"), 3);
     assert!(
-        store
-            .sync(
-                &group,
-                &[operation(
-                    json!({"op":"task.delete","task_id":"T899","if_task_rev":2})
-                )],
-                None,
-                "user",
-                false
-            )
-            .is_err()
-    );
-    store
-        .sync(
+        apply(
+            &store,
             &group,
-            &[
-                operation(json!({"op":"task.delete","task_id":"T899","if_task_rev":3})),
-                operation(json!({"op":"task.create","title":"next revision"})),
-            ],
-            None,
-            "user",
-            false,
+            &[operation(
+                json!({"op":"task.delete","task_id":"T004","if_task_rev":2})
+            )],
         )
-        .expect("delete then create");
-    assert_eq!(revision(&store, &group, "T900"), 1);
+        .is_err()
+    );
+    apply(
+        &store,
+        &group,
+        &[
+            operation(json!({"op":"task.delete","task_id":"T004","if_task_rev":3})),
+            operation(json!({"op":"task.create","title":"next revision"})),
+        ],
+    )
+    .expect("delete then create");
+    assert_eq!(revision(&store, &group, "T005"), 1);
     assert!(
         store
             .load(&group)
             .expect("load")
             .tasks
             .iter()
-            .all(|t| t["id"] != "T899")
+            .all(|t| t["id"] != "T004")
     );
 }
 
@@ -238,15 +222,15 @@ fn task_revision_read_is_non_mutating_and_malformed_or_exhausted_revisions_fail_
         .path()
         .join("groups")
         .join(&group)
-        .join("context/tasks/T792.yaml");
+        .join("context/tasks/T001.yaml");
     let original = std::fs::read(&path).expect("recorded bytes");
-    assert_eq!(revision(&store, &group, "T792"), 0);
+    assert_eq!(revision(&store, &group, "T001"), 0);
     assert_eq!(std::fs::read(&path).expect("unchanged bytes"), original);
     let mut task: Value = cccc_core::fs::read_yaml(&path).expect("task");
     task["rev"] = json!(u64::MAX);
     cccc_core::fs::write_yaml(&path, &task).expect("exhausted fault injection");
     let bytes = std::fs::read(&path).expect("bytes");
-    assert!(store.sync(&group,&[operation(json!({"op":"task.update","task_id":"T792","waiting_on":"none","if_task_rev":u64::MAX}))],None,"user",false).is_err());
+    assert!(apply(&store,&group,&[operation(json!({"op":"task.update","task_id":"T001","waiting_on":"none","if_task_rev":u64::MAX}))]).is_err());
     assert_eq!(std::fs::read(&path).expect("unchanged"), bytes);
     task["rev"] = json!("broken");
     cccc_core::fs::write_yaml(&path, &task).expect("malformed fault injection");
