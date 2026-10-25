@@ -48,7 +48,7 @@ mod cached {
             bytes: &[u8],
         ) -> Option<Arc<dyn Any + Send + Sync>> {
             let entry = self.entries.get_mut(key)?;
-            if entry.identity != *identity || entry.bytes != bytes {
+            if entry.identity != *identity || !std::ptr::eq(entry.bytes.as_ptr(), bytes.as_ptr()) {
                 return None;
             }
             self.clock = self.clock.wrapping_add(1);
