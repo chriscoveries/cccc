@@ -2,9 +2,6 @@ use serde::Serialize;
 use std::collections::VecDeque;
 
 pub(crate) const DEFAULT_CAPACITY: usize = 2_000_000;
-// A read may contain a single streamed byte. Coalesce reads so the payload
-// budget also bounds Vec headers, allocator overhead, and deque capacity.
-const CHUNK_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HistoryPage {
@@ -25,7 +22,6 @@ pub(crate) struct RawHistoryPage {
 
 pub struct OutputBuffer {
     chunks: VecDeque<Vec<u8>>,
-    front_offset: usize,
     bytes: usize,
     start: u64,
     end: u64,
@@ -38,7 +34,6 @@ impl Default for OutputBuffer {
     fn default() -> Self {
         Self {
             chunks: VecDeque::new(),
-            front_offset: 0,
             bytes: 0,
             start: 0,
             end: 0,
@@ -68,56 +63,25 @@ impl OutputBuffer {
             return;
         }
         self.update_terminal_modes(data);
+        self.chunks.push_back(data.to_vec());
+        self.bytes += data.len();
         self.end = self.end.saturating_add(data.len() as u64);
-        let retained = &data[data.len().saturating_sub(self.capacity)..];
-        if data.len() >= self.capacity {
-            self.start = self
-                .start
-                .saturating_add(self.bytes as u64)
-                .saturating_add((data.len() - retained.len()) as u64);
-            self.chunks.clear();
-            self.front_offset = 0;
-            self.bytes = 0;
-        }
-        self.append_chunks(retained);
-        self.bytes += retained.len();
         while self.bytes > self.capacity {
-            let Some(front_len) = self
-                .chunks
-                .front()
-                .map(|chunk| chunk.len() - self.front_offset)
-            else {
+            let Some(front_len) = self.chunks.front().map(Vec::len) else {
                 break;
             };
             let excess = self.bytes - self.capacity;
             if front_len <= excess {
                 self.chunks.pop_front();
-                self.front_offset = 0;
                 self.bytes -= front_len;
                 self.start = self.start.saturating_add(front_len as u64);
                 continue;
             }
-            self.front_offset += excess;
+            if let Some(front) = self.chunks.front_mut() {
+                front.drain(..excess);
+            }
             self.bytes -= excess;
             self.start = self.start.saturating_add(excess as u64);
-        }
-    }
-
-    fn append_chunks(&mut self, mut data: &[u8]) {
-        let chunk_bytes = self.capacity.min(CHUNK_BYTES);
-        while !data.is_empty() {
-            if self
-                .chunks
-                .back()
-                .is_none_or(|chunk| chunk.len() == chunk_bytes)
-            {
-                self.chunks.push_back(Vec::with_capacity(chunk_bytes));
-            }
-            if let Some(chunk) = self.chunks.back_mut() {
-                let count = data.len().min(chunk_bytes - chunk.len());
-                chunk.extend_from_slice(&data[..count]);
-                data = &data[count..];
-            }
         }
     }
 
@@ -217,8 +181,7 @@ impl OutputBuffer {
     }
 
     pub fn clear(&mut self) {
-        self.chunks = VecDeque::new();
-        self.front_offset = 0;
+        self.chunks.clear();
         self.bytes = 0;
         self.start = self.end;
     }
@@ -226,9 +189,10 @@ impl OutputBuffer {
     pub(crate) fn trim_to(&mut self, limit: usize) {
         let retained_start = self.end.saturating_sub(limit as u64).max(self.start);
         let retained = self.bytes_between(retained_start, self.end);
-        self.chunks = VecDeque::new();
-        self.front_offset = 0;
-        self.append_chunks(&retained);
+        self.chunks.clear();
+        if !retained.is_empty() {
+            self.chunks.push_back(retained);
+        }
         self.bytes = self.end.saturating_sub(retained_start) as usize;
         self.start = retained_start;
     }
@@ -242,22 +206,13 @@ impl OutputBuffer {
     }
 
     fn update_terminal_modes(&mut self, data: &[u8]) {
-        let previous = self.mode_probe.len();
-        self.mode_probe
-            .extend_from_slice(&data[..data.len().min(7)]);
-        for window in self.mode_probe.windows(8).chain(data.windows(8)) {
+        self.mode_probe.extend_from_slice(data);
+        for window in self.mode_probe.windows(8) {
             if window == b"\x1b[?2004h" {
                 self.bracketed_paste = true;
             } else if window == b"\x1b[?2004l" {
                 self.bracketed_paste = false;
             }
-        }
-        self.mode_probe.truncate(previous);
-        if data.len() >= 16 {
-            self.mode_probe.clear();
-            self.mode_probe.extend_from_slice(&data[data.len() - 16..]);
-        } else {
-            self.mode_probe.extend_from_slice(data);
         }
         if self.mode_probe.len() > 16 {
             self.mode_probe.drain(..self.mode_probe.len() - 16);
@@ -269,8 +224,7 @@ impl OutputBuffer {
         let relative_end = end.saturating_sub(self.start) as usize;
         let mut result = Vec::with_capacity(relative_end.saturating_sub(relative_start));
         let mut chunk_start = 0;
-        for (index, chunk) in self.chunks.iter().enumerate() {
-            let chunk = &chunk[if index == 0 { self.front_offset } else { 0 }..];
+        for chunk in &self.chunks {
             let chunk_end = chunk_start + chunk.len();
             let from = relative_start.saturating_sub(chunk_start).min(chunk.len());
             let to = relative_end.saturating_sub(chunk_start).min(chunk.len());
