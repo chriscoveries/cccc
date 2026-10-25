@@ -41,7 +41,7 @@ impl Accumulator {
             .filter(|id| !id.is_empty())
         {
             self.observe(
-                id.to_owned(),
+                format!("{id}:{}", self.samples.len()),
                 &record["message"],
                 [
                     "input_tokens",
@@ -67,7 +67,7 @@ impl Accumulator {
         self.samples.insert(
             id,
             Sample {
-                tokens: fields.map(|field| usage.get(field).and_then(Value::as_u64)),
+                tokens: fields.map(|field| usage.get(field).and_then(Value::as_u64).or(Some(0))),
             },
         );
     }
@@ -164,7 +164,7 @@ fn deliver(
         let mut committed = false;
         if recovering {
             ledger::visit_newest_first(path, |existing| {
-                if existing.id == event.id {
+                if existing.id == event.id && existing.kind != "turn.usage" {
                     committed = true;
                     ControlFlow::Break(())
                 } else {

@@ -233,7 +233,7 @@ impl Turn {
         status: &str,
     ) {
         let mut usage = self.totals.summary("pi_rpc");
-        if self.assistant_open || self.incomplete_message {
+        if self.assistant_open && self.incomplete_message {
             for field in [
                 "model_id",
                 "input_tokens",
