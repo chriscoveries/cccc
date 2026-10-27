@@ -13,7 +13,7 @@ pub use integrations::{
 };
 pub use messaging::{
     CancelReplyArgs, ConnectArgs, DeliverArgs, InboxArgs, LedgerAction, LedgerArgs, ReplyArgs,
-    SendArgs, TailArgs, TrackedSendArgs,
+    SendArgs, TailArgs, TrackedSendArgs, UsageArgs,
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -120,6 +120,8 @@ pub enum CommandKind {
     Deliver(DeliverArgs),
     CancelReply(CancelReplyArgs),
     Tail(TailArgs),
+    /// Read settled Pi and Claude turn usage from the Group ledger.
+    Usage(UsageArgs),
     Ledger(LedgerArgs),
     Daemon {
         #[command(subcommand)]
@@ -337,6 +339,21 @@ mod tests {
 
     #[test]
     fn parses_legacy_prompt_tail_and_runtime_flags() {
+        let usage = Cli::try_parse_from([
+            "cccc",
+            "usage",
+            "--group",
+            "g_fixture",
+            "--actor",
+            "peer",
+            "--limit",
+            "12",
+        ])
+        .expect("usage");
+        assert!(matches!(
+            usage.command,
+            Some(CommandKind::Usage(UsageArgs { limit: 12, .. }))
+        ));
         let cli = Cli::try_parse_from(["cccc", "prompt", "--actor-id", "peer"]).expect("prompt");
         assert!(matches!(
             cli.command,

@@ -129,6 +129,7 @@ async fn main() -> Result<()> {
             commands::messaging::cancel_reply(&client, &home, args).await
         }
         Some(CommandKind::Tail(args)) => commands::messaging::tail(&client, &home, args).await,
+        Some(CommandKind::Usage(args)) => commands::messaging::usage(&client, &home, args).await,
         Some(CommandKind::Inbox(args)) => commands::messaging::inbox(&client, &home, args).await,
         Some(CommandKind::Ledger(args)) => commands::messaging::ledger(&client, &home, args).await,
         Some(CommandKind::Daemon { action }) => daemon(action, home, &client).await,

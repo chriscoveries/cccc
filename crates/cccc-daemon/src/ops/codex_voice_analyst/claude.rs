@@ -15,6 +15,8 @@ mod command;
 mod control;
 mod resume_failure;
 mod transcript;
+#[cfg(test)]
+pub(crate) use transcript::replay_captured_usage_turn;
 mod transcript_ack;
 #[cfg(all(test, unix))]
 mod transcript_autonomous_client_tests;

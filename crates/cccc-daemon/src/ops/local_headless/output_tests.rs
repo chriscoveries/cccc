@@ -99,6 +99,103 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn captured_pi_and_claude_turn_usage_is_committed_once_and_readable() {
+    use crate::ops::codex_voice_analyst::{
+        CAPTURED_PI_LENGTH_STOP, CAPTURED_PI_TOOL_TURN, replay_captured_claude_usage_turn,
+        replay_captured_pi_turn,
+    };
+    use cccc_contracts::{ActorRuntime, DaemonRequest};
+    for (runtime, messages, input, output) in [
+        (
+            ActorRuntime::Pi,
+            replay_captured_pi_turn(CAPTURED_PI_TOOL_TURN, "abcdef01"),
+            1852,
+            90,
+        ),
+        (
+            ActorRuntime::Pi,
+            replay_captured_pi_turn(CAPTURED_PI_LENGTH_STOP, "abcdef01"),
+            429,
+            1,
+        ),
+        (
+            ActorRuntime::Claude,
+            replay_captured_claude_usage_turn(),
+            14,
+            4698,
+        ),
+    ] {
+        let mut f = Fixture::new(false, "");
+        let thread = messages[0]["params"]["threadId"]
+            .as_str()
+            .expect("owned thread");
+        f.session.managed = Arc::new(AnalystSession::for_usage_test(
+            f._temp.path(),
+            runtime,
+            thread,
+        ));
+        let store = GroupStore::new(f.session.home.clone()).expect("store");
+        let path = store
+            .ledger_path(&f.session.group_id)
+            .expect("group ledger");
+        for message in &messages {
+            if message["method"] == "turn/completed" {
+                assert!(
+                    cccc_core::ledger::read_all(&path)
+                        .expect("ledger")
+                        .iter()
+                        .all(|event| event.kind != "turn.usage"),
+                    "no usage record before settlement"
+                );
+                if runtime == ActorRuntime::Claude {
+                    // No task association is authoritative: retain null, not an assigned-card guess.
+                    f.session.status.lock().expect("state").task_id = None;
+                }
+            }
+            handle_message(&f.session, message.clone());
+        }
+        let usage = cccc_core::ledger::read_all(&path)
+            .expect("ledger")
+            .into_iter()
+            .filter(|event| event.kind == "turn.usage")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            usage.len(),
+            1,
+            "one settled turn must emit one group-ledger usage record"
+        );
+        assert_eq!(usage[0].data["actor_id"], f.session.actor_id);
+        assert_eq!(usage[0].data["input_tokens"], input);
+        assert_eq!(usage[0].data["output_tokens"], output);
+        assert_eq!(usage[0].data["turn_count"], 1);
+        assert!(!usage[0].data["model_id"].is_null());
+        let turn = &messages.last().expect("completion")["params"]["turn"]["id"];
+        if runtime == ActorRuntime::Claude {
+            assert!(usage[0].data["task_id"].is_null());
+        } else {
+            assert_eq!(&usage[0].data["task_id"], turn);
+        }
+        // A replay of the same generation and provider turn must not double-charge.
+        for message in messages {
+            handle_message(&f.session, message);
+        }
+        let request: DaemonRequest = serde_json::from_value(json!({"op":"turn_usage", "args":{
+            "group_id":f.session.group_id,"actor_id":f.session.actor_id,"by":"user"}}))
+        .expect("request");
+        let response = crate::dispatch::dispatch(&f.session.home, &request);
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.result["usage"]
+                .as_array()
+                .expect("usage list")
+                .len(),
+            1
+        );
+        assert_eq!(response.result["usage"][0]["id"], usage[0].id);
+    }
+}
+
+#[tokio::test]
 async fn structured_failure_has_one_terminal_and_clears_on_the_next_turn() {
     let f = Fixture::new(true, "");
     f.start("turn-1");

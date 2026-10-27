@@ -79,6 +79,7 @@ mod task_list;
 mod terminal;
 mod terminal_history_source;
 mod terminal_text;
+mod turn_usage;
 mod voice_notifications;
 pub(crate) mod voice_secretary;
 mod web_model_connectors;

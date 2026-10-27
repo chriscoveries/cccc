@@ -45,6 +45,7 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         }
         "event_append" => Operation::new(Write, append_raw),
         "ledger_tail" => Operation::new(Read, super::messaging_query::tail),
+        "turn_usage" => Operation::new(Read, super::turn_usage::list),
         "ledger_search" => Operation::new(Read, super::messaging_query::search),
         "ledger_window" => Operation::new(Read, super::messaging_query::window),
         "ledger_statuses" => Operation::new(Read, super::messaging_status::statuses),
