@@ -11,7 +11,7 @@ gcc --version > probe-artifact/compiler.txt
 gcc -std=c11 -O2 -g -Wall -Wextra -Werror -fPIC -shared \
   .github/proof/turn-io-probe.c -o probe-artifact/turn-io-probe.so
 gcc -std=c11 -O2 -g -Wall -Wextra -Werror -pthread \
-  .github/proof/probe-selftest.c -o probe-artifact/probe-selftest
+  .github/proof/probe-selftest.c -ldl -o probe-artifact/probe-selftest
 probe-artifact/probe-selftest "$PWD/probe-artifact/turn-io-probe.so" > probe-artifact/selftest.txt
 grep -Fx 'PASS marker exit=86' probe-artifact/selftest.txt
 grep -Fx 'PASS malformed exit=87' probe-artifact/selftest.txt

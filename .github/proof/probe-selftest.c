@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -52,6 +53,8 @@ static void *ordinary_thread(void *unused) {
 }
 
 static void exercise(const char *which) {
+    int (*admitted)(void) = dlsym(RTLD_DEFAULT, "turn_probe_root_admitted");
+    check(admitted != NULL && admitted() == 1);
     int writer = file("turn-usage/writer.lock");
     int ledger = file("ledger/ledger.lock");
     int marker = file("turn-usage/committed/sample.tmp");
@@ -60,6 +63,7 @@ static void exercise(const char *which) {
         int n = snprintf(alias, sizeof(alias), "%s-alias", root); check(n > 0 && n < PATH_MAX);
         check(symlink(root, alias) == 0); path(alternate, alias, "home");
         check(setenv("TURN_PROBE_HOME", alternate, 1) == 0);
+        check(admitted() == 0);
         check(flock(writer, LOCK_EX) == 0 && flock(ledger, LOCK_EX | LOCK_NB) == 0);
     } else if (!strcmp(which, "ordinary")) {
         check(flock(ledger, LOCK_EX | LOCK_NB) == 0);

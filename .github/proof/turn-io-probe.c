@@ -59,6 +59,13 @@ static const char *home(void) {
     syscall(SYS_close, root); return getenv("TURN_PROBE_HOME");
 }
 
+/* Diagnostic for the hosted negative control; no application state is touched. */
+int turn_probe_root_admitted(void) {
+    int root = root_fd();
+    if (root < 0) return 0;
+    syscall(SYS_close, root); return 1;
+}
+
 static bool fd_path(int fd, char out[PATH_MAX]) {
     char proc[64];
     int n = snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
