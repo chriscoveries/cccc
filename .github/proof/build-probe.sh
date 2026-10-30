@@ -3,7 +3,8 @@ set -Eeuo pipefail
 umask 077
 : "${SOURCE_SHA:?}"
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-[[ "$(git rev-parse HEAD^)" == "$SOURCE_SHA" ]]
+git merge-base --is-ancestor "$SOURCE_SHA" HEAD
+git diff --exit-code "$SOURCE_SHA" HEAD -- . ':!.github/proof' ':!.github/workflows/ci.yml'
 [[ ! -e probe-artifact && ! -L probe-artifact ]]
 mkdir -m 700 probe-artifact
 gcc --version > probe-artifact/compiler.txt

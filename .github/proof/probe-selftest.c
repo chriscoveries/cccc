@@ -55,7 +55,13 @@ static void exercise(const char *which) {
     int writer = file("turn-usage/writer.lock");
     int ledger = file("ledger/ledger.lock");
     int marker = file("turn-usage/committed/sample.tmp");
-    if (!strcmp(which, "ordinary")) {
+    if (!strcmp(which, "alias")) {
+        char alias[PATH_MAX], alternate[PATH_MAX];
+        int n = snprintf(alias, sizeof(alias), "%s-alias", root); check(n > 0 && n < PATH_MAX);
+        check(symlink(root, alias) == 0); path(alternate, alias, "home");
+        check(setenv("TURN_PROBE_HOME", alternate, 1) == 0);
+        check(flock(writer, LOCK_EX) == 0 && flock(ledger, LOCK_EX | LOCK_NB) == 0);
+    } else if (!strcmp(which, "ordinary")) {
         check(flock(ledger, LOCK_EX | LOCK_NB) == 0);
     } else {
         check(flock(writer, LOCK_EX) == 0);
@@ -103,7 +109,7 @@ int main(int argc, char **argv) {
     directory(state, "ledger"); directory(state, "turn-usage");
     directory(state, "turn-usage/committed");
     check(setenv("TURN_PROBE_HOME", home, 1) == 0 && setenv("LD_PRELOAD", argv[1], 1) == 0);
-    const char *cases[] = {"ordinary", "append", "thread", "close", "unlock", "off", "marker", "malformed"};
+    const char *cases[] = {"ordinary", "append", "thread", "close", "unlock", "off", "marker", "malformed", "alias"};
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         const char *which = cases[i];
         flag(!strcmp(which, "off") ? "off   \n" :

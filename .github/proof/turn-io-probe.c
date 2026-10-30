@@ -27,15 +27,36 @@ static bool safe_path(const char *path) {
     return true;
 }
 
-static const char *home(void) {
+static int root_fd(void) {
     const char *p = getenv("TURN_PROBE_HOME");
-    if (!safe_path(p) || strncmp(p, "/tmp/", 5) != 0) return NULL;
+    if (!safe_path(p) || strncmp(p, "/tmp/", 5) != 0) return -1;
     size_t n = strlen(p);
-    if (n < 10 || n >= PATH_MAX - 128 || strcmp(p + n - 5, "/home")) return NULL;
-    struct stat st;
-    if (lstat(p, &st) || !S_ISDIR(st.st_mode) || st.st_uid != getuid() ||
-        (st.st_mode & 0777) != 0700) return NULL;
-    return p;
+    if (n < 11 || n >= PATH_MAX - 128 || strcmp(p + n - 5, "/home")) return -1;
+    char token[PATH_MAX];
+    memcpy(token, p + 5, n - 10); token[n - 10] = 0;
+    if (!token[0] || strchr(token, '/') || !strcmp(token, ".") || !strcmp(token, "..")) return -1;
+    int slash = (int)syscall(SYS_openat, AT_FDCWD, "/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+    if (slash < 0) return -1;
+    int tmp = (int)syscall(SYS_openat, slash, "tmp", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+    syscall(SYS_close, slash);
+    if (tmp < 0) return -1;
+    int root = (int)syscall(SYS_openat, tmp, token, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+    syscall(SYS_close, tmp);
+    if (root < 0) return -1;
+    int child = (int)syscall(SYS_openat, root, "home", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+    struct stat a, b;
+    bool ok = child >= 0 && fstat(root, &a) == 0 && fstat(child, &b) == 0 &&
+        S_ISDIR(a.st_mode) && S_ISDIR(b.st_mode) && a.st_uid == getuid() && b.st_uid == getuid() &&
+        (a.st_mode & 0777) == 0700 && (b.st_mode & 0777) == 0700;
+    if (child >= 0) syscall(SYS_close, child);
+    if (!ok) { syscall(SYS_close, root); return -1; }
+    return root;
+}
+
+static const char *home(void) {
+    int root = root_fd();
+    if (root < 0) return NULL;
+    syscall(SYS_close, root); return getenv("TURN_PROBE_HOME");
 }
 
 static bool fd_path(int fd, char out[PATH_MAX]) {
@@ -71,16 +92,14 @@ static bool same_state(const char *path) {
 }
 
 static int mode(void) {
-    const char *root = home();
-    if (!root) return 0;
-    char path[PATH_MAX];
-    size_t n = strlen(root) - 5;
-    memcpy(path, root, n);
-    strcpy(path + n, "/armed");
-    int fd = (int)syscall(SYS_openat, AT_FDCWD, path,
+    int root = root_fd();
+    if (root < 0) return 0;
+    int fd = (int)syscall(SYS_openat, root, "armed",
                          O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0);
+    int saved_errno = errno;
+    syscall(SYS_close, root);
     if (fd < 0) {
-        if (errno == ENOENT) return 0;
+        if (saved_errno == ENOENT) return 0;
         _exit(87);
     }
     struct stat st;
@@ -99,14 +118,12 @@ static int mode(void) {
 }
 
 static void emit(const char *event, const char *target) {
-    const char *root = home();
-    if (!root) _exit(87);
-    char path[PATH_MAX], line[PATH_MAX + 128];
-    size_t n = strlen(root) - 5;
-    memcpy(path, root, n);
-    strcpy(path + n, "/probe-events.jsonl");
-    int fd = (int)syscall(SYS_openat, AT_FDCWD, path,
+    int root = root_fd();
+    if (root < 0) _exit(87);
+    char line[PATH_MAX + 128];
+    int fd = (int)syscall(SYS_openat, root, "probe-events.jsonl",
                          O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0600);
+    syscall(SYS_close, root);
     struct stat st;
     if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != getuid() ||
         st.st_nlink != 1 || st.st_size > 65536) _exit(87);
