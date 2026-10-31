@@ -1,0 +1,58 @@
+name: Slim ruleset verification
+
+on:
+  push:
+    branches: [control/slim-worker]
+
+permissions: {}
+
+jobs:
+  rulecheck:
+    if: github.repository == 'chriscoveries/cccc'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Verify create-only rules
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+          unset GIT_TRACE GIT_TRACE_PACKET GIT_TRACE_CURL GIT_CURL_VERBOSE
+          repo=https://github.com/chriscoveries/cccc.git
+          ref=refs/heads/slim/rulecheck-202610311010
+          scratch=$(mktemp -d)
+          trap 'rm -rf -- "$scratch"' EXIT
+          git init --bare -q "$scratch/repo.git"
+          git -C "$scratch/repo.git" fetch --no-tags --depth=2 "$repo" refs/heads/main
+          tip=$(git -C "$scratch/repo.git" rev-parse 'FETCH_HEAD^{commit}')
+          parent=$(git -C "$scratch/repo.git" rev-parse FETCH_HEAD^1)
+          if git -C "$scratch/repo.git" ls-remote --exit-code --heads "$repo" "$ref" >"$scratch/before"; then
+            echo 'ref already exists; no write attempted' >&2
+            exit 1
+          else
+            status=$?
+            [ "$status" -eq 2 ] || { echo 'ref absence unknown' >&2; exit 1; }
+          fi
+          echo "ref=$ref initial=$parent update=$tip"
+          git -C "$scratch/repo.git" -c 'credential.helper=!/usr/bin/gh auth git-credential' push "$repo" "$parent:$ref"
+          if git -C "$scratch/repo.git" -c 'credential.helper=!/usr/bin/gh auth git-credential' push "$repo" "$tip:$ref" >"$scratch/update" 2>&1; then
+            echo 'FAIL: update accepted' >&2
+            exit 1
+          fi
+          cat "$scratch/update"
+          grep -Fq 'GH013: Repository rule violations' "$scratch/update"
+          grep -Fq 'Cannot update this protected ref' "$scratch/update"
+          if git -C "$scratch/repo.git" -c 'credential.helper=!/usr/bin/gh auth git-credential' push "$repo" ":$ref" >"$scratch/delete" 2>&1; then
+            echo 'FAIL: delete accepted' >&2
+            exit 1
+          fi
+          cat "$scratch/delete"
+          grep -Fq 'GH013: Repository rule violations' "$scratch/delete"
+          grep -Fq 'Cannot delete this branch' "$scratch/delete"
+          actual=$(git -C "$scratch/repo.git" ls-remote --exit-code --heads "$repo" "$ref")
+          [ "$actual" = "$(printf '%s\t%s' "$parent" "$ref")" ]
+          echo "PASS: create allowed, update and delete rejected, ref retained at $parent"
