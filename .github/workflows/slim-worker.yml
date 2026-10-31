@@ -54,3 +54,13 @@ jobs:
             fi
             echo "PASS: creation refused and ref absent: $ref"
           done
+      - name: Read pinned publisher rulesets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for id in 26267040 26273208 26273216; do
+            /usr/bin/gh api "repos/chriscoveries/cccc/rulesets/$id" \
+              --jq '{id,source_type,source,target,enforcement,conditions,rules,bypass_actors,current_user_can_bypass}'
+          done
