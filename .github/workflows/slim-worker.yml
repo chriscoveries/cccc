@@ -1,4 +1,4 @@
-name: Slim ruleset verification
+name: Publisher scope verification
 
 on:
   push:
@@ -7,14 +7,14 @@ on:
 permissions: {}
 
 jobs:
-  rulecheck:
+  scopecheck:
     if: github.repository == 'chriscoveries/cccc'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write
     steps:
-      - name: Verify create-only rules
+      - name: Verify branch and tag creation refusals
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -23,36 +23,34 @@ jobs:
           export GIT_TERMINAL_PROMPT=0
           unset GIT_TRACE GIT_TRACE_PACKET GIT_TRACE_CURL GIT_CURL_VERBOSE
           repo=https://github.com/chriscoveries/cccc.git
-          ref=refs/heads/slim/rulecheck-202610311010
+          branch=refs/heads/control/rulecheck-token-20261031
+          tag=refs/tags/rulecheck-token-20261031
           scratch=$(mktemp -d)
           trap 'rm -rf -- "$scratch"' EXIT
           git init --bare -q "$scratch/repo.git"
-          git -C "$scratch/repo.git" fetch --no-tags --depth=2 "$repo" refs/heads/main
-          tip=$(git -C "$scratch/repo.git" rev-parse 'FETCH_HEAD^{commit}')
-          parent=$(git -C "$scratch/repo.git" rev-parse FETCH_HEAD^1)
-          if git -C "$scratch/repo.git" ls-remote --exit-code --heads "$repo" "$ref" >"$scratch/before"; then
-            echo 'ref already exists; no write attempted' >&2
-            exit 1
-          else
-            status=$?
-            [ "$status" -eq 2 ] || { echo 'ref absence unknown' >&2; exit 1; }
-          fi
-          echo "ref=$ref initial=$parent update=$tip"
-          git -C "$scratch/repo.git" -c 'credential.helper=!/usr/bin/gh auth git-credential' push "$repo" "$parent:$ref"
-          if git -C "$scratch/repo.git" -c 'credential.helper=!/usr/bin/gh auth git-credential' push "$repo" "$tip:$ref" >"$scratch/update" 2>&1; then
-            echo 'FAIL: update accepted' >&2
-            exit 1
-          fi
-          cat "$scratch/update"
-          grep -Fq 'GH013: Repository rule violations' "$scratch/update"
-          grep -Fq 'Cannot update this protected ref' "$scratch/update"
-          if git -C "$scratch/repo.git" -c 'credential.helper=!/usr/bin/gh auth git-credential' push "$repo" ":$ref" >"$scratch/delete" 2>&1; then
-            echo 'FAIL: delete accepted' >&2
-            exit 1
-          fi
-          cat "$scratch/delete"
-          grep -Fq 'GH013: Repository rule violations' "$scratch/delete"
-          grep -Fq 'Cannot delete this branch' "$scratch/delete"
-          actual=$(git -C "$scratch/repo.git" ls-remote --exit-code --heads "$repo" "$ref")
-          [ "$actual" = "$(printf '%s\t%s' "$parent" "$ref")" ]
-          echo "PASS: create allowed, update and delete rejected, ref retained at $parent"
+          git -C "$scratch/repo.git" fetch --no-tags --depth=1 "$repo" refs/heads/main
+          commit=$(git -C "$scratch/repo.git" rev-parse 'FETCH_HEAD^{commit}')
+          for ref in "$branch" "$tag"; do
+            if git -C "$scratch/repo.git" ls-remote --exit-code "$repo" "$ref" >"$scratch/before"; then
+              echo 'ref already exists; no write attempted' >&2
+              exit 1
+            else
+              status=$?
+              [ "$status" -eq 2 ] || { echo 'ref absence unknown' >&2; exit 1; }
+            fi
+            if git -C "$scratch/repo.git" -c 'credential.helper=!/usr/bin/gh auth git-credential' push "$repo" "$commit:$ref" >"$scratch/result" 2>&1; then
+              echo "FAIL: unexpected create at $ref" >&2
+              exit 1
+            fi
+            cat "$scratch/result"
+            grep -Fq 'GH013: Repository rule violations' "$scratch/result"
+            grep -Fq 'Cannot create ref due to creations being restricted' "$scratch/result"
+            if git -C "$scratch/repo.git" ls-remote --exit-code "$repo" "$ref" >"$scratch/after"; then
+              echo "FAIL: ref exists after refusal: $ref" >&2
+              exit 1
+            else
+              status=$?
+              [ "$status" -eq 2 ] || { echo 'ref readback unknown' >&2; exit 1; }
+            fi
+            echo "PASS: creation refused and ref absent: $ref"
+          done
