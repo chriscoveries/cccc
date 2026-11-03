@@ -379,6 +379,28 @@ mod tests {
     }
 
     #[test]
+    fn user_decision_does_not_prevent_an_independent_task_from_progressing() {
+        let mut doc = ContextDoc::default();
+        create(&mut doc, &operation(json!({"op":"task.create","title":"Decision","waiting_on":"user","client_request_id":"decision"})), "lead").expect("decision");
+        let replay = create(&mut doc, &operation(json!({"op":"task.create","title":"Decision","waiting_on":"user","client_request_id":"decision"})), "lead").expect("idempotent decision");
+        assert!(replay.replayed);
+        create(
+            &mut doc,
+            &operation(json!({"op":"task.create","title":"Independent"})),
+            "lead",
+        )
+        .expect("independent");
+        move_task(
+            &mut doc,
+            &operation(json!({"op":"task.move","task_id":"T002","status":"active"})),
+        )
+        .expect("progress");
+        assert_eq!(doc.tasks.len(), 2);
+        assert_eq!(doc.tasks[0]["waiting_on"], "user");
+        assert_eq!(doc.tasks[1]["status"], "active");
+    }
+
+    #[test]
     fn structural_validation_rejects_invalid_task_mutations() {
         let mut doc = ContextDoc::default();
         create(

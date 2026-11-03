@@ -999,6 +999,98 @@ mod tests {
     }
 
     #[test]
+    fn interval_mail_is_in_the_lead_inbox_and_respects_pause() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path()).expect("home");
+        let (store, group) = mail_for_both(&home);
+        store
+            .mutate(&group.group_id, |group| {
+                // Redacted captured interval-rule shape; recipient, text,
+                // interval and the new delivery option are labeled mutations.
+                group.automation = json!({"version":1,"rules":[{
+                    "id":"goal", "enabled":true, "scope":"group",
+                    "owner_actor_id":null, "to":[RECIPIENTS[0]],
+                    "trigger":{"kind":"interval","every_seconds":60},
+                    "action":{"kind":"notify","title":"", "snippet_ref":null,
+                        "priority":"normal", "delivery":"mail", "message":"Read WORKFLOW.md"}
+                }]})
+                .as_object()
+                .cloned()
+                .expect("rule");
+                Ok(())
+            })
+            .expect("rule");
+        assert!(
+            tick_group(&home, &group.group_id, false)
+                .expect("initial")
+                .notifications
+                .is_empty()
+        );
+        let mut timer = state::load(&store, &group.group_id).expect("timer");
+        timer
+            .last_rule
+            .insert("goal".into(), Utc::now().timestamp() - 120);
+        state::save(&store, &group.group_id, &timer).expect("due timer");
+        store
+            .mutate(&group.group_id, |group| {
+                group.state = GroupState::Paused;
+                Ok(())
+            })
+            .expect("pause");
+        assert!(
+            tick_group(&home, &group.group_id, false)
+                .expect("paused")
+                .notifications
+                .is_empty()
+        );
+        store
+            .mutate(&group.group_id, |group| {
+                group.state = GroupState::Active;
+                Ok(())
+            })
+            .expect("active");
+        store
+            .mutate(&group.group_id, |group| {
+                group.automation.get_mut("rules").expect("rules")[0]["enabled"] = json!(false);
+                Ok(())
+            })
+            .expect("disable");
+        assert!(
+            tick_group(&home, &group.group_id, false)
+                .expect("disabled")
+                .notifications
+                .is_empty()
+        );
+        store
+            .mutate(&group.group_id, |group| {
+                group.automation.get_mut("rules").expect("rules")[0]["enabled"] = json!(true);
+                Ok(())
+            })
+            .expect("enable");
+        let result = tick_group(&home, &group.group_id, false).expect("due");
+        assert_eq!(result.notifications.len(), 1);
+        let event = &result.notifications[0];
+        assert_eq!(event.kind, "chat.message");
+        assert_eq!(event.data["message_mode"], "mail");
+        assert_eq!(event.data["text"], "Read WORKFLOW.md");
+        let loaded = store.load(&group.group_id).expect("group");
+        let unread = inbox::list_unread(&home, &loaded, RECIPIENTS[0], 100).expect("inbox");
+        assert!(unread.iter().any(|message| message.id == event.id));
+        assert!(
+            !inbox::list_unread(&home, &loaded, RECIPIENTS[1], 100)
+                .expect("other inbox")
+                .iter()
+                .any(|message| message.id == event.id)
+        );
+        assert!(
+            tick_group(&home, &group.group_id, false)
+                .expect("coalesced")
+                .notifications
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn a_failed_notice_write_still_hands_over_the_notices_written_before_it() {
         for pass in [UnreadPass::Scheduled, UnreadPass::IdleMailNow] {
             let temp = tempfile::tempdir().expect("tempdir");
