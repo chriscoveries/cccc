@@ -164,6 +164,11 @@ impl DeepSeekSupervisor {
         result
     }
 
+    /// Process identity for read-only resource observation.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(std::process::Child::id)
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }

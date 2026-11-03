@@ -24,6 +24,7 @@ type Key = (String, String);
 pub(super) struct RuntimeEntry {
     pub(super) supervisor: std::sync::Mutex<DeepSeekSupervisor>,
     pub(super) running: AtomicBool,
+    observed_pid: Option<u32>,
     pub(super) manual_restart_required: AtomicBool,
     pub(super) generation: String,
     workspace: super::actor_runtime::LaunchWorkspace,
@@ -81,6 +82,7 @@ pub fn start(
             "deepseek ACP handshake failed: {error}"
         )));
     }
+    let observed_pid = supervisor.pid();
     sessions()
         .write()
         .map_err(|_| std::io::Error::other("deepseek session lock poisoned"))?
@@ -89,6 +91,7 @@ pub fn start(
             Arc::new(RuntimeEntry {
                 supervisor: std::sync::Mutex::new(supervisor),
                 running: AtomicBool::new(true),
+                observed_pid,
                 manual_restart_required: AtomicBool::new(false),
                 generation: generation.clone(),
                 workspace: super::actor_runtime::LaunchWorkspace::capture(group, actor, &cwd),
@@ -161,6 +164,19 @@ pub(super) fn cancellation_requested(group_id: &str, actor_id: &str) -> bool {
         .ok()
         .and_then(|flags| flags.get(&key).cloned())
         .is_some_and(|flag| flag.load(Ordering::Acquire))
+}
+
+pub(super) fn observed_pid(group_id: &str, actor_id: &str) -> Option<u32> {
+    let holder = sessions()
+        .read()
+        .ok()?
+        .get(&(group_id.to_owned(), actor_id.to_owned()))
+        .cloned()?;
+    holder
+        .running
+        .load(Ordering::Acquire)
+        .then_some(holder.observed_pid)
+        .flatten()
 }
 
 pub fn running(group_id: &str, actor_id: &str) -> bool {

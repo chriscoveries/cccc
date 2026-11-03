@@ -39,6 +39,8 @@ struct ActorListQuery {
     include_unread: bool,
     #[serde(default)]
     include_internal: bool,
+    #[serde(default)]
+    include_resources: bool,
 }
 
 async fn list(
@@ -54,6 +56,7 @@ async fn list(
             "by":"user",
             "include_unread":query.include_unread,
             "include_internal":query.include_internal,
+            "include_resources":query.include_resources,
         })),
     )
     .await

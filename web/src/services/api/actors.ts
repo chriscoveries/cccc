@@ -17,6 +17,11 @@ type ProfileLookupOptions = { scope?: ProfileScope; ownerId?: string };
 
 type ProfileDeleteOptions = ProfileLookupOptions & { forceDetach?: boolean };
 
+type ActorListResult = {
+  actors: Actor[];
+  host_memory?: { total_bytes: number; available_bytes: number };
+};
+
 function buildProfileQuery(opts?: ProfileLookupOptions): string {
   const params = new URLSearchParams();
   if (opts?.scope) params.set("scope", String(opts.scope));
@@ -38,25 +43,26 @@ export async function fetchActors(
   groupId: string,
   includeUnread = false,
   init?: RequestInit & { noCache?: boolean },
-  options?: { includeInternal?: boolean },
+  options?: { includeInternal?: boolean; includeResources?: boolean },
 ) {
   const gid = String(groupId || "").trim();
   const includeInternal = Boolean(options?.includeInternal);
   const params = new URLSearchParams();
   if (includeUnread) params.set("include_unread", "true");
   if (includeInternal) params.set("include_internal", "true");
+  if (options?.includeResources) params.set("include_resources", "true");
   const query = params.toString();
   const url = includeUnread
     ? `/api/v1/groups/${encodeURIComponent(gid)}/actors?${query}`
     : `/api/v1/groups/${encodeURIComponent(gid)}/actors${query ? `?${query}` : ""}`;
-  if (init?.noCache || init?.signal) {
-    return apiJson<{ actors: Actor[] }>(url, init);
+  if (options?.includeResources || init?.noCache || init?.signal) {
+    return apiJson<ActorListResult>(url, init);
   }
   if (includeUnread) {
-    return apiJson<{ actors: Actor[] }>(url);
+    return apiJson<ActorListResult>(url);
   }
   return reuseSharedReadRequest(actorsReadOnlyRequestKey(gid, includeInternal), () =>
-    apiJson<{ actors: Actor[] }>(url),
+    apiJson<ActorListResult>(url),
   );
 }
 

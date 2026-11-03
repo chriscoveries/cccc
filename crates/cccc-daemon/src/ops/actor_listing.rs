@@ -14,6 +14,10 @@ pub(super) fn list(
 ) -> Result<Vec<Value>, OpError> {
     let include_internal = bool_arg(request, "include_internal");
     let include_unread = bool_arg(request, "include_unread");
+    #[cfg(target_os = "linux")]
+    let resource_snapshot = bool_arg(request, "include_resources")
+        .then(super::actor_resources::linux::Snapshot::capture)
+        .flatten();
     let actor_ids = group
         .actors
         .iter()
@@ -42,6 +46,32 @@ pub(super) fn list(
                     &actor.id,
                 ));
                 object.insert("running".into(), Value::Bool(status.running));
+                #[cfg(target_os = "linux")]
+                if status.running
+                    && let Some(snapshot) = resource_snapshot.as_ref()
+                {
+                    // The runtime owns status.pid and has just checked its child;
+                    // managed DeepSeek keeps its PID separately while busy.
+                    let root = if let Some(pid) = status.pid {
+                        snapshot.same_identity(pid).then_some(pid)
+                    } else if actor.external_session_id.is_empty()
+                        && super::deepseek_runtime::running(&group.group_id, &actor.id)
+                    {
+                        super::deepseek_runtime::observed_pid(&group.group_id, &actor.id).filter(
+                            |&pid| {
+                                snapshot.attributed(pid, home.root(), &group.group_id, &actor.id)
+                            },
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some((rss, cpu)) = root.and_then(|pid| snapshot.actor(pid)) {
+                        object.insert(
+                            "resources".into(),
+                            json!({"rss_bytes":rss, "cpu_percent":cpu}),
+                        );
+                    }
+                }
                 let actual = super::local_headless::structured_state(&group.group_id, &actor.id);
                 let retained_pty = cccc_runtime::status(&group.group_id, &actor.id)
                     .is_ok_and(|status| status.running);

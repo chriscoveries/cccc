@@ -63,7 +63,20 @@ fn prompt(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 fn list(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group = load(home, request)?;
     authorize(&group, request, ActorAction::List, "")?;
-    object(json!({"actors": super::actor_listing::list(home, &group, request)?}))
+    let actors = super::actor_listing::list(home, &group, request)?;
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut result = json!({"actors": actors});
+    #[cfg(target_os = "linux")]
+    if request
+        .args
+        .get("include_resources")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && let Some((total, available)) = super::actor_resources::host_memory()
+    {
+        result["host_memory"] = json!({"total_bytes":total,"available_bytes":available});
+    }
+    object(result)
 }
 
 fn add(home: &HomeLayout, request: &DaemonRequest) -> OpResult {

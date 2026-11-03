@@ -1,3 +1,4 @@
+import { ActorResourcesBadge } from "../features/resources/ResourceProvider";
 import { NativeSessionPanel } from "../features/localSessions/NativeSessionPanel";
 import { isWebModelRuntime } from "../types";
 import { useTerminalTitlePaging } from "./agentTerminal/useTerminalTitlePaging";
@@ -822,6 +823,7 @@ export function AgentTab({
             >
               {actor.title || actor.id}
             </span>
+            <ActorResourcesBadge actorId={actor.id} running={isRunning} />
             {compactStatusText ? (
               <span
                 className="max-w-[40%] shrink-0 truncate text-[var(--color-text-secondary)]"
@@ -920,6 +922,7 @@ export function AgentTab({
                   >
                     {actor.title || actor.id}
                   </span>
+                  <ActorResourcesBadge actorId={actor.id} running={isRunning} />
                   <span className={actorGroupRoleBadgeClass(actorGroupRole)}>
                     {actorGroupRole === "foreman"
                       ? t("groupRoleForeman", { defaultValue: "Foreman" })
