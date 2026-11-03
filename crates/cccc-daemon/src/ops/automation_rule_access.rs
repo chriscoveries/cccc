@@ -303,9 +303,22 @@ fn validate_action(value: &mut Value) -> Result<String, OpError> {
         "notify" => {
             reject_unknown(
                 action,
-                &["kind", "title", "snippet_ref", "message", "priority"],
+                &[
+                    "kind",
+                    "title",
+                    "snippet_ref",
+                    "message",
+                    "priority",
+                    "delivery",
+                ],
                 "notify action",
             )?;
+            if action
+                .get("delivery")
+                .is_some_and(|value| !matches!(value.as_str(), Some("notification" | "mail")))
+            {
+                return Err(invalid("invalid notify delivery"));
+            }
             for key in ["title", "message"] {
                 match action.get(key) {
                     Some(value) if value.as_str().is_none() => {
@@ -391,4 +404,50 @@ fn reject_unknown(
 
 fn invalid(message: impl Into<String>) -> OpError {
     OpError::new("group_automation_manage_failed", message)
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+
+    #[test]
+    fn mail_reminders_keep_rule_permissions() {
+        let group_rule = json!({"id":"goal","scope":"group","to":["lead"],"action":{"kind":"notify","delivery":"mail"}});
+        assert!(
+            authorize_change(
+                &[],
+                std::slice::from_ref(&group_rule),
+                false,
+                "lead",
+                ActorRole::Foreman
+            )
+            .is_ok()
+        );
+        assert!(
+            authorize_change(
+                &[],
+                std::slice::from_ref(&group_rule),
+                false,
+                "peer",
+                ActorRole::Peer
+            )
+            .is_err()
+        );
+        let own_rule = json!({"id":"own","scope":"personal","owner_actor_id":"peer","to":["peer"],"action":{"kind":"notify","delivery":"mail"}});
+        assert!(authorize_change(&[], &[own_rule], false, "peer", ActorRole::Peer).is_ok());
+    }
+
+    #[test]
+    fn notify_delivery_accepts_only_documented_values() {
+        for value in [json!("notification"), json!("mail")] {
+            let mut action = json!({"kind":"notify","delivery":value});
+            assert!(validate_action(&mut action).is_ok());
+        }
+        for value in [json!("send"), json!(null), json!(3)] {
+            let mut action = json!({"kind":"notify","delivery":value});
+            assert!(validate_action(&mut action).is_err());
+        }
+        let mut legacy = json!({"kind":"notify"});
+        assert!(validate_action(&mut legacy).is_ok());
+    }
 }

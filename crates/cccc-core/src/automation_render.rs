@@ -11,6 +11,12 @@ pub fn notify_events(
     action: Option<&Map<String, Value>>,
     scheduled_at: &str,
 ) -> Vec<Event> {
+    let mail = match action.and_then(|action| action.get("delivery")) {
+        None => false,
+        Some(value) if value.as_str() == Some("notification") => false,
+        Some(value) if value.as_str() == Some("mail") => true,
+        Some(_) => return Vec::new(),
+    };
     let template = snippet(group, action).or_else(|| {
         action
             .and_then(|action| action.get("message"))
@@ -66,8 +72,26 @@ pub fn notify_events(
     routing.by = "system".into();
     routing.data = json!({"to":to}).as_object().cloned().unwrap_or_default();
     actors::visible(group)
-        .filter(|actor| actor.enabled && inbox::is_for_actor(group, &routing, &actor.id))
+        .filter(|actor| {
+            actor.enabled && (!mail || actor.id != "user")
+                && inbox::is_for_actor(group, &routing, &actor.id)
+        })
         .map(|actor| {
+            if mail {
+                let mut event = Event::new("chat.message", &group.group_id);
+                event.by = "system".into();
+                event.data = json!({
+                    "kind": "automation",
+                    "text": message,
+                    "to": [actor.id.as_str()],
+                    "message_mode": "mail",
+                    "context": {"rule_id": rule_id},
+                })
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+                return event;
+            }
             let mut event = Event::new("system.notify", &group.group_id);
             event.by = "system".into();
             event.data = json!({
@@ -143,4 +167,49 @@ fn render(template: &str, context: &[(&str, String)]) -> String {
     }
     output.push_str(remaining);
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GroupStore, HomeLayout};
+    use cccc_contracts::Actor;
+
+    #[test]
+    fn delivery_defaults_to_notification_and_mail_excludes_disabled_and_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path()).expect("home");
+        let store = GroupStore::new(home).expect("store");
+        let mut group = store.create("reminder", "").expect("group");
+        let mut disabled = Actor::new("disabled");
+        disabled.enabled = false;
+        group.actors.push(Actor::new("lead"));
+        group.actors.push(disabled);
+        group.actors.push(Actor::new("user"));
+        let rule = json!({"to":["@all"],"trigger":{"every_seconds":60}});
+        let mut action = json!({"kind":"notify","message":"Read WORKFLOW.md"});
+        let render = |action: &Value| {
+            notify_events(
+                &group,
+                "goal",
+                rule.as_object().expect("rule"),
+                action.as_object(),
+                "now",
+            )
+        };
+        let notifications = render(&action);
+        assert!(
+            notifications
+                .iter()
+                .all(|event| event.kind == "system.notify")
+        );
+        action["delivery"] = json!("mail");
+        let mail = render(&action);
+        assert_eq!(mail.len(), 1);
+        assert_eq!(mail[0].kind, "chat.message");
+        assert_eq!(mail[0].data["to"], json!(["lead"]));
+        assert_eq!(mail[0].data["message_mode"], "mail");
+        action["delivery"] = json!("invalid");
+        assert!(render(&action).is_empty());
+    }
 }

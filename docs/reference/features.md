@@ -434,6 +434,11 @@ Notes:
 
 ### Scheduling and Lifecycle Semantics
 
+- A `notify` action may opt into `delivery: "mail"`; the default is
+  `"notification"`. Mail uses the lead's ordinary inbox and notices, not a
+  fresh session. Its message may point to an operator-maintained workflow file;
+  CCCC does not open or validate that file. An owner decision can be parked in
+  an ordinary task with `waiting_on=user` while unrelated work continues.
 - A new interval rule starts its clock on the first scheduler tick; it does not
   fire immediately.
 - Paused and stopped groups run no automation. Idle groups continue user rules
@@ -442,6 +447,19 @@ Notes:
   one-time rules remain scheduled.
 - Notifications are durable ledger events for enabled matching recipients, so
   the recipient runtime does not need to be running when the rule fires.
+
+For example, a foreman can create a disabled interval rule through the
+existing automation API and enable it after reviewing the workflow pointer:
+
+```json
+{
+  "id": "goal-reminder",
+  "enabled": false,
+  "to": ["@foreman"],
+  "trigger": {"kind": "interval", "every_seconds": 2400},
+  "action": {"kind": "notify", "delivery": "mail", "message": "Read WORKFLOW.md and check the group objective."}
+}
+```
 
 ### Built-in Delivery and Automation
 

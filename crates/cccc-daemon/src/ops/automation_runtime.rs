@@ -212,7 +212,17 @@ fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
             return;
         }
         if let Ok(group) = store.load(&event.group_id) {
-            actor_delivery::dispatch(home, &group, &event);
+            if event.kind == "chat.message"
+                && event
+                    .data
+                    .get("message_mode")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("mail")
+            {
+                notify_idle_mail_recipients(home, &group, &event);
+            } else {
+                actor_delivery::dispatch(home, &group, &event);
+            }
         }
     }
     for action in result.actions {

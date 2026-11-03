@@ -3482,6 +3482,7 @@ Args:
             snippet_ref?: string | null
             message?: string
             priority?: "low" | "normal" | "high" | "urgent"
+            delivery?: "notification" | "mail" // default notification
           }
         | { kind: "group_state"; state?: "active" | "idle" | "paused" | "stopped" }
         | { kind: "actor_control"; operation?: "start" | "stop" | "restart"; targets?: string[] }
@@ -3580,8 +3581,15 @@ Notes:
 - Resume never catches up missed work: interval and cron clocks are rebased,
   missed one-time rules are completed without execution, and future one-time
   rules remain eligible.
+- A `notify` action with `delivery: "mail"` writes an ordinary actor-addressed
+  `chat.message` with `message_mode: "mail"` instead of `system.notify`.
+  It uses the existing inbox and Mail-notice rules; users and disabled actors
+  are not recipients. The message can contain an operator-supplied workflow
+  pointer, but the daemon does not read or validate that file. Mail does not
+  create a fresh session or guarantee that an actor performs the work.
 - A notification firing completes only after at least one `system.notify` has
-  been appended durably for an enabled matching recipient. Recipient delivery
+  been appended durably for an enabled matching recipient; Mail delivery
+  completes after a matching Mail event has been appended. Recipient delivery
   does not require a currently running actor process. A successfully completed
   one-time rule is disabled.
 - `group.yaml:automation` and `state/automation.json` are the shared config and
