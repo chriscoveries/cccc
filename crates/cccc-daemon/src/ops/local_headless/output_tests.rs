@@ -28,6 +28,7 @@ impl Fixture {
             home,
             group_id: group.group_id,
             actor_id: "fixture-actor".into(),
+            model_label_at_launch: None,
             workspace: Default::default(),
             managed: Arc::new(AnalystSession::for_output_test(
                 &config, structured, private,
@@ -45,6 +46,8 @@ impl Fixture {
             stop_lock: Mutex::new(()),
             startup_prompt: Mutex::new(None),
             active_turn: Mutex::new(None),
+            delivery_tasks: Mutex::new(std::collections::HashMap::new()),
+            admission: Mutex::new(()),
         };
         Self {
             session,
@@ -437,4 +440,218 @@ async fn named_tool_activity_finishes_without_journaling_transient_or_foreign_up
     );
     f.complete("turn-1", "completed", Value::Null);
     assert_eq!(f.terminals().len(), 1);
+}
+
+#[tokio::test]
+async fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
+    let captured: Value = serde_json::from_str(include_str!("../turn_usage/deliveries.json"))
+        .expect("captured deliveries are valid JSON");
+    let fixture = Fixture::new(false, "unused");
+    let session = &fixture.session;
+    let mut totals = crate::ops::turn_usage::Accumulator::new();
+    for row in include_str!("../turn_usage/claude.jsonl").lines() {
+        let row: Value = serde_json::from_str(row).expect("captured Claude metadata is valid JSON");
+        if row["type"] == "assistant" {
+            totals.claude(&row);
+        }
+    }
+    let usage = totals.summary("claude_transcript");
+    let task_ref = captured["turns"][0]["board_task"]["task_id"]
+        .as_str()
+        .expect("captured delivery names a task");
+    session.bind_delivery_task("delivery", Some(task_ref.into()));
+    session.bind_delivery_task("unconfirmed", Some("T002".into()));
+    let start = json!({"method":"turn/started","params":{"turn":{"id":"runtime-turn"}}});
+    handle_event(session, start.clone(), Some("delivery"));
+    // A later, unrelated admission cannot rename an already-owned turn.
+    session.bind_delivery_task("later", Some("T001".into()));
+    handle_event(session, start, None);
+    let completed = json!({"method":"turn/completed","params":{"turn":{
+        "id":"runtime-turn","status":"completed","usage":usage}}});
+    let mut foreign = completed.clone();
+    foreign["params"]["turn"]["id"] = json!("foreign-turn");
+    handle_event(session, foreign, None);
+    handle_event(session, completed.clone(), None);
+    handle_event(session, completed, None);
+    let ledger = GroupStore::new(session.home.clone())
+        .expect("test group store opens")
+        .ledger_path(&session.group_id)
+        .expect("test group has a ledger path");
+    let events = cccc_core::ledger::read_all(&ledger)
+        .expect("test usage ledger reads")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].data["delivery_id"], "delivery");
+    assert_eq!(events[0].data["task_ref"], "T001");
+    assert_eq!(events[0].data["task_id"], "runtime-turn");
+    assert_eq!(events[0].data["runtime"], json!(session.managed.runtime()));
+    assert!(session.take_delivery_task("delivery").is_none());
+    handle_event(
+        session,
+        json!({"method":"turn/started","params":{"turn":{"id":"late-turn"}}}),
+        Some("unconfirmed"),
+    );
+    handle_event(
+        session,
+        json!({"method":"turn/completed","params":{"turn":{
+        "id":"late-turn","status":"cancelled","usage":totals.summary("claude_transcript")}}}),
+        None,
+    );
+    let events = cccc_core::ledger::read_all(&ledger)
+        .expect("test usage ledger reads")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].data["task_ref"], "T002");
+    assert_eq!(events[1].data["delivery_id"], "unconfirmed");
+    assert_eq!(events[1].data["status"], "cancelled");
+    assert_eq!(events[1].data["input_tokens"], 14);
+    assert!(session.take_delivery_task("unconfirmed").is_none());
+    assert!(
+        Fixture::new(false, "unused")
+            .session
+            .take_delivery_task("later")
+            .is_none()
+    );
+    session.bind_delivery_task("conflict", Some("T001".into()));
+    session.bind_delivery_task("conflict", Some("T002".into()));
+    assert_eq!(session.take_delivery_task("conflict"), Some(None));
+    session.bind_delivery_task("rejected", Some("T001".into()));
+    session.forget_delivery_task("rejected");
+    assert!(session.take_delivery_task("rejected").is_none());
+}
+
+#[tokio::test]
+async fn captured_turn_keeps_the_generation_label_seen_at_start() {
+    let mut fixture = Fixture::new(false, "unused");
+    let mut totals = crate::ops::turn_usage::Accumulator::new();
+    for row in include_str!("../turn_usage/claude.jsonl").lines() {
+        let row: Value = serde_json::from_str(row).expect("captured Claude metadata");
+        if row["type"] == "assistant" {
+            totals.claude(&row);
+        }
+    }
+    // Labeled configuration mutation: a later label cannot rename an active
+    // generation, and the next owned generation captures the new declaration.
+    let store = GroupStore::new(fixture.session.home.clone()).expect("group store");
+    store
+        .mutate(&fixture.session.group_id, |group| {
+            let mut actor = cccc_contracts::Actor::new("fixture-actor");
+            actor.model_label = "first-label".into();
+            group.actors.push(actor);
+            Ok(())
+        })
+        .expect("initial actor configuration");
+    fixture.session.model_label_at_launch = Some("first-label".into());
+    let first_generation = fixture.session.managed.generation().to_owned();
+    handle_event(
+        &fixture.session,
+        json!({"method":"turn/started","params":{"turn":{"id":"first"}}}),
+        None,
+    );
+    store
+        .mutate(&fixture.session.group_id, |group| {
+            group
+                .actors
+                .iter_mut()
+                .find(|actor| actor.id == "fixture-actor")
+                .expect("fixture actor")
+                .model_label = "later-label".into();
+            Ok(())
+        })
+        .expect("updated actor configuration");
+    handle_event(
+        &fixture.session,
+        json!({"method":"turn/completed","params":{"turn":{
+        "id":"first","status":"completed","usage":totals.summary("claude_transcript")}}}),
+        None,
+    );
+    // Replace the inert managed session to represent the next generation.
+    let config = fixture._temp.path().canonicalize().expect("fixture path");
+    fixture.session.managed = Arc::new(AnalystSession::claude_for_shutdown_test(
+        &config,
+        "abcdef02",
+        Vec::new(),
+        true,
+    ));
+    assert_ne!(fixture.session.managed.generation(), first_generation);
+    let updated = store
+        .load(&fixture.session.group_id)
+        .expect("updated group");
+    fixture.session.model_label_at_launch = updated
+        .actors
+        .iter()
+        .find(|actor| actor.id == "fixture-actor")
+        .map(|actor| actor.model_label.clone());
+    handle_event(
+        &fixture.session,
+        json!({"method":"turn/started","params":{"turn":{"id":"second"}}}),
+        None,
+    );
+    handle_event(
+        &fixture.session,
+        json!({"method":"turn/completed","params":{"turn":{
+        "id":"second","status":"completed","usage":totals.summary("claude_transcript")}}}),
+        None,
+    );
+    let ledger = GroupStore::new(fixture.session.home.clone())
+        .expect("group store")
+        .ledger_path(&fixture.session.group_id)
+        .expect("ledger path");
+    let events = cccc_core::ledger::read_all(&ledger)
+        .expect("usage ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].data["model_label_at_turn"], "first-label");
+    assert_eq!(events[1].data["model_label_at_turn"], "later-label");
+}
+
+#[tokio::test]
+async fn consumed_delivery_cannot_be_rebound_to_another_task() {
+    let fixture = Fixture::new(false, "unused");
+    let session = &fixture.session;
+    session.bind_delivery_task("delivery", Some("T001".into()));
+    handle_event(
+        session,
+        json!({"method":"turn/started","params":{"turn":{"id":"first"}}}),
+        Some("delivery"),
+    );
+    session.bind_delivery_task("delivery", Some("T002".into()));
+    assert!(
+        session
+            .active_turn
+            .lock()
+            .expect("active turn lock")
+            .as_ref()
+            .expect("started turn is active")
+            .task
+            .is_none()
+    );
+    assert!(session.take_delivery_task("delivery").is_none());
+    fixture.complete("first", "completed", Value::Null);
+    handle_event(
+        session,
+        json!({"method":"turn/started","params":{"turn":{"id":"later"}}}),
+        Some("delivery"),
+    );
+    let active = session.active_turn.lock().expect("active turn lock");
+    assert!(
+        active
+            .as_ref()
+            .expect("later turn is active")
+            .task
+            .is_none()
+    );
+    assert!(
+        active
+            .as_ref()
+            .expect("later turn is active")
+            .delegation
+            .is_none()
+    );
 }

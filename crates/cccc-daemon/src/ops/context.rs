@@ -15,6 +15,7 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         "context_get" => Operation::new(Read, get),
         "context_sync" => Operation::new(Write, sync),
         "task_list" => Operation::new(Read, super::task_list::run),
+        "usage_report_source" => Operation::new(Read, super::usage_report::run),
         _ => return None,
     })
 }

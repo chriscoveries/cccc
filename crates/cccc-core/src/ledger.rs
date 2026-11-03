@@ -535,6 +535,25 @@ pub fn tail_filtered(
     // Compaction replaces the active file and adds segments; read one stable
     // set of sources rather than racing a rename between listing and open.
     let _lock = acquire_reader_lock(path)?;
+    tail_locked(path, limit, kind)
+}
+
+/// Tail an existing ledger without creating lock files or directories.
+/// The existing lock coordinates with writers and compaction.
+pub fn tail_existing_read_only(
+    path: &Path,
+    limit: usize,
+    kind: Option<&str>,
+) -> io::Result<(Vec<Event>, bool)> {
+    if limit == 0 {
+        return Ok((Vec::new(), false));
+    }
+    let lock = File::open(ledger_lock_path(path))?;
+    FileExt::lock_shared(&lock)?;
+    tail_locked(path, limit, kind)
+}
+
+fn tail_locked(path: &Path, limit: usize, kind: Option<&str>) -> io::Result<(Vec<Event>, bool)> {
     let target = limit.saturating_add(1);
     let mut newest_first = Vec::with_capacity(target);
     let group_id = ledger_group_id(path);
@@ -1219,5 +1238,114 @@ mod tests {
         let events = read_all(&path).expect("read all");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, event.id);
+    }
+    #[test]
+    fn captured_tail_reader_does_not_initialize_missing_locks() {
+        let temp = tempfile::tempdir().expect("isolated captured ledger");
+        let path = temp.path().join("ledger.jsonl");
+        let captured: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("usage_report_captured.json"))
+                .expect("captured records");
+        let data = captured
+            .iter()
+            .map(|event| {
+                format!(
+                    "{}\n",
+                    serde_json::to_string(event).expect("captured test data and setup")
+                )
+            })
+            .collect::<String>();
+        std::fs::write(&path, &data).expect("captured test data and setup");
+        assert!(tail_existing_read_only(&path, 5, None).is_err());
+        assert!(!temp.path().join("state").exists());
+        let lock_path = ledger_lock_path(&path);
+        std::fs::create_dir_all(lock_path.parent().expect("captured test data and setup"))
+            .expect("captured test data and setup");
+        File::create(&lock_path).expect("captured test data and setup");
+        let (events, has_more) =
+            tail_existing_read_only(&path, 5, None).expect("captured test data and setup");
+        assert_eq!(events.len(), 5);
+        assert!(has_more);
+        assert_eq!(
+            std::fs::read_to_string(path).expect("captured test data and setup"),
+            data
+        );
+        assert_eq!(
+            lock_path
+                .metadata()
+                .expect("captured test data and setup")
+                .len(),
+            0
+        );
+    }
+    #[test]
+    fn captured_page_handles_rotation_and_a_labeled_truncated_tail() {
+        let temp = tempfile::tempdir().expect("captured test data and setup");
+        let path = temp.path().join("ledger.jsonl");
+        let captured: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("usage_report_captured.json"))
+                .expect("captured test data and setup");
+        let lock_path = ledger_lock_path(&path);
+        std::fs::create_dir_all(
+            lock_path
+                .parent()
+                .expect("captured test data and setup")
+                .join("segments"),
+        )
+        .expect("captured test data and setup");
+        File::create(&lock_path).expect("captured test data and setup");
+        let archive = lock_path
+            .parent()
+            .expect("captured test data and setup")
+            .join("segments/ledger.0001.jsonl.gz");
+        let mut writer = GzEncoder::new(
+            File::create(archive).expect("captured test data and setup"),
+            Compression::default(),
+        );
+        for event in &captured[..5] {
+            writeln!(
+                writer,
+                "{}",
+                serde_json::to_string(event).expect("captured test data and setup")
+            )
+            .expect("captured test data and setup");
+        }
+        writer.finish().expect("captured test data and setup");
+        let mut active = captured[5..9]
+            .iter()
+            .map(|event| {
+                format!(
+                    "{}\n",
+                    serde_json::to_string(event).expect("captured test data and setup")
+                )
+            })
+            .collect::<String>();
+        // A byte-cut of a captured record models an interrupted final append.
+        let final_record =
+            serde_json::to_string(&captured[9]).expect("captured test data and setup");
+        active.push_str(&final_record[..final_record.len() / 2]);
+        std::fs::write(&path, &active).expect("captured test data and setup");
+        let (events, has_more) =
+            tail_existing_read_only(&path, 7, None).expect("captured test data and setup");
+        assert_eq!(events.len(), 7);
+        assert!(has_more);
+        assert_eq!(
+            events.first().expect("captured test data and setup").id,
+            "event-3"
+        );
+        assert_eq!(
+            events.last().expect("captured test data and setup").id,
+            "event-9"
+        );
+        let page = events
+            .iter()
+            .map(|event| serde_json::to_value(event).expect("captured test data and setup"))
+            .collect::<Vec<_>>();
+        let report = crate::usage_report::project("g_example", &page, &[], has_more, true, None);
+        assert_eq!(report["coverage"], "partial");
+        assert_eq!(
+            std::fs::read_to_string(path).expect("captured test data and setup"),
+            active
+        );
     }
 }

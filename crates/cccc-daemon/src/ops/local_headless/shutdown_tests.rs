@@ -102,6 +102,7 @@ async fn shutdown_requests_all_jobs_and_confirms_stops_concurrently() {
                 home: home.clone(),
                 group_id: group.group_id.clone(),
                 actor_id: (*short).into(),
+                model_label_at_launch: None,
                 workspace: Default::default(),
                 managed: Arc::new(AnalystSession::claude_for_shutdown_test(
                     &config,
@@ -126,6 +127,8 @@ async fn shutdown_requests_all_jobs_and_confirms_stops_concurrently() {
                 stop_lock: Mutex::new(()),
                 startup_prompt: Mutex::new(None),
                 active_turn: Mutex::new(None),
+                delivery_tasks: Mutex::new(std::collections::HashMap::new()),
+                admission: Mutex::new(()),
             });
             sessions()
                 .write()

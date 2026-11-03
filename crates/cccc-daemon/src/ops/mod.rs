@@ -85,6 +85,7 @@ mod task_list;
 mod terminal;
 mod terminal_history_source;
 mod terminal_text;
+mod usage_report;
 mod voice_notifications;
 pub(crate) mod voice_secretary;
 mod web_model_connectors;
@@ -144,3 +145,5 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
 }
 
 mod connect_cancellation;
+
+mod turn_usage;

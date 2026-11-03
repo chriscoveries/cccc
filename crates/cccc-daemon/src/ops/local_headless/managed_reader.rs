@@ -16,6 +16,9 @@ pub(super) fn spawn(
         .spawn(move || loop {
             match managed_runtime().block_on(events.recv()) {
                 Ok(event) => {
+                    if event.generation != session.managed.generation() {
+                        continue;
+                    }
                     let disconnected = event.message.get("method").and_then(Value::as_str)
                         == Some(
                             super::super::codex_voice_analyst::MANAGED_AGENT_DISCONNECTED_METHOD,
@@ -35,7 +38,7 @@ pub(super) fn spawn(
                             )]),
                         );
                     }
-                    output::handle_message(&session, event.message);
+                    output::handle_event(&session, event.message, event.requested_delegation_id.as_deref());
                     if disconnected {
                         stop_after_provider_exit(&session);
                         break;
@@ -94,6 +97,7 @@ pub(crate) async fn verify_claude_reader_release(
         home,
         group_id: group.group_id.clone(),
         actor_id: "claude-reader".into(),
+        model_label_at_launch: None,
         workspace: Default::default(),
         managed: Arc::clone(&managed),
         has_terminal: AtomicBool::new(false),
@@ -109,6 +113,8 @@ pub(crate) async fn verify_claude_reader_release(
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(None),
         active_turn: Mutex::new(None),
+        delivery_tasks: Mutex::new(std::collections::HashMap::new()),
+        admission: Mutex::new(()),
     });
     let weak = Arc::downgrade(&session);
     let receiver = managed.subscribe();

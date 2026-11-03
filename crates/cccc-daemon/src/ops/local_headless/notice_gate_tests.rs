@@ -14,6 +14,7 @@ fn session(temp: &std::path::Path) -> (Session, super::control_fixture::ControlD
         home: HomeLayout::from_path(config.join("home")).expect("home"),
         group_id: "g_notice".into(),
         actor_id: "peer".into(),
+        model_label_at_launch: None,
         workspace: Default::default(),
         managed: Arc::new(AnalystSession::claude_for_shutdown_test(
             &config,
@@ -34,6 +35,8 @@ fn session(temp: &std::path::Path) -> (Session, super::control_fixture::ControlD
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(None),
         active_turn: Mutex::new(None),
+        delivery_tasks: Mutex::new(std::collections::HashMap::new()),
+        admission: Mutex::new(()),
     };
     (session, directory)
 }

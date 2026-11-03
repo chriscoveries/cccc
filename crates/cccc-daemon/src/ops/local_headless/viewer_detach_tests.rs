@@ -90,6 +90,7 @@ async fn a_reaped_viewer_detaches_without_stopping_the_provider_job() {
         home: home.clone(),
         group_id: group.group_id.clone(),
         actor_id: "claude-1".into(),
+        model_label_at_launch: None,
         workspace: Default::default(),
         managed: Arc::new(AnalystSession::claude_for_shutdown_test(
             &config,
@@ -110,6 +111,8 @@ async fn a_reaped_viewer_detaches_without_stopping_the_provider_job() {
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(None),
         active_turn: Mutex::new(None),
+        delivery_tasks: Mutex::new(std::collections::HashMap::new()),
+        admission: Mutex::new(()),
     });
     sessions().write().expect("registry").insert(
         (group.group_id.clone(), "claude-1".into()),

@@ -82,6 +82,29 @@ pub struct DoctorArgs {
     pub all: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct UsageArgs {
+    /// Group whose bounded ledger and task snapshot should be read.
+    #[arg(long = "group")]
+    pub group_id: Option<String>,
+    /// Show one task's observed usage.
+    #[arg(
+        long,
+        conflicts_with = "by_model",
+        required_unless_present = "by_model"
+    )]
+    pub task: Option<String>,
+    /// Show overlapping model and runtime cohorts.
+    #[arg(long, conflicts_with = "task", required_unless_present = "task")]
+    pub by_model: bool,
+    /// Optional local price table, never sent to the daemon.
+    #[arg(long)]
+    pub prices: Option<std::path::PathBuf>,
+    /// Output the structured report.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "cccc",
@@ -151,6 +174,8 @@ pub enum CommandKind {
     Deliver(DeliverArgs),
     /// Cancel the open reply obligations of a Send + Reply message.
     CancelReply(CancelReplyArgs),
+    /// Report observed task usage and model outcomes without changing tasks.
+    Usage(UsageArgs),
     /// Show recent ledger events of a Group.
     Tail(TailArgs),
     /// Snapshot or compact a Group's ledger.
