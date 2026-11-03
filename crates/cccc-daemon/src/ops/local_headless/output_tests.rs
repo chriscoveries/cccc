@@ -546,6 +546,7 @@ async fn captured_turn_keeps_the_generation_label_seen_at_start() {
         })
         .expect("initial actor configuration");
     fixture.session.model_label_at_launch = Some("first-label".into());
+    let first_generation = fixture.session.managed.generation().to_owned();
     handle_event(
         &fixture.session,
         json!({"method":"turn/started","params":{"turn":{"id":"first"}}}),
@@ -576,6 +577,7 @@ async fn captured_turn_keeps_the_generation_label_seen_at_start() {
         Vec::new(),
         true,
     ));
+    assert_ne!(fixture.session.managed.generation(), first_generation);
     let updated = store
         .load(&fixture.session.group_id)
         .expect("updated group");
