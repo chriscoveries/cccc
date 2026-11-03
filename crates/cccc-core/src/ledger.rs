@@ -535,6 +535,25 @@ pub fn tail_filtered(
     // Compaction replaces the active file and adds segments; read one stable
     // set of sources rather than racing a rename between listing and open.
     let _lock = acquire_reader_lock(path)?;
+    tail_locked(path, limit, kind)
+}
+
+/// Tail an existing ledger without creating lock files or directories.
+/// The existing lock coordinates with writers and compaction.
+pub fn tail_existing_read_only(
+    path: &Path,
+    limit: usize,
+    kind: Option<&str>,
+) -> io::Result<(Vec<Event>, bool)> {
+    if limit == 0 {
+        return Ok((Vec::new(), false));
+    }
+    let lock = File::open(ledger_lock_path(path))?;
+    FileExt::lock_shared(&lock)?;
+    tail_locked(path, limit, kind)
+}
+
+fn tail_locked(path: &Path, limit: usize, kind: Option<&str>) -> io::Result<(Vec<Event>, bool)> {
     let target = limit.saturating_add(1);
     let mut newest_first = Vec::with_capacity(target);
     let group_id = ledger_group_id(path);
@@ -1219,5 +1238,28 @@ mod tests {
         let events = read_all(&path).expect("read all");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, event.id);
+    }
+    #[test]
+    fn captured_tail_reader_does_not_initialize_missing_locks() {
+        let temp = tempfile::tempdir().expect("isolated captured ledger");
+        let path = temp.path().join("ledger.jsonl");
+        let captured: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("usage_report_captured.json"))
+                .expect("captured records");
+        let data = captured
+            .iter()
+            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .collect::<String>();
+        std::fs::write(&path, &data).unwrap();
+        assert!(tail_existing_read_only(&path, 5, None).is_err());
+        assert!(!temp.path().join("state").exists());
+        let lock_path = ledger_lock_path(&path);
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        File::create(&lock_path).unwrap();
+        let (events, has_more) = tail_existing_read_only(&path, 5, None).unwrap();
+        assert_eq!(events.len(), 5);
+        assert!(has_more);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), data);
+        assert_eq!(lock_path.metadata().unwrap().len(), 0);
     }
 }

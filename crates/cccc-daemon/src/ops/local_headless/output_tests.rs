@@ -485,6 +485,7 @@ async fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
     assert_eq!(events[0].data["delivery_id"], "delivery");
     assert_eq!(events[0].data["task_ref"], "T001");
     assert_eq!(events[0].data["task_id"], "runtime-turn");
+    assert_eq!(events[0].data["runtime"], json!(session.managed.runtime()));
     assert!(session.take_delivery_task("delivery").is_none());
     handle_event(
         session,

@@ -312,6 +312,10 @@ fn complete_turn(session: &Session, message: &Value) {
                 .ok()
                 .and_then(|state| state.task_id.clone());
             let task_ref = current.task.clone();
+            // The runtime belongs to this owned session generation, not to the
+            // Actor's mutable current configuration.
+            let mut tagged_usage = usage.clone();
+            tagged_usage["runtime"] = json!(session.managed.runtime());
             if let Err(error) = super::super::turn_usage::record(
                 &session.home,
                 &session.group_id,
@@ -321,7 +325,7 @@ fn complete_turn(session: &Session, message: &Value) {
                 current.delegation.as_deref(),
                 task.as_deref(),
                 task_ref.as_deref(),
-                usage,
+                &tagged_usage,
                 &settled.status,
             ) {
                 tracing::warn!(%error, group_id = %session.group_id, actor_id = %session.actor_id, "failed to append turn usage");

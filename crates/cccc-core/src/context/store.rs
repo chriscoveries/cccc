@@ -35,6 +35,74 @@ impl ContextStore {
         })
     }
 
+    /// Read an already migrated context without initializing or migrating it.
+    /// If the lock or migration proof is missing, callers must report unknown.
+    pub fn load_selected_read_only(
+        group_dir: &std::path::Path,
+        ids: &std::collections::BTreeSet<String>,
+    ) -> io::Result<Vec<Map<String, Value>>> {
+        use fs2::FileExt;
+        if ids.len() > 1000 {
+            return Err(io::Error::other("too many task ids for a bounded snapshot"));
+        }
+        let paths = ContextPaths::new(group_dir);
+        let lock = std::fs::File::open(&paths.lock_file)?;
+        FileExt::lock_shared(&lock)?;
+        if paths.legacy_file.try_exists()? {
+            let migrated = match paths.migration_file.metadata() {
+                Ok(metadata) => metadata.is_file(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error),
+            };
+            if !migrated {
+                return Err(io::Error::other(
+                    "legacy context is not known to be migrated",
+                ));
+            }
+        }
+        let mut tasks = Vec::new();
+        for id in ids {
+            if !super::yaml_storage::is_canonical_task_id(id) {
+                return Err(io::Error::other("invalid task id"));
+            }
+            let path = paths.tasks_dir.join(format!("{id}.yaml"));
+            let metadata = match path.symlink_metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if !metadata.file_type().is_file() || metadata.len() > 1024 * 1024 {
+                return Err(io::Error::other(
+                    "task file is not regular or exceeds 1 MiB",
+                ));
+            }
+            let task = super::yaml_files::read_yaml_map(&path)?;
+            if task.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+                return Err(io::Error::other("task file id mismatch"));
+            }
+            let status = task
+                .get("status")
+                .and_then(Value::as_str)
+                .filter(|s| matches!(*s, "planned" | "active" | "done" | "archived"));
+            let waiting = task
+                .get("waiting_on")
+                .and_then(Value::as_str)
+                .filter(|s| matches!(*s, "none" | "user" | "actor" | "external"));
+            let blocked = match task.get("blocked_by") {
+                None | Some(Value::Null) => Some(false),
+                Some(Value::Array(items)) => Some(!items.is_empty()),
+                _ => None,
+            };
+            tasks.push(
+                serde_json::json!({"id":id,"status":status,"waiting_on":waiting,"blocked":blocked})
+                    .as_object()
+                    .expect("object")
+                    .clone(),
+            );
+        }
+        Ok(tasks)
+    }
+
     pub fn version(&self, document: &ContextDoc) -> io::Result<String> {
         Ok(format!("ctxv:{}", document.revision))
     }
@@ -105,5 +173,84 @@ impl ContextStore {
     fn paths(&self, group_id: &str) -> io::Result<ContextPaths> {
         let groups = GroupStore::new(self.home.clone())?;
         Ok(ContextPaths::new(&groups.group_dir(group_id)?))
+    }
+}
+
+#[cfg(test)]
+mod captured_read_only_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn captured_tasks_are_read_without_initialization_or_legacy_migration() {
+        let temp = tempfile::tempdir().expect("isolated task capture");
+        let paths = ContextPaths::new(temp.path());
+        let tasks: Vec<Value> = serde_json::from_str(include_str!("captured_tasks.json")).unwrap();
+        std::fs::create_dir_all(&paths.tasks_dir).unwrap();
+        std::fs::write(
+            paths.tasks_dir.join("T001.yaml"),
+            serde_yaml::to_string(&tasks[0]).unwrap(),
+        )
+        .unwrap();
+        let ids = std::collections::BTreeSet::from(["T001".to_string()]);
+        assert!(ContextStore::load_selected_read_only(temp.path(), &ids).is_err());
+        assert!(!paths.lock_file.exists());
+        std::fs::File::create(&paths.lock_file).unwrap();
+        std::fs::create_dir_all(paths.legacy_file.parent().unwrap()).unwrap();
+        let legacy = serde_json::to_vec(&json!({"tasks":tasks})).unwrap();
+        std::fs::write(&paths.legacy_file, &legacy).unwrap();
+        assert!(ContextStore::load_selected_read_only(temp.path(), &ids).is_err());
+        assert!(!paths.migration_file.exists());
+        assert_eq!(std::fs::read(&paths.legacy_file).unwrap(), legacy);
+        // Marker is an explicit test control: it represents a prior migration.
+        std::fs::write(&paths.migration_file, b"{}").unwrap();
+        let loaded = ContextStore::load_selected_read_only(temp.path(), &ids).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0]["id"], "T001");
+        assert_eq!(std::fs::read(&paths.legacy_file).unwrap(), legacy);
+    }
+}
+
+#[cfg(test)]
+mod captured_append_failure_tests {
+    use super::*;
+    use cccc_contracts::Event;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn committed_captured_task_can_outlive_a_failed_ledger_append() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = HomeLayout::from_path(temp.path()).unwrap();
+        let groups = GroupStore::new(home.clone()).unwrap();
+        let group = groups.create("capture", "").unwrap();
+        let group_dir = groups.group_dir(&group.group_id).unwrap();
+        let paths = ContextPaths::new(&group_dir);
+        std::fs::create_dir_all(&paths.tasks_dir).unwrap();
+        let tasks: Vec<Value> = serde_json::from_str(include_str!("captured_tasks.json")).unwrap();
+        std::fs::write(
+            paths.tasks_dir.join("T001.yaml"),
+            serde_yaml::to_string(&tasks[0]).unwrap(),
+        )
+        .unwrap();
+        let contexts = ContextStore::new(home).unwrap();
+        let mutation = json!({"op":"task.move","task_id":"T001","status":"active"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let applied = contexts
+            .sync(&group.group_id, &[mutation], None, "user", false)
+            .unwrap();
+        assert_eq!(
+            applied.changes[0]["task_transition"]["after"]["status"],
+            "active"
+        );
+        // A directory in place of a ledger is a labeled I/O failure control;
+        // it does not represent an observed production append failure.
+        let impossible_ledger = group_dir.join("not-a-ledger");
+        std::fs::create_dir(&impossible_ledger).unwrap();
+        let event = Event::new("context.sync", &group.group_id);
+        assert!(crate::ledger::append(&impossible_ledger, &event).is_err());
+        let current = contexts.load(&group.group_id).unwrap();
+        assert_eq!(current.tasks[0]["status"], "active");
     }
 }

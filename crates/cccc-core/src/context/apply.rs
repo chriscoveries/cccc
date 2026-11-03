@@ -32,10 +32,60 @@ pub fn apply_all(
         }
         if let Some(tasks) = tasks {
             super::task_revision::advance(&tasks, &mut document.tasks)?;
+            let task_id = change
+                .get("task_id")
+                .or_else(|| operation.get("task_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned);
+            if let Some(id) = task_id {
+                let before = tasks
+                    .iter()
+                    .find(|task| task.get("id").and_then(Value::as_str) == Some(id.as_str()));
+                let after = document
+                    .tasks
+                    .iter()
+                    .find(|task| task.get("id").and_then(Value::as_str) == Some(id.as_str()));
+                let before = before.map(task_state);
+                let after = after.map(task_state);
+                if before != after {
+                    change["task_transition"] =
+                        json!({"schema": 1, "task_id": id, "before": before, "after": after});
+                } else if name != "task.delete" {
+                    change["task_no_change"] = Value::Bool(true);
+                }
+            }
         }
         changes.push(change);
     }
     Ok(changes)
+}
+
+// Only accounting metadata belongs in the public ledger: never copy notes,
+// titles, checklist contents, or provider payloads from a task.
+fn task_state(task: &Map<String, Value>) -> Value {
+    let actor = task.get("assignee").and_then(Value::as_str).filter(|s| {
+        !s.is_empty()
+            && s.len() <= 128
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    });
+    let status = task
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|s| matches!(*s, "planned" | "active" | "done" | "archived"));
+    let waiting = task
+        .get("waiting_on")
+        .and_then(Value::as_str)
+        .filter(|s| matches!(*s, "none" | "user" | "actor" | "external"));
+    let blocked = match task.get("blocked_by") {
+        None | Some(Value::Null) => Some(false),
+        Some(Value::Array(items)) => Some(!items.is_empty()),
+        _ => None,
+    };
+    json!({"revision": task.get("rev").and_then(Value::as_u64).unwrap_or(0), "status": status,
+        "assignee": actor, "waiting_on": waiting, "blocked": blocked})
 }
 
 fn apply_one(
@@ -120,4 +170,46 @@ fn required<'a>(op: &'a Map<String, Value>, key: &str) -> io::Result<&'a str> {
 }
 fn string<'a>(op: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     op.get(key).and_then(Value::as_str)
+}
+
+#[cfg(test)]
+mod captured_transition_tests {
+    use super::*;
+
+    fn captured_context() -> ContextDoc {
+        // These are metadata-only projections of three real completed tasks;
+        // task numbers and actor identity were consistently replaced.
+        let tasks = serde_json::from_str(include_str!("captured_tasks.json"))
+            .expect("captured task metadata");
+        ContextDoc {
+            tasks,
+            ..ContextDoc::default()
+        }
+    }
+
+    #[test]
+    fn changed_and_noop_operations_report_only_observed_task_metadata() {
+        let mut context = captured_context();
+        // A labeled mutation of a captured done task exercises a reopen.
+        let operation = json!({"op":"task.move","task_id":"T001","status":"active"})
+            .as_object()
+            .expect("operation")
+            .clone();
+        let changes = apply_all(&mut context, &[operation.clone()], "user", |_, _| Ok(()))
+            .expect("apply captured task mutation");
+        let transition = &changes[0]["task_transition"];
+        assert_eq!(transition["task_id"], "T001");
+        assert_eq!(transition["before"]["status"], "done");
+        assert_eq!(transition["after"]["status"], "active");
+        assert_eq!(transition["after"]["assignee"], "actor-a");
+        assert_eq!(transition["before"]["revision"], 0);
+        assert_eq!(transition["after"]["revision"], 1);
+        assert_eq!(transition["after"]["blocked"], false);
+        assert!(transition["after"].get("title").is_none());
+        assert!(transition["after"].get("notes").is_none());
+        let noop =
+            apply_all(&mut context, &[operation], "user", |_, _| Ok(())).expect("repeat status");
+        assert!(noop[0].get("task_transition").is_none());
+        assert_eq!(noop[0]["task_no_change"], true);
+    }
 }

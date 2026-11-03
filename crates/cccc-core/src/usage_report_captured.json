@@ -1,0 +1,222 @@
+[
+  {
+    "v": 1,
+    "id": "event-1",
+    "ts": "2026-11-02T18:27:35.366744Z",
+    "kind": "turn.usage",
+    "group_id": "g_example",
+    "by": "actor-a",
+    "data": {
+      "status": "completed",
+      "source": "claude_transcript",
+      "model_id": "claude-opus-5-5",
+      "input_tokens": 6,
+      "output_tokens": 1807,
+      "cache_read_tokens": 1344415,
+      "cache_write_tokens": 633380,
+      "usage_samples": 3,
+      "started_at": "2026-11-02T18:27:09.484407Z",
+      "ended_at": "2026-11-02T18:27:35.366251Z",
+      "actor_id": "actor-a",
+      "generation": "generation-a",
+      "turn_id": "turn-1",
+      "delivery_id": null,
+      "task_id": null,
+      "task_ref": null
+    }
+  },
+  {
+    "v": 1,
+    "id": "event-2",
+    "ts": "2026-11-02T19:47:19.829470Z",
+    "kind": "turn.usage",
+    "group_id": "g_example",
+    "by": "actor-a",
+    "data": {
+      "status": "completed",
+      "source": "claude_transcript",
+      "model_id": "claude-opus-5-5",
+      "input_tokens": 140,
+      "output_tokens": 49283,
+      "cache_read_tokens": 8590737,
+      "cache_write_tokens": 153868,
+      "usage_samples": 70,
+      "started_at": "2026-11-02T19:37:50.070477Z",
+      "ended_at": "2026-11-02T19:47:19.829327Z",
+      "actor_id": "actor-a",
+      "generation": "generation-a",
+      "turn_id": "turn-2",
+      "delivery_id": null,
+      "task_id": null,
+      "task_ref": null
+    }
+  },
+  {
+    "v": 1,
+    "id": "event-3",
+    "ts": "2026-11-02T20:04:48.875208Z",
+    "kind": "turn.usage",
+    "group_id": "g_example",
+    "by": "actor-a",
+    "data": {
+      "status": "completed",
+      "source": "claude_transcript",
+      "model_id": "claude-opus-5-5",
+      "input_tokens": 16,
+      "output_tokens": 2330,
+      "cache_read_tokens": 1280848,
+      "cache_write_tokens": 5571,
+      "usage_samples": 7,
+      "started_at": "2026-11-02T20:04:11.365118Z",
+      "ended_at": "2026-11-02T20:04:48.874323Z",
+      "actor_id": "actor-a",
+      "generation": "generation-a",
+      "turn_id": "turn-3",
+      "delivery_id": null,
+      "task_id": null,
+      "task_ref": null
+    }
+  },
+  {
+    "v": 1,
+    "id": "event-4",
+    "ts": "2026-11-02T20:15:33.240825Z",
+    "kind": "turn.usage",
+    "group_id": "g_example",
+    "by": "actor-a",
+    "data": {
+      "status": "completed",
+      "source": "claude_transcript",
+      "model_id": "claude-opus-5-5",
+      "input_tokens": 24,
+      "output_tokens": 6574,
+      "cache_read_tokens": 1936087,
+      "cache_write_tokens": 14774,
+      "usage_samples": 10,
+      "started_at": "2026-11-02T20:14:19.149725Z",
+      "ended_at": "2026-11-02T20:15:33.240646Z",
+      "actor_id": "actor-a",
+      "generation": "generation-a",
+      "turn_id": "turn-4",
+      "delivery_id": null,
+      "task_id": null,
+      "task_ref": null
+    }
+  },
+  {
+    "v": 1,
+    "id": "event-5",
+    "ts": "2026-11-02T20:19:12.183020Z",
+    "kind": "turn.usage",
+    "group_id": "g_example",
+    "by": "actor-a",
+    "data": {
+      "status": "completed",
+      "source": "claude_transcript",
+      "model_id": "claude-opus-5-5",
+      "input_tokens": 22,
+      "output_tokens": 3419,
+      "cache_read_tokens": 2056870,
+      "cache_write_tokens": 8579,
+      "usage_samples": 10,
+      "started_at": "2026-11-02T20:18:17.916494Z",
+      "ended_at": "2026-11-02T20:19:12.182808Z",
+      "actor_id": "actor-a",
+      "generation": "generation-a",
+      "turn_id": "turn-5",
+      "delivery_id": null,
+      "task_id": null,
+      "task_ref": null
+    }
+  },
+  {
+    "v": 1,
+    "id": "event-6",
+    "ts": "2026-11-03T08:43:03.865018Z",
+    "kind": "context.sync",
+    "group_id": "g_example",
+    "by": "actor-a",
+    "data": {
+      "version": "ctxv:23415",
+      "changes": [
+        {
+          "index": 0,
+          "op": "task.update",
+          "detail": "applied"
+        }
+      ]
+    }
+  },
+  {
+    "v": 1,
+    "id": "event-7",
+    "ts": "2026-11-03T08:46:34.961773Z",
+    "kind": "context.sync",
+    "group_id": "g_example",
+    "by": "actor-a",
+    "data": {
+      "version": "ctxv:23416",
+      "changes": [
+        {
+          "index": 0,
+          "op": "task.update",
+          "detail": "applied"
+        }
+      ]
+    }
+  },
+  {
+    "v": 1,
+    "id": "event-8",
+    "ts": "2026-11-03T08:46:43.469601Z",
+    "kind": "context.sync",
+    "group_id": "g_example",
+    "by": "actor-a",
+    "data": {
+      "version": "ctxv:23417",
+      "changes": [
+        {
+          "index": 0,
+          "op": "task.update",
+          "detail": "applied"
+        }
+      ]
+    }
+  },
+  {
+    "v": 1,
+    "id": "event-9",
+    "ts": "2026-11-03T08:46:46.067970Z",
+    "kind": "context.sync",
+    "group_id": "g_example",
+    "by": "actor-a",
+    "data": {
+      "version": "ctxv:23418",
+      "changes": [
+        {
+          "index": 0,
+          "op": "task.update",
+          "detail": "applied"
+        }
+      ]
+    }
+  },
+  {
+    "v": 1,
+    "id": "event-10",
+    "ts": "2026-11-03T08:46:47.818706Z",
+    "kind": "context.sync",
+    "group_id": "g_example",
+    "by": "actor-a",
+    "data": {
+      "version": "ctxv:23419",
+      "changes": [
+        {
+          "index": 0,
+          "op": "task.create",
+          "detail": "applied"
+        }
+      ]
+    }
+  }
+]

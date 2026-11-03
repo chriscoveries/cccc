@@ -122,6 +122,7 @@ pub(super) fn record(
     .clone();
     for field in [
         "source",
+        "runtime",
         "model_id",
         "input_tokens",
         "output_tokens",

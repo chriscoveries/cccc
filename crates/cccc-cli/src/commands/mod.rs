@@ -10,3 +10,4 @@ pub mod sessions;
 pub mod setup;
 pub mod status;
 pub mod update;
+pub mod usage;
