@@ -75,6 +75,7 @@ pub(super) fn run(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                     referenced.insert(id.to_owned());
                 }
                 json!({"task_ref":id,"model_id":bounded_text(&v["model_id"],256).filter(|s|s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-'|b'_'|b'.'|b'/'|b':'|b'@'))),
+                    "model_label_at_turn":bounded_text(&v["model_label_at_turn"],512).filter(|s|s.chars().count() <= 128),
                     "runtime":bounded_text(&v["runtime"],16).filter(|s|matches!(*s,"pi"|"claude")),
                     "input_tokens":v["input_tokens"].as_u64(),"output_tokens":v["output_tokens"].as_u64(),
                     "cache_read_tokens":v["cache_read_tokens"].as_u64(),"cache_write_tokens":v["cache_write_tokens"].as_u64(),

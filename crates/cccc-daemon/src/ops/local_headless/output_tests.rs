@@ -28,6 +28,7 @@ impl Fixture {
             home,
             group_id: group.group_id,
             actor_id: "fixture-actor".into(),
+            model_label_at_launch: None,
             workspace: Default::default(),
             managed: Arc::new(AnalystSession::for_output_test(
                 &config, structured, private,
@@ -521,6 +522,55 @@ async fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
     session.bind_delivery_task("rejected", Some("T001".into()));
     session.forget_delivery_task("rejected");
     assert!(session.take_delivery_task("rejected").is_none());
+}
+
+#[tokio::test]
+async fn captured_turn_keeps_the_generation_label_seen_at_start() {
+    let mut fixture = Fixture::new(false, "unused");
+    let mut totals = crate::ops::turn_usage::Accumulator::new();
+    for row in include_str!("../turn_usage/claude.jsonl").lines() {
+        let row: Value = serde_json::from_str(row).expect("captured Claude metadata");
+        if row["type"] == "assistant" {
+            totals.claude(&row);
+        }
+    }
+    // Labeled configuration mutation: a later label cannot rename an active turn.
+    fixture.session.model_label_at_launch = Some("first-label".into());
+    handle_event(
+        &fixture.session,
+        json!({"method":"turn/started","params":{"turn":{"id":"first"}}}),
+        None,
+    );
+    fixture.session.model_label_at_launch = Some("later-label".into());
+    handle_event(
+        &fixture.session,
+        json!({"method":"turn/completed","params":{"turn":{
+        "id":"first","status":"completed","usage":totals.summary("claude_transcript")}}}),
+        None,
+    );
+    handle_event(
+        &fixture.session,
+        json!({"method":"turn/started","params":{"turn":{"id":"second"}}}),
+        None,
+    );
+    handle_event(
+        &fixture.session,
+        json!({"method":"turn/completed","params":{"turn":{
+        "id":"second","status":"completed","usage":totals.summary("claude_transcript")}}}),
+        None,
+    );
+    let ledger = GroupStore::new(fixture.session.home.clone())
+        .expect("group store")
+        .ledger_path(&fixture.session.group_id)
+        .expect("ledger path");
+    let events = cccc_core::ledger::read_all(&ledger)
+        .expect("usage ledger")
+        .into_iter()
+        .filter(|event| event.kind == "turn.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].data["model_label_at_turn"], "first-label");
+    assert_eq!(events[1].data["model_label_at_turn"], "later-label");
 }
 
 #[tokio::test]

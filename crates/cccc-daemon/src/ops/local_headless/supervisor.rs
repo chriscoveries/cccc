@@ -150,6 +150,7 @@ pub(super) fn attach_managed(
         group_id: group.group_id.clone(),
         actor_id: actor.id.clone(),
         workspace,
+        model_label_at_launch: (!actor.model_label.is_empty()).then(|| actor.model_label.clone()),
         managed: Arc::clone(&app),
         has_terminal: AtomicBool::new(false),
         viewer: Mutex::new(app.tui_ready().then(|| super::ViewerLaunch {

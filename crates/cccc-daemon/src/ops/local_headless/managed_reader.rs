@@ -97,6 +97,7 @@ pub(crate) async fn verify_claude_reader_release(
         home,
         group_id: group.group_id.clone(),
         actor_id: "claude-reader".into(),
+        model_label_at_launch: None,
         workspace: Default::default(),
         managed: Arc::clone(&managed),
         has_terminal: AtomicBool::new(false),

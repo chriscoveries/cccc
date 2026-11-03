@@ -23,6 +23,7 @@ struct Task {
 #[derive(Default)]
 struct Cohort {
     tasks: BTreeSet<String>,
+    task_costs: BTreeMap<String, Option<u128>>,
     turns: u64,
     tokens: [u128; 4],
     priced: u128,
@@ -166,13 +167,18 @@ pub fn project(
         let amount =
             prices.and_then(|table| table.numerator(model?, data["started_at"].as_str()?, tokens));
         task_turns.entry(id.to_owned()).or_default().push(json!({
-            "event_id":event["id"], "model":model, "model_label":null, "runtime":runtime,
+            "event_id":event["id"], "model":model, "model_label":data["model_label_at_turn"].as_str(), "runtime":runtime,
             "membership":membership, "status":data["status"], "tokens":tokens, "priced_numerator":amount.map(|v|v.to_string())
         }));
         let cohort = cohorts
             .entry((model.map(str::to_owned), runtime.map(str::to_owned)))
             .or_default();
         cohort.tasks.insert(id.to_owned());
+        let task_cost = cohort.task_costs.entry(id.to_owned()).or_insert(Some(0));
+        *task_cost = match (membership, *task_cost, amount) {
+            ("observed_active_to_done", Some(previous), Some(cost)) => previous.checked_add(cost),
+            _ => None,
+        };
         if membership != "observed_active_to_done" {
             cohort.unknown_membership += 1;
             continue;
@@ -221,6 +227,28 @@ pub fn project(
     }).collect();
     let cohort_results: Vec<Value> = cohorts.iter().map(|((model, runtime), c)| {
         let done = c.tasks.iter().filter(|id| states.get(id.as_str()).is_some_and(|s|s["status"] == "done")).count();
+        let globally_incomplete = has_more || transition_gap || duplicate_conflict || unattributed > 0;
+        let done_costs: Vec<Option<u128>> = c.tasks.iter()
+            .filter(|id| states.get(id.as_str()).is_some_and(|s|s["status"] == "done"))
+            .map(|id| {
+                let state_matches = tasks.get(id).is_some_and(|task| {
+                    !task.invalid && task.state.as_ref().is_some_and(|state| state["status"] == "done")
+                });
+                if globally_incomplete || !state_matches { None } else { c.task_costs.get(id).copied().flatten() }
+            })
+            .collect();
+        let fully_priced = done_costs.iter().filter(|value| value.is_some()).count();
+        let priced_done_sum = done_costs.iter().flatten().try_fold(0_u128, |sum, value| sum.checked_add(*value));
+        let count = u64::try_from(fully_priced).ok();
+        let mean = prices.and_then(|table| {
+            let count = count.filter(|count| *count > 0)?;
+            let numerator = priced_done_sum?;
+            let denominator = 1_000_000_000_000_000_u128.checked_mul(u128::from(count))?;
+            Some(json!({"numerator":numerator.to_string(), "denominator":denominator.to_string(),
+                "currency":table.currency.as_str(), "minor_scale":table.minor_scale,
+                "minor_units":table.mean_minor_units(numerator, count)?.to_string()}))
+        });
+        let all_done_mean = if fully_priced == done && done > 0 { mean.clone() } else { None };
         let reopened = c.tasks.iter().filter(|id| tasks.get(*id).is_some_and(|t|t.reopened > 0)).count();
         let blockers: u64 = c.tasks.iter().filter_map(|id| tasks.get(id)).map(|t|t.blockers).sum();
         json!({"model":model, "runtime":runtime, "model_label":null, "observed_task_participations":c.tasks.len(),
@@ -229,7 +257,8 @@ pub fn project(
             "priced_turns":c.priced_turns,"unpriced_turns":c.unpriced_turns, "unknown_membership_turns":c.unknown_membership,
             "priced_subtotal_numerator":(c.priced_turns > 0).then(|| c.priced.to_string()), "denominator":"1000000000000000",
             "priced_subtotal_minor_units":if c.priced_turns > 0 { prices.and_then(|p| p.minor_units(c.priced)).map(|n| n.to_string()) } else { None },
-            "total_cost":null,"mean_per_done_task":null})
+            "fully_priced_done_task_count":fully_priced, "unpriced_done_task_count":done - fully_priced,
+            "mean_per_fully_priced_done_task":mean, "total_cost":null,"mean_per_done_task":all_done_mean})
     }).collect();
     json!({"schema":1, "group_id":group, "ledger_snapshot_sha256":snapshot_hash,
         "ledger_events":events.len(), "has_more":has_more, "coverage":"partial",
@@ -483,6 +512,127 @@ mod tests {
             assert!(group["total_cost"].is_null());
             assert!(group["mean_per_done_task"].is_null());
         }
+    }
+    #[test]
+    fn captured_done_means_exclude_open_and_disclose_unpriced_tasks() {
+        let source = captured();
+        let planned = json!({"revision":0,"status":"planned","assignee":"actor-a","waiting_on":"actor","blocked":false});
+        let active = json!({"revision":1,"status":"active","assignee":"actor-a","waiting_on":"actor","blocked":false});
+        let finished = json!({"revision":2,"status":"done","assignee":"actor-a","waiting_on":"actor","blocked":false});
+        let mut events = Vec::new();
+        for (index, id) in ["T001", "T002", "T003"].iter().enumerate() {
+            let mut opened = source[5].clone();
+            let mut done = source[6].clone();
+            let mut turn = source[0].clone();
+            opened["id"] = json!(format!("control-open-{index}"));
+            done["id"] = json!(format!("control-done-{index}"));
+            turn["id"] = json!(format!("control-turn-{index}"));
+            opened["ts"] = json!("2026-11-02T18:27:08Z");
+            done["ts"] = json!("2026-11-02T18:27:36Z");
+            opened["data"]["changes"][0]["task_transition"] =
+                json!({"schema":1,"task_id":id,"before":planned,"after":active});
+            done["data"]["changes"][0]["task_transition"] =
+                json!({"schema":1,"task_id":id,"before":active,"after":finished});
+            turn["data"]["task_ref"] = json!(id);
+            turn["data"]["runtime"] = json!("claude");
+            turn["data"]["model_label_at_turn"] = json!(if index == 0 {
+                "first-label"
+            } else {
+                "later-label"
+            });
+            if *id == "T002" {
+                turn["data"]["input_tokens"] = Value::Null;
+            }
+            events.extend([opened, turn, done]);
+        }
+        let mut reopened = source[6].clone();
+        reopened["id"] = json!("control-reopen-2");
+        reopened["ts"] = json!("2026-11-02T18:27:40Z");
+        let active_again = json!({"revision":3,"status":"active","assignee":"actor-a","waiting_on":"actor","blocked":false});
+        reopened["data"]["changes"][0]["task_transition"] =
+            json!({"schema":1,"task_id":"T003","before":finished,"after":active_again});
+        events.push(reopened);
+        let mut snapshots: Vec<Value> =
+            serde_json::from_str(include_str!("context/captured_tasks.json"))
+                .expect("captured task snapshots");
+        snapshots[2]["status"] = json!("active");
+        let price_input = json!({"version":"example-1","currency":"USD","minor_scale":2,"entries":[{
+            "model":"claude-opus-5-5","effective_from":"2026-01-01T00:00:00Z",
+            "effective_until":"2027-01-01T00:00:00Z","input":"1.5","output":"2",
+            "cache_read":"0.125","cache_write":"0"}]});
+        let prices = PriceTable::parse(&serde_json::to_vec(&price_input).expect("price input"))
+            .expect("price table");
+        let output = project(
+            "g_example",
+            &events,
+            &snapshots,
+            false,
+            false,
+            Some(&prices),
+        );
+        let cohort = &output["cohorts"][0];
+        assert_eq!(cohort["observed_currently_done"], 2);
+        assert_eq!(cohort["fully_priced_done_task_count"], 1);
+        assert_eq!(cohort["unpriced_done_task_count"], 1);
+        assert_eq!(cohort["priced_subtotal_numerator"], "343349750000000");
+        assert_eq!(
+            cohort["mean_per_fully_priced_done_task"]["numerator"],
+            "171674875000000"
+        );
+        assert_eq!(
+            cohort["mean_per_fully_priced_done_task"]["denominator"],
+            "1000000000000000"
+        );
+        assert_eq!(cohort["mean_per_fully_priced_done_task"]["currency"], "USD");
+        assert_eq!(
+            cohort["mean_per_fully_priced_done_task"]["minor_units"],
+            "17"
+        );
+        assert!(cohort["mean_per_done_task"].is_null());
+        assert_eq!(output["tasks"][0]["turns"][0]["model_label"], "first-label");
+        assert_eq!(output["tasks"][1]["turns"][0]["model_label"], "later-label");
+        let partial = project("g_example", &events, &snapshots, true, false, Some(&prices));
+        assert_eq!(partial["cohorts"][0]["fully_priced_done_task_count"], 0);
+        assert_eq!(partial["cohorts"][0]["unpriced_done_task_count"], 2);
+        assert!(partial["cohorts"][0]["mean_per_fully_priced_done_task"].is_null());
+        events[4]["data"]["input_tokens"] = source[0]["data"]["input_tokens"].clone();
+        let both = project(
+            "g_example",
+            &events,
+            &snapshots,
+            false,
+            false,
+            Some(&prices),
+        );
+        assert_eq!(both["cohorts"][0]["fully_priced_done_task_count"], 2);
+        assert_eq!(both["cohorts"][0]["unpriced_done_task_count"], 0);
+        assert_eq!(
+            both["cohorts"][0]["mean_per_done_task"]["numerator"],
+            "343349750000000"
+        );
+        assert_eq!(
+            both["cohorts"][0]["mean_per_done_task"]["denominator"],
+            "2000000000000000"
+        );
+        assert_eq!(
+            both["cohorts"][0]["mean_per_done_task"]["minor_units"],
+            "17"
+        );
+        events.drain(3..6);
+        let complete = project(
+            "g_example",
+            &events,
+            &snapshots,
+            false,
+            false,
+            Some(&prices),
+        );
+        assert_eq!(complete["cohorts"][0]["observed_currently_done"], 1);
+        assert_eq!(complete["cohorts"][0]["unpriced_done_task_count"], 0);
+        assert_eq!(
+            complete["cohorts"][0]["mean_per_done_task"]["minor_units"],
+            "17"
+        );
     }
     #[test]
     fn labeled_captured_transitions_distinguish_reopen_from_blocker_episode() {

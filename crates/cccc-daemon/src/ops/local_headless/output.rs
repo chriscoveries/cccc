@@ -229,7 +229,13 @@ fn handle_managed_turn_started(
             .map(|task| (Some(id.to_owned()), task))
     });
     let (delivery, task) = binding.unwrap_or_default();
-    match observe_started_turn(&session.active_turn, turn_id, task, delivery) {
+    match observe_started_turn(
+        &session.active_turn,
+        turn_id,
+        task,
+        delivery,
+        session.model_label_at_launch.clone(),
+    ) {
         StartedTurnDisposition::Adopted => {
             session.set_status("working", Some(turn_id.to_owned()));
             true
@@ -253,6 +259,7 @@ fn observe_started_turn(
     turn_id: &str,
     task: Option<String>,
     delegation: Option<String>,
+    model_label_at_turn: Option<String>,
 ) -> StartedTurnDisposition {
     let Ok(mut active_turn) = active_turn.lock() else {
         return StartedTurnDisposition::Conflict;
@@ -269,6 +276,7 @@ fn observe_started_turn(
                 turn_id: turn_id.to_owned(),
                 delegation,
                 task,
+                model_label_at_turn,
             });
             StartedTurnDisposition::Adopted
         }
@@ -316,6 +324,7 @@ fn complete_turn(session: &Session, message: &Value) {
             // Actor's mutable current configuration.
             let mut tagged_usage = usage.clone();
             tagged_usage["runtime"] = json!(session.managed.runtime());
+            tagged_usage["model_label_at_turn"] = json!(current.model_label_at_turn.as_deref());
             if let Err(error) = super::super::turn_usage::record(
                 &session.home,
                 &session.group_id,
@@ -514,7 +523,7 @@ mod tests {
         let active_turn = std::sync::Mutex::new(None);
 
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-terminal", None, None),
+            observe_started_turn(&active_turn, "turn-terminal", None, None, None),
             StartedTurnDisposition::Adopted
         );
         let active = active_turn.lock().expect("active turn");
@@ -547,14 +556,15 @@ mod tests {
             turn_id: "turn-terminal".into(),
             delegation: None,
             task: None,
+            model_label_at_turn: None,
         }));
 
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-terminal", None, None),
+            observe_started_turn(&active_turn, "turn-terminal", None, None, None),
             StartedTurnDisposition::Matched
         );
         assert_eq!(
-            observe_started_turn(&active_turn, "turn-overlap", None, None),
+            observe_started_turn(&active_turn, "turn-overlap", None, None, None),
             StartedTurnDisposition::Conflict
         );
     }

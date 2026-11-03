@@ -105,11 +105,21 @@ impl PriceTable {
 
     /// Final round-half-even in the operator's chosen currency minor units.
     pub fn minor_units(&self, numerator: u128) -> Option<u128> {
+        self.mean_minor_units(numerator, 1)
+    }
+
+    /// Round only after dividing the exact numerator by the task count.
+    pub fn mean_minor_units(&self, numerator: u128, count: u64) -> Option<u128> {
+        if count == 0 {
+            return None;
+        }
         let scaled = numerator.checked_mul(10_u128.pow(u32::from(self.minor_scale)))?;
-        let quotient = scaled / DENOMINATOR;
-        let remainder = scaled % DENOMINATOR;
-        let above_half = remainder > DENOMINATOR / 2;
-        let tie_odd = remainder == DENOMINATOR / 2 && quotient % 2 == 1;
+        let denominator = DENOMINATOR.checked_mul(u128::from(count))?;
+        let quotient = scaled / denominator;
+        let remainder = scaled % denominator;
+        let above_half = remainder > denominator / 2;
+        // The fixed scale is even, so every nonzero multiple is even.
+        let tie_odd = remainder == denominator / 2 && quotient % 2 == 1;
         quotient.checked_add(if above_half || tie_odd { 1 } else { 0 })
     }
 }
@@ -272,6 +282,9 @@ mod tests {
                 .expect("captured test data and setup");
         assert_eq!(parsed.minor_units(5_000_000_000_000), Some(0));
         assert_eq!(parsed.minor_units(15_000_000_000_000), Some(2));
+        assert_eq!(parsed.mean_minor_units(10_000_000_000_000, 2), Some(0));
+        assert_eq!(parsed.mean_minor_units(30_000_000_000_000, 2), Some(2));
+        assert_eq!(parsed.mean_minor_units(10_000_000_000_000, 0), None);
         assert!(parsed.minor_units(u128::MAX).is_none());
     }
     #[test]

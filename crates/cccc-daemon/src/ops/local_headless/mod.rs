@@ -88,6 +88,7 @@ struct ActiveTurn {
     turn_id: String,
     delegation: Option<String>,
     task: Option<String>,
+    model_label_at_turn: Option<String>,
 }
 
 /// Everything needed to re-open the viewer attachment (`claude attach` or
@@ -103,6 +104,8 @@ struct Session {
     home: HomeLayout,
     group_id: String,
     actor_id: String,
+    // Configuration captured for this owned generation, never current state.
+    model_label_at_launch: Option<String>,
     // Pure headless sessions may never have a viewer. The provider's launch
     // workspace belongs to this owner, independently of terminal attachment.
     workspace: super::actor_runtime::LaunchWorkspace,

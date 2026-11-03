@@ -14,7 +14,9 @@ atomic operation: coverage, claim-to-done totals and cost totals remain partial
 or unknown. A selected page containing legacy task changes without transition
 metadata or a task-subtree deletion cannot prove interval membership. A
 present-day task assignee or model label is never used to infer
-historical attribution. Unknown runtime and model label are displayed as null.
+historical attribution. The optional operator-declared model label is captured
+for the owned session generation at turn start; it is separate from the
+provider-reported model. Old or unavailable labels and runtimes are null.
 
 Supply `--prices <file>` to price observed, linked turns. The local JSON file
 contains `version`, uppercase three-letter `currency`, `minor_scale` (0–6), and
@@ -26,6 +28,13 @@ than nine fractional digits. Missing prices or counters stay unknown. Subtotals
 use integer arithmetic, and the final minor-unit amount rounds half to even.
 The table hash and version identify the local price input; estimates are not
 invoices. Prices are not uploaded to the daemon.
+
+Model/runtime groups report fully priced and unpriced currently-done task
+counts separately. Their priced-done mean uses only qualifying turns for those
+done tasks, with exact numerator and denominator and one half-even rounding;
+open tasks do not enter that mean. When a done task is incomplete, the mean
+over all done tasks remains unknown. These are observed estimates within the
+report's stated coverage, not proof that all task usage was recorded.
 
 The `canonical_ledger_page_sha256` names the bounded decoded page: each Event is
 serialized as compact JSON in ledger order, prefixed by its eight-byte unsigned

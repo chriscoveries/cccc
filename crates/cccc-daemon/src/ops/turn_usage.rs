@@ -124,6 +124,7 @@ pub(super) fn record(
         "source",
         "runtime",
         "model_id",
+        "model_label_at_turn",
         "input_tokens",
         "output_tokens",
         "cache_read_tokens",
