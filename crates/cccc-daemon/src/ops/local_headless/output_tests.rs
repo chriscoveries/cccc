@@ -534,20 +534,56 @@ async fn captured_turn_keeps_the_generation_label_seen_at_start() {
             totals.claude(&row);
         }
     }
-    // Labeled configuration mutation: a later label cannot rename an active turn.
+    // Labeled configuration mutation: a later label cannot rename an active
+    // generation, and the next owned generation captures the new declaration.
+    let store = GroupStore::new(fixture.session.home.clone()).expect("group store");
+    store
+        .mutate(&fixture.session.group_id, |group| {
+            let mut actor = cccc_contracts::Actor::new("fixture-actor");
+            actor.model_label = "first-label".into();
+            group.actors.push(actor);
+            Ok(())
+        })
+        .expect("initial actor configuration");
     fixture.session.model_label_at_launch = Some("first-label".into());
     handle_event(
         &fixture.session,
         json!({"method":"turn/started","params":{"turn":{"id":"first"}}}),
         None,
     );
-    fixture.session.model_label_at_launch = Some("later-label".into());
+    store
+        .mutate(&fixture.session.group_id, |group| {
+            group
+                .actors
+                .iter_mut()
+                .find(|actor| actor.id == "fixture-actor")
+                .expect("fixture actor")
+                .model_label = "later-label".into();
+            Ok(())
+        })
+        .expect("updated actor configuration");
     handle_event(
         &fixture.session,
         json!({"method":"turn/completed","params":{"turn":{
         "id":"first","status":"completed","usage":totals.summary("claude_transcript")}}}),
         None,
     );
+    // Replace the inert managed session to represent the next generation.
+    let config = fixture._temp.path().canonicalize().expect("fixture path");
+    fixture.session.managed = Arc::new(AnalystSession::claude_for_shutdown_test(
+        &config,
+        "abcdef02",
+        Vec::new(),
+        true,
+    ));
+    let updated = store
+        .load(&fixture.session.group_id)
+        .expect("updated group");
+    fixture.session.model_label_at_launch = updated
+        .actors
+        .iter()
+        .find(|actor| actor.id == "fixture-actor")
+        .map(|actor| actor.model_label.clone());
     handle_event(
         &fixture.session,
         json!({"method":"turn/started","params":{"turn":{"id":"second"}}}),
