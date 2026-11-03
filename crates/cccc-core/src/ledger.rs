@@ -1248,57 +1248,104 @@ mod tests {
                 .expect("captured records");
         let data = captured
             .iter()
-            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .map(|event| {
+                format!(
+                    "{}\n",
+                    serde_json::to_string(event).expect("captured test data and setup")
+                )
+            })
             .collect::<String>();
-        std::fs::write(&path, &data).unwrap();
+        std::fs::write(&path, &data).expect("captured test data and setup");
         assert!(tail_existing_read_only(&path, 5, None).is_err());
         assert!(!temp.path().join("state").exists());
         let lock_path = ledger_lock_path(&path);
-        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
-        File::create(&lock_path).unwrap();
-        let (events, has_more) = tail_existing_read_only(&path, 5, None).unwrap();
+        std::fs::create_dir_all(lock_path.parent().expect("captured test data and setup"))
+            .expect("captured test data and setup");
+        File::create(&lock_path).expect("captured test data and setup");
+        let (events, has_more) =
+            tail_existing_read_only(&path, 5, None).expect("captured test data and setup");
         assert_eq!(events.len(), 5);
         assert!(has_more);
-        assert_eq!(std::fs::read_to_string(path).unwrap(), data);
-        assert_eq!(lock_path.metadata().unwrap().len(), 0);
+        assert_eq!(
+            std::fs::read_to_string(path).expect("captured test data and setup"),
+            data
+        );
+        assert_eq!(
+            lock_path
+                .metadata()
+                .expect("captured test data and setup")
+                .len(),
+            0
+        );
     }
     #[test]
     fn captured_page_handles_rotation_and_a_labeled_truncated_tail() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("captured test data and setup");
         let path = temp.path().join("ledger.jsonl");
         let captured: Vec<serde_json::Value> =
-            serde_json::from_str(include_str!("usage_report_captured.json")).unwrap();
+            serde_json::from_str(include_str!("usage_report_captured.json"))
+                .expect("captured test data and setup");
         let lock_path = ledger_lock_path(&path);
-        std::fs::create_dir_all(lock_path.parent().unwrap().join("segments")).unwrap();
-        File::create(&lock_path).unwrap();
+        std::fs::create_dir_all(
+            lock_path
+                .parent()
+                .expect("captured test data and setup")
+                .join("segments"),
+        )
+        .expect("captured test data and setup");
+        File::create(&lock_path).expect("captured test data and setup");
         let archive = lock_path
             .parent()
-            .unwrap()
+            .expect("captured test data and setup")
             .join("segments/ledger.0001.jsonl.gz");
-        let mut writer = GzEncoder::new(File::create(archive).unwrap(), Compression::default());
+        let mut writer = GzEncoder::new(
+            File::create(archive).expect("captured test data and setup"),
+            Compression::default(),
+        );
         for event in &captured[..5] {
-            writeln!(writer, "{}", serde_json::to_string(event).unwrap()).unwrap();
+            writeln!(
+                writer,
+                "{}",
+                serde_json::to_string(event).expect("captured test data and setup")
+            )
+            .expect("captured test data and setup");
         }
-        writer.finish().unwrap();
+        writer.finish().expect("captured test data and setup");
         let mut active = captured[5..9]
             .iter()
-            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .map(|event| {
+                format!(
+                    "{}\n",
+                    serde_json::to_string(event).expect("captured test data and setup")
+                )
+            })
             .collect::<String>();
         // A byte-cut of a captured record models an interrupted final append.
-        let final_record = serde_json::to_string(&captured[9]).unwrap();
+        let final_record =
+            serde_json::to_string(&captured[9]).expect("captured test data and setup");
         active.push_str(&final_record[..final_record.len() / 2]);
-        std::fs::write(&path, &active).unwrap();
-        let (events, has_more) = tail_existing_read_only(&path, 7, None).unwrap();
+        std::fs::write(&path, &active).expect("captured test data and setup");
+        let (events, has_more) =
+            tail_existing_read_only(&path, 7, None).expect("captured test data and setup");
         assert_eq!(events.len(), 7);
         assert!(has_more);
-        assert_eq!(events.first().unwrap().id, "event-3");
-        assert_eq!(events.last().unwrap().id, "event-9");
+        assert_eq!(
+            events.first().expect("captured test data and setup").id,
+            "event-3"
+        );
+        assert_eq!(
+            events.last().expect("captured test data and setup").id,
+            "event-9"
+        );
         let page = events
             .iter()
-            .map(|event| serde_json::to_value(event).unwrap())
+            .map(|event| serde_json::to_value(event).expect("captured test data and setup"))
             .collect::<Vec<_>>();
         let report = crate::usage_report::project("g_example", &page, &[], has_more, true, None);
         assert_eq!(report["coverage"], "partial");
-        assert_eq!(std::fs::read_to_string(path).unwrap(), active);
+        assert_eq!(
+            std::fs::read_to_string(path).expect("captured test data and setup"),
+            active
+        );
     }
 }

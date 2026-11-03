@@ -167,8 +167,8 @@ mod tests {
     use serde_json::{Value, json};
 
     fn captured_turn() -> Value {
-        let capture: Vec<Value> =
-            serde_json::from_str(include_str!("usage_report_captured.json")).unwrap();
+        let capture: Vec<Value> = serde_json::from_str(include_str!("usage_report_captured.json"))
+            .expect("captured test data and setup");
         capture[0]["data"].clone()
     }
 
@@ -183,7 +183,9 @@ mod tests {
     #[test]
     fn captured_counters_and_supplied_rates_use_exact_arithmetic() {
         let turn = captured_turn();
-        let parsed = PriceTable::parse(&serde_json::to_vec(&table()).unwrap()).unwrap();
+        let parsed =
+            PriceTable::parse(&serde_json::to_vec(&table()).expect("captured test data and setup"))
+                .expect("captured test data and setup");
         let counts = [
             "input_tokens",
             "output_tokens",
@@ -193,22 +195,34 @@ mod tests {
         .map(|key| turn[key].as_u64());
         let amount = parsed
             .numerator(
-                turn["model_id"].as_str().unwrap(),
-                turn["started_at"].as_str().unwrap(),
+                turn["model_id"]
+                    .as_str()
+                    .expect("captured test data and setup"),
+                turn["started_at"]
+                    .as_str()
+                    .expect("captured test data and setup"),
                 counts,
             )
-            .unwrap();
+            .expect("captured test data and setup");
         assert_eq!(amount, 171_674_875_000_000);
         assert_eq!(parsed.minor_units(amount), Some(17));
         assert!(
             parsed
-                .numerator("unknown", turn["started_at"].as_str().unwrap(), counts)
+                .numerator(
+                    "unknown",
+                    turn["started_at"]
+                        .as_str()
+                        .expect("captured test data and setup"),
+                    counts
+                )
                 .is_none()
         );
         assert!(
             parsed
                 .numerator(
-                    turn["model_id"].as_str().unwrap(),
+                    turn["model_id"]
+                        .as_str()
+                        .expect("captured test data and setup"),
                     "2027-01-01T00:00:00Z",
                     counts
                 )
@@ -217,8 +231,12 @@ mod tests {
         assert!(
             parsed
                 .numerator(
-                    turn["model_id"].as_str().unwrap(),
-                    turn["started_at"].as_str().unwrap(),
+                    turn["model_id"]
+                        .as_str()
+                        .expect("captured test data and setup"),
+                    turn["started_at"]
+                        .as_str()
+                        .expect("captured test data and setup"),
                     [None, counts[1], counts[2], counts[3]]
                 )
                 .is_none()
@@ -229,15 +247,29 @@ mod tests {
     fn invalid_prices_overlap_and_half_even_are_explicit() {
         let mut input = table();
         input["entries"][0]["input"] = json!(1.0);
-        assert!(PriceTable::parse(&serde_json::to_vec(&input).unwrap()).is_err());
+        assert!(
+            PriceTable::parse(&serde_json::to_vec(&input).expect("captured test data and setup"))
+                .is_err()
+        );
         input = table();
         input["entries"][0]["input"] = json!("1.0000000001");
-        assert!(PriceTable::parse(&serde_json::to_vec(&input).unwrap()).is_err());
+        assert!(
+            PriceTable::parse(&serde_json::to_vec(&input).expect("captured test data and setup"))
+                .is_err()
+        );
         input = table();
         let duplicate = input["entries"][0].clone();
-        input["entries"].as_array_mut().unwrap().push(duplicate);
-        assert!(PriceTable::parse(&serde_json::to_vec(&input).unwrap()).is_err());
-        let parsed = PriceTable::parse(&serde_json::to_vec(&table()).unwrap()).unwrap();
+        input["entries"]
+            .as_array_mut()
+            .expect("captured test data and setup")
+            .push(duplicate);
+        assert!(
+            PriceTable::parse(&serde_json::to_vec(&input).expect("captured test data and setup"))
+                .is_err()
+        );
+        let parsed =
+            PriceTable::parse(&serde_json::to_vec(&table()).expect("captured test data and setup"))
+                .expect("captured test data and setup");
         assert_eq!(parsed.minor_units(5_000_000_000_000), Some(0));
         assert_eq!(parsed.minor_units(15_000_000_000_000), Some(2));
         assert!(parsed.minor_units(u128::MAX).is_none());
@@ -261,12 +293,21 @@ mod tests {
         next["output"] = json!("0");
         next["cache_read"] = json!("0");
         next["cache_write"] = json!("0");
-        input["entries"].as_array_mut().unwrap().push(next);
-        let parsed = PriceTable::parse(&serde_json::to_vec(&input).unwrap()).unwrap();
+        input["entries"]
+            .as_array_mut()
+            .expect("captured test data and setup")
+            .push(next);
+        let parsed =
+            PriceTable::parse(&serde_json::to_vec(&input).expect("captured test data and setup"))
+                .expect("captured test data and setup");
         assert_eq!(
             parsed.numerator(
-                turn["model_id"].as_str().unwrap(),
-                turn["started_at"].as_str().unwrap(),
+                turn["model_id"]
+                    .as_str()
+                    .expect("captured test data and setup"),
+                turn["started_at"]
+                    .as_str()
+                    .expect("captured test data and setup"),
                 counts
             ),
             Some(0)
@@ -275,12 +316,18 @@ mod tests {
         for kind in ["input", "output", "cache_read", "cache_write"] {
             large["entries"][0][kind] = json!("999999999999.999999999");
         }
-        let parsed = PriceTable::parse(&serde_json::to_vec(&large).unwrap()).unwrap();
+        let parsed =
+            PriceTable::parse(&serde_json::to_vec(&large).expect("captured test data and setup"))
+                .expect("captured test data and setup");
         assert!(
             parsed
                 .numerator(
-                    turn["model_id"].as_str().unwrap(),
-                    turn["started_at"].as_str().unwrap(),
+                    turn["model_id"]
+                        .as_str()
+                        .expect("captured test data and setup"),
+                    turn["started_at"]
+                        .as_str()
+                        .expect("captured test data and setup"),
                     [Some(u64::MAX); 4]
                 )
                 .is_none()

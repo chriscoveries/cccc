@@ -219,8 +219,14 @@ mod captured_transition_tests {
             json!({"op":"task.move","task_id":"T001","status":"active"}),
             json!({"op":"task.update","task_id":"T001","blocked_by":["T002"]}),
         ]
-        .map(|operation| operation.as_object().unwrap().clone());
-        let changes = apply_all(&mut context, &operations, "user", |_, _| Ok(())).unwrap();
+        .map(|operation| {
+            operation
+                .as_object()
+                .expect("captured test data and setup")
+                .clone()
+        });
+        let changes = apply_all(&mut context, &operations, "user", |_, _| Ok(()))
+            .expect("captured test data and setup");
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0]["task_transition"]["after"]["status"], "active");
         assert_eq!(changes[0]["task_transition"]["after"]["revision"], 1);

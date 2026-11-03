@@ -119,9 +119,15 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: UsageArgs) -> R
         if let Some(items) = report["tasks"].as_array_mut() {
             items.retain(|entry| entry["task_id"] == task);
         }
-        report.as_object_mut().unwrap().remove("cohorts");
+        report
+            .as_object_mut()
+            .context("usage report must be an object")?
+            .remove("cohorts");
     } else {
-        report.as_object_mut().unwrap().remove("tasks");
+        report
+            .as_object_mut()
+            .context("usage report must be an object")?
+            .remove("tasks");
     }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);

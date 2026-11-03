@@ -143,27 +143,32 @@ mod captured_tests {
 
     #[test]
     fn captured_source_strips_content_and_reports_legacy_transition_gaps() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = HomeLayout::from_path(temp.path()).unwrap();
-        let groups = GroupStore::new(home.clone()).unwrap();
-        let group = groups.create("capture", "").unwrap();
-        let group_dir = groups.group_dir(&group.group_id).unwrap();
+        let temp = tempfile::tempdir().expect("captured test data and setup");
+        let home = HomeLayout::from_path(temp.path()).expect("captured test data and setup");
+        let groups = GroupStore::new(home.clone()).expect("captured test data and setup");
+        let group = groups
+            .create("capture", "")
+            .expect("captured test data and setup");
+        let group_dir = groups
+            .group_dir(&group.group_id)
+            .expect("captured test data and setup");
         let context = group_dir.join("context");
-        std::fs::create_dir_all(context.join("tasks")).unwrap();
-        std::fs::File::create(context.join(".rust-context.lock")).unwrap();
+        std::fs::create_dir_all(context.join("tasks")).expect("captured test data and setup");
+        std::fs::File::create(context.join(".rust-context.lock"))
+            .expect("captured test data and setup");
         let tasks: Vec<Value> = serde_json::from_str(include_str!(
             "../../../cccc-core/src/context/captured_tasks.json"
         ))
-        .unwrap();
+        .expect("captured test data and setup");
         std::fs::write(
             context.join("tasks/T001.yaml"),
-            serde_yaml::to_string(&tasks[0]).unwrap(),
+            serde_yaml::to_string(&tasks[0]).expect("captured test data and setup"),
         )
-        .unwrap();
+        .expect("captured test data and setup");
         let captured: Vec<Value> = serde_json::from_str(include_str!(
             "../../../cccc-core/src/usage_report_captured.json"
         ))
-        .unwrap();
+        .expect("captured test data and setup");
         for (index, mut row) in [captured[0].clone(), captured[5].clone()]
             .into_iter()
             .enumerate()
@@ -173,24 +178,30 @@ mod captured_tests {
             if index == 0 {
                 row["data"]["prompt"] = json!("content-to-omit");
             }
-            let event: Event = serde_json::from_value(row).unwrap();
-            ledger::append(&groups.ledger_path(&group.group_id).unwrap(), &event).unwrap();
+            let event: Event = serde_json::from_value(row).expect("captured test data and setup");
+            ledger::append(
+                &groups
+                    .ledger_path(&group.group_id)
+                    .expect("captured test data and setup"),
+                &event,
+            )
+            .expect("captured test data and setup");
         }
         let request = DaemonRequest {
             v: 1,
             op: "usage_report_source".into(),
             args: json!({"group_id":group.group_id,"task_id":"T001"})
                 .as_object()
-                .unwrap()
+                .expect("captured test data and setup")
                 .clone(),
         };
-        let result = run(&home, &request).unwrap();
+        let result = run(&home, &request).expect("captured test data and setup");
         assert_eq!(result["ledger_snapshot_available"], true);
         assert_eq!(result["transition_gap"], true);
         assert_eq!(result["tasks"][0]["status"], "done");
         assert!(
             !serde_json::to_string(&result)
-                .unwrap()
+                .expect("captured test data and setup")
                 .contains("content-to-omit")
         );
     }

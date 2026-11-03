@@ -246,7 +246,8 @@ mod tests {
     use super::*;
 
     fn captured() -> Vec<Value> {
-        serde_json::from_str(include_str!("usage_report_captured.json")).unwrap()
+        serde_json::from_str(include_str!("usage_report_captured.json"))
+            .expect("captured test data and setup")
     }
 
     #[test]
@@ -255,19 +256,35 @@ mod tests {
         let output = project("g_example", &events, &[], true, false, None);
         assert_eq!(output["unattributed_turns"], 5);
         assert_eq!(output["coverage"], "partial");
-        assert!(output["cohorts"].as_array().unwrap().is_empty());
+        assert!(
+            output["cohorts"]
+                .as_array()
+                .expect("captured test data and setup")
+                .is_empty()
+        );
     }
 
     #[test]
     fn captured_stock_events_without_hook_leave_usage_unknown() {
         let events = captured();
-        let tasks: Vec<Value> =
-            serde_json::from_str(include_str!("context/captured_tasks.json")).unwrap();
+        let tasks: Vec<Value> = serde_json::from_str(include_str!("context/captured_tasks.json"))
+            .expect("captured test data and setup");
         let report = project("g_example", &events[5..], &tasks, true, true, None);
-        assert_eq!(report["tasks"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            report["tasks"]
+                .as_array()
+                .expect("captured test data and setup")
+                .len(),
+            3
+        );
         assert!(report["tasks"][0]["turn_total"].is_null());
         assert!(report["tasks"][0]["cost_total"].is_null());
-        assert!(report["cohorts"].as_array().unwrap().is_empty());
+        assert!(
+            report["cohorts"]
+                .as_array()
+                .expect("captured test data and setup")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -296,7 +313,13 @@ mod tests {
             false,
             None,
         );
-        assert_eq!(output["tasks"][0]["turns"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            output["tasks"][0]["turns"]
+                .as_array()
+                .expect("captured test data and setup")
+                .len(),
+            1
+        );
         assert_eq!(
             output["tasks"][0]["turns"][0]["membership"],
             "observed_active_to_done"
@@ -309,7 +332,10 @@ mod tests {
             "model":"claude-opus-5-5","effective_from":"2026-01-01T00:00:00Z",
             "effective_until":"2027-01-01T00:00:00Z","input":"1.5","output":"2",
             "cache_read":"0.125","cache_write":"0"}]});
-        let prices = PriceTable::parse(&serde_json::to_vec(&price_input).unwrap()).unwrap();
+        let prices = PriceTable::parse(
+            &serde_json::to_vec(&price_input).expect("captured test data and setup"),
+        )
+        .expect("captured test data and setup");
         let priced = project(
             "g_example",
             &[opened.clone(), linked.clone(), done.clone()],
@@ -374,7 +400,12 @@ mod tests {
             false,
             None,
         );
-        assert!(output["tasks"][0]["turns"].as_array().unwrap().is_empty());
+        assert!(
+            output["tasks"][0]["turns"]
+                .as_array()
+                .expect("captured test data and setup")
+                .is_empty()
+        );
     }
     #[test]
     fn a_conflicting_replay_never_proves_membership() {
@@ -431,7 +462,8 @@ mod tests {
         second["data"]["started_at"] = first["data"]["started_at"].clone();
         second["data"]["ended_at"] = first["data"]["ended_at"].clone();
         let snapshots: Vec<Value> =
-            serde_json::from_str(include_str!("context/captured_tasks.json")).unwrap();
+            serde_json::from_str(include_str!("context/captured_tasks.json"))
+                .expect("captured test data and setup");
         let report = project(
             "g_example",
             &[opened, first, second, done],
@@ -440,7 +472,9 @@ mod tests {
             false,
             None,
         );
-        let groups = report["cohorts"].as_array().unwrap();
+        let groups = report["cohorts"]
+            .as_array()
+            .expect("captured test data and setup");
         assert_eq!(groups.len(), 2);
         for group in groups {
             assert_eq!(group["observed_task_participations"], 1);
