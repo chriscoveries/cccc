@@ -353,6 +353,17 @@ mod tests {
             "unknown"
         );
         assert!(boundary_result["tasks"][0]["turns"][0]["model_label"].is_null());
+        let mut crossing = linked.clone();
+        crossing["data"]["started_at"] = json!("2026-11-02T18:27:07Z");
+        let crossed = project(
+            "g_example",
+            &[opened.clone(), crossing, done.clone()],
+            &[],
+            false,
+            false,
+            None,
+        );
+        assert_eq!(crossed["tasks"][0]["turns"][0]["membership"], "unknown");
         // The same task reference from another group is never joined.
         linked["group_id"] = json!("g_other");
         let output = project(

@@ -212,4 +212,28 @@ mod captured_transition_tests {
         assert!(noop[0].get("task_transition").is_none());
         assert_eq!(noop[0]["task_no_change"], true);
     }
+    #[test]
+    fn captured_task_batch_keeps_order_and_blocker_transition() {
+        let mut context = captured_context();
+        let operations = [
+            json!({"op":"task.move","task_id":"T001","status":"active"}),
+            json!({"op":"task.update","task_id":"T001","blocked_by":["T002"]}),
+        ]
+        .map(|operation| operation.as_object().unwrap().clone());
+        let changes = apply_all(&mut context, &operations, "user", |_, _| Ok(())).unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0]["task_transition"]["after"]["status"], "active");
+        assert_eq!(changes[0]["task_transition"]["after"]["revision"], 1);
+        assert_eq!(
+            changes[1]["task_transition"]["before"],
+            changes[0]["task_transition"]["after"]
+        );
+        assert_eq!(changes[1]["task_transition"]["after"]["revision"], 2);
+        assert_eq!(changes[1]["task_transition"]["after"]["blocked"], true);
+        assert!(
+            changes[1]["task_transition"]["after"]
+                .get("blocked_by")
+                .is_none()
+        );
+    }
 }

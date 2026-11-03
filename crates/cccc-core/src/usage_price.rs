@@ -242,4 +242,48 @@ mod tests {
         assert_eq!(parsed.minor_units(15_000_000_000_000), Some(2));
         assert!(parsed.minor_units(u128::MAX).is_none());
     }
+    #[test]
+    fn adjacent_intervals_and_overflow_use_captured_counters() {
+        let turn = captured_turn();
+        let counts = [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+        ]
+        .map(|key| turn[key].as_u64());
+        let mut input = table();
+        input["entries"][0]["effective_until"] = json!("2026-11-02T18:27:09.484407Z");
+        let mut next = input["entries"][0].clone();
+        next["effective_from"] = input["entries"][0]["effective_until"].clone();
+        next["effective_until"] = json!("2027-01-01T00:00:00Z");
+        next["input"] = json!("0");
+        next["output"] = json!("0");
+        next["cache_read"] = json!("0");
+        next["cache_write"] = json!("0");
+        input["entries"].as_array_mut().unwrap().push(next);
+        let parsed = PriceTable::parse(&serde_json::to_vec(&input).unwrap()).unwrap();
+        assert_eq!(
+            parsed.numerator(
+                turn["model_id"].as_str().unwrap(),
+                turn["started_at"].as_str().unwrap(),
+                counts
+            ),
+            Some(0)
+        );
+        let mut large = table();
+        for kind in ["input", "output", "cache_read", "cache_write"] {
+            large["entries"][0][kind] = json!("999999999999.999999999");
+        }
+        let parsed = PriceTable::parse(&serde_json::to_vec(&large).unwrap()).unwrap();
+        assert!(
+            parsed
+                .numerator(
+                    turn["model_id"].as_str().unwrap(),
+                    turn["started_at"].as_str().unwrap(),
+                    [Some(u64::MAX); 4]
+                )
+                .is_none()
+        );
+    }
 }

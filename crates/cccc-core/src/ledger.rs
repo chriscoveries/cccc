@@ -1262,4 +1262,43 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path).unwrap(), data);
         assert_eq!(lock_path.metadata().unwrap().len(), 0);
     }
+    #[test]
+    fn captured_page_handles_rotation_and_a_labeled_truncated_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ledger.jsonl");
+        let captured: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("usage_report_captured.json")).unwrap();
+        let lock_path = ledger_lock_path(&path);
+        std::fs::create_dir_all(lock_path.parent().unwrap().join("segments")).unwrap();
+        File::create(&lock_path).unwrap();
+        let archive = lock_path
+            .parent()
+            .unwrap()
+            .join("segments/ledger.0001.jsonl.gz");
+        let mut writer = GzEncoder::new(File::create(archive).unwrap(), Compression::default());
+        for event in &captured[..5] {
+            writeln!(writer, "{}", serde_json::to_string(event).unwrap()).unwrap();
+        }
+        writer.finish().unwrap();
+        let mut active = captured[5..9]
+            .iter()
+            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .collect::<String>();
+        // A byte-cut of a captured record models an interrupted final append.
+        let final_record = serde_json::to_string(&captured[9]).unwrap();
+        active.push_str(&final_record[..final_record.len() / 2]);
+        std::fs::write(&path, &active).unwrap();
+        let (events, has_more) = tail_existing_read_only(&path, 7, None).unwrap();
+        assert_eq!(events.len(), 7);
+        assert!(has_more);
+        assert_eq!(events.first().unwrap().id, "event-3");
+        assert_eq!(events.last().unwrap().id, "event-9");
+        let page = events
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect::<Vec<_>>();
+        let report = crate::usage_report::project("g_example", &page, &[], has_more, true, None);
+        assert_eq!(report["coverage"], "partial");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), active);
+    }
 }
