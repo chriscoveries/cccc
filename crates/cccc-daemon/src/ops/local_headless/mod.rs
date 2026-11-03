@@ -128,6 +128,8 @@ pub enum BatchSubmission {
 #[derive(Debug)]
 struct ActiveTurn {
     turn_id: String,
+    delegation: Option<String>,
+    task: Option<String>,
 }
 
 /// Everything needed to re-open the viewer attachment (`claude attach` or
@@ -154,6 +156,8 @@ struct Session {
     stop_lock: Mutex<()>,
     startup_prompt: Mutex<Option<String>>,
     active_turn: Mutex<Option<ActiveTurn>>,
+    delivery_tasks: Mutex<std::collections::HashMap<String, Option<String>>>,
+    admission: Mutex<()>,
 }
 
 fn poisoned() -> std::io::Error {
