@@ -8,12 +8,14 @@ mod daemon_takeover;
 #[cfg(any(windows, test))]
 mod detached_daemon_owner;
 mod host_state;
+mod process_recovery;
 mod shutdown;
 mod tui;
 mod web_endpoint;
 mod web_host;
 mod web_instance;
 mod web_launch;
+mod web_voice_recovery;
 
 use anyhow::{Result, bail};
 use args::{Cli, CommandKind, DaemonAction, HermesAction, RuntimeAction, WebModeArg};
@@ -167,6 +169,9 @@ async fn main() -> Result<()> {
 
 async fn daemon(action: DaemonAction, home: HomeLayout, client: &DaemonClient) -> Result<()> {
     match action {
+        DaemonAction::ProcessRecovery { owner, action } => {
+            process_recovery::run(home, client, owner, action).await
+        }
         DaemonAction::Run => cccc_daemon::run_with_diagnostics(home).await,
         DaemonAction::Stop => {
             let response = daemon_lifecycle::stop(client, &home).await?;

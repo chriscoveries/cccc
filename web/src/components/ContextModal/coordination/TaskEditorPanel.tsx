@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import {
   useCallback,
   useEffect,
@@ -10,7 +11,6 @@ import {
   type SetStateAction,
   type TextareaHTMLAttributes,
 } from "react";
-import { Plus, X } from "lucide-react";
 import type { Task, TaskChecklistItem, TaskWaitingOn } from "../../../types";
 import { formatFullTime, formatTime } from "../../../utils/time";
 import { classNames } from "../../../utils/classNames";
@@ -21,6 +21,7 @@ import {
   type TaskTypeId,
 } from "../../../utils/taskWorkflow";
 import { SelectCombobox } from "../../SelectCombobox";
+import { CloseIcon, PlusIcon } from "../../Icons";
 import {
   alignTaskDraftTaskType,
   getWaitingOnOptions,
@@ -112,6 +113,7 @@ export function TaskEditorPanel({
   onOpenTask,
   onAddSubtask,
 }: TaskEditorPanelProps) {
+  const { i18n } = useTranslation("modals");
   if (taskEditorMode === "none" || !taskDraft) {
     return null;
   }
@@ -151,16 +153,71 @@ export function TaskEditorPanel({
       : tr("context.newTask", "New task")
     : selectedTask?.id || tr("context.taskDetails", "Task editor");
   const isDone = String(taskDraft.status || "").toLowerCase() === "done";
+  const statusChoices = [
+    { value: "planned", label: tr("context.planned", "Planned") },
+    { value: "active", label: tr("context.active", "Active") },
+    { value: "done", label: tr("context.done", "Done") },
+    { value: "archived", label: tr("context.archived", "Archived") },
+  ];
+  const availableStatusChoices =
+    taskDraft.status && !statusChoices.some((item) => item.value === taskDraft.status)
+      ? [...statusChoices, { value: taskDraft.status, label: taskDraft.status }]
+      : statusChoices;
+  const handoffField = field(
+    tr("context.handoffField", "Hand off to"),
+    <SelectCombobox
+      items={actorItems(tr("context.none", "None"), assigneeChoices, taskDraft.handoffTo)}
+      value={asOption(taskDraft.handoffTo)}
+      onChange={(value) => update({ handoffTo: fromOption(value) })}
+      ariaLabel={tr("context.handoffField", "Hand off to")}
+      className={ui.inputClass}
+      disabled={locked}
+      searchable
+    />,
+  );
+  const blockedField = field(
+    tr("context.blockedBy", "Blocked by"),
+    <textarea
+      value={taskDraft.blockedBy}
+      readOnly={locked}
+      onChange={(event) => update({ blockedBy: event.target.value })}
+      className={classNames(ui.textareaClass, "min-h-[72px]")}
+      placeholder={tr("context.blockedByPlaceholder", "Task IDs, one per line")}
+    />,
+  );
+  const taskTimes =
+    !isCreate && selectedTask ? (
+      <p className={classNames("text-xs", ui.mutedTextClass)}>
+        {[
+          selectedTask.created_at
+            ? `${tr("context.createdAt", "Created")} ${formatFullTime(selectedTask.created_at)}`
+            : "",
+          selectedTask.updated_at
+            ? tr("context.updated", "Updated {{time}}", {
+                time: formatTime(selectedTask.updated_at, i18n?.language),
+              })
+            : "",
+          selectedTask.archived_from
+            ? `${tr("context.archivedFrom", "Archived from")} ${selectedTask.archived_from}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" · ")}
+      </p>
+    ) : null;
 
   return (
-    <section className="flex h-full min-h-0 flex-col" aria-busy={syncBusy}>
+    <section data-task-editor="" className="flex h-full min-h-0 flex-col" aria-busy={syncBusy}>
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--glass-border-subtle)] px-4 py-3 sm:px-5">
         <div className="flex min-w-0 items-center gap-2">
           <h2 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
             {heading}
           </h2>
           {hasTaskUnsaved ? (
-            <span className="shrink-0 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+            <span
+              data-task-unsaved=""
+              className="shrink-0 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400"
+            >
               {tr("context.unsaved", "Unsaved")}
             </span>
           ) : null}
@@ -177,6 +234,7 @@ export function TaskEditorPanel({
         {error ? (
           <div
             role="alert"
+            data-task-editor-alert=""
             className="rounded-xl border border-rose-500/30 bg-rose-500/15 px-3 py-2 text-sm text-rose-600 dark:text-rose-400"
           >
             {error}
@@ -185,6 +243,7 @@ export function TaskEditorPanel({
         {taskGone ? (
           <div
             role="alert"
+            data-task-editor-alert=""
             className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300"
           >
             {tr(
@@ -195,6 +254,7 @@ export function TaskEditorPanel({
         ) : taskStale ? (
           <div
             role="alert"
+            data-task-editor-alert=""
             className="space-y-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300"
           >
             <p>
@@ -231,22 +291,26 @@ export function TaskEditorPanel({
         )}
 
         <div className="grid gap-3 sm:grid-cols-2">
-          {field(
-            tr("context.status", "Status"),
-            <SelectCombobox
-              items={[
-                { value: "planned", label: tr("context.planned", "Planned") },
-                { value: "active", label: tr("context.active", "Active") },
-                { value: "done", label: tr("context.done", "Done") },
-                { value: "archived", label: tr("context.archived", "Archived") },
-              ]}
-              value={taskDraft.status}
-              onChange={(value) => update({ status: value })}
-              ariaLabel={tr("context.status", "Status")}
-              className={ui.inputClass}
-              disabled={locked}
-            />,
-          )}
+          <div className="min-w-0 sm:col-span-2">
+            <span className={labelClass}>{tr("context.status", "Status")}</span>
+            <div
+              role="group"
+              aria-label={tr("context.status", "Status")}
+              data-task-editor-status=""
+            >
+              {availableStatusChoices.map((item) => (
+                <button
+                  key={item.value}
+                  type="button"
+                  aria-pressed={taskDraft.status === item.value}
+                  disabled={locked}
+                  onClick={() => update({ status: item.value })}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
           {field(
             tr("context.assignee", "Assignee"),
             <SelectCombobox
@@ -291,6 +355,10 @@ export function TaskEditorPanel({
               disabled={locked}
             />,
           )}
+          {handoffField}
+          <div data-task-editor-blocked="" className="min-w-0 sm:col-span-2">
+            {blockedField}
+          </div>
         </div>
 
         {field(
@@ -370,33 +438,7 @@ export function TaskEditorPanel({
                   searchable
                 />,
               )}
-              {field(
-                tr("context.handoffField", "Hand off to"),
-                <SelectCombobox
-                  items={actorItems(
-                    tr("context.none", "None"),
-                    assigneeChoices,
-                    taskDraft.handoffTo,
-                  )}
-                  value={asOption(taskDraft.handoffTo)}
-                  onChange={(value) => update({ handoffTo: fromOption(value) })}
-                  ariaLabel={tr("context.handoffField", "Hand off to")}
-                  className={ui.inputClass}
-                  disabled={locked}
-                  searchable
-                />,
-              )}
             </div>
-            {field(
-              tr("context.blockedBy", "Blocked by"),
-              <textarea
-                value={taskDraft.blockedBy}
-                readOnly={locked}
-                onChange={(event) => update({ blockedBy: event.target.value })}
-                className={classNames(ui.textareaClass, "min-h-[72px]")}
-                placeholder={tr("context.blockedByPlaceholder", "Task IDs, one per line")}
-              />,
-            )}
             <TaskTypeSection
               tr={tr}
               ui={ui}
@@ -407,28 +449,10 @@ export function TaskEditorPanel({
               locked={locked}
               onTaskTypeChange={onTaskTypeChange}
             />
+            {taskTimes}
           </div>
         </details>
 
-        {!isCreate && selectedTask ? (
-          <p className={classNames("text-xs", ui.mutedTextClass)}>
-            {[
-              selectedTask.created_at
-                ? `${tr("context.createdAt", "Created")} ${formatFullTime(selectedTask.created_at)}`
-                : "",
-              selectedTask.updated_at
-                ? tr("context.updated", "Updated {{time}}", {
-                    time: formatTime(selectedTask.updated_at),
-                  })
-                : "",
-              selectedTask.archived_from
-                ? `${tr("context.archivedFrom", "Archived from")} ${selectedTask.archived_from}`
-                : "",
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </p>
-        ) : null}
         {/* Why Delete is not offered: read when looked for, not kept on screen. */}
         {!isCreate && selectedTask && selectedTaskDeleteHint ? (
           <p className={classNames("text-xs", ui.mutedTextClass)}>{selectedTaskDeleteHint}</p>
@@ -674,7 +698,13 @@ function ChecklistEditor({
                   aria-label={tr("context.checklistRemove", "Remove item {{n}}", { n: index + 1 })}
                   className="flex size-10 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:bg-[var(--glass-tab-bg)] hover:text-[var(--color-text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--color-border-focus)] disabled:opacity-50"
                 >
-                  <X className="size-4" aria-hidden="true" />
+                  <CloseIcon
+                    size={24}
+                    strokeWidth={2}
+                    absoluteStrokeWidth={false}
+                    className="size-4"
+                    aria-hidden="true"
+                  />
                 </button>
               </li>
             );
@@ -687,7 +717,13 @@ function ChecklistEditor({
         onClick={() => add()}
         className={classNames(ui.buttonSecondaryClass, "mt-2 gap-1.5")}
       >
-        <Plus className="size-4" aria-hidden="true" />
+        <PlusIcon
+          size={24}
+          strokeWidth={2}
+          absoluteStrokeWidth={false}
+          className="size-4"
+          aria-hidden="true"
+        />
         {tr("context.checklistAdd", "Add item")}
       </button>
     </fieldset>
@@ -791,49 +827,91 @@ function TaskTypeSection({
       <p className={classNames("text-xs", ui.mutedTextClass)}>{taskTypeDescription}</p>
       {structured ? (
         <div className="flex flex-wrap gap-1.5">
-          <span className={presentClass(taskWorkflowCoverage.hasGoal)}>
+          <span
+            className={presentClass(taskWorkflowCoverage.hasGoal)}
+            data-task-coverage={taskWorkflowCoverage.hasGoal ? "present" : "missing"}
+          >
             {tr("context.goal", "Goal")}
           </span>
-          <span className={presentClass(taskWorkflowCoverage.hasSuccessCriteria)}>
+          <span
+            className={presentClass(taskWorkflowCoverage.hasSuccessCriteria)}
+            data-task-coverage={taskWorkflowCoverage.hasSuccessCriteria ? "present" : "missing"}
+          >
             {tr("context.successCriteria", "Success criteria")}
           </span>
-          <span className={presentClass(taskWorkflowCoverage.hasRequiredEvidence)}>
+          <span
+            className={presentClass(taskWorkflowCoverage.hasRequiredEvidence)}
+            data-task-coverage={taskWorkflowCoverage.hasRequiredEvidence ? "present" : "missing"}
+          >
             {tr("context.requiredEvidence", "Required evidence")}
           </span>
           {taskWorkflowCoverage.taskTypeFamily === "standard" ? (
-            <span className={presentClass(taskWorkflowCoverage.hasOwner)}>
+            <span
+              className={presentClass(taskWorkflowCoverage.hasOwner)}
+              data-task-coverage={taskWorkflowCoverage.hasOwner ? "present" : "missing"}
+            >
               {tr("context.owner", "Owner")}
             </span>
           ) : null}
           {taskWorkflowCoverage.isOptimization ? (
             <>
-              <span className={presentClass(taskWorkflowCoverage.hasBaseline)}>
+              <span
+                className={presentClass(taskWorkflowCoverage.hasBaseline)}
+                data-task-coverage={taskWorkflowCoverage.hasBaseline ? "present" : "missing"}
+              >
                 {tr("context.baseline", "Baseline")}
               </span>
-              <span className={presentClass(taskWorkflowCoverage.hasPrimaryMetric)}>
+              <span
+                className={presentClass(taskWorkflowCoverage.hasPrimaryMetric)}
+                data-task-coverage={taskWorkflowCoverage.hasPrimaryMetric ? "present" : "missing"}
+              >
                 {tr("context.primaryMetric", "Primary metric")}
               </span>
-              <span className={presentClass(taskWorkflowCoverage.hasVerifierBoundary)}>
+              <span
+                className={presentClass(taskWorkflowCoverage.hasVerifierBoundary)}
+                data-task-coverage={
+                  taskWorkflowCoverage.hasVerifierBoundary ? "present" : "missing"
+                }
+              >
                 {tr("context.verifierBoundary", "Verifier boundary")}
               </span>
-              <span className={presentClass(taskWorkflowCoverage.hasCurrentBest)}>
+              <span
+                className={presentClass(taskWorkflowCoverage.hasCurrentBest)}
+                data-task-coverage={taskWorkflowCoverage.hasCurrentBest ? "present" : "missing"}
+              >
                 {tr("context.currentBest", "Current best")}
               </span>
-              <span className={presentClass(taskWorkflowCoverage.hasFrontierNext)}>
+              <span
+                className={presentClass(taskWorkflowCoverage.hasFrontierNext)}
+                data-task-coverage={taskWorkflowCoverage.hasFrontierNext ? "present" : "missing"}
+              >
                 {tr("context.frontierNext", "Frontier next")}
               </span>
             </>
           ) : null}
           {isDone ? (
             <>
-              <span className={presentClass(taskWorkflowCoverage.hasCloseoutVerdict)}>
+              <span
+                className={presentClass(taskWorkflowCoverage.hasCloseoutVerdict)}
+                data-task-coverage={taskWorkflowCoverage.hasCloseoutVerdict ? "present" : "missing"}
+              >
                 {tr("context.closeoutVerdict", "Closeout verdict")}
               </span>
-              <span className={presentClass(taskWorkflowCoverage.hasVerificationSummary)}>
+              <span
+                className={presentClass(taskWorkflowCoverage.hasVerificationSummary)}
+                data-task-coverage={
+                  taskWorkflowCoverage.hasVerificationSummary ? "present" : "missing"
+                }
+              >
                 {tr("context.verificationSummary", "Verification summary")}
               </span>
               {taskWorkflowCoverage.isOptimization ? (
-                <span className={presentClass(taskWorkflowCoverage.hasAttemptDecision)}>
+                <span
+                  className={presentClass(taskWorkflowCoverage.hasAttemptDecision)}
+                  data-task-coverage={
+                    taskWorkflowCoverage.hasAttemptDecision ? "present" : "missing"
+                  }
+                >
                   {tr("context.attemptDecision", "Attempt decision")}
                 </span>
               ) : null}
@@ -869,7 +947,10 @@ function TaskTypeSection({
           {taskWorkflowCoverage.hasAttemptLog ? (
             <div className="flex flex-wrap items-center gap-2">
               {latestAttemptLabel ? (
-                <span className={attemptToneClass(taskWorkflowCoverage.latestAttemptVerdict)}>
+                <span
+                  className={attemptToneClass(taskWorkflowCoverage.latestAttemptVerdict)}
+                  data-task-attempt={taskWorkflowCoverage.latestAttemptVerdict}
+                >
                   {latestAttemptLabel}
                 </span>
               ) : null}

@@ -3,7 +3,7 @@ use cccc_core::GroupStore;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::ops::actor_delivery::{DeliveryJob, complete_job};
+use crate::ops::actor_delivery::{CompletedDelivery, DeliveryJob, complete_job, finish_job};
 use crate::ops::actor_runtime;
 use crate::ops::deepseek_runtime::TurnDelivery;
 
@@ -124,6 +124,7 @@ pub fn process_batch(
             if !submit_text(
                 &current_group.group_id,
                 &current_actor,
+                &status,
                 &super::actor_delivery_preamble::render(&job.home, &current_group, &current_actor),
                 cancelled,
             ) {
@@ -156,7 +157,13 @@ pub fn process_batch(
             "[CCCC] If this conversation has not completed CCCC initialization, call cccc_bootstrap before handling this task. Otherwise continue without repeating bootstrap.\n\n{payload}"
         );
     }
-    if submit_text(&current_group.group_id, &current_actor, &payload, cancelled) {
+    if submit_text(
+        &current_group.group_id,
+        &current_actor,
+        &status,
+        &payload,
+        cancelled,
+    ) {
         preamble_session.clone_from(&status.started_at);
         finish_jobs(jobs);
         return BatchOutcome::Delivered;
@@ -233,7 +240,10 @@ fn process_external_batch(
                 "actor_id":actor.id,
                 "role":cccc_core::actors::effective_role(&group, &actor.id),
                 "scope_key":scope.map(|scope| &scope.scope_key),
-                "scope_root":scope.map(|scope| &scope.url),
+                // Shown in the same spelling as the startup prompt's workspace.
+                "scope_root":scope.map(|scope| {
+                    cccc_runtime::compatible_path(std::path::Path::new(&scope.url))
+                }),
             });
             text = format!("[CCCC] Receiving context: {context}\n\n{text}");
         }
@@ -386,6 +396,14 @@ fn process_managed_batch(
                 if let Some(reason) = terminal_reason(&error) {
                     return BatchOutcome::Terminal(reason);
                 }
+                if error.code == actor_runtime::RUNTIME_CONFIRMATION_PAUSED {
+                    // No native submission occurred. Keep the durable messages
+                    // retryable while freeing the worker for an explicit start.
+                    for job in jobs {
+                        finish_job(job, CompletedDelivery::Unsubmitted(error.message.clone()));
+                    }
+                    return BatchOutcome::Delivered;
+                }
                 if matches!(
                     error.code.as_str(),
                     actor_runtime::CLAUDE_RESUME_FAILED | actor_runtime::RUNTIME_RESUME_FAILED
@@ -513,8 +531,19 @@ fn ensure_running(
     Ok(Some(status))
 }
 
-fn submit_text(group_id: &str, actor: &Actor, text: &str, cancelled: &AtomicBool) -> bool {
-    super::actor_delivery::submit_terminal_text(group_id, actor, text, cancelled)
+fn submit_text(
+    group_id: &str,
+    actor: &Actor,
+    expected: &cccc_runtime::SessionStatus,
+    text: &str,
+    cancelled: &AtomicBool,
+) -> bool {
+    // Configuration and terminal ownership can change while this batch is waiting.
+    // Reclassify before each preamble/payload, then pin the observed PTY at the writer.
+    if super::local_headless::uses_managed_delivery(group_id, actor) {
+        return false;
+    }
+    super::actor_delivery::submit_terminal_text_for_session(expected, actor, text, cancelled)
 }
 
 #[cfg(test)]

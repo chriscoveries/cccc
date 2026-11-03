@@ -129,7 +129,8 @@ fn assemble_payload(
         "memory_recall_gate": memory_recall_gate,
         "next_calls": {
             "help": "cccc_help()  # when a CCCC route or state boundary is unclear",
-            "context_get": "cccc_context_get()",
+            "context_get": "cccc_context_get(detail=\"overview\")  # brief, recent decisions and handoffs, agent states",
+            "tasks": "cccc_task()  # open tasks, one row each; pass task_id to read one in full",
             "connect": "cccc_connect()  # discover accessible remote Groups/Actors; use both instance_id and target_group_id for an external_groups entry",
             "inbox_read": "cccc_inbox_read()",
             "memory_search": "cccc_capability_use(tool_name=\"cccc_memory\", tool_arguments={\"action\":\"search\",\"query\":\"...\"})",
@@ -172,7 +173,7 @@ fn build_session(
         |scope| {
             json!({
                 "scope_key": scope.scope_key,
-                "path": scope.url,
+                "path": cccc_runtime::compatible_path(std::path::Path::new(&scope.url)),
             })
         },
     );
@@ -1064,6 +1065,26 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn session_shows_the_drive_path_of_a_verbatim_group_scope() {
+        let temp = tempfile::tempdir().expect("fixture directory");
+        let home = HomeLayout::from_path(temp.path()).expect("home");
+        let mut group = cccc_core::GroupStore::new(home)
+            .expect("groups")
+            .create("Verbatim scope", "")
+            .expect("group");
+        group.scopes.push(cccc_core::Scope {
+            scope_key: "scope_demo".into(),
+            url: r"\\?\C:\work\demo".into(),
+            label: "demo".into(),
+            git_remote: String::new(),
+        });
+        group.active_scope_key = "scope_demo".into();
+        let session = build_session(&group, &[], "lead", json!({}));
+        assert_eq!(session["active_scope"]["path"], r"C:\work\demo");
+    }
+
     fn fixture_context() -> Map<String, Value> {
         json!({
             "coordination": {
@@ -1247,6 +1268,25 @@ mod tests {
         assert!(payload.get("group").is_none());
         assert!(payload.get("context").is_none());
     }
+
+    #[test]
+    fn next_calls_point_at_the_compact_context_and_task_reads() {
+        let payload = assemble_payload(json!({}), json!({}), json!({}), json!({}), json!({}));
+        let calls = &payload["next_calls"];
+        assert!(
+            calls["context_get"]
+                .as_str()
+                .expect("context_get")
+                .starts_with("cccc_context_get(detail=\"overview\")")
+        );
+        assert!(
+            calls["tasks"]
+                .as_str()
+                .expect("tasks")
+                .starts_with("cccc_task()")
+        );
+    }
+
     #[test]
     fn bootstrap_task_preview_keeps_the_recorded_task_revision() {
         let temp = tempfile::tempdir().expect("tempdir");

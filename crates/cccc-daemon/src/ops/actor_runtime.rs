@@ -7,6 +7,7 @@ use crate::dispatch::OpError;
 use crate::ops::actor_profile_runtime;
 
 mod attributed_reap;
+mod confirmation;
 mod environment;
 mod persistence;
 mod reconcile;
@@ -15,16 +16,22 @@ pub(crate) mod terminal_history;
 mod untrusted_workspace_tests;
 mod workspace;
 pub(crate) use attributed_reap::reap_group;
+pub(super) use confirmation::{
+    AUTOMATIC_LIFECYCLE, actor_response, restore_runtime, user_confirmation_retry,
+};
+#[cfg(test)]
+pub(super) use confirmation::{confirmation_required, require_restored_managed_actor};
 pub use persistence::persist_lifecycle;
 pub(crate) use reconcile::record_process_exit;
 pub use reconcile::{reap_exited, reconcile_exited};
 pub(crate) use workspace::LaunchWorkspace;
-pub(super) use workspace::{caller_scope, effective_scope, session_prompt};
+pub(super) use workspace::{caller_scope, displayed_scope, effective_scope, session_prompt};
 
 /// Claude Code refused the Actor's workspace; only the operator can accept its trust prompt.
 pub(crate) const CLAUDE_WORKSPACE_UNTRUSTED: &str = "claude_workspace_untrusted";
 pub(crate) const CLAUDE_RESUME_FAILED: &str = "claude_resume_failed";
 pub(crate) const RUNTIME_RESUME_FAILED: &str = "runtime_resume_failed";
+pub(crate) const RUNTIME_CONFIRMATION_PAUSED: &str = "runtime_confirmation_paused";
 
 pub fn apply(
     home: &HomeLayout,
@@ -96,6 +103,21 @@ pub(super) fn apply_resolved(
             },
         );
     }
+    // A closed confirmation PTY can still belong to its watcher until the next poll.
+    // Do not let an automatic delivery cancel that owner and reopen the prompt first.
+    if kind == "actor.start"
+        && !super::local_headless::running(&group.group_id, actor_id)
+        && super::local_headless::confirmation_pending_active(&group.group_id, actor_id)
+            .map_err(OpError::io)?
+    {
+        return Ok(None);
+    }
+    // A confirmation that ends before connecting pauses only this member.
+    // Check it before teardown, startup baselines or provider configuration.
+    if actor.runtime == ActorRuntime::Claude && super::local_headless::supports(actor) {
+        super::local_headless::ensure_confirmation_allowed(&group.group_id, actor_id)
+            .map_err(launch_error)?;
+    }
     // Also retire a disconnected registration whose previous cleanup failed.
     stop_registered(group, actor_id)?;
     if kind == "actor.new_session" {
@@ -143,6 +165,9 @@ fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> R
 }
 
 fn launch_error(error: std::io::Error) -> OpError {
+    if super::local_headless::is_confirmation_paused_error(&error) {
+        return OpError::new(RUNTIME_CONFIRMATION_PAUSED, error.to_string());
+    }
     if super::runtime_session::resume_failure::is_blocked(&error) {
         return OpError::new(RUNTIME_RESUME_FAILED, error.to_string());
     }
@@ -257,6 +282,7 @@ pub fn start_group(home: &HomeLayout, group: &GroupDoc) -> Result<Vec<SessionSta
                     statuses.push(status);
                 }
             }
+            Err(error) if error.code == RUNTIME_CONFIRMATION_PAUSED => continue,
             Err(error) => {
                 let mut rollback_failures = Vec::new();
                 for actor_id in started_actor_ids.iter().rev() {

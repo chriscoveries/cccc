@@ -1371,6 +1371,7 @@ export function ContextModal({
         <div
           ref={navigationRef}
           role="tablist"
+          data-context-tabs
           aria-label={tr("context.tabsAria", "Context sections")}
           className="flex shrink-0 gap-5 overflow-x-auto scroll-px-4 sm:scroll-px-5 border-b border-[var(--glass-border-subtle)] bg-[var(--color-bg-primary)] px-4 sm:px-5"
           onKeyDown={(event) => {
@@ -1419,6 +1420,8 @@ export function ContextModal({
         <div
           ref={contentRef}
           className="min-h-0 flex-1 overflow-y-auto bg-[var(--color-bg-primary)]"
+          // The task board's column jump scrolls this element, not the page behind.
+          data-context-scroll
         >
           <div className="flex min-h-full flex-col gap-4 p-4 sm:p-5">
             {[boardError, taskEditorVisible ? "" : syncError].map((message, index) =>
@@ -1557,7 +1560,10 @@ export function ContextModal({
             >
               <div className="absolute inset-0 glass-overlay" onPointerDown={closeTaskEditor} />
               <div className="absolute inset-y-0 right-0 flex w-full justify-end">
-                <div className="h-full w-full sm:w-[min(860px,calc(100vw-1.5rem))]">
+                <div
+                  data-task-drawer-panel
+                  className="h-full w-full sm:w-[min(860px,calc(100vw-1.5rem))]"
+                >
                   <div className="flex h-full flex-col border-l border-[var(--glass-border-subtle)] shadow-2xl glass-modal">
                     <div className="sr-only" id="context-task-drawer-title">
                       {taskEditorMode === "create"

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { classNames } from "../../utils/classNames";
 import { useModalA11y } from "../../hooks/useModalA11y";
 import { ModalFrame } from "./ModalFrame";
+import { CHET_PRINCIPAL } from "../../utils/chetIdentity";
 
 export interface RecipientEntry {
   id: string;
@@ -81,6 +82,7 @@ export function RecipientsModal({
       </div>
       <div
         className="text-[11px] truncate text-[var(--color-text-muted)] mt-0.5"
+        data-recipient-destination
         title={t("recipients.toLabel", { label: toLabel })}
       >
         {t("recipients.toLabel", { label: toLabel })}
@@ -103,9 +105,12 @@ export function RecipientsModal({
         {entries.length > 0 ? (
           <div className="rounded-xl border divide-y border-[var(--glass-border-subtle)] divide-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)]">
             {entries.map((entry) => {
+              // Chet's intake is not a Group delivery.
+              const chet = entry.id === CHET_PRINCIPAL;
               const canDeliver =
                 !remoteDelivery &&
                 entry.id !== "user" &&
+                !chet &&
                 (messageMode !== "mail" || !entry.read) &&
                 !entry.replied &&
                 !entry.cancelled &&
@@ -114,6 +119,7 @@ export function RecipientsModal({
               // An ambiguous delivery counts as handled, but it is not a confirmed success.
               const deliveryUncertain =
                 !isReply && !isRead && !remoteDelivery && entry.deliveryState === "ambiguous";
+              const confirmedSuccess = entry.cleared && !entry.cancelled && !deliveryUncertain;
               // A symbol needs an image role to carry its name; the cancelled text reads as itself.
               const statusSymbol = entry.cancelled
                 ? null
@@ -136,19 +142,30 @@ export function RecipientsModal({
                   ? t(entry.cleared ? "recipients.statusRead" : "recipients.statusReadPending")
                   : deliveryLabel(entry);
               return (
-                <div key={entry.id} className="flex items-center justify-between gap-3 px-4 py-3">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-[var(--color-text-primary)]">
+                <div
+                  key={entry.id}
+                  data-recipient-row
+                  data-recipient-result={confirmedSuccess ? "success" : undefined}
+                  className="flex items-center justify-between gap-3 px-4 py-3"
+                >
+                  <div className="min-w-0" data-recipient-summary>
+                    <div
+                      className="truncate text-sm font-medium text-[var(--color-text-primary)]"
+                      data-recipient-name
+                    >
                       {entry.label || entry.id}
                     </div>
-                    <div className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">
-                      {deliveryLabel(entry)}
-                    </div>
+                    {chet ? null : (
+                      <div className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">
+                        {deliveryLabel(entry)}
+                      </div>
+                    )}
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
+                  <div className="flex shrink-0 items-center gap-2" data-recipient-controls>
                     {canDeliver ? (
                       <button
                         type="button"
+                        data-lcd-key
                         className="rounded-lg border border-[var(--glass-border-subtle)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--glass-tab-bg-hover)] disabled:opacity-50"
                         disabled={Boolean(busyAction)}
                         onClick={() => {
@@ -165,7 +182,7 @@ export function RecipientsModal({
                     <div
                       className={classNames(
                         "text-sm font-semibold tracking-tight",
-                        entry.cleared && !entry.cancelled && !deliveryUncertain
+                        confirmedSuccess
                           ? "text-emerald-600 dark:text-emerald-400"
                           : "text-[var(--color-text-muted)]",
                       )}
@@ -206,6 +223,7 @@ export function RecipientsModal({
           <div className="mt-4 border-t border-[var(--glass-border-subtle)] pt-4">
             <button
               type="button"
+              data-lcd-key
               className="rounded-lg px-3 py-2 text-sm font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--glass-tab-bg-hover)] disabled:opacity-50"
               disabled={Boolean(busyAction)}
               onClick={() => {

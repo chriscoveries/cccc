@@ -94,6 +94,7 @@ pub(crate) async fn call_with_context(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
+            crate::response_projection::EchoedFields::capture(&arguments),
         )
     });
     if message_operation {
@@ -118,8 +119,9 @@ pub(crate) async fn call_with_context(
         name if is_repo_tool(name) => {
             let result = crate::local_tools::call(home, client, name, arguments).await?;
             return Ok(if message_operation {
-                let (group_id, actor_id) = message_context.as_ref().expect("message context");
-                with_post_message_context(home, result, group_id, actor_id)
+                let (group_id, actor_id, fields) =
+                    message_context.as_ref().expect("message context");
+                with_post_message_context(home, result, group_id, actor_id, name, fields)
             } else {
                 result
             });
@@ -174,8 +176,8 @@ pub(crate) async fn call_with_context(
     };
     let result = tool_result(payload);
     Ok(if message_operation {
-        let (group_id, actor_id) = message_context.as_ref().expect("message context");
-        with_post_message_context(home, result, group_id, actor_id)
+        let (group_id, actor_id, fields) = message_context.as_ref().expect("message context");
+        with_post_message_context(home, result, group_id, actor_id, name, fields)
     } else {
         result
     })
@@ -213,9 +215,12 @@ fn authorize_tool(
     {
         let role = cccc_core::actors::effective_role(group, actor_id)
             .unwrap_or(cccc_contracts::ActorRole::Peer);
+        // The daemon authorizes each automation change by the caller's role, so a peer
+        // manages only reminders to itself; a Web Model peer may reach it like any peer.
+        let open_to_peers = name == "cccc_automation";
         if cccc_core::web_model_tool_names().any(|tool| tool == name)
             || (via_capability_use
-                && role == cccc_contracts::ActorRole::Foreman
+                && (role == cccc_contracts::ActorRole::Foreman || open_to_peers)
                 && cccc_core::is_builtin_capability_pack_tool(name))
         {
             return Ok(());
@@ -551,27 +556,24 @@ fn postprocess_task_result(
         .get("action")
         .and_then(Value::as_str)
         .unwrap_or("list");
-    if !matches!(action, "get" | "list")
-        || arguments
-            .get("include_archived")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
+    if !matches!(action, "get" | "list") {
         return Ok(());
     }
-    if result
-        .get("task")
-        .and_then(Value::as_object)
-        .and_then(|task| task.get("status"))
-        .and_then(Value::as_str)
-        == Some("archived")
+    let include_archived = arguments
+        .get("include_archived")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !include_archived
+        && result
+            .get("task")
+            .and_then(Value::as_object)
+            .and_then(|task| task.get("status"))
+            .and_then(Value::as_str)
+            == Some("archived")
     {
         return Err("archived_hidden: archived task is hidden by default".into());
     }
-    if let Some(tasks) = result.get_mut("tasks").and_then(Value::as_array_mut) {
-        tasks.retain(|task| task.get("status").and_then(Value::as_str) != Some("archived"));
-    }
-    Ok(())
+    crate::task_summary::list_page(result, arguments)
 }
 
 fn is_task_mail_boundary(arguments: &Map<String, Value>) -> bool {
@@ -805,12 +807,15 @@ fn with_post_message_context(
     mut result: Value,
     group_id: &str,
     actor_id: &str,
+    name: &str,
+    fields: &crate::response_projection::EchoedFields,
 ) -> Value {
     if let Some(payload) = result
         .get_mut("structuredContent")
         .and_then(Value::as_object_mut)
     {
         insert_mail_pending_context(home, payload, group_id, actor_id);
+        crate::response_projection::apply(name, payload, fields);
         let text = serde_json::to_string_pretty(payload).unwrap_or_else(|_| "{}".into());
         result["content"] = json!([{"type":"text","text":text}]);
     }
@@ -927,6 +932,10 @@ mod tests {
                 .expect_err("peer management call must fail"),
             "cccc_actor requires a Web Model foreman actor"
         );
+        // Automation is decided per change by the daemon, so a Web Model peer may reach
+        // it through capability use, though not by naming it directly.
+        assert!(super::authorize_tool(&home, "cccc_automation", &peer_args, true).is_ok());
+        assert!(super::authorize_tool(&home, "cccc_automation", &peer_args, false).is_err());
         let native_peer_args = json!({
             "group_id":peer_group.group_id,
             "by":"native-peer"
@@ -943,6 +952,13 @@ mod tests {
 
     #[tokio::test]
     async fn capability_use_enables_hidden_pack_and_calls_inferred_builtin() {
+        if crate::lib_tests::isolate_embedded_daemon_test(concat!(
+            module_path!(),
+            "::",
+            "capability_use_enables_hidden_pack_and_calls_inferred_builtin"
+        )) {
+            return;
+        }
         let temp = tempfile::tempdir().expect("tempdir");
         let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
         let group = cccc_core::GroupStore::new(home.clone())
@@ -1031,6 +1047,13 @@ mod tests {
 
     #[tokio::test]
     async fn user_control_plane_routes_an_explicit_cross_group_target() {
+        if crate::lib_tests::isolate_embedded_daemon_test(concat!(
+            module_path!(),
+            "::",
+            "user_control_plane_routes_an_explicit_cross_group_target"
+        )) {
+            return;
+        }
         let temp = tempfile::tempdir().expect("tempdir");
         let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
         let store = cccc_core::GroupStore::new(home.clone()).expect("groups");
@@ -1251,8 +1274,14 @@ mod tests {
             json!({"receipt":{"status":"failed"}}),
             json!({"error":{"code":"invalid_recipient","message":"unknown actor"}}),
         ] {
-            let result =
-                with_post_message_context(&home, super::tool_result(payload.clone()), "", "");
+            let result = with_post_message_context(
+                &home,
+                super::tool_result(payload.clone()),
+                "",
+                "",
+                "cccc_message_send",
+                &Default::default(),
+            );
             assert_eq!(result["structuredContent"], payload);
             let text: serde_json::Value =
                 serde_json::from_str(result["content"][0]["text"].as_str().expect("text"))
@@ -1278,11 +1307,18 @@ mod tests {
         cccc_core::ledger::append(&store.ledger_path(&group.group_id).expect("ledger"), &mail)
             .expect("append mail");
 
+        let fields = crate::response_projection::EchoedFields::capture(
+            json!({"text":"my update"}).as_object().expect("args"),
+        );
         let success = with_post_message_context(
             &home,
-            super::tool_result(json!({"event":{"id":"event-1"}})),
+            super::tool_result(
+                json!({"event":{"id":"event-1","kind":"chat.message","data":{"text":"my update"}}}),
+            ),
             &group.group_id,
             "peer1",
+            "cccc_message_send",
+            &fields,
         );
         assert_eq!(success["structuredContent"]["event"]["id"], "event-1");
         assert!(
@@ -1291,12 +1327,30 @@ mod tests {
                 .is_none()
         );
         assert_eq!(success["structuredContent"]["mail_pending"]["count"], 1);
+        assert!(
+            success["structuredContent"]["event"]["data"]
+                .get("text")
+                .is_none()
+        );
+        assert_eq!(
+            success["structuredContent"]["mcp_omitted_fields"]["event"],
+            json!(["text"])
+        );
+        let content: serde_json::Value = serde_json::from_str(
+            success["content"][0]["text"]
+                .as_str()
+                .expect("text content"),
+        )
+        .expect("JSON payload");
+        assert_eq!(content, success["structuredContent"]);
 
         let incomplete = with_post_message_context(
             &home,
             super::tool_result(json!({"partial_failure":true})),
             &group.group_id,
             "peer1",
+            "cccc_message_send",
+            &Default::default(),
         );
         assert!(incomplete["structuredContent"]["post_message_nudge"].is_null());
         assert_eq!(incomplete["structuredContent"]["mail_pending"]["count"], 1);

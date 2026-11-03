@@ -2,6 +2,7 @@ import { Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { CapabilitySourceInstance } from "../../types";
+import { LcdIcon } from "../Icons";
 
 type CapabilitySourceInstancesProps = {
   instances: CapabilitySourceInstance[];
@@ -48,8 +49,9 @@ export function CapabilitySourceInstances({
                 disabled={busyKey === `source-instance-delete:${key}`}
                 aria-label={t("capabilityCenter.sources.deleteInstance")}
                 onClick={() => onDelete(instance)}
+                data-status-tone="error"
               >
-                <Trash2 size={14} aria-hidden="true" />
+                <LcdIcon icon={Trash2} glyph="trash" size={14} aria-hidden="true" />
               </button>
             </div>
           );

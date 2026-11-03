@@ -10,6 +10,7 @@ mod executable;
 mod history_access;
 mod manager;
 mod native_codex;
+pub mod process_recovery;
 pub use native_codex::{
     NativeCodexSessionInfo, NativeCodexSteerOutcome, native_codex_can_receive,
     native_codex_session_info, native_codex_try_steer,
@@ -18,6 +19,7 @@ pub use native_codex::{
 mod manager_windows_tests;
 mod output;
 mod output_reader;
+mod path_form;
 mod process_tree;
 mod pty_input;
 #[cfg(target_os = "linux")]
@@ -65,15 +67,19 @@ pub use history_access::{
     history_since, last_output, retained_history, retained_history_tail,
 };
 pub use manager::{
-    reap, resize, start, start_with_history, status, stop, stop_all, stop_if_started_at, submit,
-    submit_interruptible, submit_sequence_interruptible, wait_for_input_ready, write,
+    reap, resize, start, start_with_history, start_with_history_isolated_environment, status, stop,
+    stop_all, stop_if_started_at, submit, submit_interruptible,
+    submit_sequence_for_session_interruptible, submit_sequence_interruptible, wait_for_input_ready,
+    write,
 };
 pub use output::HistoryPage;
-#[cfg(unix)]
-pub use process_tree::protect_owned_process_groups;
+pub use path_form::compatible_path;
 pub use process_tree::{
-    CommandError, OwnedProcessTree, force_terminate_owned, owned_process_recovery_pending,
+    CommandError, OwnedProcessTree, ProcessStartUnconfirmed, force_terminate_owned,
+    owned_process_recovery_pending,
 };
+#[cfg(unix)]
+pub use process_tree::{prepare_web_process_guard, protect_owned_process_groups};
 pub use session::{LaunchSpec, SessionStatus};
 pub use session_history::OutputObservation;
 pub use terminal_attach::{TerminalAttachMode, TerminalAttachment, TerminalInput, TerminalOutput};
@@ -93,6 +99,10 @@ pub enum RuntimeError {
     NotFound(String, String),
     #[error("runtime command is empty")]
     EmptyCommand,
+    #[error(
+        "cmd.exe cannot run in {0}: it cannot use a UNC path, or a path that needs the \\\\?\\ prefix, as its current directory, and would start in the Windows directory or not at all. Use a workspace on a local disk with an ordinary path, or a program that does not start through cmd.exe"
+    )]
+    CmdInPrefixedDirectory(String),
     #[error("runtime session is not running: {0}/{1}")]
     NotRunning(String, String),
     #[error(

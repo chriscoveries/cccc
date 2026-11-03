@@ -62,6 +62,8 @@ import {
 import { ComposerRecipientsRow } from "./ComposerRecipientsRow";
 import { useComposerTextareaAutoResize } from "./useComposerTextareaAutoResize";
 import { useShortTouchViewport } from "../../hooks/useShortTouchViewport";
+import { CHET_SELECTOR } from "../../utils/chetIdentity";
+import { messageModeForRecipients } from "../../stores/composerMessageMode";
 import {
   buildComposerHistoryEntries,
   canStartComposerHistory,
@@ -224,6 +226,7 @@ export function ChatComposer({
   // The draft text is owned here, not by ChatTab: only the composer needs a
   // re-render per keystroke.
   const composerText = useComposerStore((s) => s.composerText);
+  const isWebAdmin = useUIStore((s) => s.isWebAdmin);
   const composerHistoryRef = useRef<ComposerHistorySession | null>(null);
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [composerFocused, setComposerFocused] = useState(false);
@@ -854,13 +857,17 @@ export function ChatComposer({
     { key: "request_reply", label: t("modeSendReply"), description: t("modeSendReplyDesc") },
     { key: "mail", label: t("modeMail"), description: t("modeMailDesc") },
   ];
-  const modeOptions = replyTarget
-    ? allModeOptions.filter((option) => option.key !== "request_reply")
-    : allModeOptions;
+  const toChet = toTokens.includes(CHET_SELECTOR) || !!replyTarget?.toChet;
+  const modeOptions = allModeOptions.filter(
+    (option) =>
+      !(replyTarget && option.key === "request_reply") && !(toChet && option.key === "mail"),
+  );
 
-  const effectiveMessageMode: ComposerMessageMode = replyTarget
-    ? normalizeReplyMessageMode(messageMode)
-    : messageMode;
+  const effectiveMessageMode: ComposerMessageMode = messageModeForRecipients(
+    replyTarget ? normalizeReplyMessageMode(messageMode) : messageMode,
+    toTokens,
+    !!replyTarget?.toChet,
+  );
   const requestReplyRecipientsReady = hasConcreteReplyRecipients(toTokens);
   const canSend = getComposerCanSend({
     composerText,
@@ -937,13 +944,15 @@ export function ChatComposer({
     }
     return "Ctrl+Enter";
   }, []);
-  const sendButtonTitle =
-    effectiveMessageMode === "request_reply" && !requestReplyRecipientsReady
-      ? t("modeSendReplyRequiresConcrete")
-      : t("sendMessageWithShortcut", {
-          shortcut: sendShortcutLabel,
-          defaultValue: "Send message ({{shortcut}})",
-        });
+  // Send + Reply needs concrete recipients; say why Send is off where the recipients are chosen.
+  const replyRecipientsBlocked =
+    effectiveMessageMode === "request_reply" && !requestReplyRecipientsReady;
+  const sendButtonTitle = replyRecipientsBlocked
+    ? t("modeSendReplyRequiresConcrete")
+    : t("sendMessageWithShortcut", {
+        shortcut: sendShortcutLabel,
+        defaultValue: "Send message ({{shortcut}})",
+      });
   const showTypingPlaceholder = Boolean(
     !compactViewport &&
     selectedGroupId &&
@@ -1212,11 +1221,20 @@ export function ChatComposer({
               selectedGroupId={selectedGroupId}
               busy={busy}
               actors={actors}
+              allowChet={isWebAdmin === true && (!destGroupId || destGroupId === selectedGroupId)}
               selectedGroupActorsHydrating={selectedGroupActorsHydrating}
               toTokens={toTokens}
               onToggleRecipient={onToggleRecipient}
               onClearRecipients={onClearRecipients}
             />
+            {replyRecipientsBlocked ? (
+              <p
+                data-composer-send-blocked
+                className="px-3 pb-1 text-xs text-[var(--color-text-secondary)]"
+              >
+                {t("modeSendReplyRequiresConcrete")}
+              </p>
+            ) : null}
 
             <div ref={setVoiceStatusTarget} data-voice-mobile-status-slot />
 

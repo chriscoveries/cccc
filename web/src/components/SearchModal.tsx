@@ -63,6 +63,7 @@ function highlightText(text: string, query: string, _isDark?: boolean): ReactNod
       <mark
         key={`m${k++}-${idx}`}
         className="px-0.5 rounded bg-amber-200 text-amber-900 dark:bg-amber-500/20 dark:text-amber-200"
+        data-search-match
       >
         {matched}
       </mark>,
@@ -95,7 +96,7 @@ export function SearchModal({
 
   const [results, setResults] = useState<LedgerEvent[]>([]);
   const [hasMore, setHasMore] = useState(false);
-  const { t } = useTranslation("chat");
+  const { t, i18n } = useTranslation("chat");
 
   const actorIds = useMemo(() => {
     const ids = actors.map((a) => String(a.id || "")).filter(Boolean);
@@ -236,7 +237,12 @@ export function SearchModal({
           </Button>
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <div className="flex flex-wrap items-center gap-1" role="group" aria-label={t("kind")}>
+          <div
+            className="flex flex-wrap items-center gap-1"
+            role="group"
+            aria-label={t("kind")}
+            data-search-kind
+          >
             {(
               [
                 ["all", t("kindAll")],
@@ -262,7 +268,7 @@ export function SearchModal({
               </Button>
             ))}
           </div>
-          <div className="flex min-w-0 flex-1 items-center gap-2 sm:justify-end">
+          <div className="flex min-w-[min(100%,9rem)] flex-1 items-center gap-2 sm:justify-end">
             <span className="shrink-0 text-xs text-[var(--color-text-secondary)]">{t("by")}</span>
             <select
               value={by}
@@ -340,7 +346,7 @@ export function SearchModal({
                       className="text-xs text-[var(--color-text-muted)]"
                       title={formatFullTime(ev.ts)}
                     >
-                      {formatTime(ev.ts)}
+                      {formatTime(ev.ts, i18n?.language)}
                     </span>
                     <span className="text-xs font-medium text-[var(--color-text-primary)]">
                       {getDisplayName(ev.by || "") || "—"}
@@ -372,6 +378,7 @@ export function SearchModal({
                       type="button"
                       variant="ghost"
                       size="sm"
+                      data-lcd-key
                       onClick={() => onJumpToMessage(evId)}
                       aria-label={t("openMessageContext")}
                       title={t("openMessage").replace("↗ ", "")}
@@ -384,6 +391,7 @@ export function SearchModal({
                       type="button"
                       variant="ghost"
                       size="sm"
+                      data-lcd-key
                       onClick={() => onReply(ev)}
                       aria-label={
                         senderLabel ? t("replyToSender", { name: senderLabel }) : t("reply")
@@ -398,6 +406,7 @@ export function SearchModal({
                       type="button"
                       variant="ghost"
                       size="sm"
+                      data-lcd-key
                       onClick={() => {
                         void copyWithFeedback(evId, {
                           successMessage: t("common:copied"),

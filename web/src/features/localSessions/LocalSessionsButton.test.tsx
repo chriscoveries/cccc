@@ -144,7 +144,9 @@ function target() {
   return document.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
 }
 function foreman() {
-  return document.querySelector<HTMLButtonElement>('section button[aria-haspopup="menu"]');
+  return document.querySelector<HTMLButtonElement>(
+    `section[aria-label="${i18n.t("localSessions.newGroupDefaults")}"] button[aria-haspopup="menu"]`,
+  );
 }
 async function chooseForeman(sourceId: string) {
   await click(foreman());
@@ -180,7 +182,11 @@ it("discovers only when opened and creates a new Group with a separate selection
   const select = vi.fn();
   await mount(select);
   expect(mocks.fetch).not.toHaveBeenCalled();
-  await click(button("Connect existing sessions"));
+  const entry = button("Connect sessions");
+  // Beside the Group heading the visible name is short but still says what it connects;
+  // the tip gives the full name.
+  expect(entry.title).toBe("Connect existing sessions");
+  await click(entry);
   expect(host.querySelector('[role="dialog"]')).toBeNull();
   expect(document.querySelector('[role="dialog"]')?.getAttribute("aria-labelledby")).toBe(
     "local-sessions-title",
@@ -190,7 +196,6 @@ it("discovers only when opened and creates a new Group with a separate selection
   );
   expect(document.body.textContent).toContain(source.title);
   expect(document.body.textContent).toContain(source.cwd);
-  expect(target().getAttribute("aria-label")).toBe("Group");
   expect(target().dataset.value).toBe("");
   expect(target().textContent).toContain("+ New Group");
   expect(document.body.textContent).toContain("Selected sessions: 0 / 16");
@@ -228,10 +233,16 @@ it("explains an empty directory without creating a Group or enabling an empty su
   mocks.fetch.mockResolvedValue({ ok: true, result: { sources: [] } });
   await open();
   expect(document.body.textContent).toContain(enLayout.localSessions.empty);
-  // With nothing connected yet, the setup steps are what the reader needs.
-  const [setupDetails, troubleshooting] = Array.from(document.querySelectorAll("details"));
+  // With nothing connected yet, the setup steps are what the reader needs, opened once
+  // without a second control for them.
+  const [setupDetails, troubleshooting] = Array.from(document.querySelectorAll("details")).filter(
+    (details) => !details.parentElement?.closest("details"),
+  );
   expect(setupDetails?.open).toBe(true);
   expect(troubleshooting?.open).toBe(false);
+  expect(Array.from(document.querySelectorAll("button"), (b) => b.textContent)).not.toContain(
+    "View setup steps",
+  );
   expect(document.body.textContent).not.toContain(enLayout.localSessions.unavailableHint);
   expect(document.querySelector('[role="alert"]')).toBeNull();
   expect(document.body.textContent).toContain("Selected sessions: 0 / 16");
@@ -321,13 +332,19 @@ it("retains an unavailable chosen Foreman until explicitly deselected, then uses
   });
   await act(async () => vi.advanceTimersByTimeAsync(3000));
   expect(foreman()?.dataset.value).toBe(second.source_id);
-  expect(document.querySelector("section")?.textContent).toContain(second.cwd);
+  expect(
+    document.querySelector(`section[aria-label="${i18n.t("localSessions.newGroupDefaults")}"]`)
+      ?.textContent,
+  ).toContain(second.cwd);
   expect(button("Create & connect").disabled).toBe(true);
   await click(button("Create & connect"));
   expect(mocks.create).not.toHaveBeenCalled();
   await click(checkbox(second.title));
   expect(foreman()).toBeNull();
-  expect(document.querySelector("section")?.textContent).toContain(source.cwd);
+  expect(
+    document.querySelector(`section[aria-label="${i18n.t("localSessions.newGroupDefaults")}"]`)
+      ?.textContent,
+  ).toContain(source.cwd);
   expect(button("Create & connect").disabled).toBe(false);
   await click(button("Create & connect"));
   expect(mocks.create).toHaveBeenCalledExactlyOnceWith([source.source_id]);
@@ -362,7 +379,7 @@ it("preserves selection order across targets and offline polls, then joins the e
   await click(document.querySelector('[role="menuitemradio"][data-value="g-existing"]'));
   expect(button("Connect to Group").disabled).toBe(false);
   expect(document.querySelector('section[aria-label="New Group defaults"]')).toBeNull();
-  expect(document.body.textContent).toContain("Selected sessions join this Group as Actors.");
+  expect(document.body.textContent).toContain("Selected sessions join this Group as agents.");
   expect(document.body.textContent).not.toContain(enLayout.localSessions.groupHint);
   await chooseTarget("");
   expect(document.querySelector("section dd")?.textContent).toBe(second.title);
@@ -457,14 +474,19 @@ it("shows registered but unready sources without allowing their admission", asyn
   expect(button("Create & connect").disabled).toBe(true);
   // The hint names no cause; it leads to the troubleshooting steps.
   expect(document.body.textContent).toContain(enLayout.localSessions.unavailableHint);
-  const [setupDetails, troubleshooting] = Array.from(document.querySelectorAll("details"));
+  const [setupDetails, troubleshooting] = Array.from(document.querySelectorAll("details")).filter(
+    (details) => !details.parentElement?.closest("details"),
+  );
   expect(setupDetails?.open).toBe(false);
+  const scroll = vi.fn();
+  troubleshooting!.scrollIntoView = scroll;
   await click(button(enLayout.localSessions.showTroubleshooting));
-  expect(setupDetails?.open).toBe(true);
   expect(troubleshooting?.open).toBe(true);
-  // The reader can still close what was opened for them.
+  expect(scroll).toHaveBeenCalledOnce();
+  // Opening the other section afterwards leaves the view where the reader puts it.
   await click(setupDetails!.querySelector("summary"));
-  expect(setupDetails?.open).toBe(false);
+  expect(setupDetails?.open).toBe(true);
+  expect(scroll).toHaveBeenCalledOnce();
 });
 
 it("marks existing members and resumes only a paused source on an explicit user action", async () => {
@@ -674,6 +696,23 @@ it("does not present a failed directory load as an empty session directory and r
   expect(button("Create & connect").disabled).toBe(false);
 });
 
+it("opens the setup steps when the directory turns out empty after a failed first load, not because of the failure", async () => {
+  vi.useFakeTimers();
+  mocks.fetch.mockResolvedValueOnce({
+    ok: false,
+    error: { message: "Synthetic directory failure" },
+  });
+  mocks.fetch.mockResolvedValue({ ok: true, result: { sources: [] } });
+  await open();
+  const setup = () => document.querySelector("details");
+  expect(document.querySelector('[role="alert"]')).not.toBeNull();
+  expect(setup()?.open).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(3000));
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(document.body.textContent).toContain(enLayout.localSessions.empty);
+  expect(setup()?.open).toBe(true);
+});
+
 it("requires a selected session when connecting to an existing Group instead of navigating", async () => {
   const select = vi.fn();
   await open(select);
@@ -824,7 +863,9 @@ it("offers the terminal /setup path, the enable commands and a collapsed trouble
   expect(document.querySelector("details")?.open).toBe(false);
   expect(document.body.textContent).not.toContain(enLayout.localSessions.unavailableHint);
   await click(document.querySelector("summary"));
-  const [setupDetails, troubleshooting] = Array.from(document.querySelectorAll("details"));
+  const [setupDetails, troubleshooting] = Array.from(document.querySelectorAll("details")).filter(
+    (details) => !details.parentElement?.closest("details"),
+  );
   expect(setupDetails?.open).toBe(true);
   const setup = setupDetails!.textContent!;
   for (const text of [
@@ -834,13 +875,7 @@ it("offers the terminal /setup path, the enable commands and a collapsed trouble
     "same OS user",
     "CCCC_HOME",
     "cccc sessions enable --runtime codex",
-    "cccc sessions enable --runtime claude",
-    "cccc sessions enable --runtime pi",
-    "cccc sessions enable --runtime opencode",
     "approve the CCCC hooks when asked (/hooks)",
-    "claude --resume picks the conversation to continue",
-    "Pi: run /reload",
-    "OpenCode V2: reopen the original session",
   ]) {
     expect(setup).toContain(text);
   }
@@ -866,10 +901,28 @@ it("offers the terminal /setup path, the enable commands and a collapsed trouble
   ]) {
     expect(help).toContain(text);
   }
-  expect(setupDetails!.querySelector(":scope > a")?.getAttribute("href")).toBe(
+  expect(setupDetails!.parentElement?.querySelector(":scope > a")?.getAttribute("href")).toBe(
     "https://chesterra.github.io/cccc/guide/local-sessions",
   );
 });
+
+it.each([
+  ["en", "Connect sessions", "Connect existing sessions"],
+  ["zh", "接入会话", "接入已有会话"],
+  ["ja", "セッション接続", "既存セッションを接続"],
+])(
+  "names the expanded entry briefly, with its full name for tips, in %s",
+  async (language, short, full) => {
+    await i18n.changeLanguage(language);
+    await mount();
+    const entry = host.querySelector("button")!;
+    expect(entry.textContent).toBe(short);
+    // The accessible name is the visible one, so voice control can say what it sees.
+    expect(entry.hasAttribute("aria-label")).toBe(false);
+    expect(entry.title).toBe(full);
+    await i18n.changeLanguage("en");
+  },
+);
 
 it.each([
   [

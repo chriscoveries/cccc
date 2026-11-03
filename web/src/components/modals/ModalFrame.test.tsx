@@ -45,21 +45,19 @@ it("sizes a full-screen modal from the visible viewport so the mobile keyboard c
   // useViewportHeight publishes the visible viewport (shrunk and panned by the iOS
   // keyboard) as CSS variables; a fixed overlay must size against them rather than
   // the layout viewport, or a terminal's input row ends up under the keyboard.
-  for (const isOpen of [true, false]) {
-    expect(getModalOverlayStyle({ inline: false, isOpen })).toMatchObject({
-      top: "var(--app-viewport-offset-top, 0px)",
-      height: "var(--app-viewport-height, 100dvh)",
-      maxHeight: "var(--app-viewport-height, 100dvh)",
-      bottom: "auto",
-    });
-  }
+  expect(getModalOverlayStyle({ inline: false })).toMatchObject({
+    top: "var(--app-viewport-offset-top, 0px)",
+    height: "var(--app-viewport-height, 100dvh)",
+    maxHeight: "var(--app-viewport-height, 100dvh)",
+    bottom: "auto",
+  });
   // The rendered overlay uses that style (happy-dom keeps max-height but drops
   // var() values for height/top, so only max-height is observable here).
   expect(render().style.getPropertyValue("max-height")).toBe(VISUAL_VIEWPORT_BOX.maxHeight);
 });
 
 it("leaves inline frames to their host layout", () => {
-  expect(getModalOverlayStyle({ inline: true, isOpen: true })).toBeUndefined();
+  expect(getModalOverlayStyle({ inline: true })).toBeUndefined();
   expect(render(true).getAttribute("style")).toBeNull();
 });
 
@@ -101,3 +99,34 @@ it.each(["", "Native editor"])(
     expect(onClose).toHaveBeenCalledTimes(3);
   },
 );
+
+it("shows a window again at once and keeps it visible while it fades out", () => {
+  // A window kept mounted while closed, such as a presentation slot visited before,
+  // opens again by its classes alone. Were its visibility to fade in with its opacity,
+  // it would still count as hidden on the frame focus moves into it, and focus would
+  // fall to the page.
+  const frame = (isOpen: boolean) => {
+    act(() =>
+      root.render(
+        <ModalFrame
+          isOpen={isOpen}
+          isDark={false}
+          onClose={() => {}}
+          titleId="t"
+          title=""
+          closeAriaLabel="close"
+          panelClassName=""
+        >
+          <button type="button">Slot</button>
+        </ModalFrame>,
+      ),
+    );
+    return (host.firstElementChild as HTMLElement).className;
+  };
+  const closed = frame(false);
+  expect(closed).toContain("invisible");
+  expect(closed).toContain("transition-[opacity,visibility]");
+  const open = frame(true);
+  expect(open).toContain("visible");
+  expect(open).not.toContain("visibility");
+});

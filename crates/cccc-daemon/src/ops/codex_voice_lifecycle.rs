@@ -19,7 +19,11 @@ const EVENT_CAPACITY: usize = 1024;
 pub enum AnalystTurnOrigin {
     Voice,
     Terminal,
-    ActorResult { speakable: bool },
+    /// A durable Group input is admitted between user text and Voice turns.
+    Group,
+    ActorResult {
+        speakable: bool,
+    },
 }
 
 impl AnalystTurnOrigin {
@@ -37,7 +41,10 @@ impl AnalystTurnOrigin {
             (Self::ActorResult { speakable: a }, Self::ActorResult { speakable: b }) => {
                 Self::ActorResult { speakable: a || b }
             }
-            (Self::Terminal, origin) | (origin, Self::Terminal) => origin,
+            (Self::Terminal, origin)
+            | (origin, Self::Terminal)
+            | (Self::Group, origin)
+            | (origin, Self::Group) => origin,
         }
     }
 }
@@ -58,6 +65,7 @@ pub enum AnalystLifecycleEvent {
         speakable: bool,
     },
     Completed {
+        source: AnalystCompletionSource,
         turn_id: String,
         delegation_id: String,
         delegation_ids: Vec<String>,
@@ -74,6 +82,14 @@ pub enum AnalystLifecycleEvent {
         delegation_id: String,
         position: usize,
     },
+}
+
+/// A host error after an admission attempt does not prove what the Runtime did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalystCompletionSource {
+    Runtime,
+    HostNotStarted,
+    HostUnconfirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,8 +187,10 @@ impl AnalystLifecycle {
                         );
                         if let Some(lifecycle) = Weak::upgrade(&weak) {
                             lifecycle.invalidate().await;
-                            if let Err(error) =
-                                lifecycle.session.stop(lifecycle.session.generation()).await
+                            if let Err(error) = lifecycle
+                                .session
+                                .stop_for_voice(lifecycle.session.generation())
+                                .await
                             {
                                 tracing::warn!(%error, "failed to stop invalid Voice Analyst session");
                             }
@@ -192,14 +210,33 @@ impl AnalystLifecycle {
             .monitor
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(task);
-        if lifecycle.session.structured_only() {
-            queue::start(&lifecycle);
-        }
+        // Native sessions also use this queue when a Group input must wait
+        // for an existing text turn. Ordinary native input is unchanged.
+        queue::start(&lifecycle);
         lifecycle
     }
 
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<AnalystLifecycleEvent> {
         self.events.subscribe()
+    }
+
+    /// Snapshot work known to this lifecycle without waiting on a provider RPC.
+    /// None means the owner is busy, not that the queue is empty.
+    pub(crate) fn try_in_flight(&self) -> Option<(Vec<String>, Vec<String>)> {
+        let state = self.state.try_lock().ok()?;
+        let queued = state
+            .pending
+            .iter()
+            .chain(state.native_pending.iter())
+            .map(|item| item.delegation_id.clone())
+            .chain(state.queue.iter().map(|input| input.delegation_id.clone()))
+            .collect();
+        let working = state
+            .active
+            .as_ref()
+            .map(|active| active.delegation_ids.clone())
+            .unwrap_or_default();
+        Some((queued, working))
     }
 
     async fn invalidate(&self) {
@@ -208,7 +245,17 @@ impl AnalystLifecycle {
         state.pending = None;
         state.settled_pending = None;
         state.native_pending.clear();
-        state.queue.clear();
+        // Queued inputs never reached the Runtime: say so, as a cancel does.
+        let queued = state.queue.drain(..).collect::<Vec<_>>();
+        for input in queued {
+            self.complete_unadmitted_input(
+                &input.delegation_id,
+                input.origin,
+                "cancelled",
+                "",
+                AnalystCompletionSource::HostNotStarted,
+            );
+        }
         self.queue_len
             .store(0, std::sync::atomic::Ordering::Release);
         state.invalidated = true;

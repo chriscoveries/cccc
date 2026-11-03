@@ -641,14 +641,14 @@ export function createGroupStoreAsyncActions(
 
     loadMoreHistory: async (groupId?: string) => {
       const gid = String(groupId || get().selectedGroupId || "").trim();
-      if (!gid) return;
+      if (!gid) return false;
 
       const bucket = getGroupChatBucket(get().chatByGroup, gid);
-      if (bucket.isLoadingHistory || !bucket.hasMoreHistory) return;
+      if (bucket.isLoadingHistory || !bucket.hasMoreHistory) return false;
 
       const chatMessages = bucket.events.filter((event) => event.kind === "chat.message");
       const firstEvent = chatMessages[0];
-      if (!firstEvent?.id) return;
+      if (!firstEvent?.id) return false;
 
       set((state) => buildChatBucketPatch(state, gid, { isLoadingHistory: true }) ?? state);
       try {
@@ -681,7 +681,7 @@ export function createGroupStoreAsyncActions(
     openChatWindow: async (groupId: string, centerEventId: string) => {
       const gid = String(groupId || "").trim();
       const eid = String(centerEventId || "").trim();
-      if (!gid || !eid) return;
+      if (!gid || !eid) return false;
       useUIStore.getState().setGroupWorkView(gid, "messages");
       const epoch = beginGroupRequestEpoch(chatWindowRequestEpochByGroup, gid);
 
@@ -701,10 +701,11 @@ export function createGroupStoreAsyncActions(
       );
       try {
         const resp = await api.fetchMessageWindow(gid, eid, { before: 30, after: 30 });
-        if (!isLatestGroupRequestEpoch(chatWindowRequestEpochByGroup, gid, epoch)) return;
+        // A newer request took over; what it shows is not this one's failure.
+        if (!isLatestGroupRequestEpoch(chatWindowRequestEpochByGroup, gid, epoch)) return true;
         if (!resp.ok) {
           set((state) => buildChatBucketPatch(state, gid, { chatWindow: null }) ?? state);
-          return;
+          return false;
         }
 
         const events = projectFetchedChatEvents(resp.result.events || []);
@@ -721,10 +722,87 @@ export function createGroupStoreAsyncActions(
               },
             }) ?? state,
         );
+        return true;
       } finally {
         if (isLatestGroupRequestEpoch(chatWindowRequestEpochByGroup, gid, epoch)) {
           set((state) => buildChatBucketPatch(state, gid, { isChatWindowLoading: false }) ?? state);
         }
+      }
+    },
+
+    loadMoreChatWindowAfter: async (groupId: string) => {
+      const gid = String(groupId || "").trim();
+      const original = get().chatByGroup[gid]?.chatWindow;
+      const tailId = String(original?.events.at(-1)?.id || "").trim();
+      if (!gid || !original || !original.hasMoreAfter || original.isLoadingAfter || !tailId) return;
+      const centerId = original.centerEventId;
+      const epoch = beginGroupRequestEpoch(chatWindowRequestEpochByGroup, gid);
+      const currentWindow = (state: GroupState) => {
+        const current = state.chatByGroup[gid]?.chatWindow;
+        return isLatestGroupRequestEpoch(chatWindowRequestEpochByGroup, gid, epoch) &&
+          current?.centerEventId === centerId &&
+          current.events.at(-1)?.id === tailId
+          ? current
+          : null;
+      };
+      set((state) => {
+        const current = currentWindow(state);
+        return current
+          ? (buildChatBucketPatch(state, gid, {
+              chatWindow: { ...current, isLoadingAfter: true, afterError: false },
+            }) ?? state)
+          : state;
+      });
+      try {
+        const response = await api.fetchMessageWindow(gid, tailId, { before: 0, after: 50 });
+        if (
+          !response.ok ||
+          response.result.center_id !== tailId ||
+          typeof response.result.has_more_after !== "boolean" ||
+          !Array.isArray(response.result.events)
+        )
+          throw new Error("invalid context page");
+        const events = projectFetchedChatEvents(response.result.events);
+        if (events[0]?.id !== tailId || (response.result.has_more_after && events.length <= 1))
+          throw new Error("invalid context page");
+        set((state) => {
+          const current = currentWindow(state);
+          if (!current) return state;
+          const ids = new Set(current.events.map((event) => event.id));
+          const newer = events.slice(1);
+          const duplicate = newer.some((event) => {
+            if (!event.id || ids.has(event.id)) return true;
+            ids.add(event.id);
+            return false;
+          });
+          if (duplicate) {
+            return (
+              buildChatBucketPatch(state, gid, {
+                chatWindow: { ...current, isLoadingAfter: false, afterError: true },
+              }) ?? state
+            );
+          }
+          return (
+            buildChatBucketPatch(state, gid, {
+              chatWindow: {
+                ...current,
+                events: [...current.events, ...newer],
+                hasMoreAfter: response.result.has_more_after,
+                isLoadingAfter: false,
+                afterError: false,
+              },
+            }) ?? state
+          );
+        });
+      } catch {
+        set((state) => {
+          const current = currentWindow(state);
+          return current
+            ? (buildChatBucketPatch(state, gid, {
+                chatWindow: { ...current, isLoadingAfter: false, afterError: true },
+              }) ?? state)
+            : state;
+        });
       }
     },
 

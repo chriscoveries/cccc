@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { PanelRightClose, PanelRightOpen, Plus, X } from "lucide-react";
+import { LcdIcon } from "../Icons";
 import type { GroupPresentation } from "../../types";
 import { classNames } from "../../utils/classNames";
 import { ensurePresentation } from "../../utils/presentation";
@@ -69,7 +70,7 @@ export function PresentationRail({
             ref={toggleRef}
             onClick={toggleCompact}
           >
-            <PanelRightOpen />
+            <LcdIcon icon={PanelRightOpen} glyph="square-chevron-left" />
           </SidePanelButton>
         </div>
       ) : (
@@ -85,7 +86,7 @@ export function PresentationRail({
               ref={toggleRef}
               onClick={toggleCompact}
             >
-              <PanelRightClose />
+              <LcdIcon icon={PanelRightClose} glyph="square-chevron-right" />
             </SidePanelButton>
           )}
         </SidePanelHeader>
@@ -111,6 +112,11 @@ export function PresentationRail({
                 type="button"
                 title={card?.title || t("presentationSlotEmptyTitle")}
                 aria-label={attention ? `${label} · ${t("presentationUpdatedNotice")}` : label}
+                data-presentation-slot
+                data-presentation-highlight={
+                  slot.slot_id === normalized.highlight_slot_id || undefined
+                }
+                data-presentation-attention={attention || undefined}
                 disabled={!card && (readOnly || !onPinSlot)}
                 onClick={() => (card ? onOpenSlot(slot.slot_id) : onPinSlot?.(slot.slot_id))}
                 className={classNames(
@@ -172,7 +178,7 @@ export function PresentationRail({
                     {readOnly || !onPinSlot ? (
                       <span>{index + 1}</span>
                     ) : (
-                      <Plus className="h-4 w-4" />
+                      <LcdIcon icon={Plus} glyph="plus" className="h-4 w-4" />
                     )}
                     {!compact && (
                       <span>
@@ -185,6 +191,7 @@ export function PresentationRail({
                 )}
                 {attention && (
                   <span
+                    data-status-dot="active"
                     className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-cyan-500"
                     aria-hidden="true"
                   />
@@ -202,7 +209,7 @@ export function PresentationRail({
       {compact && onClose && (
         <div className="flex shrink-0 justify-center border-t border-[var(--glass-border-subtle)] py-1">
           <SidePanelButton title={closeLabel} onClick={onClose}>
-            <X />
+            <LcdIcon icon={X} glyph="close" />
           </SidePanelButton>
         </div>
       )}

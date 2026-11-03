@@ -12,6 +12,7 @@ import {
   runtimeProfileScopeLabel,
   runtimeProfileRuntimeLabel,
 } from "./runtimeProfileControlsModel";
+import { LcdIcon } from "../Icons";
 
 export type RuntimeConfigurationMode = "custom" | "profile";
 
@@ -35,8 +36,17 @@ export function OpenCodeManagedModelHint({ runtime }: { runtime?: string | null 
   )
     return null;
   return (
-    <p className="mt-1.5 flex items-start gap-1.5 text-xs font-medium leading-5 text-orange-700 dark:text-orange-300">
-      <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
+    <p
+      className="mt-1.5 flex items-start gap-1.5 text-xs font-medium leading-5 text-orange-700 dark:text-orange-300"
+      data-status-tone="warning"
+    >
+      <LcdIcon
+        icon={AlertTriangle}
+        glyph="warning-diamond"
+        size={14}
+        className="mt-0.5 shrink-0"
+        aria-hidden="true"
+      />
       <span className="min-w-0">{t("opencodeManagedModelHint")}</span>
     </p>
   );

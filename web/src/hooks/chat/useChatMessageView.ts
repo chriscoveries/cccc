@@ -6,7 +6,7 @@ import type { Actor, GroupDoc, LedgerEvent } from "../../types";
 import { isFormalChatMessageEvent } from "../../utils/chatSend";
 import { hasRenderableChatMessageContent } from "../../utils/ledgerEventHandlers";
 import {
-  shouldRestoreDetachedScrollSnapshot,
+  shouldRestoreScrollSnapshot,
   shouldShowInConversation,
   toVisibleConversationEvent,
 } from "./chatTabBasics";
@@ -21,16 +21,20 @@ import {
   dropOrphanQueuedPlaceholders,
 } from "./chatStreamingProjection";
 import { resolveChatListHistoryState } from "./chatListHistoryState";
+import { resolveInitialChatScroll } from "./chatScrollFocus";
 import { matchesChatFilters } from "./chatMessageFilters";
 import { useChatSenderHistory } from "./useChatSenderHistory";
 import { usePendingPages } from "../../features/pendingReplies/usePendingPages";
+import { usePinnedMessages } from "../../features/pins/usePinnedMessages";
 
 const EMPTY_SENDERS: readonly string[] = [];
+const EMPTY_IDS: readonly string[] = [];
 
 type ChatEmptyState = "ready" | "hydrating" | "business_empty" | "filtered_empty";
 
 export function useChatMessageView(input: {
   selectedGroupId: string;
+  liveJump: { groupId: string; eventId: string; requestId: number } | null;
   events: LedgerEvent[];
   streamingEvents: LedgerEvent[];
   outboxEntries: Pick<OutboxEntry, "localId" | "event">[];
@@ -56,15 +60,28 @@ export function useChatMessageView(input: {
     input.selectedGroupId,
     input.chatFilter === "pending_user" && !inChatWindow,
   );
+  const pinned = usePinnedMessages(
+    input.selectedGroupId,
+    input.chatFilter === "pinned" && !inChatWindow,
+  );
+  // Waiting for you and Pinned are server projections; they filter by sender themselves.
+  const projection = pending.active || pinned.active;
   const senderHistory = useChatSenderHistory(
     input.selectedGroupId,
-    pending.active ? EMPTY_SENDERS : senders,
+    projection ? EMPTY_SENDERS : senders,
   );
   const conversationEvents = senders.length === 0 ? input.events : senderHistory.events;
+  const liveJump =
+    !inChatWindow &&
+    input.liveJump?.groupId === input.selectedGroupId &&
+    input.chatFilter === "all" &&
+    !senders.length
+      ? input.liveJump
+      : null;
   const viewKey =
     inChatWindow && input.chatWindow
       ? `${input.selectedGroupId}:window:${input.chatWindow.centerEventId}`
-      : `${input.selectedGroupId}:live:${input.chatFilter}:${JSON.stringify(senders)}`;
+      : `${input.selectedGroupId}:live:${input.chatFilter}:${JSON.stringify(senders)}${liveJump ? `:jump:${liveJump.requestId}` : ""}`;
   const orderState = useMemo(
     () => ({ viewKey, map: new Map<string, number>(), next: 0 }),
     [viewKey],
@@ -120,15 +137,14 @@ export function useChatMessageView(input: {
       .filter(shouldShowInConversation)
       .map(toVisibleConversationEvent);
   }, [inChatWindow, input.chatWindow, liveChatMessages]);
-  // Pending requests are a server projection over the complete ledger, not the
-  // locally loaded tail. Keep closed rows until the user leaves this view.
-  const displayedMessages = useMemo(
-    () =>
-      pending.active
-        ? pending.events.filter((event) => !senders.length || senders.includes(event.by ?? ""))
-        : chatMessages,
-    [pending.active, pending.events, senders, chatMessages],
-  );
+  // Pending requests and pins are server projections over the complete ledger, not the
+  // locally loaded tail. Keep closed or unpinned rows until the user leaves the view.
+  const displayedMessages = useMemo(() => {
+    const projected = pending.active ? pending.events : pinned.active ? pinned.events : null;
+    return projected
+      ? projected.filter((event) => !senders.length || senders.includes(event.by ?? ""))
+      : chatMessages;
+  }, [pending.active, pending.events, pinned.active, pinned.events, senders, chatMessages]);
 
   const hasAnyChatMessages = useMemo(
     () =>
@@ -139,8 +155,27 @@ export function useChatMessageView(input: {
       senderHistory.events.length > 0,
     [input.events, input.outboxEntries, senderHistory.events.length],
   );
-  const restoreSnapshot =
-    !inChatWindow && shouldRestoreDetachedScrollSnapshot(input.scrollSnapshot);
+  const initialScroll = useMemo(
+    () =>
+      resolveInitialChatScroll({
+        snapshot:
+          !inChatWindow && shouldRestoreScrollSnapshot(input.scrollSnapshot, viewKey)
+            ? input.scrollSnapshot!
+            : null,
+        viewKey,
+        conversation: unfilteredLiveChatMessages,
+        view: displayedMessages,
+        exactOnly: projection,
+      }),
+    [
+      displayedMessages,
+      inChatWindow,
+      input.scrollSnapshot,
+      projection,
+      unfilteredLiveChatMessages,
+      viewKey,
+    ],
+  );
   const historyState = resolveChatListHistoryState({
     selectedGroupId: input.selectedGroupId,
     chatFilter: input.chatFilter,
@@ -155,8 +190,15 @@ export function useChatMessageView(input: {
   });
   const effectiveIsLoadingHistory = pending.active
     ? pending.loading
-    : historyState.isLoadingHistory;
-  const effectiveHasMoreHistory = pending.active ? pending.hasMore : historyState.hasMoreHistory;
+    : pinned.active
+      ? pinned.loading
+      : historyState.isLoadingHistory;
+  // All pins arrive in one read.
+  const effectiveHasMoreHistory = pending.active
+    ? pending.hasMore
+    : pinned.active
+      ? false
+      : historyState.hasMoreHistory;
   const hydratedDoc =
     !!input.groupDoc &&
     input.groupDoc.group_id === input.selectedGroupId &&
@@ -172,16 +214,20 @@ export function useChatMessageView(input: {
         ? !pending.loaded && !pending.error
           ? "hydrating"
           : "filtered_empty"
-        : !input.selectedGroupId
-          ? "business_empty"
-          : historyState.isFilteredEmpty
-            ? "filtered_empty"
-            : effectiveIsLoadingHistory ||
-                effectiveHasMoreHistory ||
-                !hydratedDoc ||
-                (input.needsActors && !settledActors)
-              ? "hydrating"
-              : "business_empty";
+        : pinned.active
+          ? !pinned.loaded && !pinned.error
+            ? "hydrating"
+            : "filtered_empty"
+          : !input.selectedGroupId
+            ? "business_empty"
+            : historyState.isFilteredEmpty
+              ? "filtered_empty"
+              : effectiveIsLoadingHistory ||
+                  effectiveHasMoreHistory ||
+                  !hydratedDoc ||
+                  (input.needsActors && !settledActors)
+                ? "hydrating"
+                : "business_empty";
 
   const centerEventId = inChatWindow ? input.chatWindow?.centerEventId : undefined;
   return {
@@ -191,20 +237,20 @@ export function useChatMessageView(input: {
     unfilteredLiveChatMessages,
     chatMessages: displayedMessages,
     hasAnyChatMessages,
-    chatInitialScrollAnchorId: restoreSnapshot ? input.scrollSnapshot!.anchorId : undefined,
-    chatInitialScrollAnchorOffsetPx: restoreSnapshot
-      ? Number(input.scrollSnapshot!.offsetPx || 0)
-      : undefined,
-    chatInitialScrollOffsetPx:
-      restoreSnapshot && Number.isFinite(Number(input.scrollSnapshot!.scrollTop))
-        ? Math.max(0, Number(input.scrollSnapshot!.scrollTop))
-        : undefined,
+    chatInitialScrollAnchorId: liveJump?.eventId || initialScroll.anchorId,
+    // A jump opens at the reading top, never at another view's saved place.
+    chatInitialScrollAnchorOffsetPx: liveJump ? undefined : initialScroll.anchorOffsetPx,
+    chatInitialScrollOffsetPx: initialScroll.scrollOffsetPx,
+    chatInitialScrollHighlight: !!liveJump || initialScroll.highlight === true,
+    liveJumpActive: !!liveJump,
     chatWindowProps:
       inChatWindow && input.chatWindow
         ? {
             centerEventId: input.chatWindow.centerEventId,
             hasMoreBefore: input.chatWindow.hasMoreBefore,
             hasMoreAfter: input.chatWindow.hasMoreAfter,
+            isLoadingAfter: input.chatWindow.isLoadingAfter === true,
+            afterError: input.chatWindow.afterError === true,
           }
         : null,
     chatInitialScrollTargetId: centerEventId,
@@ -215,6 +261,10 @@ export function useChatMessageView(input: {
     senderHistoryError: senders.length === 0 ? "" : senderHistory.error,
     loadSenderHistory: senderHistory.loadMore,
     pendingActive: pending.active,
+    pinnedActive: pinned.active,
+    pinnedError: pinned.active && pinned.error,
+    pinnedUnavailable: pinned.active ? pinned.unavailable : EMPTY_IDS,
+    retryPinned: pinned.refresh,
     pendingPageError: pending.active && pending.error,
     pendingDaemonUnsupported: pending.active && pending.error && pending.daemonUnsupported,
     loadPendingPage: pending.loadMore,

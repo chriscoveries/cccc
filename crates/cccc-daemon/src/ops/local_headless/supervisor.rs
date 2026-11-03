@@ -240,6 +240,12 @@ fn start_session(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Resu
     if lookup(&key).is_some_and(|item| item.running()) {
         return Ok(());
     }
+    if actor.runtime == ActorRuntime::Claude {
+        super::confirmation_pause::ensure_allowed(&key)?;
+    } else {
+        // A prior Claude confirmation does not govern another provider's next launch.
+        super::confirmation_pause::retry(&key)?;
+    }
     stop_locked(&key)?;
 
     start_managed_agent(home, group, actor, key)
@@ -313,13 +319,19 @@ fn lifecycle_keys() -> io::Result<HashSet<Key>> {
 }
 
 pub fn stop_group(group_id: &str) -> io::Result<()> {
-    let actor_ids = lifecycle_keys()?
+    let mut actor_ids = lifecycle_keys()?
         .into_iter()
         .filter(|key| key.0 == group_id)
         .map(|key| key.1)
-        .collect::<Vec<_>>();
+        .collect::<HashSet<_>>();
+    // A cancelled watcher may leave its protected terminal alive after launch
+    // preparation fails; it still belongs to the Group being paused.
+    actor_ids.extend(super::confirmation_terminal::group_actor_ids(group_id)?);
     for actor_id in actor_ids {
         stop(group_id, &actor_id)?;
+        // Group pause stops managed owners. A pending confirmation has no
+        // managed owner yet, so retire its protected terminal separately.
+        super::confirmation_terminal::stop_owned(group_id, &actor_id)?;
     }
     Ok(())
 }
@@ -394,6 +406,18 @@ pub fn running(group_id: &str, actor_id: &str) -> bool {
 /// succeeds. Preserve that distinction from an independent PTY session.
 pub(crate) fn registered_running(group_id: &str, actor_id: &str) -> Option<bool> {
     lookup(&(group_id.to_owned(), actor_id.to_owned())).map(|item| item.running())
+}
+
+/// The owned provider PID, separate from an optional attached viewer PID.
+/// The outer option distinguishes an absent session from an unknown process.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub(crate) fn observed_process(group_id: &str, actor_id: &str) -> Option<Option<u32>> {
+    let item = lookup(&(group_id.to_owned(), actor_id.to_owned()))?;
+    Some(if item.running() {
+        item.managed.process_id()
+    } else {
+        None
+    })
 }
 
 pub(crate) fn registered_workspace(
@@ -587,16 +611,19 @@ fn submit_with_startup_prompt(
 
 #[cfg(test)]
 fn render_turn(event: &Event) -> Option<(String, String)> {
-    super::super::actor_delivery_render::render_batch(std::slice::from_ref(event)).map(|text| {
-        (
-            text,
-            if event.kind == "system.notify" {
-                "system_notify".into()
-            } else {
-                String::new()
-            },
-        )
-    })
+    let group = super::super::actor_delivery_render::test_group();
+    super::super::actor_delivery_render::render_batch(&group, std::slice::from_ref(event)).map(
+        |text| {
+            (
+                text,
+                if event.kind == "system.notify" {
+                    "system_notify".into()
+                } else {
+                    String::new()
+                },
+            )
+        },
+    )
 }
 
 fn lookup(key: &Key) -> Option<Arc<Session>> {

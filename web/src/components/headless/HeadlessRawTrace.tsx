@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useEffect, useMemo, useRef } from "react";
 
 import type { HeadlessStreamEvent } from "../../types";
@@ -52,6 +53,23 @@ function badgeClassName(
   return isDark
     ? "border-transparent bg-white/[0.07] text-slate-200"
     : "border-transparent bg-slate-100 text-slate-700";
+}
+
+// The LCD look reads a trace tone through the shared status hooks.
+function lcdTone(
+  tone: "neutral" | "info" | "success" | "warning" | "error",
+): "neutral" | "info" | "ok" | "warning" | "error" {
+  return tone === "success" ? "ok" : tone;
+}
+
+function lcdDot(
+  tone: "neutral" | "info" | "success" | "warning" | "error",
+  live: boolean,
+): "active" | "attention" | "failed" | "inactive" | "neutral" {
+  if (tone === "error") return "failed";
+  if (live) return "active";
+  if (tone === "warning") return "attention";
+  return tone === "success" ? "neutral" : "inactive";
 }
 
 function liveStatusClassName(isDark: boolean): string {
@@ -154,6 +172,7 @@ export function HeadlessRawTrace({
   className,
   compact = false,
 }: HeadlessRawTraceProps) {
+  const { i18n } = useTranslation("actors");
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
   const entries = useMemo(() => buildHeadlessRawTraceEntries(events), [events]);
@@ -184,6 +203,8 @@ export function HeadlessRawTrace({
           isDark ? "border-white/10 text-slate-400" : "border-slate-200 text-slate-500",
           className,
         )}
+        data-headless-trace
+        data-status-tone="muted"
       >
         {emptyLabel}
       </div>
@@ -206,6 +227,7 @@ export function HeadlessRawTrace({
         isDark ? "border-white/10 bg-slate-950/55" : "border-slate-200 bg-white",
         className,
       )}
+      data-headless-trace
     >
       <div className={compact ? "flex flex-col" : "flex flex-col gap-3"}>
         {renderGroups.map((group) => {
@@ -220,6 +242,7 @@ export function HeadlessRawTrace({
                     : "rounded-[24px] border px-4 py-3 shadow-[0_14px_34px_-30px_rgba(15,23,42,0.35)] transition-all",
                   !compact && messageCardClassName(entry.live, isDark),
                 )}
+                data-trace-card={compact ? undefined : ""}
               >
                 <div className="mb-3 flex items-center gap-2 text-[11px]">
                   <div
@@ -240,9 +263,12 @@ export function HeadlessRawTrace({
                     {entry.live ? "live" : "done"}
                   </span>
                   {entry.ts ? (
-                    <span className="ml-auto inline-flex items-center gap-1 text-[var(--color-text-tertiary)]">
+                    <span
+                      className="ml-auto inline-flex items-center gap-1 text-[var(--color-text-tertiary)]"
+                      data-status-tone="muted"
+                    >
                       <ClockIcon className="h-3.5 w-3.5" />
-                      {formatTime(entry.ts)}
+                      {formatTime(entry.ts, i18n?.language)}
                     </span>
                   ) : null}
                 </div>
@@ -280,6 +306,7 @@ export function HeadlessRawTrace({
                     : "overflow-hidden rounded-[22px] border transition-all",
                   isDark ? "border-white/10 bg-white/[0.03]" : "border-slate-200 bg-white",
                 )}
+                data-trace-card={compact ? undefined : ""}
               >
                 <div
                   className={
@@ -289,8 +316,8 @@ export function HeadlessRawTrace({
                   }
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-start gap-3">
-                      <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+                      <div className="min-w-[6rem] flex-1">
                         <div className="flex items-center gap-2">
                           <div
                             className={classNames(
@@ -312,17 +339,24 @@ export function HeadlessRawTrace({
                           </span>
                         </div>
                       </div>
-                      <div className="flex shrink-0 items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
+                      <div
+                        className="ml-auto flex min-w-0 max-w-full shrink-0 flex-wrap items-center justify-end gap-2 text-[11px] text-[var(--color-text-tertiary)]"
+                        data-status-tone="muted"
+                      >
                         <span
                           className={classNames(
                             "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-medium tracking-[0.08em]",
                             badgeClassName("info", isDark),
                           )}
+                          data-status-tone="info"
                         >
-                          <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
+                          <span
+                            className="h-1.5 w-1.5 rounded-full bg-sky-500"
+                            data-status-dot={group.live ? "active" : "inactive"}
+                          />
                           {group.live ? "live" : bandBadge}
                         </span>
-                        {group.ts ? <span>{formatTime(group.ts)}</span> : null}
+                        {group.ts ? <span>{formatTime(group.ts, i18n?.language)}</span> : null}
                       </div>
                     </div>
                     <div
@@ -354,6 +388,7 @@ export function HeadlessRawTrace({
                                     "font-mono text-[11px] font-semibold",
                                     isDark ? "text-sky-200" : "text-sky-700",
                                   )}
+                                  data-status-tone="info"
                                 >
                                   {getEventStepLabel(entry)}
                                 </span>
@@ -362,11 +397,15 @@ export function HeadlessRawTrace({
                                     "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em]",
                                     badgeClassName(entry.tone, isDark),
                                   )}
+                                  data-status-tone={lcdTone(entry.tone)}
                                 >
                                   {entry.badge.toLowerCase()}
                                 </span>
                                 {index === group.entries.length - 1 && latestEntry.live ? (
-                                  <span className="shrink-0 text-[10px] font-medium uppercase tracking-[0.08em] text-sky-500">
+                                  <span
+                                    className="shrink-0 text-[10px] font-medium uppercase tracking-[0.08em] text-sky-500"
+                                    data-status-tone="info"
+                                  >
                                     latest
                                   </span>
                                 ) : null}
@@ -385,6 +424,7 @@ export function HeadlessRawTrace({
                                     "mt-1 whitespace-pre-wrap break-words font-mono text-[11px] leading-5",
                                     isDark ? "text-slate-400" : "text-slate-600",
                                   )}
+                                  data-status-tone="muted"
                                 >
                                   {detailLines.map((line) => `  ${line}`).join("\n")}
                                 </div>
@@ -413,6 +453,8 @@ export function HeadlessRawTrace({
                   : "overflow-hidden rounded-[22px] border transition-all",
                 !compact && eventCardClassName(entry.tone, entry.live, isDark),
               )}
+              data-trace-card={compact ? undefined : ""}
+              data-status-tone={entry.tone === "error" ? "error" : undefined}
             >
               <div
                 className={
@@ -422,8 +464,8 @@ export function HeadlessRawTrace({
                 }
               >
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-start gap-3">
-                    <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+                    <div className="min-w-[6rem] flex-1">
                       <div
                         className={classNames(
                           "text-[13px] font-medium leading-6",
@@ -439,12 +481,16 @@ export function HeadlessRawTrace({
                         {entry.title}
                       </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
+                    <div
+                      className="ml-auto flex min-w-0 max-w-full shrink-0 flex-wrap items-center justify-end gap-2 text-[11px] text-[var(--color-text-tertiary)]"
+                      data-status-tone={entry.tone === "error" ? undefined : "muted"}
+                    >
                       <span
                         className={classNames(
                           "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-medium tracking-[0.08em]",
                           badgeClassName(entry.tone, isDark),
                         )}
+                        data-status-tone={lcdTone(entry.tone)}
                       >
                         <span
                           className={classNames(
@@ -461,6 +507,7 @@ export function HeadlessRawTrace({
                                       ? "bg-slate-400"
                                       : "bg-slate-500",
                           )}
+                          data-status-dot={lcdDot(entry.tone, entry.live)}
                         />
                         {entry.badge.toLowerCase()}
                       </span>
@@ -475,7 +522,7 @@ export function HeadlessRawTrace({
                         </span>
                       ) : null}
                       {entry.tone === "error" ? <AlertIcon className="h-4 w-4" /> : null}
-                      {entry.ts ? <span>{formatTime(entry.ts)}</span> : null}
+                      {entry.ts ? <span>{formatTime(entry.ts, i18n?.language)}</span> : null}
                     </div>
                   </div>
                   {hasDetails ? (
@@ -492,6 +539,7 @@ export function HeadlessRawTrace({
                             ? "border-white/8 bg-black/20 text-slate-300"
                             : "border-slate-200 bg-slate-50/80 text-slate-600",
                       )}
+                      data-status-tone={entry.tone === "error" ? undefined : "muted"}
                     >
                       {detailLines.map((line) => `  ${line}`).join("\n")}
                     </div>

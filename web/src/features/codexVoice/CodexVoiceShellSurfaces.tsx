@@ -10,6 +10,8 @@ export function CodexVoiceSidebarDock(props: SharedProps & { collapsed: boolean 
   return (
     <CodexVoiceDock
       controller={voice.controller}
+      chetWorking={voice.chet.working}
+      chetUnread={voice.chet.unread}
       collapsed={collapsed}
       onOpen={voice.openDetails}
       onStart={voice.start}
@@ -19,12 +21,15 @@ export function CodexVoiceSidebarDock(props: SharedProps & { collapsed: boolean 
 
 export function CodexVoiceMobileDock(props: SharedProps) {
   const { voice } = props;
-  if (!voice.controller.isEngaged) return null;
+  // The phone bar shows while a call or Chet's work runs, and folds away after.
+  if (!voice.controller.isEngaged && !voice.chet.working) return null;
   return (
     <div className="mt-[48px] flex-none md:hidden">
       <CodexVoiceDock
         variant="mobile"
         controller={voice.controller}
+        chetWorking={voice.chet.working}
+        chetUnread={voice.chet.unread}
         onOpen={voice.openDetails}
         onStart={voice.start}
       />
@@ -49,6 +54,7 @@ export function CodexVoiceOverlays(
         isDark={isDark}
         isSmallScreen={isSmallScreen}
         controller={voice.controller}
+        chet={voice.chet}
         onClose={voice.closeDetails}
         onOpenSource={props.onOpenSource}
       />

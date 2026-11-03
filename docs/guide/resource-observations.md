@@ -4,6 +4,8 @@ The local group header shows host RAM used and available; actor headers show
 resident memory and CPU for the actor's observed process tree. These are
 Linux-only, best-effort observations. On other systems, for remote sessions,
 or when a process cannot be identified or read, a value is unavailable.
+Managed Claude Agent View jobs do not currently expose their worker PID to the
+daemon, so they are unavailable instead of being measured as terminal viewers.
 
 The browser asks for a fresh observation about every ten seconds while a local
 group is open. The daemon reads bounded `/proc` metadata only when explicitly

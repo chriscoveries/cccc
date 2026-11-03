@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "cccc"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "anyhow",
  "base64",
@@ -562,6 +562,7 @@ dependencies = [
  "ratatui",
  "reqwest 0.12.28",
  "retach",
+ "rustix",
  "rustls 0.23.37",
  "semver",
  "serde_json",
@@ -575,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-client"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "cccc-pair-contracts",
  "cccc-pair-core",
@@ -586,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-contracts"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "chrono",
  "serde",
@@ -596,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-core"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "aws-lc-rs",
  "base64",
@@ -635,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-daemon"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "anyhow",
  "axum",
@@ -653,6 +654,7 @@ dependencies = [
  "percent-encoding",
  "regex",
  "reqwest 0.12.28",
+ "rustix",
  "rustls 0.23.37",
  "same-file",
  "serde",
@@ -676,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-mcp"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "anyhow",
  "axum",
@@ -703,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-notebooklm"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "cookie",
  "mime_guess",
@@ -716,10 +718,11 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-runtime"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "cccc-pair-contracts",
  "cccc-windows-process",
+ "dunce",
  "filedescriptor",
  "futures-util",
  "nix 0.28.0",
@@ -728,10 +731,12 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
+ "uuid",
  "win32job",
 ]
 
@@ -756,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "cccc-pair-web"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "aes",
  "anyhow",
@@ -815,14 +820,14 @@ dependencies = [
 
 [[package]]
 name = "cccc-windows-console"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "cccc-windows-process"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "windows-sys 0.61.2",
 ]

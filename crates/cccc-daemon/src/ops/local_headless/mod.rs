@@ -1,5 +1,7 @@
 #[cfg(all(test, unix))]
 mod claude_resume_tests;
+mod confirmation_pause;
+mod confirmation_terminal;
 mod events;
 mod events_migration;
 #[cfg(test)]
@@ -22,6 +24,8 @@ pub(crate) use events::{
     append as append_event, append_with_dedupe as append_event_with_dedupe,
     contains_dedupe as contains_event_dedupe,
 };
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub(crate) use supervisor::observed_process;
 pub(crate) use supervisor::{
     cancel_turn, respond_interaction, respond_permission, structured_state,
 };
@@ -46,12 +50,52 @@ pub(crate) fn waiting_for_workspace_trust(group_id: &str, actor_id: &str) -> std
     workspace_trust_recovery::registered(&(group_id.to_owned(), actor_id.to_owned()))
 }
 
+pub(crate) fn confirmation_pending_active(group_id: &str, actor_id: &str) -> std::io::Result<bool> {
+    workspace_trust_recovery::active(&(group_id.to_owned(), actor_id.to_owned()))
+}
+
+/// A protected confirmation PTY with no active watcher cannot complete its recovery.
+pub(super) fn orphaned_confirmation(group_id: &str, actor_id: &str) -> std::io::Result<bool> {
+    Ok(!confirmation_pending_active(group_id, actor_id)?
+        && confirmation_terminal::owns(group_id, actor_id)?)
+}
+
+pub(crate) fn pause_confirmation(group_id: &str, actor_id: &str) -> std::io::Result<()> {
+    confirmation_pause::pause((group_id.to_owned(), actor_id.to_owned()))
+}
+
+pub(crate) fn confirmation_paused(group_id: &str, actor_id: &str) -> std::io::Result<bool> {
+    confirmation_pause::is_paused(&(group_id.to_owned(), actor_id.to_owned()))
+}
+
+pub(super) fn ensure_confirmation_allowed(group_id: &str, actor_id: &str) -> std::io::Result<()> {
+    confirmation_pause::ensure_allowed(&(group_id.to_owned(), actor_id.to_owned()))
+}
+
+pub(super) fn is_confirmation_paused_error(error: &std::io::Error) -> bool {
+    confirmation_pause::is_paused_error(error)
+}
+
+pub(crate) fn retry_confirmation(group_id: &str, actor_id: &str) -> std::io::Result<()> {
+    let key = (group_id.to_owned(), actor_id.to_owned());
+    workspace_trust_recovery::cancel(&key)?;
+    confirmation_pause::retry(&key)
+}
+
+/// Called after Group deletion commits; its runtime teardown already cancelled old recoveries.
+pub(crate) fn clear_group_confirmation_pauses(group_id: &str) -> std::io::Result<()> {
+    confirmation_pause::clear_group(group_id)
+}
+
 /// Delivery follows the current owner; saved settings apply on the next launch.
 /// A temporary Claude trust terminal belongs to recovery, not native task input.
 pub(super) fn uses_managed_delivery(group_id: &str, actor: &cccc_contracts::Actor) -> bool {
     registered_running(group_id, &actor.id).is_some()
+        // The recovery is registered before its PTY is published, and the terminal
+        // marker is installed before recovery can retire. Read in that handoff order.
         || workspace_trust_recovery::registered(&(group_id.to_owned(), actor.id.clone()))
             .unwrap_or(true)
+        || confirmation_terminal::owns(group_id, &actor.id).unwrap_or(true)
         || (supports(actor)
             && !cccc_runtime::status(group_id, &actor.id).is_ok_and(|status| status.running))
 }

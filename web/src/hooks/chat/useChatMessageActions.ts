@@ -10,13 +10,23 @@ import {
 import type { Actor, LedgerEvent } from "../../types";
 import { buildReplyComposerState } from "../../utils/chatReply";
 import { copyTextToClipboard } from "../../utils/copy";
-import { appendSenderPerspective, getMessageInsight } from "../../utils/messagePerspective";
 import { canOpenSourceMessageLocally } from "./chatTabBasics";
+import { isLiveChatBottom } from "./chatScrollFocus";
+
+/** Take the opened message out of the address, as leaving its view does. */
+function clearOpenedMessageFromUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("event");
+  url.searchParams.delete("tab");
+  window.history.replaceState({}, "", url.pathname + (url.search ? url.search : ""));
+}
 
 export function useChatMessageActions(input: {
   selectedGroupId: string;
   actors: Actor[];
   groupSettings: Parameters<typeof buildReplyComposerState>[3];
+  /** The selected Group's generation, for messages Chet wrote in it. */
+  groupGeneration: string;
   composerRef?: React.RefObject<HTMLTextAreaElement | null>;
   setChatAtBottom: (value: boolean) => void;
   hasForeman: boolean;
@@ -42,7 +52,7 @@ export function useChatMessageActions(input: {
   setChatScrollSnapshot: (groupId: string, snapshot: ChatScrollSnapshot) => void;
   setNewActorRole: (role: "foreman" | "peer") => void;
   openModal: (name: "addActor") => void;
-  loadMoreHistory: (groupId: string) => Promise<unknown>;
+  loadMoreHistory: (groupId: string) => Promise<void | false>;
 }) {
   const { inChatWindow, selectedGroupId, setChatScrollSnapshot } = input;
   const copyMessageLink = useCallback(
@@ -53,27 +63,9 @@ export function useChatMessageActions(input: {
       url.searchParams.set("group", input.selectedGroupId);
       url.searchParams.set("event", eid);
       url.searchParams.set("tab", "chat");
-      if (await copyTextToClipboard(url.toString())) input.showNotice({ message: "Link copied" });
-      else input.showError("Failed to copy link");
-    },
-    [input],
-  );
-
-  const copyMessageText = useCallback(
-    async (event: LedgerEvent) => {
-      if (event.kind !== "chat.message") return;
-      const text = String(event.data && "text" in event.data ? event.data.text || "" : "");
-      const copyText = appendSenderPerspective(
-        text,
-        getMessageInsight(event.data),
-        input.t("chat:senderPerspective", { defaultValue: "Sender perspective" }),
-      );
-      if (!copyText) return;
-      if (await copyTextToClipboard(copyText)) {
-        input.showNotice({
-          message: input.t("chat:contentCopied", { defaultValue: "Content copied" }),
-        });
-      } else input.showError(input.t("common:copyFailed", { defaultValue: "Copy failed" }));
+      if (await copyTextToClipboard(url.toString()))
+        input.showNotice({ message: input.t("chat:linkCopied") });
+      else input.showError(input.t("common:copyFailed", { defaultValue: "Copy failed" }));
     },
     [input],
   );
@@ -85,6 +77,7 @@ export function useChatMessageActions(input: {
         input.selectedGroupId,
         input.actors,
         input.groupSettings,
+        input.groupGeneration,
       );
       if (!state) {
         input.showError(
@@ -126,7 +119,18 @@ export function useChatMessageActions(input: {
         const store = useGroupStore.getState();
         if (store.selectedGroupId !== groupId) store.setSelectedGroupId(groupId);
         useUIStore.getState().setActiveTab("chat");
-        void input.openChatWindow(groupId, eventId);
+        void input.openChatWindow(groupId, eventId).then((opened) => {
+          // Only for the message still awaited, not after the reader moved to another Group
+          // or message: the view stayed where it was, so say so and clear it from the address.
+          if (
+            opened !== false ||
+            useGroupStore.getState().selectedGroupId !== groupId ||
+            new URL(window.location.href).searchParams.get("event") !== eventId
+          )
+            return;
+          clearOpenedMessageFromUrl();
+          input.showError(input.t("chat:messageWindowFailed"));
+        });
       };
       if (useGroupStore.getState().selectedGroupId === groupId) navigate();
       else requestWorkspaceNavigation(navigate);
@@ -136,10 +140,7 @@ export function useChatMessageActions(input: {
 
   const exitChatWindow = useCallback(() => {
     input.closeChatWindow(input.selectedGroupId);
-    const url = new URL(window.location.href);
-    url.searchParams.delete("event");
-    url.searchParams.delete("tab");
-    window.history.replaceState({}, "", url.pathname + (url.search ? url.search : ""));
+    clearOpenedMessageFromUrl();
   }, [input]);
 
   const handleScrollButtonClick = useCallback(() => {
@@ -159,10 +160,13 @@ export function useChatMessageActions(input: {
   const handleScrollChange = useCallback(
     (isAtBottom: boolean) => {
       if (!groupMessagesVisible(input.selectedGroupId, useUIStore.getState())) return;
-      input.setChatAtBottom(isAtBottom);
+      // A context window can end before the live timeline. Its bottom is not
+      // evidence that the reader has seen the latest live messages.
+      const atLiveBottom = isLiveChatBottom(isAtBottom, input.inChatWindow);
+      input.setChatAtBottom(atLiveBottom);
       if (!input.selectedGroupId) return;
-      input.setShowScrollButton(input.selectedGroupId, !isAtBottom);
-      if (isAtBottom) input.setChatUnreadCount(input.selectedGroupId, 0);
+      input.setShowScrollButton(input.selectedGroupId, !atLiveBottom);
+      if (atLiveBottom) input.setChatUnreadCount(input.selectedGroupId, 0);
     },
     [input],
   );
@@ -179,7 +183,6 @@ export function useChatMessageActions(input: {
 
   return {
     copyMessageLink,
-    copyMessageText,
     startReply,
     cancelReply: () => input.setReplyTarget(null),
     showRecipients: (eventId: string) => input.setRecipientsModal(eventId),
@@ -195,6 +198,8 @@ export function useChatMessageActions(input: {
       input.openModal("addActor");
     },
     loadCurrentGroupHistory: () =>
-      input.selectedGroupId ? input.loadMoreHistory(input.selectedGroupId) : Promise.resolve(),
+      input.selectedGroupId
+        ? input.loadMoreHistory(input.selectedGroupId)
+        : Promise.resolve<false>(false),
   };
 }

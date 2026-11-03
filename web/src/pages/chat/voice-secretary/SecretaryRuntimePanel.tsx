@@ -1,12 +1,17 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ProcessRecoveryDialog } from "../../../components/modals/ProcessRecoveryDialog";
 import { Button } from "../../../components/ui/button";
 import { useUIStore } from "../../../stores/useUIStore";
 import { RUNTIME_INFO } from "../../../types";
 import * as api from "../../../services/api";
+import type { ProcessRecoveryOwner } from "../../../services/api/processRecovery";
 import type { SecretaryRuntimeState } from "../../../services/api/voiceSecretary";
 import { secretaryTaskSubject } from "./secretaryTaskPresentation";
 import { secretaryReadinessIssue } from "../../../features/voice/secretaryReadiness";
+
+// The runtime reports only the daemon's records, so the review shows that owner alone.
+const DAEMON_RECORDS: ProcessRecoveryOwner[] = ["daemon"];
 
 const NativeSessionTerminal = lazy(() =>
   import("../../../features/voice/NativeSessionTerminal").then((module) => ({
@@ -21,6 +26,7 @@ export function SecretaryRuntimePanel({ active, isDark }: { active: boolean; isD
   const [state, setState] = useState<SecretaryRuntimeState | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
   const visit = useRef(0);
   const mutation = useRef<number | null>(null);
   const sequence = useRef(0);
@@ -155,8 +161,28 @@ export function SecretaryRuntimePanel({ active, isDark }: { active: boolean; isD
           )
         )}
       </header>
+      {state?.process_recovery_pending ? (
+        <div
+          data-secretary-process-recovery
+          className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2"
+        >
+          <p
+            data-status-tone="warning"
+            className="min-w-0 flex-1 break-words text-sm text-amber-700 dark:text-amber-300"
+          >
+            {t("voiceSettings.resident.processRecoveryPending")}
+          </p>
+          <Button size="sm" variant="secondary" onClick={() => setRecoveryOpen(true)}>
+            {t("voiceSettings.resident.reviewProcessRecovery")}
+          </Button>
+        </div>
+      ) : null}
       {diagnostic && (
-        <p role="alert" className="shrink-0 break-words text-sm text-rose-600 dark:text-rose-300">
+        <p
+          role="alert"
+          data-status-tone="error"
+          className="shrink-0 break-words text-sm text-rose-600 dark:text-rose-300"
+        >
           {diagnostic}
         </p>
       )}
@@ -201,6 +227,12 @@ export function SecretaryRuntimePanel({ active, isDark }: { active: boolean; isD
           )}
         </div>
       )}
+      <ProcessRecoveryDialog
+        isOpen={recoveryOpen}
+        owners={DAEMON_RECORDS}
+        isDark={isDark}
+        onClose={() => setRecoveryOpen(false)}
+      />
     </section>
   );
 }

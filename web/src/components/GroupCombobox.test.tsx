@@ -176,3 +176,14 @@ it("still accepts a mouse choice in a non-searchable list", async () => {
   expect(trigger.textContent).toBe("Second");
   expect(trigger.getAttribute("aria-expanded")).toBe("false");
 });
+
+it("opens the list in a portal with pixel icons and the search focused", async () => {
+  const trigger = await open(true);
+  const popover = document.querySelector<HTMLElement>('[role="dialog"]')!;
+  expect(host.contains(popover)).toBe(false);
+  expect(popover.contains(document.querySelector("[cmdk-input]"))).toBe(true);
+  expect(trigger.querySelector("svg[data-lcd-icon] [data-lcd-glyph]")).not.toBeNull();
+  expect(popover.querySelectorAll("svg[data-lcd-icon] [data-lcd-glyph]").length).toBeGreaterThan(1);
+  const input = popover.querySelector<HTMLInputElement>("[cmdk-input]")!;
+  expect(document.activeElement).toBe(input);
+});

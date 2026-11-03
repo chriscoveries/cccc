@@ -112,4 +112,97 @@ describe("MessageAttachments download contract", () => {
       "/api/v1/groups/g1/blobs/stored-hash?filename=clip.mp4&amp;download=true",
     );
   });
+
+  it("previews a confirmed image you sent from its stored blob, so it shows again later", () => {
+    // Shown again after its local copy is revoked (a filter change, a long list), an image
+    // previewed from that copy would fail until the page was reloaded.
+    const markup = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[
+          {
+            kind: "image",
+            path: "state/blobs/stored-hash",
+            title: "shot.png",
+            mime_type: "image/png",
+            local_preview_url: "blob:revoked-soon",
+          },
+        ]}
+        blobGroupId="g1"
+        isUserMessage
+        isDark={false}
+        attachmentKeyPrefix="event-5"
+        downloadTitle={(name) => `Download ${name}`}
+      />,
+    );
+
+    expect(markup).not.toContain("blob:revoked-soon");
+    expect(markup).toContain('src="/api/v1/groups/g1/blobs/stored-hash?filename=shot.png"');
+  });
+});
+
+describe("MessageAttachments image layout", () => {
+  it.each([
+    { isUserMessage: false, count: 1, reserveWidth: true },
+    { isUserMessage: true, count: 1, reserveWidth: false },
+    { isUserMessage: false, count: 2, reserveWidth: false },
+  ])(
+    "reserves agent single-image preview width: user=$isUserMessage, count=$count",
+    ({ isUserMessage, count, reserveWidth }) => {
+      const markup = renderToStaticMarkup(
+        <MessageAttachments
+          attachments={Array.from({ length: count }, (_, index) => ({
+            kind: "image" as const,
+            path: `state/blobs/image-${index}`,
+            title: `image-${index}.png`,
+            mime_type: "image/png",
+          }))}
+          blobGroupId="g1"
+          isUserMessage={isUserMessage}
+          isDark={false}
+          attachmentKeyPrefix="event-image"
+          downloadTitle={(name) => `Download ${name}`}
+        />,
+      );
+      const host = document.createElement("div");
+      host.innerHTML = markup;
+      const imageContainer = host.querySelector("[data-image-frame]")?.parentElement?.parentElement;
+      expect(imageContainer).not.toBeNull();
+      expect(imageContainer?.classList.contains("max-w-full")).toBe(true);
+      expect(imageContainer?.classList.contains("w-[min(30rem,82vw)]")).toBe(reserveWidth);
+    },
+  );
+});
+
+describe("MessageAttachments video layout", () => {
+  it.each([
+    { isUserMessage: false, reserveWidth: true },
+    { isUserMessage: true, reserveWidth: false },
+  ])(
+    "reserves agent video preview width: user=$isUserMessage",
+    ({ isUserMessage, reserveWidth }) => {
+      const markup = renderToStaticMarkup(
+        <MessageAttachments
+          attachments={[
+            {
+              kind: "file",
+              path: "state/blobs/video-hash",
+              title: "video.mp4",
+              mime_type: "video/mp4",
+            },
+          ]}
+          blobGroupId="g1"
+          isUserMessage={isUserMessage}
+          isDark={false}
+          attachmentKeyPrefix="event-video"
+          downloadTitle={(name) => `Download ${name}`}
+        />,
+      );
+      const host = document.createElement("div");
+      host.innerHTML = markup;
+      const videoContainer = host.querySelector("figure")?.parentElement;
+      expect(videoContainer).not.toBeNull();
+      expect(videoContainer?.classList.contains("max-w-full")).toBe(true);
+      expect(videoContainer?.classList.contains("w-[min(30rem,82vw)]")).toBe(reserveWidth);
+    },
+  );
 });

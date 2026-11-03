@@ -20,6 +20,10 @@ const WEB_MODEL_TARGETS_KEY: &str = "web_model_browser_targets";
 const WEB_MODEL_DELIVERY_PREFERENCES_KEY: &str = "web_model_delivery_preferences";
 const RUNTIME_STATES_KEY: &str = "runtime_states";
 
+#[cfg(all(test, unix))]
+#[path = "actors_confirmation_tests.rs"]
+mod confirmation_tests;
+
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "actor_list" => Operation::new(Read, list),
@@ -163,6 +167,9 @@ fn add(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             ));
         }
     };
+    if let Err(error) = super::local_headless::retry_confirmation(&group_id, &added.id) {
+        tracing::warn!(%error, %group_id, actor_id = %added.id, "new Actor confirmation cleanup failed");
+    }
     object(json!({"actor": added, "event": event}))
 }
 
@@ -207,6 +214,8 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         ));
     }
     patch.remove("runtime_state_source");
+    patch.remove("runtime_confirmation_required");
+    patch.remove(actor_runtime::AUTOMATIC_LIFECYCLE);
     if let Some(value) = patch.get("default_scope_key") {
         let reference = value
             .as_str()
@@ -339,6 +348,13 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 ));
             }
         };
+    if enabled_patched
+        && actor.enabled
+        && !was_running
+        && actor_runtime::user_confirmation_retry(request)
+    {
+        super::local_headless::retry_confirmation(&group_id, &actor_id).map_err(OpError::io)?;
+    }
     let mut effect = ActorUpdateEffect::None;
     if enabled_patched && !actor.enabled {
         actor_delivery::shutdown_actor(&group_id, &actor_id);
@@ -440,7 +456,11 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     if enabling_native {
         actor_delivery::dispatch_unread(home, &updated_group, &actor_id);
     }
-    object(json!({"actor": actor, "event": event}))
+    let actor = actor_runtime::actor_response(&group_id, &actor);
+    object(
+        json!({"runtime_confirmation_required":actor["runtime_confirmation_required"],
+        "actor": actor, "event": event}),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -501,8 +521,7 @@ fn rollback_actor_update(
         failures.push(format!("restore actor secrets: {}", error.message));
     }
     if matches!(effect, ActorUpdateEffect::Stopped)
-        && let Err(error) =
-            actor_runtime::apply(home, original_group, &original_actor.id, "actor.start")
+        && let Err(error) = actor_runtime::restore_runtime(home, original_group, &original_actor.id)
         && !actor_runtime::same_untrusted_workspace(&original, &error)
     {
         failures.push(format!(
@@ -638,6 +657,9 @@ fn remove(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             ));
         }
     };
+    if let Err(error) = super::local_headless::retry_confirmation(&group_id, &actor_id) {
+        tracing::warn!(%error, %group_id, %actor_id, "removed Actor confirmation cleanup failed");
+    }
     if let Some(successor) = succession
         && let Err(error) = append_event(
             home,
@@ -776,7 +798,7 @@ fn restart_after_failed_remove(
     if !runtime_was_running {
         return original;
     }
-    match actor_runtime::apply(home, group, &actor.id, "actor.start") {
+    match actor_runtime::restore_runtime(home, group, &actor.id) {
         Ok(_) => {
             actor_delivery::dispatch_group_unread(home, group);
             original
@@ -860,7 +882,15 @@ pub(super) fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) 
             "Reset this session in its original runtime; CCCC only controls collaboration access",
         ));
     }
-    let runtime_was_running = actor_process_running(&group, &original_actor);
+    // Only an explicit user Start may replace a protected confirmation PTY
+    // whose watcher was cancelled. Automatic delivery must leave it alone.
+    let orphaned_confirmation = kind == "actor.start"
+        && actor_runtime::user_confirmation_retry(request)
+        && original_actor.external_session_id.is_empty()
+        && super::local_headless::orphaned_confirmation(&group_id, &actor_id)
+            .map_err(OpError::io)?;
+    let runtime_was_running =
+        actor_process_running(&group, &original_actor) && !orphaned_confirmation;
     let retry_runtime = if original_actor.external_session_id.is_empty()
         && matches!(kind, "actor.start" | "actor.restart")
     {
@@ -901,11 +931,21 @@ pub(super) fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) 
     let enabled = kind != "actor.stop";
     // An old trust terminal is not a resumed managed session. An explicit retry
     // must retire that attachment before retrying the same durable conversation.
-    let apply_kind = if retry_claude_trust && retried_claude_resume && kind == "actor.start" {
+    let apply_kind = if kind == "actor.start"
+        && (orphaned_confirmation || (retry_claude_trust && retried_claude_resume))
+    {
         "actor.restart"
     } else {
         kind
     };
+    // Preparation can fail without replacing the current confirmation terminal.
+    // Retire its owner only once the snapshot and retry gates are ready to proceed.
+    if actor_runtime::user_confirmation_retry(request)
+        && (matches!(kind, "actor.restart" | "actor.new_session")
+            || (kind == "actor.start" && !runtime_was_running))
+    {
+        super::local_headless::retry_confirmation(&group_id, &actor_id).map_err(OpError::io)?;
+    }
     let status = match actor_runtime::apply(home, &group, &actor_id, apply_kind) {
         Ok(status) => status,
         Err(error) => {
@@ -982,7 +1022,11 @@ pub(super) fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) 
             ),
         }
     }
-    object(json!({"actor": actor, "event": event, "runtime": status}))
+    let actor = actor_runtime::actor_response(&group_id, &actor);
+    object(
+        json!({"runtime_confirmation_required":actor["runtime_confirmation_required"],
+        "actor": actor, "event": event, "runtime": status}),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1056,7 +1100,7 @@ fn rollback_actor_lifecycle(
         effect,
         ActorLifecycleEffect::Stopped | ActorLifecycleEffect::Replaced
     ) && let Err(error) =
-        actor_runtime::apply(home, original_group, &original_actor.id, "actor.start")
+        actor_runtime::restore_runtime(home, original_group, &original_actor.id)
     {
         failures.push(format!("restore previous runtime: {}", error.message));
     }

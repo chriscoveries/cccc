@@ -21,6 +21,7 @@ mod automation_manage;
 mod automation_rule_access;
 pub(crate) mod automation_runtime;
 mod capabilities;
+mod chet_history;
 mod codex_mcp;
 pub(crate) mod codex_voice_analyst;
 pub(crate) mod codex_voice_controller;
@@ -47,10 +48,13 @@ mod group_space;
 mod groups;
 mod hermes_runtime;
 mod im;
+#[cfg(test)]
+mod isolated_test;
 pub(crate) mod local_headless;
 pub(crate) mod local_sessions;
 mod maintenance;
 mod membership;
+mod owned_process_recovery;
 pub(crate) use membership::ReachRestore;
 pub(crate) use membership::validated_live_web_binding;
 mod membership_account;
@@ -58,6 +62,7 @@ mod membership_cloudflared;
 mod memory;
 mod message_idempotency;
 mod message_metadata;
+mod message_pins;
 mod messaging;
 pub(crate) use messaging::reply_crosses_groups;
 mod messaging_inbox;
@@ -106,7 +111,9 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         automation_config::resolve_operation,
         assistants::resolve_operation,
         capabilities::resolve_operation,
+        chet_history::resolve_operation,
         messaging::resolve_operation,
+        message_pins::resolve_operation,
         presentation::resolve_operation,
         profiles::resolve_operation,
         diagnostics::resolve_operation,
@@ -120,6 +127,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         dots_events::resolve_operation,
         grok_webhook::resolve_operation,
         maintenance::resolve_operation,
+        owned_process_recovery::resolve_operation,
         im::resolve_operation,
         memory::resolve_operation,
         context::resolve_operation,

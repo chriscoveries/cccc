@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -194,6 +194,92 @@ function getMessageTextClassName(density: HeadlessLiveTraceDensity, isDark: bool
   );
 }
 
+type LiveCursorState = "solid" | "waiting" | "quiet";
+type LiveMessageGroup = Extract<HeadlessPreviewRenderGroup, { kind: "message" }>;
+
+/** Only observed text changes count as a new chunk; initial history is a baseline. */
+function useLiveTraceCursor(group: LiveMessageGroup | undefined): LiveCursorState {
+  const [state, setState] = useState<LiveCursorState>("waiting");
+  const previous = useRef<{ session: string; id: string; text: string } | null>(null);
+  const session = group?.pendingEventId;
+  const id = group?.id;
+  const text = group?.entry.text;
+
+  useLayoutEffect(() => {
+    if (!id || text === undefined) {
+      previous.current = null;
+      setState("waiting");
+      return;
+    }
+    const before = previous.current;
+    const changed =
+      before !== null &&
+      before.session === (session || "") &&
+      (before.id !== id || before.text !== text);
+    previous.current = { session: session || "", id, text };
+    setState(changed ? "solid" : "waiting");
+    const waitingTimer = window.setTimeout(() => setState("waiting"), 700);
+    const quietTimer = window.setTimeout(() => setState("quiet"), 10_000);
+    return () => {
+      window.clearTimeout(waitingTimer);
+      window.clearTimeout(quietTimer);
+    };
+  }, [id, session, text]);
+
+  return state;
+}
+
+function TraceMessageBody({
+  group,
+  density,
+  isDark,
+  cursor,
+}: {
+  group: LiveMessageGroup;
+  density: HeadlessLiveTraceDensity;
+  isDark: boolean;
+  cursor?: LiveCursorState;
+}) {
+  const cursorElement = cursor ? <span data-lcd-live-cursor={cursor} aria-hidden="true" /> : null;
+  if (!shouldRenderPreviewMarkdown(group.entry.streamPhase)) {
+    return (
+      <div className={getMessageTextClassName(density, isDark)}>
+        {group.entry.text}
+        {cursorElement}
+      </div>
+    );
+  }
+
+  const markdown = (
+    <LazyMarkdownRenderer
+      content={group.entry.text}
+      isDark={isDark}
+      invertText={isDark}
+      className={classNames(
+        density === "expanded"
+          ? "text-[13.5px] leading-[1.65] [&_p]:mb-2.5 [&_pre]:border [&_pre]:p-3.5 [&_.code-block-header]:rounded-t-2xl [&_.code-block-header]:border [&_.code-block-header]:px-3.5 [&_.code-block-header]:py-2.5"
+          : "text-[13px] leading-[1.58] [&_p]:mb-2 [&_pre]:border [&_pre]:p-3 [&_.code-block-header]:rounded-t-2xl [&_.code-block-header]:border [&_.code-block-header]:px-3 [&_.code-block-header]:py-2",
+        isDark
+          ? "[&_pre]:border-white/10 [&_pre]:bg-white/[0.03] [&_.code-block-header]:border-white/10 [&_.code-block-header]:bg-white/[0.04] [&_.code-block-header]:text-slate-300"
+          : "[&_pre]:border-slate-200 [&_pre]:bg-white [&_.code-block-header]:border-slate-200 [&_.code-block-header]:bg-slate-100 [&_.code-block-header]:text-slate-600",
+      )}
+      fallback={
+        <div className={getMessageTextClassName(density, isDark)}>
+          {group.entry.text}
+          {cursorElement}
+        </div>
+      }
+    />
+  );
+  // Keep the Markdown subtree mounted when streaming ends. Removing the
+  // wrapper at that moment would discard focus inside the rendered message.
+  return (
+    <div data-lcd-live-markdown={cursor ? "" : undefined} data-lcd-live-cursor={cursor}>
+      {markdown}
+    </div>
+  );
+}
+
 function getTracePhaseLabel(streamPhase: string, labels: HeadlessLiveTraceLabels): string {
   const normalized = String(streamPhase || "")
     .trim()
@@ -293,6 +379,12 @@ function ActivityRow({
   const error = isErrorActivity(entry.activity);
   const trailingMeta = density === "expanded" ? narrative.metaLines[0] || "" : "";
   const showDetails = density === "expanded" && narrative.detailRows.length > 0;
+  const summary = normalizeInlineText(entry.activity.summary);
+  const toolName = normalizeInlineText(entry.activity.tool_name);
+  const compactSummary =
+    density === "compact" && summary !== narrative.primaryTitle && summary !== toolName
+      ? summary
+      : "";
 
   return (
     <div
@@ -305,6 +397,8 @@ function ActivityRow({
           : "",
       )}
       title={narrative.title || narrative.primaryTitle}
+      data-trace-card={density === "expanded" ? "" : undefined}
+      data-status-tone={error ? "error" : undefined}
     >
       <div className="flex min-w-0 items-center gap-2.5">
         <span
@@ -316,6 +410,7 @@ function ActivityRow({
                 : "border-rose-200 bg-white text-rose-700"
               : "",
           )}
+          data-status-tone={error ? "error" : undefined}
         >
           {narrative.kindLabel}
         </span>
@@ -342,11 +437,17 @@ function ActivityRow({
               isDark ? "text-slate-400" : "text-slate-600",
             )}
             title={trailingMeta}
+            data-status-tone="muted"
           >
             {trailingMeta}
           </div>
         ) : null}
       </div>
+      {compactSummary ? (
+        <div className="mt-1 break-words text-[10.5px] leading-4 text-[var(--color-text-secondary)]">
+          {compactSummary}
+        </div>
+      ) : null}
       {showDetails ? (
         <div
           className={classNames(
@@ -361,6 +462,7 @@ function ActivityRow({
                   "mr-1 uppercase tracking-[0.12em]",
                   isDark ? "text-slate-500" : "text-slate-500",
                 )}
+                data-status-tone="muted"
               >
                 {row.label}
               </span>
@@ -388,7 +490,7 @@ export function HeadlessLiveTrace({
   density = "compact",
   className,
 }: HeadlessLiveTraceProps) {
-  const { t } = useTranslation("actors");
+  const { t, i18n } = useTranslation("actors");
   const outputRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
   const labels = useMemo<HeadlessLiveTraceLabels>(
@@ -437,6 +539,21 @@ export function HeadlessLiveTrace({
     () => buildHeadlessPreviewRenderGroups(timelineEntries),
     [timelineEntries],
   );
+  const latestPreview = previewSessions?.[previewSessions.length - 1];
+  // The fallback renderer can infer a streaming phase from saved text. Only
+  // an explicit streaming session is evidence that the text is live now.
+  const streaming =
+    String(latestPreview?.phase || fallbackPhase || "")
+      .trim()
+      .toLowerCase() === "streaming";
+  const liveMessageGroup = streaming
+    ? (timelineGroups
+        .slice()
+        .reverse()
+        .find((group): group is LiveMessageGroup => group.kind === "message" && group.live) ??
+      undefined)
+    : undefined;
+  const liveCursor = useLiveTraceCursor(liveMessageGroup);
   const sessionCount =
     Array.isArray(previewSessions) && previewSessions.length > 0
       ? previewSessions.length
@@ -450,6 +567,7 @@ export function HeadlessLiveTrace({
     : "";
   const latestPendingEventId = String(
     latestTimelineGroup?.pendingEventId ||
+      (latestPreview && !latestPreview.pendingEventId ? latestPreview.currentStreamId : "") ||
       fallbackPendingEventId ||
       previewSessions?.[previewSessions.length - 1]?.pendingEventId ||
       "",
@@ -477,6 +595,8 @@ export function HeadlessLiveTrace({
             className,
           )}
           role="status"
+          data-headless-trace
+          data-status-tone="muted"
         >
           {emptyLabel}
         </div>
@@ -490,17 +610,25 @@ export function HeadlessLiveTrace({
             : "border-black/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))]",
           className,
         )}
+        data-headless-trace
       >
         <div
           className={classNames(
             "w-full max-w-md rounded-[24px] border px-6 py-6 text-center shadow-sm",
             isDark ? "border-white/10 bg-white/[0.04]" : "border-black/8 bg-white/88",
           )}
+          data-trace-card
         >
-          <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl border border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] text-[var(--color-text-tertiary)]">
+          <div
+            className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl border border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] text-[var(--color-text-tertiary)]"
+            data-status-tone="muted"
+          >
             <SparklesIcon size={18} />
           </div>
-          <div className="mt-4 text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--color-text-muted)]">
+          <div
+            className="mt-4 text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--color-text-muted)]"
+            data-status-tone="muted"
+          >
             {labels.liveTrace}
           </div>
           <div className="mt-2 text-lg font-semibold text-[var(--color-text-primary)]">
@@ -511,6 +639,7 @@ export function HeadlessLiveTrace({
               "mx-auto mt-3 max-w-sm text-sm leading-6",
               isDark ? "text-slate-400" : "text-slate-500",
             )}
+            data-status-tone="muted"
           >
             {emptyLabel}
           </div>
@@ -536,6 +665,7 @@ export function HeadlessLiveTrace({
             : "border-black/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.99),rgba(248,250,252,0.95))] shadow-[0_24px_70px_rgba(15,23,42,0.08)]"),
         className,
       )}
+      data-headless-trace
     >
       <div
         className={classNames(
@@ -546,10 +676,14 @@ export function HeadlessLiveTrace({
             ? "border-white/8 bg-[rgba(10,11,14,0.78)]"
             : "border-black/6 bg-[rgba(255,255,255,0.78)]",
         )}
+        data-trace-head
       >
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--color-text-muted)]">
+            <div
+              className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--color-text-muted)]"
+              data-status-tone="muted"
+            >
               <SparklesIcon size={14} />
               {latestSummary.eyebrow}
             </div>
@@ -559,8 +693,11 @@ export function HeadlessLiveTrace({
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {latestTimelineGroup?.live ? (
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/12 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-600 dark:text-emerald-300">
-                <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse motion-reduce:animate-none" />
+              <span
+                className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/12 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-600 dark:text-emerald-300"
+                data-status-tone="ok"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-current" data-status-dot="active" />
                 {labels.live}
               </span>
             ) : null}
@@ -571,9 +708,12 @@ export function HeadlessLiveTrace({
                   ? "border-white/10 bg-white/[0.04] text-slate-300"
                   : "border-black/8 bg-black/[0.03] text-slate-600",
               )}
+              data-status-tone="muted"
             >
               <ClockIcon size={12} />
-              {latestTimelineGroup?.ts ? formatTime(latestTimelineGroup.ts) : recentDisplayLabel}
+              {latestTimelineGroup?.ts
+                ? formatTime(latestTimelineGroup.ts, i18n?.language)
+                : recentDisplayLabel}
             </span>
           </div>
         </div>
@@ -597,6 +737,7 @@ export function HeadlessLiveTrace({
                 <div className="flex items-center gap-3 py-1">
                   <span
                     className={classNames("h-px flex-1", isDark ? "bg-white/8" : "bg-slate-200")}
+                    data-trace-rule
                   />
                   <span
                     className={classNames(
@@ -605,11 +746,13 @@ export function HeadlessLiveTrace({
                         ? "border-white/10 bg-white/[0.04] text-slate-400"
                         : "border-black/8 bg-black/[0.03] text-slate-500",
                     )}
+                    data-status-tone="muted"
                   >
-                    {group.ts ? formatTime(group.ts) : recentDisplayLabel}
+                    {group.ts ? formatTime(group.ts, i18n?.language) : recentDisplayLabel}
                   </span>
                   <span
                     className={classNames("h-px flex-1", isDark ? "bg-white/8" : "bg-slate-200")}
+                    data-trace-rule
                   />
                 </div>
               ) : null}
@@ -642,6 +785,7 @@ export function HeadlessLiveTrace({
                               ? "bg-white/30"
                               : "bg-slate-400",
                       )}
+                      data-status-dot={group.entry.live ? "active" : "inactive"}
                     />
                   </div>
                   <div
@@ -658,6 +802,7 @@ export function HeadlessLiveTrace({
                             ? "border-white/10 bg-white/[0.03]"
                             : "border-slate-200/90 bg-slate-50/88"),
                     )}
+                    data-trace-card={density === "expanded" ? "" : undefined}
                   >
                     {getTracePhaseLabel(group.entry.streamPhase, labels) ? (
                       <div className="mb-2 flex items-center gap-2">
@@ -673,36 +818,21 @@ export function HeadlessLiveTrace({
                         </span>
                         {group.live ? (
                           <span className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-[0.14em] text-emerald-600 dark:text-emerald-300">
-                            <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse motion-reduce:animate-none" />
+                            <span
+                              className="h-1.5 w-1.5 rounded-full bg-current"
+                              data-status-dot="active"
+                            />
                             {labels.streaming}
                           </span>
                         ) : null}
                       </div>
                     ) : null}
-                    {shouldRenderPreviewMarkdown(group.entry.streamPhase) ? (
-                      <LazyMarkdownRenderer
-                        content={group.entry.text}
-                        isDark={isDark}
-                        invertText={isDark}
-                        className={classNames(
-                          density === "expanded"
-                            ? "text-[13.5px] leading-[1.65] [&_p]:mb-2.5 [&_pre]:border [&_pre]:p-3.5 [&_.code-block-header]:rounded-t-2xl [&_.code-block-header]:border [&_.code-block-header]:px-3.5 [&_.code-block-header]:py-2.5"
-                            : "text-[13px] leading-[1.58] [&_p]:mb-2 [&_pre]:border [&_pre]:p-3 [&_.code-block-header]:rounded-t-2xl [&_.code-block-header]:border [&_.code-block-header]:px-3 [&_.code-block-header]:py-2",
-                          isDark
-                            ? "[&_pre]:border-white/10 [&_pre]:bg-white/[0.03] [&_.code-block-header]:border-white/10 [&_.code-block-header]:bg-white/[0.04] [&_.code-block-header]:text-slate-300"
-                            : "[&_pre]:border-slate-200 [&_pre]:bg-white [&_.code-block-header]:border-slate-200 [&_.code-block-header]:bg-slate-100 [&_.code-block-header]:text-slate-600",
-                        )}
-                        fallback={
-                          <div className={getMessageTextClassName(density, isDark)}>
-                            {group.entry.text}
-                          </div>
-                        }
-                      />
-                    ) : (
-                      <div className={getMessageTextClassName(density, isDark)}>
-                        {group.entry.text}
-                      </div>
-                    )}
+                    <TraceMessageBody
+                      group={group}
+                      density={density}
+                      isDark={isDark}
+                      cursor={group.id === liveMessageGroup?.id ? liveCursor : undefined}
+                    />
                   </div>
                 </div>
               ) : (
@@ -729,6 +859,7 @@ export function HeadlessLiveTrace({
                             ? "bg-white/20"
                             : "bg-slate-400",
                       )}
+                      data-status-dot={group.live ? "active" : "inactive"}
                     />
                   </div>
                   <div className={getActivityBandClassName(density)}>

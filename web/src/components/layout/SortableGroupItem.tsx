@@ -1,5 +1,5 @@
 import { groupSidebarRowClass } from "./groupSidebarModel";
-import { Archive, ArchiveRestore, Link2 } from "lucide-react";
+import { ConnectLinkIcon, GroupArchiveIcon, GroupArchiveRestoreIcon } from "../Icons";
 import { GroupConnectionBadge } from "../../features/connect/GroupConnectionBadge";
 import type { GroupConnectionCount } from "../../features/connect/protocol";
 import { useCallback } from "react";
@@ -61,13 +61,23 @@ export function SortableGroupItem({
   const menu = useGroupMenu(menuAriaLabel || menuActionLabel || "", [
     ...(runActions ?? []),
     ...(onOpenConnections && connectionsLabel
-      ? [{ label: connectionsLabel, icon: <Link2 size={15} />, onClick: onOpenConnections }]
+      ? [
+          {
+            label: connectionsLabel,
+            icon: <ConnectLinkIcon size={15} />,
+            onClick: onOpenConnections,
+          },
+        ]
       : []),
     ...(onMenuAction && menuActionLabel
       ? [
           {
             label: menuActionLabel,
-            icon: isArchived ? <ArchiveRestore size={15} /> : <Archive size={15} />,
+            icon: isArchived ? (
+              <GroupArchiveRestoreIcon size={15} />
+            ) : (
+              <GroupArchiveIcon size={15} />
+            ),
             onClick: onMenuAction,
           },
         ]
@@ -202,7 +212,7 @@ export function SortableGroupItem({
           onFocus={onWarm}
         >
           <div className="flex items-center gap-2 min-w-0">
-            <GroupStatusIndicator status={status} subtle />
+            <GroupStatusIndicator status={status} />
             <span
               className={classNames(
                 "text-sm truncate",

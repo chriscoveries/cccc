@@ -8,8 +8,12 @@ import { PendingReplyEditingContext } from "./PendingReplyEditingContext";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
-    t: (key: string, values?: { reason?: string }) =>
-      values?.reason ? `${key}: ${values.reason}` : key,
+    t: (key: string, values?: { reason?: string; choice?: string }) =>
+      values?.reason
+        ? `${key}: ${values.reason}`
+        : values?.choice
+          ? `${key}: ${values.choice}`
+          : key,
   }),
 }));
 
@@ -108,6 +112,32 @@ it("supports a plain request and refuses a blank answer", async () => {
   expect(onSubmit).toHaveBeenCalledExactlyOnceWith({ kind: "other", text: "Reply" });
 });
 
+it("sends the Other answer with Ctrl+Enter or ⌘+Enter, not while an input method composes", async () => {
+  const onSubmit = vi.fn();
+  await render({ question, state: "pending", onSubmit });
+  await act(async () => radios()[2]!.click());
+  const press = (init: KeyboardEventInit) =>
+    act(async () => {
+      host
+        .querySelector("textarea")!
+        .dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init }),
+        );
+    });
+  await press({ ctrlKey: true });
+  expect(onSubmit).not.toHaveBeenCalled();
+  await changeText("見送り");
+  await press({});
+  await press({ ctrlKey: true, isComposing: true });
+  // Safari can report an input method's confirming Enter by keyCode 229 alone.
+  await press({ ctrlKey: true, keyCode: 229 } as KeyboardEventInit);
+  expect(onSubmit).not.toHaveBeenCalled();
+  await press({ ctrlKey: true });
+  expect(onSubmit).toHaveBeenCalledExactlyOnceWith({ kind: "other", text: "見送り" });
+  await press({ metaKey: true });
+  expect(onSubmit).toHaveBeenCalledTimes(2);
+});
+
 it("counts Unicode scalars without truncating an answer that exceeds the limit", async () => {
   const onSubmit = vi.fn();
   await render({ state: "pending", onSubmit });
@@ -195,4 +225,127 @@ it("offers the existing chat reply for an unsupported source only when available
   expect(onSubmit).not.toHaveBeenCalled();
   await render({ state: "unsupported", onSubmit });
   expect(host.querySelector("button")).toBeNull();
+});
+
+it("adds the title block, in the product's existing words, while the question is open", async () => {
+  const onSubmit = vi.fn();
+  await render({ question, state: "pending", onSubmit });
+  expect(host.querySelector("form .lcd-ask-title")?.textContent).toBe("filterWaitingForYou");
+  await render({ question, state: "pending", sending: true, onSubmit });
+  // The button says it is sending; the title keeps its words instead of repeating that.
+  expect(host.querySelector(".lcd-ask-title")?.textContent).toBe("filterWaitingForYou");
+  expect(
+    [...host.querySelectorAll("button")].filter((b) => b.textContent === "pendingReply.sending"),
+  ).toHaveLength(1);
+  await render({ question, state: "answered", onSubmit });
+  expect(host.querySelector(".lcd-ask-title")).toBeNull();
+  expect(host.querySelector("[data-pending-reply-closed]")?.textContent).toContain(
+    "pendingReply.answered",
+  );
+});
+
+it("drops the title while the 'Waiting for you' indicators are off", async () => {
+  await render({ question, state: "pending", quiet: true, onSubmit: vi.fn() });
+  expect(host.querySelector(".lcd-ask-title")).toBeNull();
+  expect(host.querySelector("form")?.hasAttribute("data-pending-reply-quiet")).toBe(true);
+  expect(radios()).toHaveLength(3);
+});
+
+it("keeps the action in the last row, enabled while the choices are locked", async () => {
+  const onRetry = vi.fn();
+  await render({ question, state: "pending", onSubmit: vi.fn() });
+  // "Other" and the action share one row, which wraps instead of overlapping.
+  const row = host.querySelector(".lcd-ask-other");
+  expect(row?.querySelector('input[type="radio"]')).not.toBeNull();
+  expect(row?.querySelector('.lcd-ask-action button[type="submit"]')).not.toBeNull();
+  expect(host.querySelector("legend")?.className).toBe("sr-only");
+
+  await act(async () => radios()[0]!.click());
+  await render({ question, state: "pending", uncertain: true, onSubmit: vi.fn(), onRetry });
+  const retry = host.querySelector<HTMLButtonElement>(".lcd-ask-other .lcd-ask-action button")!;
+  expect(retry.textContent).toBe("pendingReply.retrySame");
+  expect(radios().every((radio) => radio.disabled)).toBe(true);
+  expect(retry.disabled).toBe(false);
+  await act(async () => retry.click());
+  expect(onRetry).toHaveBeenCalledOnce();
+
+  await render({ question, state: "pending", onSubmit: vi.fn() });
+  await act(async () => radios()[2]!.click());
+  expect(host.querySelector(".lcd-ask-answer textarea")).not.toBeNull();
+  expect(host.querySelector('.lcd-ask-answer button[type="submit"]')).not.toBeNull();
+  expect(host.querySelector(".lcd-ask-other")).toBeNull();
+});
+
+it("names only the chosen letter, as the options stay listed above", async () => {
+  const answered = { id: "second", label: "Second" };
+  await render({ question, state: "answered", answeredOption: answered, onSubmit: vi.fn() });
+  const closed = () => host.querySelector("[data-pending-reply-closed]")?.textContent;
+  expect(closed()).toBe("pendingReply.answeredChoice: second");
+});
+
+it("grows the answer box with its text and fits it again when the box gets narrower", async () => {
+  const observers: Array<() => void> = [];
+  class ResizeObserverStub {
+    constructor(callback: () => void) {
+      observers.push(callback);
+    }
+    observe() {}
+    disconnect() {}
+  }
+  vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    callback(0);
+    return 1;
+  });
+  let natural = 60;
+  let width = 300;
+  const scrollHeight = vi
+    .spyOn(HTMLTextAreaElement.prototype, "scrollHeight", "get")
+    .mockImplementation(() => natural);
+  const clientWidth = vi
+    .spyOn(HTMLTextAreaElement.prototype, "clientWidth", "get")
+    .mockImplementation(() => width);
+  try {
+    await render({ question: { options: [] }, state: "pending", onSubmit: vi.fn() });
+    const box = host.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(box.style.height).toBe("60px");
+    natural = 140;
+    await changeText("a long answer that wraps onto several lines");
+    expect(box.style.height).toBe("140px");
+    // The same text wraps onto more lines in a narrower box (a turned phone).
+    natural = 200;
+    width = 240;
+    await act(async () => observers.forEach((notify) => notify()));
+    expect(box.style.height).toBe("200px");
+    // Its own height change does not count as a width change.
+    natural = 260;
+    await act(async () => observers.forEach((notify) => notify()));
+    expect(box.style.height).toBe("200px");
+  } finally {
+    scrollHeight.mockRestore();
+    clientWidth.mockRestore();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("keeps the send key's words as its name and its own icon while sending starts", async () => {
+  vi.useFakeTimers();
+  try {
+    await render({ question: { options: [] }, state: "pending", onSubmit: vi.fn() });
+    const key = () => host.querySelector<HTMLButtonElement>("[data-ask-send]")!;
+    expect(key().getAttribute("aria-label")).toBe("pendingReply.send");
+    expect(key().getAttribute("title")).toBe("pendingReply.send");
+    expect(key().querySelector("[data-ask-send-label]")?.textContent).toBe("pendingReply.send");
+    expect(key().querySelector("[data-ask-send-mark] svg")).not.toBeNull();
+
+    await render({ question: { options: [] }, state: "pending", sending: true, onSubmit: vi.fn() });
+    expect(key().getAttribute("aria-label")).toBe("pendingReply.sending");
+    expect(key().disabled).toBe(true);
+    // A quick send never blinks to an empty key: the send mark stays for 250 ms.
+    expect(key().querySelector("[data-ask-send-mark] .lcd-spinner")).toBeNull();
+    await act(async () => vi.advanceTimersByTime(250));
+    expect(key().querySelector("[data-ask-send-mark] .lcd-spinner[data-shown]")).not.toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
 });

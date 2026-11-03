@@ -42,7 +42,7 @@ impl AnalystLifecycle {
                 "Voice Analyst managed session disconnected"
             );
             self.invalidate().await;
-            if let Err(error) = self.session.stop(self.session.generation()).await {
+            if let Err(error) = self.session.stop_for_voice(self.session.generation()).await {
                 tracing::error!(%error, "failed to stop disconnected Voice Analyst session");
             }
             return;
@@ -237,6 +237,7 @@ impl AnalystLifecycle {
             normalized_completion_status(provider_status, &result, active.origin)
         };
         let _ = self.events.send(AnalystLifecycleEvent::Completed {
+            source: AnalystCompletionSource::Runtime,
             turn_id: active.turn_id,
             delegation_id: active.latest_delegation_id,
             delegation_ids: active.delegation_ids,

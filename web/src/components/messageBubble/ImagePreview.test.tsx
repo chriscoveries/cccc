@@ -1,3 +1,7 @@
+// @vitest-environment happy-dom
+
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -47,5 +51,35 @@ describe("ImagePreview fixed layout", () => {
 
     expect(markup).toContain("height:128px");
     expect(markup).toContain('download="missing-image.png"');
+  });
+
+  it("draws the transparency grid in panel tones and shows the picture without a lift", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const render = () =>
+      act(async () =>
+        root.render(
+          <ImagePreview
+            href="/api/v1/groups/g1/blobs/image"
+            downloadHref="/api/v1/groups/g1/blobs/image?download=true"
+            downloadName="image.png"
+            alt="attachment"
+            isSvg={false}
+            isUserMessage={false}
+            isDark={false}
+          />,
+        ),
+      );
+    try {
+      await render();
+      const image = host.querySelector("img");
+      expect(image?.style.backgroundColor).toBe("var(--lcd-panel)");
+      expect(image?.style.boxShadow).toBe("");
+      expect(image?.style.filter).toBe("");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 });

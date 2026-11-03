@@ -1,10 +1,9 @@
-import { useContext } from "react";
+import { useVisiblePendingSummary } from "./useVisiblePendingSummary";
 import { useTranslation } from "react-i18next";
-import { PendingSummaryContext } from "./context";
 import { pendingIndicator } from "./indicator";
 
 export function usePendingGroupLabel(groupId: string, title: string): string {
-  const context = useContext(PendingSummaryContext);
+  const context = useVisiblePendingSummary();
   const { t } = useTranslation("layout");
   if (!context) return title;
   const indicator = pendingIndicator(context.summaries[groupId]);

@@ -239,6 +239,7 @@ export function ActorProfilesTab({
             <div
               role="alert"
               className="rounded-lg border px-3 py-2 text-sm border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+              data-status-tone="error"
             >
               {editorErr}
             </div>
@@ -964,7 +965,10 @@ export function ActorProfilesTab({
       <section className={settingsWorkspaceShellClass(isDark)}>
         <div className={settingsWorkspaceHeaderClass(isDark)}>
           <div>
-            <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+            <h3
+              className="text-sm font-semibold text-[var(--color-text-primary)]"
+              data-settings-page-title
+            >
               {isMyScope ? t("settings:tabs.myProfiles") : t("settings:tabs.actorProfiles")}
             </h3>
             <p className="mt-1 text-xs text-[var(--color-text-muted)]">
@@ -989,7 +993,10 @@ export function ActorProfilesTab({
 
         <div className={settingsWorkspaceBodyClass}>
           {err ? (
-            <div className="rounded-lg border px-3 py-2 text-sm border-rose-500/30 bg-rose-500/10 text-rose-400">
+            <div
+              className="rounded-lg border px-3 py-2 text-sm border-rose-500/30 bg-rose-500/10 text-rose-400"
+              data-status-tone="error"
+            >
               {err}
             </div>
           ) : null}
@@ -1069,6 +1076,7 @@ export function ActorProfilesTab({
                     <button
                       onClick={() => void handleDelete(profile)}
                       className="inline-flex min-h-[36px] items-center justify-center rounded-xl border border-rose-500/30 bg-rose-500/12 px-3 py-1.5 text-xs font-medium text-rose-600 transition-colors hover:bg-rose-500/18 dark:text-rose-300"
+                      data-status-tone="error"
                     >
                       {t("common:delete")}
                     </button>

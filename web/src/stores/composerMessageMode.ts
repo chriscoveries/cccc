@@ -1,3 +1,5 @@
+import { CHET_SELECTOR } from "../utils/chetIdentity";
+
 export type ComposerMessageMode = "send" | "request_reply" | "mail";
 export type ReplyMessageMode = "send" | "mail";
 
@@ -12,6 +14,18 @@ export function normalizeComposerMessageMode(value: unknown): ComposerMessageMod
 
 export function normalizeReplyMessageMode(value: unknown): ReplyMessageMode {
   return value === "mail" ? "mail" : "send";
+}
+
+/**
+ * Chet has no Mail inbox, whether addressed as @chet or answered with a reply to its message;
+ * preserve the user's preference for other recipients.
+ */
+export function messageModeForRecipients(
+  mode: ComposerMessageMode,
+  recipients: readonly string[],
+  replyToChet = false,
+): ComposerMessageMode {
+  return mode === "mail" && (replyToChet || recipients.includes(CHET_SELECTOR)) ? "send" : mode;
 }
 
 export function loadComposerMessageModePreference(): ComposerMessageMode {

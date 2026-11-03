@@ -5,8 +5,8 @@ authority. Local ASR is provided by the linked `sherpa-onnx` runtime.
 
 Voice Secretary is one global, on-demand service with direct Runtime configuration
 or a linked Runtime Profile. Groups keep their own documents, transcripts and requests;
-no secretary appears in the normal Actor roster. Voice Analyst remains a
-separate service for Realtime calls, with its own configuration and context.
+no secretary appears in the normal agent roster. Chet is a separate global
+assistant with its own Runtime, conversation and optional Realtime calls.
 
 In the expanded Secretary workspace, **View Secretary** opens the shared execution
 view. Codex, Claude Code, Grok Build, OpenCode and Kilo offer an interactive native
@@ -42,7 +42,7 @@ do not block the Secretary, and viewing status does not retry failed work.
 
 Open **Settings → This instance → Voice → Voice Secretary** to select a Runtime
 directly or link a Runtime Profile, and manage recognition and document-processing defaults. Secretary supports the same
-structured runtimes as Voice Analyst: **Codex, Claude Code, Grok Build, OpenCode,
+structured runtimes as Chet: **Codex, Claude Code, Grok Build, OpenCode,
 Kilo**, and **Antigravity, GitHub Copilot, Devin and Cursor in ACP mode**. Native
 TUI Profiles are excluded. Tasks have distinct working copies and share one persistent execution session;
 native tools follow the Runtime permission model. CCCC binds its task MCP to the
@@ -59,9 +59,9 @@ Codex and Claude use dedicated MCP configurations; Copilot disables other config
 servers and built-in MCPs for the task process. Other providers may still expose
 user-configured services; this is not a filesystem or connected-service sandbox.
 All voice settings use **Settings → This instance → Voice**, with two tabs:
-**Voice Secretary** and **Voice conversation**. Secretary has Runtime/model, capture and
-recognition, and document-processing sections. Voice conversation has Realtime call
-preferences and Voice Analyst. Their runtime forms use the same direct/Profile
+**Voice Secretary** and **Chet**. Secretary has Runtime/model, capture and
+recognition, and document-processing sections. Chet has call preferences,
+message notifications and Runtime settings. Their runtime forms use the same direct/Profile
 choices, but credentials, contexts and results stay separate.
 The shared **Audio devices** section above the two tabs owns microphone and speaker
 choices for both workflows and all Groups in the current browser. The Secretary's
@@ -101,7 +101,7 @@ The gear in either workspace scrolls to the corresponding feature tab;
 returns without ending a call, recording or task. Recognition choices, document
 update preferences and call preferences save automatically. Runtime/credential drafts
 and Secretary work rules have separate explicit Save/Discard controls. A preference
-save never submits the Runtime or credentials. Analyst drafts survive closing settings;
+save never submits the Runtime or credentials. Chet drafts survive closing settings;
 unsaved Secretary/ASR drafts prompt before leaving.
 
 Choose a model through the custom launch command (for example `--model ...` where
@@ -112,8 +112,8 @@ Both runtime forms support **Add to Runtime Profiles**, **Create Profile** and
 settings copies only that service's saved private environment and staged changes;
 values remain write-only. Applying the new Profile is a separate Runtime save.
 Editing a shared Profile also affects its other users. Custom Secretary credentials
-are independent of Analyst and Actor credentials, and secret values are never read back.
-No extra model configuration layer or per-Group secretary Actor is created.
+are independent of Chet and agent credentials, and secret values are never read back.
+No extra model configuration layer or per-Group secretary agent is created.
 
 There is no Group Voice settings page or enable switch. Shared recognition backend,
 language, update interval and work rules belong to the global Secretary. Specific
@@ -201,13 +201,13 @@ PCM16LE at 24 kHz. Long-lived OAuth credentials stay on the host. Subscription e
 remain subject to the provider; this is not a separate API-key configuration or a free-usage promise.
 
 
-Live voice is experimental. Choose Codex Voice or Grok Voice in the existing voice console;
-the separate Voice Analyst runtime stays independent. Codex Voice reads a local Codex
+Live voice is experimental. Choose Codex Voice or Grok Voice in Chet;
+Chet's text Runtime is configured independently. Codex Voice reads a local Codex
 ChatGPT login from `CODEX_HOME/auth.json` (by default `~/.codex/auth.json`) or
 `CCCC_CODEX_AUTH_PATH`, then connects to ChatGPT's Codex realtime backend
 (default base URL: `https://chatgpt.com/backend-api/codex`). The call connection
-and the separate Voice Analyst have different configuration: choosing an
-Analyst Runtime does not configure the call provider.
+and Chet's text Runtime have different configuration: choosing a
+Runtime does not configure the call provider.
 
 The speaking-voice menu labels the primary language of newly documented Codex voices
 and can be searched by that language. These are voice profiles, not a restriction on
@@ -219,19 +219,19 @@ including its confirmed target, necessary background, limits and latest correcti
 can pass unchanged, including the original wording from Codex's native delegation. Voice is instructed
 to keep the user's current request language, technical identifiers and any explicit output-language
 requirement. Both services attach a bounded, speaker-labelled excerpt from the current call
-to help the Analyst resolve follow-ups such as "check that one". The provider request remains intact;
-drafts and omitted history are marked. This excerpt becomes part of the retained Analyst conversation.
-Assistant speech and quoted Actor messages confer no additional authority. Essential ambiguity should
-prompt one focused question. This uses the existing Analyst, with no extra rewrite model or task console.
+to help Chet resolve follow-ups such as "check that one". The provider request remains intact;
+drafts and omitted history are marked. This excerpt becomes part of the retained Chet conversation.
+Assistant speech and quoted agent messages confer no additional authority. Essential ambiguity should
+prompt one focused question. This uses Chet's existing Runtime, with no extra rewrite model or task console.
 
 Grok Voice acknowledges investigation acceptance briefly, then announces each complete result in arrival
-order, including investigations entered directly in the Analyst console during that call. Progress remains
-visible in the Analyst. Reports wait for the user's automatic reply, the previous response and playback to
+order, including investigations entered directly in Chet's Activity pane during that call. Progress remains
+visible in Chet. Reports wait for the user's automatic reply, the previous response and playback to
 finish; each response is directed to that report rather than whichever question was asked most recently.
 You can interrupt normally. An interrupted report is not automatically replayed, and later queued reports
 remain available during the same call. A missing older delivery confirmation does not block independently
 ready reports; uncertain delivery is warned about rather than retried. Ending the call clears its local
-announcement queue without replaying Analyst work. Codex Voice retains its native delegation/progress path.
+announcement queue without replaying Chet work. Codex Voice retains its native delegation/progress path.
 
 This is distinct from the [public OpenAI Realtime API](https://developers.openai.com/api/docs/guides/realtime).
 An API key or API credits alone do not configure the current call path. Call
@@ -242,14 +242,12 @@ Realtime API integration.
 
 The subscription connection offers the 25 v3 voices listed by Codex 0.163.0's
 `thread/realtime/listVoices`, including Himari, Miko, Rindo and Rivage. Cove
-remains the default. Choose the service and speaking voice directly in the
-voice-console header or in **Call preferences**; type a name or language to filter
+remains the default. Choose the service and speaking voice beside Chet's input on desktop,
+or in **Call preferences** (including on phones); type a name or language to filter
 the voice list. Each service's voice selection is remembered in this browser and
 applies to the next call. End the active call before switching service or voice.
-The sidebar and voice-console header keep the service and speaking voice visible
-before, during and after calls. With no active call they show the browser's current
-selection; during a call they show its actual service and voice, including a call
-owned by another browser. Changing next-call preferences does not relabel that call.
+During a call the console shows its actual service and voice, including a call owned by
+another browser. Changing next-call preferences does not relabel that call.
 Web uses the host's advertised catalog, so a newly supported voice survives a page reload. Microphone and
 speaker preferences remain shared with Voice Secretary.
 
@@ -258,7 +256,7 @@ Codex, according to the [October 15 system card](https://deploymentsafety.openai
 CCCC keeps the subscription channel's `gpt-live-1-codex` identifier; that name
 does not establish which product revision the provider serves to an account.
 Voice availability still depends on the account and provider rollout. No separate
-API key is required, and selecting a Claude or Grok Analyst changes the working
+API key is required, and selecting a Claude or Grok Runtime for Chet changes the working
 Runtime rather than the voice provider.
 
 ## Workspace modes
@@ -424,7 +422,7 @@ their original IDs before saving the final revision. This also recovers availabl
 segments from an incomplete recording without treating them as a complete final
 transcript. If a browser retry still fails, recording stops with an error and
 the remaining unconfirmed text returns to the original Group's composer for
-review; it is not automatically sent to an Actor.
+review; it is not automatically sent to an agent.
 Connection failures retain known document segments and recover available text to
 the composer for non-document capture. A disconnected document recording gets a
 bounded attempt to finalize its provider stream. Lease release is fenced to its
@@ -448,9 +446,30 @@ Open **Settings → This instance → Voice → Voice Secretary → Capture and 
 Install the final and live models under **Entire instance → Voice**. The sherpa-onnx runtime is linked into the
 Rust binary, so runtime install/remove actions are compatibility no-ops. Models
 are downloaded into `~/.cccc/cache/voice-models`, verified against the bundled
-manifest, unpacked in staging, and atomically activated. Existing model caches
-and `install-state.json` files are read in place. Operating-system file locks
-make interrupted installs recoverable after a process crash.
+manifest, unpacked in staging, and atomically activated: each install becomes a
+new version directory, and one atomic write of the model's `install-state.json`
+switches to it. Downloaded archives are deleted once unpacked, unless the model
+requires the archive file itself. If an update fails before the switch, the
+installed version's files are kept, and the error is shown with the model when
+CCCC can record it; if CCCC stops during an update, the files are kept too.
+Either way the model stays installed and usable as long as that version has
+every file the current model definition requires. If CCCC cannot confirm whether
+the switch happened, it leaves the install state as it is and keeps both
+versions until a later cleanup can confirm the current one.
+A replaced version is deleted at a later cleanup: when the next install starts,
+after an install completes, or when CCCC Web starts. A version that a
+recognition in progress still uses waits for a later cleanup. Removing a model
+deletes all of its versions at once, even one in use.
+
+Existing model caches and `install-state.json` files are read in place; their
+next install or update moves the model into a version directory. Versions of
+CCCC before this layout show such a model as not installed, so after a
+downgrade it must be installed again. If `install-state.json` exists but cannot
+be read or is damaged, including a link to a missing file, the model shows as
+failed instead of not installed, and installing
+does not overwrite it: restore read access to the file if it is intact, or
+reinstall, which replaces the model's files. Operating-system file locks make
+interrupted installs recoverable after a process crash.
 
 Live browser capture sends 16 kHz mono PCM16 as binary WebSocket frames; JSON is
 used only for start/stop control messages. Both WebSocket recordings and HTTP
@@ -599,7 +618,7 @@ Archived documents are retained in durable state but omitted from the working
 document projection. Archiving the current document selects the most recently
 updated remaining active document, or clears the active target when none remain.
 
-There is no per-Group secretary Actor or legacy execution path. Global tasks use their own business receipts. Provider turn completion and console
+There is no per-Group secretary agent or legacy execution path. Global tasks use their own business receipts. Provider turn completion and console
 text do not count as a delivered answer or committed document.
 Document paths remain repository-relative Markdown paths with symlink rejection.
 
@@ -609,7 +628,7 @@ Empty refinements use `no_op=true`; drafts are never sent as messages.
 Ask records a durable request before execution. A terminal report updates that
 request and its ledger feedback, allowing results to survive refresh/reconnect.
 For explicit peer coordination, the Secretary may propose a message to one
-current Group Actor. The user reviews and confirms forwarding; the task cannot
+current Group agent. The user reviews and confirms forwarding; the task cannot
 send messages itself. Secretary answers/drafts are not injected into Realtime Voice.
 
 In **Prompt** with **Polish after recording** off, microphone input routes directly to the composer. Local ASR accepts the explicit `composer` dispatch target, but the
@@ -678,12 +697,12 @@ billing plan must be enabled for that account. Connection tests distinguish a
 known resource-not-granted rejection from authentication failure, unspecified
 access denial, and quota limits without exposing upstream response bodies.
 
-## Existing documents and obsolete Actors
+## Existing documents and obsolete agents {#existing-documents-and-obsolete-actors}
 
 Groups retain documents, transcripts and fixed-target tasks; they do not own another
-Secretary configuration. Old Actor HELP files are preserved but their protocol is
+Secretary configuration. Old agent HELP files are preserved but their protocol is
 not imported into the task executor. Daemon startup stops and removes obsolete
-secretary Actors through the normal resource lifecycle before restoring Group
-runtimes. No legacy executor or automatic replay of old Actor history is retained.
+secretary agents through the normal resource lifecycle before restoring Group
+runtimes. No legacy executor or automatic replay of old agent history is retained.
 Configure the global Secretary explicitly, and choose what to do with unclaimed
 saved input when selecting its Runtime.

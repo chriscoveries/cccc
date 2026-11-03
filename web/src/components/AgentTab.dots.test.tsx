@@ -163,6 +163,60 @@ async function render(
   );
 }
 
+it("keeps confirmation visible after Actor refresh without adding read-only controls", async () => {
+  const waiting: Actor = {
+    id: "claude",
+    title: "Claude",
+    runtime: "claude",
+    runner_effective: "pty",
+    running: true,
+    runtime_state_source: "terminal",
+    runtime_confirmation_required: true,
+  };
+  // The existing transport mock keeps this a component contract, not a real PTY test.
+  await render(true, waiting, "g_confirmation", true, false);
+  const notice = host.querySelector("[data-runtime-confirmation]")!;
+  expect(notice.getAttribute("role")).toBe("status");
+  // The header names the state; the notice says once what to do.
+  expect(notice.textContent).toBe("runtimeConfirmationHint");
+  expect(host.textContent).toContain("runtimeConfirmationPending");
+  expect(notice.querySelector("button,input")).toBeNull();
+  expect(mocks.launch).not.toHaveBeenCalled();
+  expect(mocks.pause).not.toHaveBeenCalled();
+  await render(
+    true,
+    { ...waiting, runtime_confirmation_required: false },
+    "g_confirmation",
+    true,
+    false,
+  );
+  expect(host.querySelector("[data-runtime-confirmation]")).toBeNull();
+});
+
+it("keeps distinct LCD status shapes and their accessible Actor labels", async () => {
+  const managed: Actor = {
+    id: "managed",
+    runtime: "pi",
+    enabled: true,
+    running: true,
+    runner_effective: "headless",
+    runtime_state_source: "managed_session",
+    effective_working_state: "working",
+  };
+  await render(true, managed, "g_managed");
+  const status = () => host.querySelector('[data-terminal-title-bar] [role="img"]');
+  expect(status()?.getAttribute("aria-label")).toBe("working");
+  expect(status()?.getAttribute("data-lcd-shape")).toBe("run");
+
+  await render(true, { ...managed, effective_working_state: "error" }, "g_managed");
+  expect(status()?.getAttribute("aria-label")).toBe("common:error");
+  expect(status()?.textContent).toBe("×");
+
+  await render(true, { ...managed, running: false }, "g_managed");
+  expect(status()?.getAttribute("aria-label")).toBe("stopped");
+  expect(status()?.getAttribute("data-lcd-shape")).toBe("stop");
+});
+
 it.each([false, true])(
   "shows a GET-projected managed turn error without offering Start (compact=%s)",
   async (compact) => {
@@ -294,8 +348,7 @@ it("does not show a running indicator for an unpaired Dot with a valid subscript
     '[role="img"][aria-label="settings:dotsActor.phases.waiting_pairing"]',
   );
   expect(indicator).not.toBeNull();
-  expect(indicator?.className).toContain("bg-slate-400/65");
-  expect(indicator?.className).not.toContain("bg-emerald-500 ring-");
+  expect(indicator?.getAttribute("data-lcd-shape")).toBe("stop");
 });
 
 it("retains the working indicator for an accepted task after its event subscription expires", async () => {
@@ -313,8 +366,7 @@ it("retains the working indicator for an accepted task after its event subscript
     '[role="img"][aria-label="settings:dotsActor.phases.working"]',
   );
   expect(indicator).not.toBeNull();
-  expect(indicator?.className).toContain("bg-emerald-500 ring-");
-  expect(indicator?.className).not.toContain("bg-slate-400/65");
+  expect(indicator?.getAttribute("data-lcd-shape")).toBe("run");
 });
 
 it("shows an administrator-managed connection for a Group writer without fetching restricted Dots state or losing local Pause", async () => {
@@ -507,8 +559,8 @@ it.each([false, true])(
         expect(header.textContent).toContain(status);
         const indicator = header.querySelector('[role="img"]')!;
         expect(indicator.getAttribute("aria-label")).toBe(status);
-        expect(indicator.className).toContain(
-          status === "nativeSession.available" ? "bg-emerald-500" : "bg-slate-400/65",
+        expect(indicator.getAttribute("data-lcd-shape")).toBe(
+          status === "nativeSession.available" ? "idle" : "stop",
         );
       }
     }

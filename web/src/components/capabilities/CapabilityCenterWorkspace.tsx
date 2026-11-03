@@ -53,6 +53,7 @@ import {
   capabilityCenterRootClass,
   capabilityCenterSectionTypeFilter,
   capabilityCenterSourceRemovalAction,
+  capabilityCenterTurnOff,
   capabilityCenterType,
   capabilityCenterTypeLabel,
   CAPABILITY_CENTER_DEFAULT_PAGE_SIZE,
@@ -71,6 +72,8 @@ import {
   isCapabilityHiddenFromSlashCommands,
 } from "../modals/settings/capabilityManagementModel";
 import { useCapabilityCenterData } from "./useCapabilityCenterData";
+import { LcdIcon } from "../Icons";
+import type { LcdGlyphName } from "../LcdGlyph";
 
 interface CapabilityCenterWorkspaceProps {
   isOpen: boolean;
@@ -102,12 +105,13 @@ type CapabilityCenterConfirmDialogState = {
 const sectionItems: Array<{
   id: CapabilityCenterSection;
   icon: typeof BookOpen;
+  glyph: LcdGlyphName;
   label: string;
   hint: string;
 }> = [
-  { id: "skill", icon: BookOpen, label: "Skills", hint: "Procedural skills" },
-  { id: "mcp", icon: Plug, label: "MCP", hint: "Tool servers" },
-  { id: "sources", icon: Boxes, label: "Sources", hint: "Feeds and origins" },
+  { id: "skill", icon: BookOpen, glyph: "book-open", label: "Skills", hint: "Procedural skills" },
+  { id: "mcp", icon: Plug, glyph: "plug", label: "MCP", hint: "Tool servers" },
+  { id: "sources", icon: Boxes, glyph: "package", label: "Sources", hint: "Feeds and origins" },
 ];
 
 function statusBadgeClass(kind: "neutral" | "good" | "warn" | "danger") {
@@ -120,6 +124,14 @@ function statusBadgeClass(kind: "neutral" | "good" | "warn" | "danger") {
   return "border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] text-[var(--color-text-secondary)]";
 }
 
+// The LCD look reads a badge's meaning through the shared status hooks.
+function statusBadgeTone(kind: "neutral" | "good" | "warn" | "danger") {
+  if (kind === "good") return "ok";
+  if (kind === "warn") return "warning";
+  if (kind === "danger") return "error";
+  return undefined;
+}
+
 function MiniBadge({
   children,
   kind = "neutral",
@@ -130,6 +142,7 @@ function MiniBadge({
   return (
     <span
       className={`inline-flex h-6 items-center rounded border px-2 text-[11px] font-medium ${statusBadgeClass(kind)}`}
+      data-status-tone={statusBadgeTone(kind)}
     >
       {children}
     </span>
@@ -206,12 +219,12 @@ export function CapabilityCenterWorkspace({
     error: err,
     hasMore,
     items,
+    loadState,
     loading,
     refresh,
     selectedId,
     setError: setErr,
     setSelectedId,
-    setState,
     sourceInstances,
     sources,
     state,
@@ -341,14 +354,14 @@ export function CapabilityCenterWorkspace({
           return;
         }
         rememberStickyItem(row);
-        const stateResp = await api.fetchGroupCapabilityState(groupId, "user", { noCache: true });
-        if (stateResp.ok) setState(stateResp.result);
+        // The same read as every other state reload, so a failed or unusable read is reported.
+        await loadState();
         publishCapabilityChanged(groupId);
       } finally {
         setBusyKey("");
       }
     },
-    [groupId, hiddenIds, rememberStickyItem, setErr, setState, t],
+    [groupId, hiddenIds, loadState, rememberStickyItem, setErr, t],
   );
 
   const executeRemoveCapability = useCallback(
@@ -361,18 +374,10 @@ export function CapabilityCenterWorkspace({
       setBusyKey(`remove:${capId}`);
       setErr("");
       try {
-        const resp =
-          action === "disable"
-            ? await api.enableGroupCapability(groupId, capId, {
-                enabled: false,
-                actorId: "user",
-                reason: "capability center disable",
-                cleanup: true,
-              })
-            : await api.uninstallCapability(groupId, capId, {
-                actorId: "user",
-                reason: `capability center ${action}`,
-              });
+        const resp = await api.uninstallCapability(groupId, capId, {
+          actorId: "user",
+          reason: `capability center ${action}`,
+        });
         if (!resp.ok) {
           setErr(resp.error?.message || t("capabilityCenter.remove.failed"));
           return;
@@ -401,7 +406,7 @@ export function CapabilityCenterWorkspace({
           id: capId,
         }),
         confirmLabel: t(`capabilityCenter.remove.label.${action}`),
-        tone: action === "disable" ? "default" : "destructive",
+        tone: "destructive",
         onConfirm: () => executeRemoveCapability(row, action),
       });
     },
@@ -473,17 +478,17 @@ export function CapabilityCenterWorkspace({
   );
 
   const executeEnableCapability = useCallback(
-    async (row: CapabilityOverviewItem, nextEnabled: boolean) => {
+    async (row: CapabilityOverviewItem) => {
       const capId = String(row.capability_id || "").trim();
       if (!groupId || !capId) return;
       setBusyKey(`enable:${capId}`);
       setErr("");
       try {
         const resp = await api.enableGroupCapability(groupId, capId, {
-          enabled: nextEnabled,
+          enabled: true,
           scope: "group",
           actorId: "user",
-          reason: nextEnabled ? "capability center enable" : "capability center disable",
+          reason: "capability center enable",
         });
         if (!resp.ok) {
           setErr(resp.error?.message || t("capabilityCenter.enable.failed"));
@@ -499,6 +504,63 @@ export function CapabilityCenterWorkspace({
     [groupId, refresh, rememberStickyItem, setErr, t],
   );
 
+  // "Enabled" here also counts the user's own actor and session use, so Disable turns off
+  // whichever of them the usage reports, then shows the state it reads back.
+  const executeDisableCapability = useCallback(
+    async (row: CapabilityOverviewItem) => {
+      const capId = String(row.capability_id || "").trim();
+      if (!groupId || !capId) return;
+      setBusyKey(`enable:${capId}`);
+      setErr("");
+      let failure = "";
+      let wrote = false;
+      try {
+        const { result, confirmed } = await capabilityCenterTurnOff({
+          readUsage: async () => {
+            const resp = await api.fetchGroupCapabilityState(groupId, "user", {
+              capabilityId: capId,
+              noCache: true,
+            });
+            if (resp.ok) return resp.result?.capability_usage || null;
+            failure = resp.error?.message || "";
+            return null;
+          },
+          turnOff: async (scope) => {
+            wrote = true;
+            const resp = await api.enableGroupCapability(groupId, capId, {
+              enabled: false,
+              scope,
+              actorId: "user",
+              reason: "capability center disable",
+            });
+            if (!resp.ok) failure = resp.error?.message || "";
+            return resp.ok;
+          },
+        });
+        const message = failure || t("capabilityCenter.enable.failed");
+        if (result === "unread") {
+          setErr(message);
+          return;
+        }
+        if (wrote) rememberStickyItem(row);
+        const nextState = await refresh();
+        if (wrote) publishCapabilityChanged(groupId);
+        // A read-back that failed reports its own error, and one a newer load replaced leaves
+        // that load to show the state; neither is taken to mean the capability is off.
+        if (result === "failed") {
+          setErr(confirmed ? t("capabilityCenter.enable.partlyFailed", { message }) : message);
+        } else if (nextState && capabilityCenterEnabledIds(nextState).has(capId)) {
+          setErr(
+            t("capabilityCenter.enable.stillEnabled", { name: capabilityCenterDisplayName(row) }),
+          );
+        }
+      } finally {
+        setBusyKey("");
+      }
+    },
+    [groupId, refresh, rememberStickyItem, setErr, t],
+  );
+
   const toggleEnableCapability = useCallback(
     (row: CapabilityOverviewItem) => {
       const capId = String(row.capability_id || "").trim();
@@ -506,7 +568,7 @@ export function CapabilityCenterWorkspace({
       const enabledIds = capabilityCenterEnabledIds(state);
       const enabled = enabledIds.has(capId);
       if (!enabled) {
-        void executeEnableCapability(row, true);
+        void executeEnableCapability(row);
         return;
       }
       setConfirmDialog({
@@ -519,10 +581,10 @@ export function CapabilityCenterWorkspace({
           id: capId,
         }),
         confirmLabel: t("capabilityCenter.enable.disable"),
-        onConfirm: () => executeEnableCapability(row, false),
+        onConfirm: () => executeDisableCapability(row),
       });
     },
-    [executeEnableCapability, groupId, state, t],
+    [executeDisableCapability, executeEnableCapability, groupId, state, t],
   );
 
   const toggleSource = useCallback(
@@ -661,6 +723,7 @@ export function CapabilityCenterWorkspace({
       role={surface === "overlay" ? "dialog" : undefined}
       aria-modal={surface === "overlay" ? true : undefined}
       aria-label={t("capabilityCenter.title")}
+      data-capability-center
     >
       <div className={frameClass}>
         <aside className="hidden w-[248px] shrink-0 border-r border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] md:flex md:flex-col">
@@ -670,7 +733,7 @@ export function CapabilityCenterWorkspace({
               {t("capabilityCenter.subtitle")}
             </div>
           </div>
-          <nav className="flex-1 space-y-1 overflow-y-auto px-2 py-3">
+          <nav className="flex-1 space-y-1 overflow-y-auto px-2 py-3" data-capability-nav>
             {localizedSections.map((item) => {
               const Icon = item.icon;
               const active = section === item.id;
@@ -683,9 +746,10 @@ export function CapabilityCenterWorkspace({
                       ? "bg-[var(--glass-bg-active)] text-[var(--color-text-primary)]"
                       : "text-[var(--color-text-secondary)] hover:bg-[var(--glass-bg-hover)] hover:text-[var(--color-text-primary)]"
                   }`}
+                  aria-current={active ? "page" : undefined}
                   onClick={() => setSection(item.id)}
                 >
-                  <Icon size={17} aria-hidden="true" />
+                  <LcdIcon icon={Icon} glyph={item.glyph} size={17} aria-hidden="true" />
                   <span className="min-w-0">
                     <span className="block text-sm font-medium">{item.label}</span>
                     <span className="block truncate text-[11px] text-[var(--color-text-muted)]">
@@ -708,7 +772,7 @@ export function CapabilityCenterWorkspace({
           <header className="flex min-h-[56px] items-center justify-between gap-3 border-b border-[var(--glass-border-subtle)] px-3 py-2 sm:px-4 sm:py-3 lg:px-6">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
-                <BookOpen size={18} aria-hidden="true" />
+                <LcdIcon icon={BookOpen} glyph="book-open" size={18} aria-hidden="true" />
                 <h2 className="min-w-0 truncate text-base font-semibold sm:text-lg">
                   {t("capabilityCenter.title")}
                 </h2>
@@ -730,7 +794,7 @@ export function CapabilityCenterWorkspace({
                   void refresh();
                 }}
               >
-                <RefreshCcw size={15} aria-hidden="true" />
+                <LcdIcon icon={RefreshCcw} glyph="reload" size={15} aria-hidden="true" />
                 <span className="sr-only sm:not-sr-only">{t("capabilityCenter.refresh")}</span>
               </Button>
               {onClose ? (
@@ -745,7 +809,7 @@ export function CapabilityCenterWorkspace({
                         aria-label={t("capabilityCenter.close")}
                         onClick={onClose}
                       >
-                        <X size={17} aria-hidden="true" />
+                        <LcdIcon icon={X} glyph="close" size={17} aria-hidden="true" />
                       </Button>
                     </span>
                   )}
@@ -758,7 +822,7 @@ export function CapabilityCenterWorkspace({
                   className="h-10 w-10 bg-[var(--glass-panel-bg)] sm:w-auto sm:px-3"
                 >
                   <a href="/ui/">
-                    <X size={15} aria-hidden="true" />
+                    <LcdIcon icon={X} glyph="close" size={15} aria-hidden="true" />
                     <span className="sr-only sm:not-sr-only sm:truncate">
                       {t("capabilityCenter.backToApp")}
                     </span>
@@ -771,6 +835,7 @@ export function CapabilityCenterWorkspace({
           <nav
             className="flex gap-2 overflow-x-auto border-b border-[var(--glass-border-subtle)] px-3 py-2 md:hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
             aria-label={t("capabilityCenter.sectionNavigation")}
+            data-capability-nav
           >
             {localizedSections.map((item) => {
               const Icon = item.icon;
@@ -784,9 +849,10 @@ export function CapabilityCenterWorkspace({
                       ? "border-[rgba(59,130,246,0.35)] bg-[var(--glass-bg-active)] text-[var(--color-text-primary)]"
                       : "border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] text-[var(--color-text-secondary)]"
                   }`}
+                  aria-current={active ? "page" : undefined}
                   onClick={() => setSection(item.id)}
                 >
-                  <Icon size={15} aria-hidden="true" />
+                  <LcdIcon icon={Icon} glyph={item.glyph} size={15} aria-hidden="true" />
                   <span>{item.label}</span>
                 </button>
               );
@@ -808,8 +874,14 @@ export function CapabilityCenterWorkspace({
                     className="inline-flex min-h-[36px] items-center gap-2 rounded-lg border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] px-3 text-xs font-medium text-[var(--color-text-secondary)]"
                     aria-expanded={mobileControlsOpen}
                     onClick={() => setMobileControlsOpen((value) => !value)}
+                    data-lcd-key
                   >
-                    <SlidersHorizontal size={14} aria-hidden="true" />
+                    <LcdIcon
+                      icon={SlidersHorizontal}
+                      glyph="sliders-horizontal"
+                      size={14}
+                      aria-hidden="true"
+                    />
                     <span>{t("capabilityCenter.stateFilter")}</span>
                   </button>
                   <span className="min-w-0 truncate text-xs text-[var(--color-text-muted)]">
@@ -820,15 +892,19 @@ export function CapabilityCenterWorkspace({
                 </div>
                 <div
                   className={`${mobileControlsOpen ? "mt-2 flex" : "hidden"} flex-col gap-2 sm:mt-3 sm:flex xl:flex-row xl:items-center`}
+                  data-capability-filters
                 >
                   <div className="relative min-w-0 flex-1">
-                    <Search
+                    <LcdIcon
+                      icon={Search}
+                      glyph="search"
                       className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]"
                       size={15}
                       aria-hidden="true"
                     />
                     <input
                       className="h-9 w-full rounded-lg border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] pl-9 pr-3 text-sm outline-none focus:border-[rgba(59,130,246,0.42)] sm:h-10"
+                      data-lcd-field
                       value={query}
                       placeholder={t("capabilityCenter.searchPlaceholder")}
                       onChange={(event) => setQuery(event.target.value)}
@@ -859,7 +935,10 @@ export function CapabilityCenterWorkspace({
                   </div>
                 </div>
                 {err ? (
-                  <div className="mt-2 rounded-lg border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
+                  <div
+                    className="mt-2 rounded-lg border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300"
+                    data-status-tone="error"
+                  >
                     {err}
                   </div>
                 ) : null}
@@ -988,7 +1067,9 @@ function SegmentedControl(props: {
       <div
         className={`flex max-w-full items-center gap-1 overflow-x-auto rounded-lg border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${props.disabled ? "opacity-50" : ""}`}
       >
-        <SlidersHorizontal
+        <LcdIcon
+          icon={SlidersHorizontal}
+          glyph="sliders-horizontal"
           size={14}
           className="ml-1 shrink-0 text-[var(--color-text-muted)]"
           aria-hidden="true"
@@ -999,6 +1080,7 @@ function SegmentedControl(props: {
             type="button"
             className={`min-h-[34px] shrink-0 rounded-md px-3 text-xs font-medium sm:min-h-[36px] ${props.value === option.id ? "bg-[var(--glass-bg-active)] text-[var(--color-text-primary)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--glass-bg-hover)]"}`}
             disabled={props.disabled}
+            aria-pressed={props.value === option.id}
             onClick={() => props.onChange(option.id)}
           >
             {option.label}
@@ -1072,6 +1154,7 @@ function CapabilityTable(props: {
                 className={`grid w-full grid-cols-[minmax(260px,1.8fr)_88px_150px_130px_170px] items-center gap-3 px-4 py-2.5 text-left text-sm lg:px-6 ${
                   selected ? "bg-[var(--glass-bg-active)]" : "hover:bg-[var(--glass-bg-hover)]"
                 }`}
+                aria-current={selected ? "true" : undefined}
                 onClick={() => props.onSelect(capId)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
@@ -1144,6 +1227,7 @@ function CapabilityTable(props: {
               className={`rounded-lg border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] p-3 text-left text-sm ${
                 selected ? "ring-1 ring-[rgba(59,130,246,0.42)]" : ""
               }`}
+              aria-current={selected ? "true" : undefined}
               onClick={() => props.onSelect(capId)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
@@ -1309,6 +1393,7 @@ function CapabilityPaginationBar(props: {
           <span>{t("capabilityCenter.pagination.rows")}</span>
           <select
             className="h-9 rounded-md border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] px-2 text-xs text-[var(--color-text-primary)] sm:h-8"
+            data-lcd-field
             value={props.pageSize}
             disabled={props.loading}
             onChange={(event) => props.onPageSizeChange(Number(event.target.value))}
@@ -1326,6 +1411,7 @@ function CapabilityPaginationBar(props: {
             className="inline-flex min-h-[36px] items-center justify-center rounded-md border border-[var(--glass-border-subtle)] bg-[var(--glass-panel-bg)] px-3 text-xs hover:bg-[var(--glass-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50 sm:h-8 sm:min-h-0"
             disabled={!canPrev}
             onClick={() => props.onPageIndexChange(Math.max(0, props.pageIndex - 1))}
+            data-lcd-key
           >
             {t("capabilityCenter.pagination.prev")}
           </button>
@@ -1339,6 +1425,7 @@ function CapabilityPaginationBar(props: {
             onClick={() =>
               props.onPageIndexChange(Math.min(props.totalPages - 1, props.pageIndex + 1))
             }
+            data-lcd-key
           >
             {t("capabilityCenter.pagination.next")}
           </button>
@@ -1381,8 +1468,14 @@ function EnableCapabilityButton({
             disabled={busy}
             aria-label={label}
             onClick={onClick}
+            data-lcd-key
           >
-            <Icon size={14} aria-hidden="true" />
+            <LcdIcon
+              icon={Icon}
+              glyph={enabled ? "power-off" : "power"}
+              size={14}
+              aria-hidden="true"
+            />
           </button>
         </span>
       )}
@@ -1421,8 +1514,10 @@ function IconToggle({
             disabled={busy}
             aria-label={label}
             onClick={onClick}
+            data-lcd-key
+            data-status-tone={hidden ? "neutral" : undefined}
           >
-            <Icon size={14} aria-hidden="true" />
+            <LcdIcon icon={Icon} glyph={hidden ? "eye-off" : "eye"} size={14} aria-hidden="true" />
           </button>
         </span>
       )}
@@ -1460,8 +1555,9 @@ function BlockCapabilityButton({
             disabled={busy}
             aria-label={label}
             onClick={onClick}
+            data-status-tone={blocked ? "ok" : "warning"}
           >
-            <Shield size={15} aria-hidden="true" />
+            <LcdIcon icon={Shield} glyph="shield" size={15} aria-hidden="true" />
           </button>
         </span>
       )}
@@ -1495,8 +1591,9 @@ function RemoveCapabilityButton({
             disabled={busy}
             aria-label={label}
             onClick={onClick}
+            data-status-tone="error"
           >
-            <Trash2 size={14} aria-hidden="true" />
+            <LcdIcon icon={Trash2} glyph="trash" size={14} aria-hidden="true" />
           </button>
         </span>
       )}

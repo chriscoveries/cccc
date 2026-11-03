@@ -7,6 +7,8 @@ import { RUNTIME_INFO, SUPPORTED_RUNTIMES, type RuntimeMode } from "../../types"
 import { runtimeDetectionKey } from "../../utils/runtimeDetection";
 import { SelectCombobox } from "../SelectCombobox";
 import { Button } from "../ui/button";
+import { LcdSpinner } from "../LcdSpinner";
+import { LcdIcon } from "../Icons";
 
 export function RuntimeSelector({
   value,
@@ -82,6 +84,9 @@ export function RuntimeSelector({
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs">
         <span
           role="status"
+          data-status-tone={
+            captionKey === "failed" || captionKey === "missing" ? "warning" : undefined
+          }
           className={
             captionKey === "failed" || captionKey === "missing"
               ? "text-orange-700 dark:text-orange-300"
@@ -94,16 +99,19 @@ export function RuntimeSelector({
         <Button
           type="button"
           variant="ghost"
+          data-lcd-key
           size="sm"
           className="min-h-[44px] gap-1.5 text-xs"
           disabled={disabled || checking}
           onClick={() => void refresh()}
         >
-          <RefreshCw
-            size={13}
-            aria-hidden="true"
-            className={checking ? "animate-spin motion-reduce:animate-none" : ""}
-          />
+          {checking ? (
+            <LcdSpinner className="h-[13px] w-[13px]">
+              <LcdIcon icon={RefreshCw} glyph="reload" size={13} aria-hidden="true" />
+            </LcdSpinner>
+          ) : (
+            <LcdIcon icon={RefreshCw} glyph="reload" size={13} aria-hidden="true" />
+          )}
           {t("runtimeDetection.recheck")}
         </Button>
       </div>

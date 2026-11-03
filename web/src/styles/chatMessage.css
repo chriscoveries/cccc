@@ -1,63 +1,222 @@
-/* Keep hover controls out of the reading path, with keyboard and touch access. */
+/* With a pointer, a message's actions show beside its head on hover or keyboard focus, in the
+   free space after the time, or before your name on your own messages (lcd.css places them):
+   nothing is reserved for them, so showing them moves nothing and a short message stays as
+   wide as its text. A column narrower than 28rem, beside a side panel or at a large text size,
+   and touch have no bar: every action is in the ⋮ that ends the message's head (lcd.css). */
 .message-actions-inline {
   display: none;
 }
 
-/* Put each touch menu beside its message instead of reserving a row below it. */
-@supports selector(.message-row:has(.message-actions-menu)) {
-  @media (pointer: coarse) and (max-width: 767px),
-    (pointer: coarse) and (max-width: 1023px) and (max-height: 480px) {
-    .message-row:has(.message-actions-menu) {
-      min-height: 44px;
-    }
-    .message-row.items-start:has(.message-actions-menu) {
-      padding-right: max(clamp(1.5rem, 8%, 2rem), calc(44px - min(16px, 1rem)));
-    }
-    .message-row.items-end:has(.message-actions-menu) {
-      padding-left: max(clamp(1.5rem, 8%, 2rem), calc(44px - min(16px, 1rem)));
-    }
+@media (hover: hover) and (pointer: fine) {
+  @container messages (width >= 28rem) {
     .message-actions-menu {
-      position: absolute;
-      z-index: 1;
-      bottom: 0;
-    }
-    .message-row.items-start .message-actions-menu {
-      right: calc(-1 * min(16px, 1rem));
-    }
-    .message-row.items-end .message-actions-menu {
-      left: calc(-1 * min(16px, 1rem));
-    }
-    .message-actions-menu > button {
-      width: 44px;
-      height: 44px;
-      padding: 0;
-    }
-    .message-actions-label {
       display: none;
     }
-    .message-footer-no-status:has(.message-actions-menu) {
-      margin-top: 0;
+    .message-actions-inline {
+      display: flex;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 140ms ease-out;
+    }
+    /* A message's whole band keeps its actions showing, not only the message itself: they sit
+       beside a short message's head, past the message's own box, and a pointer heading there
+       from the text must not lose them on the way. An open ⋯ menu keeps them too. */
+    [data-message-row]:hover .message-actions-inline,
+    [data-message-row]:focus-within .message-actions-inline {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    /* Its own rule: a browser without :has() drops a whole selector list, which would take
+       the hover and focus cases above with it and leave a pointer with no message actions. */
+    .message-actions-inline:has([aria-expanded="true"]) {
+      opacity: 1;
+      pointer-events: auto;
     }
   }
 }
-@media (min-width: 640px) and (hover: hover) {
-  .message-actions-menu {
-    display: none;
-  }
-  .message-actions-inline {
-    display: flex;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 140ms ease-out;
-  }
-  .message-row:hover .message-actions-inline,
-  .message-row:focus-within .message-actions-inline {
-    opacity: 1;
-    pointer-events: auto;
+
+@media (pointer: coarse) {
+  .message-actions-menu > button {
+    min-width: 44px;
+    min-height: 44px;
   }
 }
+
 @media (prefers-reduced-motion: reduce) {
   .message-actions-inline {
     transition: none;
+  }
+}
+/* The members float over the end of the message list (ChatTab). The list ends with room for
+   them, so its last message scrolls clear, and the room stays while reading hides them on a
+   phone, so hiding them never moves the list. Text scrolled under them fades out behind their
+   keys only, with soft ends, and shows on either side; at rest nothing sits in the fade, so
+   the members stand on the page's own ground. Where they show on a phone, whose width their
+   strip can span, the key back to the latest message rises above them. */
+.chat-reading-scroller.chat-list-over-dock {
+  padding-bottom: max(4.5rem, 64px);
+  scroll-padding-bottom: max(4.5rem, 64px);
+}
+
+/* On a phone a line of agent activity above the members makes them taller; ChatTab measures
+   them (useFloatingDockReserve) and the room grows with them. */
+@media (max-width: 767px) {
+  .chat-reading-scroller.chat-list-over-dock {
+    padding-bottom: max(4.5rem, 64px, calc(var(--chat-dock-height, 0px) + 0.75rem));
+    scroll-padding-bottom: max(4.5rem, 64px, calc(var(--chat-dock-height, 0px) + 0.75rem));
+  }
+}
+
+.chat-dock-fade {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
+  padding-top: 1rem;
+}
+
+.chat-dock-fade::before {
+  content: "";
+  position: absolute;
+  inset: 0 -1.5rem;
+  z-index: -1;
+  background-image:
+    linear-gradient(to bottom, transparent, var(--color-chat-bg) 1rem),
+    linear-gradient(to bottom, transparent, var(--color-bg-primary) 1rem);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 1.5rem,
+    #000 calc(100% - 1.5rem),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 1.5rem,
+    #000 calc(100% - 1.5rem),
+    transparent
+  );
+}
+
+@media (max-width: 767px) {
+  .chat-dock-shown ~ [data-scroll-latest] {
+    --chat-latest-bottom: calc(
+      max(4.5rem, 64px, calc(var(--chat-dock-height, 0px) + 0.75rem)) + 0.5rem
+    );
+  }
+}
+
+/* Float the latest action above the log without reducing its reading height. */
+[data-scroll-latest] {
+  position: absolute;
+  z-index: 30;
+  right: 1.25rem;
+  bottom: var(--chat-latest-bottom, 1.5rem);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  border: 1px solid var(--glass-panel-border);
+  border-radius: 999px;
+  background: var(--glass-panel-bg);
+  box-shadow: var(--glass-shadow), var(--glass-inner-glow);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  animation: scale-in 0.2s ease-out;
+}
+
+[data-scroll-latest]:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: -2px;
+}
+
+[data-scroll-latest-count] {
+  position: absolute;
+  top: -0.375rem;
+  right: -0.375rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 0.25rem;
+  border-radius: 999px;
+  background: var(--color-indigo-500);
+  box-shadow:
+    0 1px 3px 0 rgb(0 0 0 / 0.1),
+    0 1px 2px -1px rgb(0 0 0 / 0.1);
+  color: white;
+  font-size: 0.625rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-scroll-latest] {
+  right: 0.75rem;
+  bottom: var(--chat-latest-bottom, 0.75rem);
+  width: 2.5rem;
+  height: 2.5rem;
+  border-color: var(--lcd-ink);
+  border-radius: 0;
+  background: var(--lcd-panel);
+  box-shadow: none;
+  color: var(--lcd-ink);
+  transition: none;
+  animation: none;
+  transform: none;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-scroll-latest] svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+/* New messages use the same neutral filled mark as unread Mail. The waiting
+   colour is reserved for requests that need the user's answer. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-scroll-latest-count] {
+  top: -0.25rem;
+  right: -0.25rem;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  padding: 0 0.2rem;
+  border-radius: 0;
+  background: var(--lcd-ink);
+  box-shadow: none;
+  color: var(--lcd-bg);
+  font-weight: 400;
+}
+
+@media (hover: hover) {
+  [data-scroll-latest]:hover {
+    color: var(--color-text-primary);
+    transform: scale(1.05);
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-scroll-latest]:hover {
+    background: var(--lcd-sel-soft);
+    color: var(--lcd-ink);
+    transform: none;
+  }
+}
+
+/* After hover, as a press shrinks the key even under the pointer. */
+[data-scroll-latest]:active {
+  transform: scale(0.95);
+}
+
+@media (pointer: coarse) {
+  [data-scroll-latest] {
+    width: max(2.75rem, 44px);
+    height: max(2.75rem, 44px);
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-scroll-latest] {
+    width: max(2.5rem, 44px);
+    height: max(2.5rem, 44px);
   }
 }

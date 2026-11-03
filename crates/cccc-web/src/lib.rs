@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod browser_surface;
+mod chet_group_input;
 mod codex_voice;
 #[cfg(test)]
 mod connect_browser_fixture;
@@ -47,6 +48,8 @@ pub fn system_browser_path() -> Option<std::path::PathBuf> {
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 const COMPONENT_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+// Analyst protocol shutdown first requests TERM and allows two seconds before KILL.
+const VOICE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServeOutcome {
@@ -55,6 +58,37 @@ pub enum ServeOutcome {
 }
 
 pub type ListeningCallback = Arc<dyn Fn(SocketAddr) + Send + Sync>;
+
+/// Recovery provided only by a Web host holding the corresponding instance
+/// lock. A standalone library app has no authority to reconcile another host.
+#[derive(Clone)]
+pub struct VoiceProcessRecovery {
+    pub reconcile: Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>,
+    pub review: Arc<VoiceProcessReview>,
+    /// None means the daemon holds its lock and must be asked through IPC.
+    pub review_daemon_offline: Arc<DaemonProcessReview>,
+    /// Unix hosts use the daemon's process ledger; Windows uses Job ownership.
+    pub check_daemon_guard: bool,
+}
+
+pub type VoiceProcessReview = dyn Fn(
+        VoiceRecoveryRequest,
+    ) -> Result<serde_json::Value, cccc_runtime::process_recovery::RecoveryError>
+    + Send
+    + Sync;
+
+pub type DaemonProcessReview = dyn Fn(
+        VoiceRecoveryRequest,
+    ) -> Result<Option<serde_json::Value>, cccc_runtime::process_recovery::RecoveryError>
+    + Send
+    + Sync;
+
+#[derive(Clone)]
+pub enum VoiceRecoveryRequest {
+    List,
+    Retry { id: String, version: String },
+    Accept { id: String, version: String },
+}
 
 #[derive(Clone)]
 pub(crate) struct LiveBinding {
@@ -178,19 +212,53 @@ fn app_with_shutdown(
     Arc<browser_surface::BrowserSurfaces>,
     AppState,
 ) {
+    let (app, im_workers, browser_surfaces, state, _) = app_with_shutdown_and_recovery(
+        home,
+        shutdown,
+        web_mode,
+        restart,
+        live_binding,
+        runtime_id,
+        None,
+    );
+    (app, im_workers, browser_surfaces, state)
+}
+
+fn app_with_shutdown_and_recovery(
+    home: HomeLayout,
+    shutdown: broadcast::Sender<()>,
+    web_mode: WebMode,
+    restart: Option<Arc<RestartHandle>>,
+    live_binding: LiveBinding,
+    runtime_id: String,
+    process_recovery: Option<VoiceProcessRecovery>,
+) -> (
+    Router,
+    Arc<im_runtime::ImWorkerRegistry>,
+    Arc<browser_surface::BrowserSurfaces>,
+    AppState,
+    Option<tokio::task::JoinHandle<()>>,
+) {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let ledger_events = ledger_event_hub::LedgerEventHub::new(home.clone());
     let im_workers = Arc::new(im_runtime::ImWorkerRegistry::new(ledger_events.clone()));
-    im_workers.restore_enabled(home.clone(), DaemonClient::new(home.clone()));
+    im_workers.restore_enabled(
+        home.clone(),
+        DaemonClient::new(home.clone()).without_voice_origin(),
+    );
     let browser_surfaces = Arc::new(browser_surface::BrowserSurfaces::default());
-    let codex_voice = Arc::new(codex_voice::CodexVoiceSessions::new());
+    let codex_voice = Arc::new(if process_recovery.is_some() {
+        codex_voice::CodexVoiceSessions::with_process_recovery(process_recovery)
+    } else {
+        codex_voice::CodexVoiceSessions::new()
+    });
     let notebooklm_auth = Arc::new(notebooklm_auth::AuthFlowManager::default());
     spawn_notebooklm_auth_shutdown(
         Arc::clone(&notebooklm_auth),
         Arc::clone(&browser_surfaces),
         shutdown.subscribe(),
     );
-    spawn_codex_voice_shutdown(Arc::clone(&codex_voice), shutdown.subscribe());
+    let voice_shutdown = spawn_codex_voice_shutdown(Arc::clone(&codex_voice), shutdown.subscribe());
     spawn_group_resource_reaper(
         home.clone(),
         Arc::clone(&im_workers),
@@ -212,7 +280,7 @@ fn app_with_shutdown(
         connect_http: connect_frames::http_client()
             .build()
             .map_err(|error| error.to_string()),
-        client: DaemonClient::new(home.clone()),
+        client: DaemonClient::new(home.clone()).without_voice_origin(),
         home,
         browser_surfaces: Arc::clone(&browser_surfaces),
         codex_voice,
@@ -229,7 +297,7 @@ fn app_with_shutdown(
         push,
     };
     let app = router_for_state(state.clone());
-    (app, im_workers, browser_surfaces, state)
+    (app, im_workers, browser_surfaces, state, voice_shutdown)
 }
 
 fn router_for_state(state: AppState) -> Router {
@@ -267,16 +335,36 @@ fn router_for_state(state: AppState) -> Router {
 fn spawn_codex_voice_shutdown(
     sessions: Arc<codex_voice::CodexVoiceSessions>,
     mut shutdown: broadcast::Receiver<()>,
-) {
-    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-        return;
-    };
-    runtime.spawn(async move {
+) -> Option<tokio::task::JoinHandle<()>> {
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
+    Some(runtime.spawn(async move {
         let _ = shutdown.recv().await;
         if let Err(error) = sessions.shutdown().await {
             tracing::warn!(%error, "Codex Voice shutdown failed");
+            cccc_runtime::diagnostic(format_args!(
+                "[cccc] Voice cleanup failed; check the Web logs"
+            ));
         }
-    });
+    }))
+}
+
+async fn await_codex_voice_shutdown(
+    task: Option<tokio::task::JoinHandle<()>>,
+    timeout: std::time::Duration,
+) {
+    let Some(task) = task else { return };
+    match tokio::time::timeout(timeout, task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Codex Voice shutdown worker failed");
+            cccc_runtime::diagnostic(format_args!(
+                "[cccc] Voice cleanup worker failed; cleanup was not confirmed"
+            ));
+        }
+        Err(_) => cccc_runtime::diagnostic(format_args!(
+            "[cccc] Voice cleanup timed out; completion was not confirmed"
+        )),
+    }
 }
 
 fn spawn_notebooklm_auth_shutdown(
@@ -430,6 +518,7 @@ where
         shutdown,
         restart_behavior,
         None,
+        None,
     )
     .await?
     {
@@ -457,10 +546,37 @@ where
         shutdown,
         RestartBehavior::ReturnToSupervisor,
         on_listening,
+        None,
     )
     .await
 }
 
+pub async fn serve_until_mode_supervised_with_voice_recovery<F>(
+    home: HomeLayout,
+    host: &str,
+    port: u16,
+    web_mode: WebMode,
+    shutdown: F,
+    on_listening: Option<ListeningCallback>,
+    process_recovery: VoiceProcessRecovery,
+) -> Result<ServeOutcome>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    serve_until_mode_with_restart(
+        home,
+        host,
+        port,
+        web_mode,
+        shutdown,
+        RestartBehavior::ReturnToSupervisor,
+        on_listening,
+        Some(process_recovery),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn serve_until_mode_with_restart<F>(
     home: HomeLayout,
     host: &str,
@@ -469,6 +585,7 @@ async fn serve_until_mode_with_restart<F>(
     shutdown: F,
     restart_behavior: RestartBehavior,
     on_listening: Option<ListeningCallback>,
+    process_recovery: Option<VoiceProcessRecovery>,
 ) -> Result<ServeOutcome>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -496,17 +613,19 @@ where
         .then(|| Arc::new(RestartHandle::new(web_shutdown.clone())));
     let mut restart_rx = web_shutdown.subscribe();
     let (shutdown_started, mut shutdown_started_rx) = tokio::sync::oneshot::channel();
-    let (app, im_workers, browser_surfaces, app_state) = app_with_shutdown(
-        home,
-        web_shutdown.clone(),
-        web_mode,
-        restart.clone(),
-        LiveBinding {
-            host: host.to_owned(),
-            port: address.port(),
-        },
-        runtime_id,
-    );
+    let (app, im_workers, browser_surfaces, app_state, voice_shutdown) =
+        app_with_shutdown_and_recovery(
+            home,
+            web_shutdown.clone(),
+            web_mode,
+            restart.clone(),
+            LiveBinding {
+                host: host.to_owned(),
+                port: address.port(),
+            },
+            runtime_id,
+            process_recovery,
+        );
     if let Err(error) = web_runtime_state::write(
         &app_state.home,
         host,
@@ -520,7 +639,17 @@ where
     }
     routes::spawn_web_model_supervisor(app_state.clone());
     routes::spawn_grok_webhooks(app_state.clone());
+    // An exhibit never installs voice models; the full Web clears what installs left behind.
+    if !web_mode.is_read_only() {
+        routes::spawn_voice_model_cleanup(app_state.home.clone());
+    }
+    if !web_mode.is_read_only() {
+        chet_group_input::spawn(app_state.clone());
+    }
     routes::spawn_dots_events(app_state);
+    // Also notify shutdown subscribers if the server fails before its graceful
+    // shutdown future fires.
+    let shutdown_after_server = web_shutdown.clone();
     let server = async move {
         axum::serve(
             listener,
@@ -538,26 +667,36 @@ where
         .await
     };
     tokio::pin!(server);
-    let server_result = tokio::select! {
+    let (server_result, shutdown_was_sent) = tokio::select! {
         biased;
-        result = &mut server => result,
-        _ = &mut shutdown_started_rx => {
-            match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, &mut server).await {
+        result = &mut server => (result, shutdown_started_rx.try_recv().is_ok()),
+        started = &mut shutdown_started_rx => {
+            let result = match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, &mut server).await {
                 Ok(result) => result,
                 Err(_) => {
                     tracing::warn!("Web graceful shutdown timed out; closing active connections");
                     Ok(())
                 }
-            }
+            };
+            (result, started.is_ok())
         }
     };
-    if tokio::time::timeout(COMPONENT_SHUTDOWN_TIMEOUT, im_workers.shutdown())
-        .await
-        .is_err()
-    {
-        tracing::warn!("Web component shutdown timed out; cancelling remaining IM workers");
+    if !shutdown_was_sent {
+        let _ = shutdown_after_server.send(());
     }
-    shutdown::browser_surfaces(&browser_surfaces).await;
+    let other_shutdown = async {
+        if tokio::time::timeout(COMPONENT_SHUTDOWN_TIMEOUT, im_workers.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::warn!("Web component shutdown timed out; cancelling remaining IM workers");
+        }
+        shutdown::browser_surfaces(&browser_surfaces).await;
+    };
+    tokio::join!(
+        await_codex_voice_shutdown(voice_shutdown, VOICE_SHUTDOWN_TIMEOUT),
+        other_shutdown,
+    );
     if let Err(error) = web_runtime_state::clear_if_owner(&runtime_home) {
         tracing::warn!(%error, "failed to clear live Web binding");
     }

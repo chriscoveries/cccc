@@ -14,6 +14,7 @@ export type PendingPrependCompensation = {
   anchorId: string;
   anchorOffsetPx: number;
   anchorTop: number | null;
+  kind?: "append";
 };
 
 export function shouldTriggerTopHistoryLoad(input: {
@@ -246,7 +247,7 @@ export function useTopHistoryLoadCoordinator(input: {
   cancelPendingBottomScroll: () => void;
   detachFollowMode: () => void;
   markAwayFromBottom: () => void;
-  onLoadMore?: () => void;
+  onLoadMore?: () => void | false | Promise<void | false>;
 }) {
   const {
     compensation,
@@ -261,8 +262,10 @@ export function useTopHistoryLoadCoordinator(input: {
     onLoadMore,
   } = input;
   const topLoadArmedRef = useRef(true);
+  const loadSequenceRef = useRef(0);
 
   const reset = useCallback(() => {
+    loadSequenceRef.current += 1;
     topLoadArmedRef.current = true;
     compensation.clear();
   }, [compensation]);
@@ -281,38 +284,44 @@ export function useTopHistoryLoadCoordinator(input: {
     [getAnchorSnapshot, getAnchorTop, getCurrentContentSize],
   );
 
-  const handleTopHistoryScroll = useCallback(
-    (params: {
-      scrollTop: number;
-      topTriggerPx: number;
-      topRearmPx: number;
-      hasMoreHistory: boolean;
-      isLoadingHistory: boolean;
-    }) => {
-      // The reader keeps scrolling (mobile momentum included) while the older
-      // page loads. Track where they are now, otherwise the compensation would
-      // snap back to the position captured when the load was triggered.
-      if (compensation.pendingRef.current) {
-        compensation.begin(capturePendingCompensation(params.scrollTop));
+  // A manual request and a top-scroll request share one anchor and one in-flight gate.
+  const beginTopHistoryLoad = useCallback(
+    (scrollTop: number) => {
+      if (!onLoadMore || compensation.pendingRef.current || compensation.isCompensatingRef.current)
         return false;
-      }
-
-      const decision = getTopHistoryLoadDecision({
-        ...params,
-        topLoadArmed: topLoadArmedRef.current,
-        isPrependCompensating: compensation.isCompensatingRef.current,
-        hasLoadMoreHandler: !!onLoadMore,
-      });
-      topLoadArmedRef.current = decision.topLoadArmed;
-      if (!decision.shouldLoad) return false;
-
+      topLoadArmedRef.current = false;
       detachFollowMode();
       markAwayFromBottom();
       cancelPendingBottomScroll();
-
-      compensation.begin(capturePendingCompensation(params.scrollTop));
-
-      onLoadMore?.();
+      compensation.begin(capturePendingCompensation(scrollTop));
+      const sequence = ++loadSequenceRef.current;
+      const releaseUnstarted = () => {
+        if (loadSequenceRef.current !== sequence) return false;
+        compensation.clear();
+        topLoadArmedRef.current = true;
+        return true;
+      };
+      let result: ReturnType<NonNullable<typeof onLoadMore>>;
+      try {
+        result = onLoadMore();
+      } catch (error) {
+        releaseUnstarted();
+        throw error;
+      }
+      if (result === false) {
+        releaseUnstarted();
+        return false;
+      }
+      if (result) {
+        void result.then(
+          (started) => {
+            if (started === false) releaseUnstarted();
+          },
+          (error: unknown) => {
+            if (releaseUnstarted()) console.error("Failed to load older messages:", error);
+          },
+        );
+      }
       return true;
     },
     [
@@ -325,12 +334,53 @@ export function useTopHistoryLoadCoordinator(input: {
     ],
   );
 
+  const requestTopHistoryLoad = useCallback(
+    (params: { scrollTop: number; hasMoreHistory: boolean; isLoadingHistory: boolean }) => {
+      if (!params.hasMoreHistory || params.isLoadingHistory) return false;
+      return beginTopHistoryLoad(params.scrollTop);
+    },
+    [beginTopHistoryLoad],
+  );
+
+  const handleTopHistoryScroll = useCallback(
+    (params: {
+      scrollTop: number;
+      topTriggerPx: number;
+      topRearmPx: number;
+      hasMoreHistory: boolean;
+      isLoadingHistory: boolean;
+    }) => {
+      // The reader keeps scrolling (mobile momentum included) while the older
+      // page loads. Track where they are now, otherwise the compensation would
+      // snap back to the position captured when the load was triggered.
+      if (compensation.pendingRef.current) {
+        compensation.begin({
+          ...capturePendingCompensation(params.scrollTop),
+          kind: compensation.pendingRef.current.kind,
+        });
+        return false;
+      }
+
+      const decision = getTopHistoryLoadDecision({
+        ...params,
+        topLoadArmed: topLoadArmedRef.current,
+        isPrependCompensating: compensation.isCompensatingRef.current,
+        hasLoadMoreHandler: !!onLoadMore,
+      });
+      topLoadArmedRef.current = decision.topLoadArmed;
+      if (!decision.shouldLoad) return false;
+      return beginTopHistoryLoad(params.scrollTop);
+    },
+    [beginTopHistoryLoad, capturePendingCompensation, compensation, onLoadMore],
+  );
+
   const applyPendingPrependCompensation = useCallback(
     (params: { isLoadingHistory: boolean }) => {
       if (params.isLoadingHistory) return false;
       const pending = compensation.pendingRef.current;
       if (!pending) return false;
 
+      loadSequenceRef.current += 1;
       compensation.takePending();
 
       if (pending.anchorId && scrollToMessageAnchor(pending.anchorId, pending.anchorOffsetPx)) {
@@ -343,6 +393,11 @@ export function useTopHistoryLoadCoordinator(input: {
         return true;
       }
 
+      if (pending.kind === "append") {
+        compensation.scrollToOffset(pending.previousOffset);
+        compensation.scheduleAnchorCorrection(pending.anchorId, pending.anchorTop);
+        return true;
+      }
       const nextTotalSize = getCurrentContentSize();
       const delta = Math.max(0, nextTotalSize - pending.previousTotalSize);
       if (delta <= 0) {
@@ -359,7 +414,12 @@ export function useTopHistoryLoadCoordinator(input: {
   );
 
   return useMemo(
-    () => ({ handleTopHistoryScroll, applyPendingPrependCompensation, reset }),
-    [applyPendingPrependCompensation, handleTopHistoryScroll, reset],
+    () => ({
+      handleTopHistoryScroll,
+      requestTopHistoryLoad,
+      applyPendingPrependCompensation,
+      reset,
+    }),
+    [applyPendingPrependCompensation, handleTopHistoryScroll, requestTopHistoryLoad, reset],
   );
 }

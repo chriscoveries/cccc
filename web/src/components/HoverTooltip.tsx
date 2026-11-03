@@ -8,6 +8,7 @@ import {
   shift,
   useDismiss,
   useFloating,
+  useFocus,
   useHover,
   useInteractions,
   useRole,
@@ -15,13 +16,15 @@ import {
 
 interface HoverTooltipProps {
   label: ReactNode;
+  /** Also show for keyboard focus, for controls whose name and state live only here. */
+  openOnFocus?: boolean;
   children: (
     getReferenceProps: (userProps?: HTMLAttributes<HTMLElement>) => Record<string, unknown>,
     setReference: (node: HTMLElement | null) => void,
   ) => ReactNode;
 }
 
-export function HoverTooltip({ label, children }: HoverTooltipProps) {
+export function HoverTooltip({ label, openOnFocus = false, children }: HoverTooltipProps) {
   const [isOpen, setIsOpen] = useState(false);
   const { refs, floatingStyles, context } = useFloating({
     open: isOpen,
@@ -34,9 +37,10 @@ export function HoverTooltip({ label, children }: HoverTooltipProps) {
 
   const isPositioned = context.isPositioned;
   const hover = useHover(context, { delay: 150, restMs: 80 });
+  const focus = useFocus(context, { enabled: openOnFocus, visibleOnly: true });
   const dismiss = useDismiss(context);
   const role = useRole(context, { role: "tooltip" });
-  const { getReferenceProps, getFloatingProps } = useInteractions([hover, dismiss, role]);
+  const { getReferenceProps, getFloatingProps } = useInteractions([hover, focus, dismiss, role]);
 
   const setReference = useCallback((node: HTMLElement | null) => refs.setReference(node), [refs]);
   const setFloating = useCallback((node: HTMLElement | null) => refs.setFloating(node), [refs]);

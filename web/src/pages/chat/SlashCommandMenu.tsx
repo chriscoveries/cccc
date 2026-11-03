@@ -1,6 +1,8 @@
 import { useLayoutEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { useComposerMenuHeight } from "./useComposerMenuHeight";
 import { classNames } from "../../utils/classNames";
+import { BUILTIN_SLASH_DESCRIPTION_KEYS } from "../../utils/builtinSlashCommands";
 import { slashCommandDisplayKind, type SlashCommandItem } from "../../utils/slashCommands";
 
 export function SlashCommandMenu(props: {
@@ -23,6 +25,7 @@ export function SlashCommandMenu(props: {
     onHover,
     onLoadMore,
   } = props;
+  const { t } = useTranslation("chat");
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const menuRef = useRef<HTMLDivElement | null>(null);
   useComposerMenuHeight(menuRef, suggestions.length > 0);
@@ -48,12 +51,18 @@ export function SlashCommandMenu(props: {
     <div
       ref={menuRef}
       onScroll={handleScroll}
-      className="glass-panel absolute bottom-full left-2 z-30 mb-3 max-h-60 w-72 overflow-auto rounded-2xl border shadow-2xl animate-in fade-in zoom-in-95 duration-200 scrollbar-subtle"
+      className="glass-panel absolute bottom-full left-2 z-30 mb-3 max-h-60 w-[min(18rem,calc(100%-1rem))] overflow-auto rounded-2xl border shadow-2xl animate-in fade-in zoom-in-95 duration-200 scrollbar-subtle"
       role="listbox"
+      data-lcd-menu
     >
       {suggestions.map((item, idx) => {
         const displayKind = slashCommandDisplayKind(item);
         const isSelected = idx === selectedIndex;
+        const descriptionKey = BUILTIN_SLASH_DESCRIPTION_KEYS.get(item.capabilityId || "");
+        const description =
+          descriptionKey && item.description === t(descriptionKey, { lng: "en" })
+            ? t(descriptionKey)
+            : item.description;
         return (
           <button
             key={`${item.sourceType}:${item.command}`}
@@ -84,7 +93,7 @@ export function SlashCommandMenu(props: {
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <div className="truncate font-medium">{item.command}</div>
-                {item.description ? (
+                {description ? (
                   <div
                     className={classNames(
                       "truncate text-xs",
@@ -96,8 +105,9 @@ export function SlashCommandMenu(props: {
                           ? "text-slate-400"
                           : "text-gray-500",
                     )}
+                    data-lcd-hint
                   >
-                    {item.description}
+                    {description}
                   </div>
                 ) : null}
               </div>
@@ -120,6 +130,7 @@ export function SlashCommandMenu(props: {
                           ? "bg-white/8 text-slate-400"
                           : "bg-black/5 text-gray-500",
                 )}
+                data-lcd-tag
               >
                 {displayKind}
               </span>
@@ -133,6 +144,7 @@ export function SlashCommandMenu(props: {
             "px-4 py-2 text-center text-xs",
             isDark ? "text-slate-500" : "text-gray-400",
           )}
+          data-lcd-hint
         >
           {loadMoreLabel}
         </div>

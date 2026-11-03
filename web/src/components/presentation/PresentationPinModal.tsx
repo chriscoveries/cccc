@@ -105,6 +105,7 @@ function WorkspaceList({
       )}
     >
       <div
+        data-presentation-picker-path
         className={classNames(
           "border-b px-4 py-2 text-xs font-mono",
           isDark ? "border-white/10 text-slate-400" : "border-black/10 text-gray-500",
@@ -114,6 +115,7 @@ function WorkspaceList({
       </div>
       {error ? (
         <div
+          data-status-tone="error"
           className={classNames("px-4 py-4 text-sm", isDark ? "text-rose-300" : "text-rose-600")}
         >
           {error}
@@ -123,6 +125,7 @@ function WorkspaceList({
           {parentPath !== null ? (
             <button
               type="button"
+              data-presentation-picker-row
               onClick={() => onOpenDir(parentPath)}
               className={classNames(
                 "flex w-full items-center gap-2 border-b px-4 py-3 text-left text-sm transition-colors",
@@ -131,7 +134,12 @@ function WorkspaceList({
                   : "border-black/10 text-gray-700 hover:bg-gray-50",
               )}
             >
-              <span className={isDark ? "text-slate-500" : "text-gray-400"}>..</span>
+              <span
+                data-status-tone="muted"
+                className={isDark ? "text-slate-500" : "text-gray-400"}
+              >
+                ..
+              </span>
             </button>
           ) : null}
           {busy ? (
@@ -149,6 +157,8 @@ function WorkspaceList({
                 <button
                   key={item.path}
                   type="button"
+                  data-presentation-picker-row
+                  data-selected={isSelected || undefined}
                   onClick={() => (item.is_dir ? onOpenDir(item.path) : onSelectFile(item.path))}
                   className={classNames(
                     "flex w-full items-center gap-3 px-4 py-3 text-left text-sm transition-colors",
@@ -162,6 +172,7 @@ function WorkspaceList({
                   )}
                 >
                   <span
+                    data-presentation-picker-kind={item.is_dir ? "dir" : "file"}
                     className={classNames(
                       "w-5 text-center text-xs",
                       item.is_dir
@@ -178,6 +189,7 @@ function WorkspaceList({
                   <span className="min-w-0 flex-1 truncate">{item.name}</span>
                   {!item.is_dir && item.mime_type ? (
                     <span
+                      data-status-tone="muted"
                       className={classNames("text-xs", isDark ? "text-slate-500" : "text-gray-400")}
                     >
                       {item.mime_type}
@@ -505,13 +517,17 @@ export function PresentationPinModal({
           </label>
 
           {error ? (
-            <div className={classNames("text-sm", isDark ? "text-rose-300" : "text-rose-600")}>
+            <div
+              data-status-tone="error"
+              className={classNames("text-sm", isDark ? "text-rose-300" : "text-rose-600")}
+            >
               {error}
             </div>
           ) : null}
         </div>
 
         <div
+          data-presentation-pin-footer
           className={classNames(
             "grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-2.5 border-t px-5 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] sm:flex sm:items-center sm:justify-end sm:gap-3 sm:py-4",
             isDark ? "border-white/10" : "border-black/10",
@@ -519,6 +535,7 @@ export function PresentationPinModal({
         >
           <button
             type="button"
+            data-lcd-key
             onClick={onClose}
             disabled={busy}
             className={classNames(
@@ -531,6 +548,7 @@ export function PresentationPinModal({
           </button>
           <button
             type="button"
+            data-lcd-primary
             onClick={() => void handleSubmit()}
             disabled={busy}
             className={classNames(

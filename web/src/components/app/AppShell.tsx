@@ -343,6 +343,7 @@ function AppShellContent({
                       isDark={isDark}
                       isSmallScreen={isSmallScreen}
                       readOnly={webReadOnly}
+                      canCreateGroup={!!onCreateGroup}
                       mobileAppHeaderReserved={!webReadOnly && codexVoice.controller.isEngaged}
                       selectedGroupId={selectedGroupId}
                       selectedGroupRunning={selectedGroupRunning}

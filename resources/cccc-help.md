@@ -10,7 +10,7 @@ CCCC routes and shared-state reference, including the peer collaboration contrac
 - Target either `user` alone or one/more agents; never mix domains. Mail is agent-only, so send separate messages to humans.
 - Promote/retry with `cccc_message_deliver`; a new claim wakes a paused/stopped Group; confirm `ambiguous` retries.
 - `cccc_inbox_read` consumes Mail; `cccc_message_history` inspects messages without changing Mail state.
-- Read shared truth with `cccc_context_get`; reserve `cccc_agent_state` for cross-turn recovery.
+- Read shared truth with `cccc_context_get(detail="overview")` and open tasks with `cccc_task()`; reserve `cccc_agent_state` for cross-turn recovery.
 - Invoke known hidden tools with `cccc_capability_use`; search only when unknown.
 
 If the client blocks a tool call, report the actual tool name and error. A host refusal is not evidence that CCCC executed the operation. Await user guidance before retrying that operation, including through a different tool.
@@ -35,6 +35,7 @@ per-recipient runtime truth is `runtime.delivery`.
 ### Chat
 
 - Targets are `@all`, `@foreman`, `@peers`, `user`, or actor IDs. Before replying, verify `event_id`; before any message, verify `to`. Avoid broad targets for narrow updates.
+- `@chet`, alone, addresses Chet, the user's global assistant, with Send or Request reply, not Mail. A member whose ID or title is `chet` makes it ambiguous, and the send is refused. To reply to a message from Chet, omit `to`.
 - Reply to the current message with its `event_id`; `reply_to` is its optional parent.
 - Use a tracked task, not a reply request, for durable execution and evidence.
 
@@ -59,7 +60,8 @@ an uncertain send, rather than creating another message.
 ### Shared Context
 
 - The daemon and append-only group ledger are the source of truth.
-- `cccc_context_get` reads the current brief, tasks, handoffs, and actor state.
+- `cccc_context_get` reads the current brief, tasks, handoffs, and actor state; `detail="overview"` leaves the task list out.
+- `cccc_task()` lists open tasks one row each; list a task by `task_id` for its notes, checklist and outcome before updating them.
 - Coordination and task tools are direct; project and memory tools are on demand. Do not mirror every local todo.
 
 ### State Layers

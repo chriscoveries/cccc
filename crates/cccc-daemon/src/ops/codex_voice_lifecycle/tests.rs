@@ -10,6 +10,617 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+#[tokio::test]
+async fn in_flight_snapshot_includes_starting_native_and_active_inputs_without_waiting() {
+    let (session, server) = test_session().await;
+    let session = Arc::new(session);
+    let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+    let mut state = lifecycle.state.lock().await;
+    state.pending = Some(PendingStart {
+        delegation_id: "starting".into(),
+        origin: AnalystTurnOrigin::Voice,
+        cancelling: false,
+    });
+    state.native_pending.push_back(PendingStart {
+        delegation_id: "native".into(),
+        origin: AnalystTurnOrigin::Terminal,
+        cancelling: false,
+    });
+    state.queue.push_back(queue::QueuedInput {
+        delegation_id: "queued".into(),
+        text: "later".into(),
+        origin: AnalystTurnOrigin::Terminal,
+    });
+    state.active = Some(ActiveTurn {
+        turn_id: "turn".into(),
+        latest_delegation_id: "active".into(),
+        delegation_ids: vec!["active".into()],
+        origin: AnalystTurnOrigin::Terminal,
+        cancelling: false,
+        deltas: String::new(),
+        completed_text: String::new(),
+        result_overflowed: false,
+    });
+    assert!(
+        lifecycle.try_in_flight().is_none(),
+        "locked is unknown, not empty"
+    );
+    drop(state);
+    let (queued, working) = lifecycle.try_in_flight().expect("unlocked");
+    assert_eq!(queued, ["starting", "native", "queued"]);
+    assert_eq!(working, ["active"]);
+    session.stop(session.generation()).await.expect("stop");
+    server.await.expect("fake server");
+}
+
+#[tokio::test]
+async fn invalidation_reports_queued_inputs_as_never_started() {
+    let (session, server) = test_session().await;
+    let session = Arc::new(session);
+    let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+    let mut events = lifecycle.subscribe();
+    lifecycle
+        .state
+        .lock()
+        .await
+        .queue
+        .push_back(queue::QueuedInput {
+            delegation_id: "queued".into(),
+            text: "later".into(),
+            origin: AnalystTurnOrigin::Terminal,
+        });
+    lifecycle.invalidate().await;
+    match events.recv().await.expect("not started") {
+        AnalystLifecycleEvent::Completed {
+            source,
+            delegation_id,
+            status,
+            ..
+        } => {
+            assert_eq!(source, AnalystCompletionSource::HostNotStarted);
+            assert_eq!(delegation_id, "queued");
+            assert_eq!(status, "cancelled");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert!(matches!(
+        events.recv().await.expect("disconnected"),
+        AnalystLifecycleEvent::Disconnected
+    ));
+    assert!(lifecycle.state.lock().await.queue.is_empty());
+    session.stop(session.generation()).await.expect("stop");
+    server.await.expect("fake server");
+}
+
+#[tokio::test]
+async fn busy_input_is_not_requeued_after_invalidation() {
+    let (session, server) = test_session().await;
+    let session = Arc::new(session);
+    let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+    let mut events = lifecycle.subscribe();
+    let mut state = lifecycle.state.lock().await;
+    lifecycle.requeue_after_busy(
+        queue::QueuedInput {
+            delegation_id: "live".into(),
+            text: "later".into(),
+            origin: AnalystTurnOrigin::Terminal,
+        },
+        &mut state,
+    );
+    assert_eq!(
+        state
+            .queue
+            .pop_front()
+            .expect("live input requeued")
+            .delegation_id,
+        "live"
+    );
+    lifecycle
+        .queue_len
+        .store(0, std::sync::atomic::Ordering::Release);
+    assert!(events.try_recv().is_err());
+    state.invalidated = true;
+    lifecycle.requeue_after_busy(
+        queue::QueuedInput {
+            delegation_id: "busy".into(),
+            text: "later".into(),
+            origin: AnalystTurnOrigin::Terminal,
+        },
+        &mut state,
+    );
+    assert!(state.queue.is_empty());
+    drop(state);
+    assert!(matches!(
+        events.recv().await.expect("not started"),
+        AnalystLifecycleEvent::Completed {
+            source: AnalystCompletionSource::HostNotStarted,
+            delegation_id,
+            ..
+        } if delegation_id == "busy"
+    ));
+    session.stop(session.generation()).await.expect("stop");
+    server.await.expect("fake server");
+}
+
+#[tokio::test]
+async fn invalidated_lifecycle_refuses_native_input_registration() {
+    let (session, server) = test_session().await;
+    let session = Arc::new(session);
+    let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+    let mut state = lifecycle.state.lock().await;
+    state.invalidated = true;
+    let error = lifecycle
+        .register_native_input("late", "question", AnalystTurnOrigin::Voice, state)
+        .await
+        .expect_err("an invalidated owner cannot register native input");
+    assert!(error.to_string().contains("lifecycle ended"));
+    assert!(lifecycle.state.lock().await.native_pending.is_empty());
+    session.stop(session.generation()).await.expect("stop");
+    server.await.expect("fake server");
+}
+
+#[tokio::test]
+async fn late_receipt_after_invalidation_does_not_revive_queued_work() {
+    let (session, server, start_seen, release_start) = test_session_with_delayed_start().await;
+    let session = Arc::new(session);
+    let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+    let mut events = lifecycle.subscribe();
+    lifecycle
+        .state
+        .lock()
+        .await
+        .queue
+        .push_back(queue::QueuedInput {
+            delegation_id: "late".into(),
+            text: "question".into(),
+            origin: AnalystTurnOrigin::Terminal,
+        });
+    lifecycle.queue_notify.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), start_seen)
+        .await
+        .expect("start request deadline")
+        .expect("fake provider saw start");
+    lifecycle.invalidate().await;
+    release_start.send(()).expect("release receipt");
+    assert!(matches!(
+        events.recv().await.expect("disconnected"),
+        AnalystLifecycleEvent::Disconnected
+    ));
+    let event = tokio::time::timeout(Duration::from_secs(3), events.recv())
+        .await
+        .expect("completion deadline")
+        .expect("completion event");
+    assert!(matches!(
+        event,
+        AnalystLifecycleEvent::Completed {
+            source: AnalystCompletionSource::HostUnconfirmed,
+            delegation_id,
+            ..
+        } if delegation_id == "late"
+    ));
+    assert!(
+        events.try_recv().is_err(),
+        "no Started may follow invalidation"
+    );
+    let state = lifecycle.state.lock().await;
+    assert!(state.invalidated && state.active.is_none() && state.queue.is_empty());
+    drop(state);
+    session.stop(session.generation()).await.expect("stop");
+    server.await.expect("fake server");
+}
+
+#[tokio::test]
+async fn group_and_other_inputs_wait_for_each_other_and_then_start() {
+    for (active_origin, arriving_origin) in [
+        (AnalystTurnOrigin::Terminal, AnalystTurnOrigin::Group),
+        (AnalystTurnOrigin::Group, AnalystTurnOrigin::Terminal),
+        (AnalystTurnOrigin::Voice, AnalystTurnOrigin::Group),
+        (AnalystTurnOrigin::Group, AnalystTurnOrigin::Voice),
+        (
+            AnalystTurnOrigin::ActorResult { speakable: false },
+            AnalystTurnOrigin::Group,
+        ),
+        (
+            AnalystTurnOrigin::Group,
+            AnalystTurnOrigin::ActorResult { speakable: false },
+        ),
+    ] {
+        let (session, server, start_seen, release_start) = test_session_with_delayed_start().await;
+        let session = Arc::new(session);
+        let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+        let mut events = lifecycle.subscribe();
+        session.publish_event_for_test(json!({
+            "method":"turn/started", "params":{"threadId":"thread-lifecycle","turn":{"id":"busy"}}
+        }));
+        events.recv().await.expect("active turn");
+        lifecycle
+            .state
+            .lock()
+            .await
+            .active
+            .as_mut()
+            .expect("active")
+            .origin = active_origin;
+        let admission = lifecycle
+            .admit_input("next", "separate input", arriving_origin)
+            .await
+            .expect("enqueue");
+        assert!(matches!(admission, VoiceDelegationAdmission::Queued { .. }));
+        assert!(matches!(
+            events.recv().await.expect("queued"),
+            AnalystLifecycleEvent::Queued { .. }
+        ));
+        assert!(
+            lifecycle
+                .state
+                .lock()
+                .await
+                .active
+                .as_ref()
+                .expect("active")
+                .delegation_ids
+                .iter()
+                .all(|id| id != "next")
+        );
+
+        session.publish_event_for_test(json!({
+            "method":"turn/completed", "params":{"turn":{"id":"busy","status":"completed"}}
+        }));
+        assert!(matches!(
+            events.recv().await.expect("old completion"),
+            AnalystLifecycleEvent::Completed { .. }
+        ));
+        tokio::time::timeout(Duration::from_secs(3), start_seen)
+            .await
+            .expect("queue started next input")
+            .expect("fake saw start");
+        release_start.send(()).expect("release next turn");
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_secs(3), events.recv()).await
+            .expect("new start deadline").expect("started"),
+            AnalystLifecycleEvent::Started { receipt, origin }
+                if receipt.delegation_id == "next" && origin == arriving_origin)
+        );
+        session.stop(session.generation()).await.expect("stop");
+        server.await.expect("fake server");
+    }
+}
+
+#[tokio::test]
+async fn group_and_other_inputs_also_wait_during_an_unresolved_start() {
+    for (starting_origin, arriving_origin) in [
+        (AnalystTurnOrigin::Terminal, AnalystTurnOrigin::Group),
+        (AnalystTurnOrigin::Group, AnalystTurnOrigin::Terminal),
+        (AnalystTurnOrigin::Voice, AnalystTurnOrigin::Group),
+        (AnalystTurnOrigin::Group, AnalystTurnOrigin::Voice),
+        (
+            AnalystTurnOrigin::ActorResult { speakable: false },
+            AnalystTurnOrigin::Group,
+        ),
+        (
+            AnalystTurnOrigin::Group,
+            AnalystTurnOrigin::ActorResult { speakable: false },
+        ),
+    ] {
+        let (session, server, start_seen, release_start) = test_session_with_delayed_start().await;
+        let session = Arc::new(session);
+        let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+        let mut events = lifecycle.subscribe();
+        let starting = Arc::clone(&lifecycle);
+        let start = tokio::spawn(async move {
+            starting
+                .admit_input("first", "starting input", starting_origin)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), start_seen)
+            .await
+            .expect("start request")
+            .expect("fake saw start");
+        assert!(matches!(
+            lifecycle
+                .admit_input("next", "separate input", arriving_origin)
+                .await
+                .expect("enqueue"),
+            VoiceDelegationAdmission::Queued { .. }
+        ));
+        assert!(matches!(
+            events.recv().await.expect("queued"),
+            AnalystLifecycleEvent::Queued { .. }
+        ));
+        release_start.send(()).expect("release first turn");
+        assert!(matches!(
+            start.await.expect("start task").expect("first accepted"),
+            VoiceDelegationAdmission::Turn(_)
+        ));
+        assert!(matches!(events.recv().await.expect("started"),
+            AnalystLifecycleEvent::Started { receipt, origin }
+                if receipt.delegation_id == "first" && origin == starting_origin));
+        let state = lifecycle.state.lock().await;
+        assert_eq!(
+            state
+                .queue
+                .front()
+                .expect("next still queued")
+                .delegation_id,
+            "next"
+        );
+        assert!(
+            state
+                .active
+                .as_ref()
+                .expect("first active")
+                .delegation_ids
+                .iter()
+                .all(|id| id != "next")
+        );
+        drop(state);
+        session.stop(session.generation()).await.expect("stop");
+        server.await.expect("fake server");
+    }
+}
+
+#[tokio::test]
+async fn group_and_other_inputs_remain_separate_during_native_admission() {
+    let (session, server) = test_session().await;
+    let session = Arc::new(session);
+    let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+    lifecycle
+        .state
+        .lock()
+        .await
+        .native_pending
+        .push_back(PendingStart {
+            delegation_id: "group".into(),
+            origin: AnalystTurnOrigin::Group,
+            cancelling: false,
+        });
+
+    assert!(matches!(
+        lifecycle
+            .begin_actor_result("old-voice-reply", "other source", false)
+            .await
+            .expect("queue notification"),
+        VoiceDelegationAdmission::Queued { .. }
+    ));
+    let state = lifecycle.state.lock().await;
+    assert_eq!(state.native_pending.len(), 1);
+    assert_eq!(
+        state.queue.front().expect("queued").delegation_id,
+        "old-voice-reply"
+    );
+    drop(state);
+    session.stop(session.generation()).await.expect("stop");
+    server.await.expect("fake server");
+}
+
+#[tokio::test]
+async fn cancelling_user_work_keeps_a_queued_group_request() {
+    let (session, server, interrupt_seen, release_interrupt) =
+        test_session_with_delayed_interrupt().await;
+    let session = Arc::new(session);
+    let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+    let mut events = lifecycle.subscribe();
+    session.publish_event_for_test(json!({
+        "method":"turn/started", "params":{"threadId":"thread-lifecycle","turn":{"id":"user-turn"}}
+    }));
+    events.recv().await.expect("started");
+    assert!(matches!(
+        lifecycle
+            .admit_group("group", "independent request")
+            .await
+            .expect("group"),
+        VoiceDelegationAdmission::Queued { .. }
+    ));
+    assert!(matches!(
+        events.recv().await.expect("queued"),
+        AnalystLifecycleEvent::Queued { .. }
+    ));
+    let cancel_lifecycle = Arc::clone(&lifecycle);
+    let cancel = tokio::spawn(async move { cancel_lifecycle.cancel_current().await });
+    tokio::time::timeout(Duration::from_secs(3), interrupt_seen)
+        .await
+        .expect("cancel deadline")
+        .expect("fake saw cancel");
+    assert_eq!(
+        lifecycle
+            .state
+            .lock()
+            .await
+            .queue
+            .front()
+            .expect("group retained")
+            .delegation_id,
+        "group"
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "the group request was not cancelled"
+    );
+    release_interrupt.send(()).expect("release cancel");
+    assert!(
+        cancel
+            .await
+            .expect("cancel task")
+            .expect("cancel succeeded")
+    );
+    session.stop(session.generation()).await.expect("stop");
+    server.await.expect("fake server");
+}
+
+#[tokio::test]
+async fn cancelling_while_user_native_input_is_pending_keeps_group_work() {
+    for origin in [AnalystTurnOrigin::Voice, AnalystTurnOrigin::Terminal] {
+        let (session, server) = test_session().await;
+        let session = Arc::new(session);
+        let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+        let mut events = lifecycle.subscribe();
+        lifecycle
+            .state
+            .lock()
+            .await
+            .native_pending
+            .push_back(PendingStart {
+                delegation_id: "user-input".into(),
+                origin,
+                cancelling: false,
+            });
+        assert!(matches!(
+            lifecycle
+                .admit_group("group", "independent request")
+                .await
+                .expect("group"),
+            VoiceDelegationAdmission::Queued { .. }
+        ));
+        assert!(matches!(
+            events.recv().await.expect("queued"),
+            AnalystLifecycleEvent::Queued { .. }
+        ));
+        assert!(
+            !lifecycle.cancel_current().await.expect("cancel"),
+            "no user cancellation was confirmed"
+        );
+        let state = lifecycle.state.lock().await;
+        assert_eq!(
+            state.queue.front().expect("group retained").delegation_id,
+            "group"
+        );
+        assert_eq!(
+            state
+                .native_pending
+                .front()
+                .expect("user still pending")
+                .delegation_id,
+            "user-input"
+        );
+        assert_eq!(lifecycle.queued_inputs(), 1);
+        drop(state);
+        assert!(
+            events.try_recv().is_err(),
+            "the group input was not cancelled"
+        );
+        session.stop(session.generation()).await.expect("stop");
+        server.await.expect("fake server");
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_queued_user_input_still_starts_the_waiting_group_input() {
+    let (session, server, start_seen, release_start) = test_session_with_delayed_start().await;
+    let session = Arc::new(session);
+    let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+    let mut events = lifecycle.subscribe();
+    {
+        let mut state = lifecycle.state.lock().await;
+        for (id, origin) in [
+            ("user-input", AnalystTurnOrigin::Terminal),
+            ("group", AnalystTurnOrigin::Group),
+        ] {
+            state.queue.push_back(queue::QueuedInput {
+                delegation_id: id.into(),
+                text: id.into(),
+                origin,
+            });
+        }
+        lifecycle
+            .queue_len
+            .store(2, std::sync::atomic::Ordering::Release);
+    }
+    assert!(
+        lifecycle
+            .cancel_current()
+            .await
+            .expect("cancel queued user input")
+    );
+    assert!(matches!(
+        events.recv().await.expect("user cancellation"),
+        AnalystLifecycleEvent::Completed {
+            source: AnalystCompletionSource::HostNotStarted,
+            delegation_id,
+            ..
+        } if delegation_id == "user-input"
+    ));
+    tokio::time::timeout(Duration::from_secs(3), start_seen)
+        .await
+        .expect("retained Group starts")
+        .expect("fake saw start");
+    release_start.send(()).expect("release start");
+    assert!(matches!(
+        events.recv().await.expect("group started"),
+        AnalystLifecycleEvent::Started { receipt, origin: AnalystTurnOrigin::Group }
+            if receipt.delegation_id == "group"
+    ));
+    session.stop(session.generation()).await.expect("stop");
+    server.await.expect("fake server");
+}
+
+#[tokio::test]
+async fn waiting_user_requests_precede_group_inputs_without_reordering_each_other() {
+    let (session, server) = test_session().await;
+    let session = Arc::new(session);
+    let lifecycle = AnalystLifecycle::start(Arc::clone(&session));
+    let mut events = lifecycle.subscribe();
+    session.publish_event_for_test(json!({
+        "method":"turn/started", "params":{"threadId":"thread-lifecycle","turn":{"id":"voice"}}
+    }));
+    events.recv().await.expect("started");
+    lifecycle
+        .state
+        .lock()
+        .await
+        .active
+        .as_mut()
+        .expect("active")
+        .origin = AnalystTurnOrigin::Group;
+    assert!(matches!(
+        lifecycle
+            .admit_group("next-group", "member input")
+            .await
+            .expect("group"),
+        VoiceDelegationAdmission::Queued { .. }
+    ));
+    for (index, (id, origin)) in [
+        ("voice-first", AnalystTurnOrigin::Voice),
+        ("typed-second", AnalystTurnOrigin::Terminal),
+        ("voice-third", AnalystTurnOrigin::Voice),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(matches!(
+            lifecycle
+                .admit_input(id, "user request", origin)
+                .await
+                .expect("user input"),
+            VoiceDelegationAdmission::Queued { .. }
+        ));
+        assert_eq!(
+            lifecycle.queued_inputs(),
+            index + 2,
+            "the queue count includes the Group input behind the user"
+        );
+    }
+    let state = lifecycle.state.lock().await;
+    let active = state.active.as_ref().expect("active");
+    assert_eq!(active.origin, AnalystTurnOrigin::Group);
+    assert!(
+        active
+            .delegation_ids
+            .iter()
+            .all(|id| !id.starts_with("voice-"))
+    );
+    assert_eq!(
+        state
+            .queue
+            .iter()
+            .map(|input| input.delegation_id.as_str())
+            .collect::<Vec<_>>(),
+        ["voice-first", "typed-second", "voice-third", "next-group"]
+    );
+    drop(state);
+    session.stop(session.generation()).await.expect("stop");
+    server.await.expect("fake server");
+}
+
 pub(crate) async fn collect_normalized_events_for_test(
     events: Vec<AnalystEvent>,
     pending: Option<&str>,
@@ -636,6 +1247,11 @@ async fn failed_interrupt_allows_a_real_retry() {
 fn result_origin_and_completion_status_are_consistent() {
     assert!(!AnalystTurnOrigin::ActorResult { speakable: false }.speakable());
     assert!(AnalystTurnOrigin::ActorResult { speakable: true }.speakable());
+    assert!(
+        AnalystTurnOrigin::Terminal
+            .merged(AnalystTurnOrigin::Voice)
+            .speakable()
+    );
     assert_eq!(
         normalized_completion_status("completed", "", AnalystTurnOrigin::Voice),
         "failed"
@@ -665,7 +1281,7 @@ async fn test_session() -> (AnalystSession, JoinHandle<()>) {
                 continue;
             };
             let result = match request["method"].as_str().expect("method") {
-                "initialize" | "thread/name/set" => json!({}),
+                "initialize" | "thread/name/set" | "turn/steer" => json!({}),
                 "thread/start" => json!({"thread":{"id":"thread-lifecycle"}}),
                 "thread/read" => json!({"thread":{"id":"thread-lifecycle","turns":[]}}),
                 method => panic!("unexpected lifecycle test method: {method}"),
@@ -691,6 +1307,63 @@ async fn test_session() -> (AnalystSession, JoinHandle<()>) {
     .await
     .expect("connect test Analyst");
     (session, server)
+}
+
+async fn test_session_with_delayed_start() -> (
+    AnalystSession,
+    JoinHandle<()>,
+    oneshot::Receiver<()>,
+    oneshot::Sender<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let endpoint = format!("ws://{}", listener.local_addr().expect("address"));
+    let (seen_tx, seen_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut socket = accept_async(stream).await.expect("websocket");
+        let mut start_gate = Some((seen_tx, release_rx));
+        while let Some(frame) = socket.next().await {
+            let Message::Text(text) = frame.expect("frame") else {
+                continue;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request");
+            let Some(id) = request["id"].as_u64() else {
+                continue;
+            };
+            let result = match request["method"].as_str().expect("method") {
+                "initialize" | "thread/name/set" | "turn/steer" => json!({}),
+                "thread/start" => json!({"thread":{"id":"thread-lifecycle"}}),
+                "thread/read" => json!({"thread":{"id":"thread-lifecycle","turns":[]}}),
+                "turn/start" => {
+                    let (seen, release) = start_gate.take().expect("single start");
+                    seen.send(()).expect("notify start");
+                    release.await.expect("release start");
+                    json!({"turn":{"id":"late-turn"}})
+                }
+                method => panic!("unexpected lifecycle test method: {method}"),
+            };
+            socket
+                .send(Message::Text(
+                    json!({"jsonrpc":"2.0","id":id,"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("response");
+        }
+    });
+    let session = AnalystSession::connect_for_test(
+        WorkspaceBinding {
+            root: PathBuf::from("/tmp"),
+        },
+        "generation-lifecycle".into(),
+        endpoint,
+        PathBuf::from("codex"),
+    )
+    .await
+    .expect("connect test Analyst");
+    (session, server, seen_rx, release_tx)
 }
 
 async fn test_session_with_delayed_interrupt() -> (

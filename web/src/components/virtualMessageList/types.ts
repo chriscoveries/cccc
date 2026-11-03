@@ -27,6 +27,9 @@ export interface VirtualMessageListProps {
   initialScrollAnchorId?: string;
   initialScrollAnchorOffsetPx?: number;
   initialScrollOffsetPx?: number;
+  /** Mark the initial anchor briefly once the view opens on it: it stands in for a message the
+   * reader did not see in this view. */
+  highlightInitialScrollAnchor?: boolean;
   highlightEventId?: string;
   className?: string;
   topInsetPx?: number;
@@ -34,8 +37,9 @@ export interface VirtualMessageListProps {
   onReply: (event: LedgerEvent) => void;
   onShowRecipients: (eventId: string) => void;
   onCopyLink?: (eventId: string) => void;
+  /** Pin or unpin a message; absent where pins are not offered. */
+  onTogglePin?: (eventId: string, pinned: boolean) => void;
   onViewContext?: (eventId: string) => void;
-  onCopyContent?: (event: LedgerEvent) => void;
   onRelay?: (event: LedgerEvent) => void;
   onOpenSource?: (srcGroupId: string, srcEventId: string) => void;
   onOpenPresentationRef?: (ref: PresentationMessageRef, event: LedgerEvent) => void;
@@ -44,12 +48,25 @@ export interface VirtualMessageListProps {
   onScrollButtonClick: () => void;
   chatUnreadCount: number;
   onScrollChange?: (isAtBottom: boolean) => void;
+  /** A context's target can be shown in live chat after its initial positioning. */
+  onContextReady?: () => void;
+  /** The current live view was opened on an explicit message. */
+  liveJumpActive?: boolean;
+  contextWindow?: boolean;
+  /** The reader reached the end of a context window; initial means it opened there. */
+  onReachedContextEnd?: (initial: boolean, atBottom: boolean) => boolean | void;
+  onLoadNewerContext?: () => void;
+  isLoadingNewerContext?: boolean;
+  newerContextError?: boolean;
   onScrollSnapshot?: (snapshot: ChatScrollSnapshot, groupId?: string) => void;
   sendScrollRequest?: ChatSendScrollRequest | null;
   onSendScrollRequestConsumed?: (requestId: number) => void;
   isLoadingHistory?: boolean;
   hasMoreHistory?: boolean;
+  /** The live list is narrowed by a message or sender filter. */
+  hasActiveFilters?: boolean;
   isFilteredEmpty?: boolean;
   emptyMessage?: string;
-  onLoadMore?: () => void;
+  /** False means no request started; started requests continue to report state through props. */
+  onLoadMore?: () => void | false | Promise<void | false>;
 }

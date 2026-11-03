@@ -16,15 +16,13 @@ import {
   type ContextTranslator,
   type SubtaskProgress,
 } from "../model";
-import { taskSearchExcerpt } from "../taskSearchExcerpt";
-import type { ContextModalUi } from "../ui";
+import { taskSearchMatch, taskSearchTextMatch } from "../taskSearchExcerpt";
 import { TaskCardBadges } from "./TaskCardBadges";
 
 interface TaskCardProps {
   task: Task;
   subtasks?: SubtaskProgress;
   tr: ContextTranslator;
-  ui: ContextModalUi;
   syncBusy: boolean;
   searchQuery?: string;
   selected: boolean;
@@ -78,7 +76,6 @@ function TaskCardComponent({
   task,
   subtasks,
   tr,
-  ui,
   syncBusy,
   searchQuery = "",
   selected,
@@ -87,6 +84,7 @@ function TaskCardComponent({
   onRestoreTask,
 }: TaskCardProps) {
   const status = taskStatus(task);
+  const title = taskTitle(task);
   const summary = taskDisplaySummary(task);
   // Without a summary, an unfinished task shows the first checklist item still open.
   const openItem =
@@ -94,23 +92,27 @@ function TaskCardComponent({
       ? task.checklist?.find((item) => String(item.text || "").trim() && checklistItemOpen(item))
           ?.text
       : undefined;
-  const blocked = taskIsLive(task) && Array.isArray(task.blocked_by) && task.blocked_by.length > 0;
-  // While searching, quote where the match is when nothing on the card shows
-  // it. Only the openings of the clamped title and summary count as shown.
-  const found = useMemo(
-    () =>
-      searchQuery.trim()
-        ? taskSearchExcerpt(task, searchQuery, [
-            task.id,
-            taskTitle(task).slice(0, 30),
-            task.assignee,
-            task.priority,
-            summary.slice(0, 40),
-            taskIsLive(task) ? task.handoff_to : "",
-          ])
-        : null,
-    [task, searchQuery, summary],
-  );
+  const query = searchQuery.trim();
+  // The row shows its title and ID; quote a match from any other field.
+  const found = useMemo(() => {
+    if (!query) return null;
+    const match = taskSearchMatch(task, query);
+    return match && match.field !== "title" && match.field !== "id" ? match : null;
+  }, [task, query]);
+  const foundLabel = found
+    ? found.field === "handoff_to"
+      ? tr("context.handoffTo", "Handoff →")
+      : tr("context.searchMatchField", "{{field}}:", {
+          field:
+            found.field === "notes"
+              ? tr("context.notes", "Notes")
+              : found.field === "assignee"
+                ? tr("context.assignee", "Assignee")
+                : found.field === "priority"
+                  ? tr("context.priority", "Priority")
+                  : tr("context.outcome", "Outcome"),
+        })
+    : null;
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, isDragging } =
     useDraggable({
       id: `task:${task.id}`,
@@ -127,116 +129,96 @@ function TaskCardComponent({
           ? { label: tr("context.reopen", "Reopen"), next: "active" as BoardStatus }
           : { label: tr("context.restore", "Restore"), next: "planned" as BoardStatus };
 
+  const dragHandle = () => (
+    <button
+      ref={setActivatorNodeRef}
+      type="button"
+      {...attributes}
+      {...listeners}
+      disabled={syncBusy}
+      // The unlayered global button rule overrides Tailwind's touch-none.
+      // Keep the browser's pan/back gestures off this drag handle only.
+      style={{ touchAction: "none" }}
+      onClick={(event) => event.stopPropagation()}
+      aria-label={tr("context.dragTaskNamed", "Move {{id}}: {{title}}", { id: task.id, title })}
+      title={tr("context.dragTask", "Drag task")}
+      data-task-drag
+    >
+      <span aria-hidden="true">⋮⋮</span>
+    </button>
+  );
+  const runQuickAction = () => {
+    if (status === "archived") onRestoreTask(task);
+    else onMoveTaskToStatus(task, quickAction.next);
+  };
+
+  const titleMatch = query ? taskSearchTextMatch(title, query) : null;
   return (
     <div
       ref={setNodeRef}
       style={{ transform: CSS.Translate.toString(transform) }}
-      className={classNames("group/task min-w-0", isDragging && "z-20 opacity-80")}
+      className={classNames("min-w-0", isDragging && "z-20 opacity-80")}
     >
       <div
         id={`context-task-${task.id}`}
         data-task-id={task.id}
+        data-task-row
+        data-selected={selected || undefined}
+        data-searching={query ? true : undefined}
         onClick={() => onSelectTask(task)}
-        className={classNames(
-          "min-w-0 w-full cursor-pointer overflow-hidden rounded-2xl border p-3 text-left transition-all",
-          blocked
-            ? "border-rose-500/30 bg-rose-500/5"
-            : selected
-              ? "border-black/10 bg-[rgb(245,245,245)] shadow-[0_0_0_1px_rgba(17,24,39,0.08)] dark:border-white/12 dark:bg-white/[0.08] dark:shadow-[0_0_0_1px_rgba(255,255,255,0.06)]"
-              : "glass-panel hover:border-[var(--glass-border-subtle)]",
-        )}
       >
-        <div className="flex items-start justify-between gap-2">
+        {/* The body and the actions are siblings: a touch screen keeps the actions
+              in a column beside the text, so they never add a line to the row. */}
+        <div data-task-body>
           <button
             type="button"
-            title={taskTitle(task)}
+            title={title}
             onClick={(event) => {
               event.stopPropagation();
               onSelectTask(task);
             }}
-            className="min-w-0 flex-1 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-[var(--color-border-focus)]"
+            data-task-title
           >
-            <span className="line-clamp-2 text-sm font-semibold text-[var(--color-text-primary)] [overflow-wrap:anywhere]">
-              {taskTitle(task)}
+            {/* A span holds the clamp: line clamping is unreliable on a button box. */}
+            <span>
+              {titleMatch ? (
+                <>
+                  {title.slice(0, titleMatch[0])}
+                  <mark>{title.slice(titleMatch[0], titleMatch[1])}</mark>
+                  {title.slice(titleMatch[1])}
+                </>
+              ) : (
+                title
+              )}
             </span>
-            <span className={classNames("mt-1 block text-xs", ui.mutedTextClass)}>
+          </button>
+          {found ? (
+            <p data-task-excerpt>
+              <span>{foundLabel}</span> {found.before}
+              <mark>{found.match}</mark>
+              {found.after}
+            </p>
+          ) : summary ? (
+            <p data-task-summary>{summary}</p>
+          ) : openItem ? (
+            <p data-task-summary>
+              {tr("context.openChecklistItem", "To do: {{item}}", { item: openItem.trim() })}
+            </p>
+          ) : null}
+          <div data-task-meta>
+            <span data-task-meta-id>
               {task.id}
               <TaskUpdatedAge updatedAt={task.updated_at} tr={tr} />
             </span>
-          </button>
-          <button
-            ref={setActivatorNodeRef}
-            type="button"
-            {...attributes}
-            {...listeners}
-            disabled={syncBusy}
-            // The unlayered global button rule overrides Tailwind's touch-none.
-            // Keep the browser's pan/back gestures off this drag handle only.
-            style={{ touchAction: "none" }}
-            className="touch-none rounded-lg px-2 py-1 text-[11px] glass-btn text-[var(--color-text-secondary)] focus:opacity-100 focus-visible:outline-2 focus-visible:outline-[var(--color-border-focus)] md:opacity-0 md:group-hover/task:opacity-100 md:[@media(any-pointer:coarse)]:opacity-100"
-            onClick={(event) => event.stopPropagation()}
-            aria-label={tr("context.dragTaskNamed", "Move {{id}}: {{title}}", {
-              id: task.id,
-              title: taskTitle(task),
-            })}
-            title={tr("context.dragTask", "Drag task")}
-          >
-            <span aria-hidden="true">⋮⋮</span>
-          </button>
+            <TaskCardBadges task={task} tr={tr} subtasks={subtasks} />
+          </div>
         </div>
-
-        {summary ? (
-          <div className={classNames("mt-2 line-clamp-3 text-xs", ui.subtleTextClass)}>
-            {summary}
-          </div>
-        ) : openItem ? (
-          <div className={classNames("mt-2 line-clamp-2 text-xs", ui.subtleTextClass)}>
-            {tr("context.openChecklistItem", "To do: {{item}}", { item: openItem.trim() })}
-          </div>
-        ) : null}
-
-        {found ? (
-          <p
-            className={classNames(
-              "mt-1.5 line-clamp-2 text-xs [overflow-wrap:anywhere]",
-              ui.subtleTextClass,
-            )}
-          >
-            <span className="font-medium">
-              {found.field === "handoff_to"
-                ? tr("context.handoffTo", "Handoff →")
-                : tr("context.searchMatchField", "{{field}}:", {
-                    field:
-                      found.field === "title"
-                        ? tr("context.titleField", "Title")
-                        : found.field === "notes"
-                          ? tr("context.notes", "Notes")
-                          : tr("context.outcome", "Outcome"),
-                  })}
-            </span>{" "}
-            {found.before}
-            <mark className="rounded bg-amber-200 px-0.5 text-amber-900 dark:bg-amber-500/20 dark:text-amber-200">
-              {found.match}
-            </mark>
-            {found.after}
-          </p>
-        ) : null}
-
-        <TaskCardBadges task={task} tr={tr} subtasks={subtasks} />
-
-        <div className="mt-2 flex items-center" onClick={(event) => event.stopPropagation()}>
-          <button
-            type="button"
-            onClick={() => {
-              if (status === "archived") onRestoreTask(task);
-              else onMoveTaskToStatus(task, quickAction.next);
-            }}
-            disabled={syncBusy}
-            className="rounded-md border border-[var(--glass-border-subtle)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] hover:bg-[var(--glass-tab-bg)] focus-visible:outline-2 focus-visible:outline-[var(--color-border-focus)] disabled:opacity-50"
-          >
+        <span data-task-actions onClick={(event) => event.stopPropagation()}>
+          {dragHandle()}
+          <button type="button" onClick={runQuickAction} disabled={syncBusy} data-task-quick>
             {quickAction.label}
           </button>
-        </div>
+        </span>
       </div>
     </div>
   );
@@ -248,7 +230,6 @@ export const TaskCard = memo(TaskCardComponent, (previous, next) => {
     previous.subtasks?.done === next.subtasks?.done &&
     previous.subtasks?.total === next.subtasks?.total &&
     previous.tr === next.tr &&
-    previous.ui === next.ui &&
     previous.syncBusy === next.syncBusy &&
     previous.searchQuery === next.searchQuery &&
     previous.selected === next.selected &&

@@ -11,6 +11,7 @@ import {
   setWorkspaceDirty,
   useWorkspaceNavigation,
 } from "../stores/workspaceNavigation";
+import { useUIStore } from "../stores/useUIStore";
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 const translate = vi.hoisted(
   () => (key: string, values?: { groupId?: string }) =>
@@ -191,6 +192,7 @@ it("opens a worker notification without discarding unsaved work", async () => {
   root = createRoot(document.createElement("div"));
   await act(async () => root.render(<Probe />));
   setWorkspaceDirty(owner, true);
+  useUIStore.getState().setSidebarOpen(true);
   const data = { type: "cccc:push:open", v: 1, group_id: "a", event_id: "message-1" };
   let ack!: ReturnType<typeof vi.fn>;
   await act(async () => {
@@ -200,14 +202,46 @@ it("opens a worker notification without discarding unsaved work", async () => {
   expect(message).not.toHaveBeenCalled();
   expect(location.search).toBe("?group=a");
   expect(useWorkspaceNavigation.getState().pending).not.toBeNull();
+  // Nothing moves until the reader lets the unsaved work go: the phone's Group list stays open.
+  expect(useUIStore.getState().sidebarOpen).toBe(true);
   await act(async () => finishWorkspaceNavigation(false));
   expect(message).not.toHaveBeenCalled();
+  expect(useUIStore.getState().sidebarOpen).toBe(true);
 
   await act(async () => pushMessage(container, data));
   await act(async () => finishWorkspaceNavigation(true));
   expect(message).toHaveBeenCalledExactlyOnceWith("a", "message-1");
+  expect(useUIStore.getState().sidebarOpen).toBe(false);
   expect(new URLSearchParams(location.search).get("event")).toBe("message-1");
   expect(error).not.toHaveBeenCalled();
+});
+
+it("closes the phone's Group list when a notification opens a message in an open page", async () => {
+  const container = new EventTarget();
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: container });
+  window.history.replaceState({}, "", "/?group=a");
+  useUIStore.getState().setSidebarOpen(true);
+  const message = vi.fn().mockResolvedValue(undefined);
+  function Probe() {
+    const [id, setId] = useState("a");
+    useDeepLink({
+      groups: [{ group_id: "a" }, { group_id: "b" }] as GroupMeta[],
+      groupsLoaded: true,
+      selectedGroupId: id,
+      setSelectedGroupId: setId,
+      setActiveTab: vi.fn(),
+      openChatWindow: message,
+      showError: vi.fn(),
+    });
+    return null;
+  }
+  root = createRoot(document.createElement("div"));
+  await act(async () => root.render(<Probe />));
+  await act(async () =>
+    pushMessage(container, { type: "cccc:push:open", v: 1, group_id: "a", event_id: "m-1" }),
+  );
+  expect(message).toHaveBeenCalledExactlyOnceWith("a", "m-1");
+  expect(useUIStore.getState().sidebarOpen).toBe(false);
 });
 
 it("accepts only the dedicated worker and rechecks Group access before navigation", async () => {
@@ -564,7 +598,7 @@ it("reports a link whose Group list cannot be read without mentioning notificati
   expect(error).toHaveBeenCalledExactlyOnceWith("notifications.groupsUnavailableForLink");
 });
 
-it("acts on a click that reaches a waking page late, but not on a stale or older one", async () => {
+it("acts on a click that reaches the page late, but not on a stale or older one", async () => {
   const container = new EventTarget();
   Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: container });
   const groups = [{ group_id: "a" }, { group_id: "b" }, { group_id: "c" }] as GroupMeta[];
@@ -593,13 +627,14 @@ it("acts on a click that reaches a waking page late, but not on a stale or older
         deadline,
       ),
     );
-  // Past the worker's own deadline, as a frozen tab wakes: still taken.
-  await open("b", Date.now() - 3000);
+  // Half a minute past the worker's own deadline, as when the page or browser was slow to
+  // respond after the click: still taken.
+  await open("b", Date.now() - 30000);
   expect(message).toHaveBeenLastCalledWith("b", "in-b");
-  // Long past it: ignored.
-  await open("c", Date.now() - 60000);
+  // Over a minute past it: ignored.
+  await open("c", Date.now() - 61000);
   // Older than the click already taken: ignored.
-  await open("c", Date.now() - 5000);
+  await open("c", Date.now() - 35000);
   expect(message).toHaveBeenCalledOnce();
 });
 

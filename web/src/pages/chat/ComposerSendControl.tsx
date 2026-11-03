@@ -2,6 +2,7 @@ import { useId } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDownIcon, InboxIcon, ReplyIcon, SendIcon } from "../../components/Icons";
 import { Button } from "../../components/ui/button";
+import { LcdSpinner } from "../../components/LcdSpinner";
 import { Popover, PopoverContent, PopoverTrigger } from "../../components/ui/popover";
 import type { ComposerMessageMode } from "../../stores/useComposerStore";
 
@@ -34,6 +35,14 @@ export function ComposerSendControl({
   const unavailableReasonId = useId();
   const active = options.find((option) => option.key === mode) || options[0];
   const Icon = mode === "mail" ? InboxIcon : mode === "request_reply" ? ReplyIcon : SendIcon;
+  const sendIcon = (
+    <Icon
+      data-composer-send-icon
+      size={14}
+      strokeWidth={1.25}
+      className={mode === "send" ? undefined : "hidden @min-[600px]/composer:block"}
+    />
+  );
   const showUnavailableReason =
     !requestReplyReady && options.some((option) => option.key === "request_reply");
   return (
@@ -43,6 +52,8 @@ export function ComposerSendControl({
     >
       <Button
         variant="ghost"
+        data-composer-send-primary
+        data-busy={busy ? "" : undefined}
         className={`h-[44px] min-h-[44px] min-w-[44px] rounded-l-xl rounded-r-none text-xs shadow-none @min-[600px]/composer:h-9 @min-[600px]/composer:min-h-9 @min-[600px]/composer:min-w-11 @min-[600px]/composer:px-3 ${
           mode === "send"
             ? "px-3"
@@ -52,19 +63,19 @@ export function ComposerSendControl({
         }`}
         onClick={onSend}
         disabled={busy || !canSend}
-        aria-label={mode === "send" ? t("sendMessage") : t("messageMode", { mode: active.label })}
-        title={title}
+        // The key says at once that the message is being sent; its mark follows later.
+        aria-label={
+          busy
+            ? t("sending")
+            : mode === "send"
+              ? t("sendMessage")
+              : t("messageMode", { mode: active.label })
+        }
+        title={busy ? t("sending") : title}
       >
-        {busy ? (
-          <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-        ) : (
-          <Icon
-            size={14}
-            strokeWidth={1.25}
-            className={mode === "send" ? undefined : "hidden @min-[600px]/composer:block"}
-          />
-        )}
+        {busy ? <LcdSpinner className="h-4 w-4">{sendIcon}</LcdSpinner> : sendIcon}
         <span
+          data-composer-send-label
           className={
             mode === "send"
               ? "hidden max-w-28 truncate @min-[600px]/composer:inline"

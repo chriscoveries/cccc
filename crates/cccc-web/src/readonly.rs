@@ -85,19 +85,29 @@ fn is_mutating_get(path: &str) -> bool {
             .strip_prefix("/nomcp/s/")
             .and_then(|rest| rest.strip_suffix("/send"))
             .is_some_and(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+        // The Voice Secretary's socket upgrade is a GET, but the session saves
+        // recordings and appends transcripts.
+        || path
+            .strip_prefix("/api/v1/groups/")
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(group_id, tail)| {
+                !group_id.is_empty() && tail == "assistants/voice_secretary/transcriptions/ws"
+            })
 }
 
-/// The user's open reply requests and notification subscriptions. An
-/// exhibit's viewers are spectators, not the Group's user, so these reads are
-/// refused there, not only the changes.
+/// The user's open reply requests, message pins and notification subscriptions.
+/// An exhibit's viewers are spectators, not the Group's user, so these reads
+/// are refused there, not only the changes.
 fn is_user_obligation_get(path: &str) -> bool {
-    path == "/api/v1/reply-requests/summary"
+    path.starts_with("/api/v1/process-recovery/")
+        || path.starts_with("/api/v1/chet/")
+        || path == "/api/v1/reply-requests/summary"
         || path == "/api/v1/push/config"
         || path
             .strip_prefix("/api/v1/groups/")
             .and_then(|rest| rest.split_once('/'))
             .is_some_and(|(group_id, tail)| {
-                !group_id.is_empty() && tail == "reply-requests/pending"
+                !group_id.is_empty() && matches!(tail, "reply-requests/pending" | "pins")
             })
 }
 
@@ -146,8 +156,15 @@ mod tests {
             "/api/v1/registry/reconcile",
             "/nomcp/s/session-1/send",
             "/api/v1/codex_voice/calls/generation/events",
+            "/api/v1/groups/g_1/assistants/voice_secretary/transcriptions/ws",
         ] {
             assert!(!is_read_only_safe(&Method::GET, path), "{path}");
+        }
+        for path in [
+            "/api/v1/groups//assistants/voice_secretary/transcriptions/ws",
+            "/api/v1/groups/g_1/assistants/voice_secretary/transcriptions",
+        ] {
+            assert!(is_read_only_safe(&Method::GET, path), "{path}");
         }
         assert!(!is_read_only_safe(
             &Method::HEAD,
@@ -172,5 +189,37 @@ mod tests {
             &Method::GET,
             "/api/v1/groups/g_1/ledger/tail"
         ));
+    }
+
+    #[test]
+    fn read_only_refuses_message_pins_for_reads_and_writes() {
+        for method in [Method::GET, Method::HEAD, Method::POST] {
+            assert!(!is_read_only_safe(&method, "/api/v1/groups/g_1/pins"));
+        }
+    }
+
+    #[test]
+    fn read_only_refuses_private_recovery_records_even_for_reads() {
+        for method in [Method::GET, Method::HEAD, Method::POST] {
+            for suffix in ["daemon", "web", "web/retry", "web/accept"] {
+                assert!(!is_read_only_safe(
+                    &method,
+                    &format!("/api/v1/process-recovery/{suffix}")
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn read_only_refuses_chet_history_and_inputs() {
+        for method in [Method::GET, Method::HEAD, Method::POST] {
+            for path in [
+                "/api/v1/chet/history",
+                "/api/v1/chet/status",
+                "/api/v1/chet/inputs",
+            ] {
+                assert!(!is_read_only_safe(&method, path), "{path}");
+            }
+        }
     }
 }

@@ -60,7 +60,9 @@ export const ActorAvatar = memo(function ActorAvatar({
           ? "h-[72%] w-[72%] object-contain"
           : runtimeKey === "copilot"
             ? "h-[88%] w-[88%] object-contain"
-            : "h-full w-full object-contain";
+            : runtimeKey === "opencode"
+              ? "h-[77%] w-[77%] object-contain"
+              : "h-full w-full object-contain";
 
   const logoSrc = useMemo(() => {
     if (isUser || usesInlineClaudeLogo) return null;
@@ -98,7 +100,7 @@ export const ActorAvatar = memo(function ActorAvatar({
       ) : usesInlineClaudeLogo ? (
         <ClaudeLogo className="h-3/5 w-3/5" />
       ) : logoSrc ? (
-        <span className="flex h-full w-full items-center justify-center bg-white">
+        <span className="flex h-full w-full items-center justify-center bg-white" data-runtime-logo>
           <img src={logoSrc} alt="" className={logoClassName} />
         </span>
       ) : (

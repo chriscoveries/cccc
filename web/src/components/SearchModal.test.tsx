@@ -151,7 +151,15 @@ it.each(["close", "group"])(
 it("runs a filtered search immediately when a kind filter is selected before submitting a query", async () => {
   vi.mocked(apiJson).mockResolvedValueOnce(response("notify result"));
   await render();
+  const filter = (label: string) =>
+    [...host.querySelectorAll("[data-search-kind] button")].find(
+      (button) => button.textContent === label,
+    )!;
+  expect(filter("kindAll").getAttribute("aria-pressed")).toBe("true");
+  expect(filter("kindNotify").getAttribute("aria-pressed")).toBe("false");
   await click("kindNotify");
+  expect(filter("kindAll").getAttribute("aria-pressed")).toBe("false");
+  expect(filter("kindNotify").getAttribute("aria-pressed")).toBe("true");
   expect(String(vi.mocked(apiJson).mock.lastCall?.[0])).toContain("q=&kind=notify");
   expect(host.textContent).toContain("notify result");
 });

@@ -38,7 +38,7 @@ pub(super) fn list(
             actor.normalize_runtime_constraints();
             actor.role = actors::effective_role(group, &actor.id);
             let status = actor_runtime_status::resolve(home, group, &actor);
-            let mut value = serde_json::to_value(&actor).unwrap_or_else(|_| json!({}));
+            let mut value = super::actor_runtime::actor_response(&group.group_id, &actor);
             if let Some(object) = value.as_object_mut() {
                 object.extend(runtime_session::actor_fields(
                     home,
@@ -50,9 +50,13 @@ pub(super) fn list(
                 if status.running
                     && let Some(snapshot) = resource_snapshot.as_ref()
                 {
-                    // The runtime owns status.pid and has just checked its child;
-                    // managed DeepSeek keeps its PID separately while busy.
-                    let root = if let Some(pid) = status.pid {
+                    // Managed sessions may report their viewer PID as status;
+                    // observe the owned provider instead, or remain unknown.
+                    let root = if let Some(managed) =
+                        super::local_headless::observed_process(&group.group_id, &actor.id)
+                    {
+                        managed.filter(|&pid| snapshot.same_identity(pid))
+                    } else if let Some(pid) = status.pid {
                         snapshot.same_identity(pid).then_some(pid)
                     } else if actor.external_session_id.is_empty()
                         && super::deepseek_runtime::running(&group.group_id, &actor.id)
@@ -98,6 +102,7 @@ pub(super) fn list(
                 object.insert(
                     "effective_scope".into(),
                     super::actor_runtime::effective_scope(group, Some(&actor))
+                        .map(super::actor_runtime::displayed_scope)
                         .map_or_else(|| json!({}), |scope| json!(scope)),
                 );
                 object.extend(super::working_state::runtime_actor_fields(

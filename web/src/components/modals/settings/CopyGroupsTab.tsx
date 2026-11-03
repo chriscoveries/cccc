@@ -54,6 +54,10 @@ export function CopyGroupsTab({ groupId, groupTitle }: CopyGroupsTabProps) {
     parentDir: workspaceParentDir,
     locations: workspaceLocations,
     error: workspacePickerError,
+    createError: workspaceCreateError,
+    clearCreateError: clearWorkspaceCreateError,
+    retryPath: workspaceRetryPath,
+    retryCreatedDirectory: retryCreatedWorkspaceDirectory,
     busy: workspacePickerBusy,
     show: openWorkspacePicker,
     close: closeWorkspacePicker,
@@ -247,6 +251,7 @@ export function CopyGroupsTab({ groupId, groupTitle }: CopyGroupsTabProps) {
           {info ? (
             <span
               role="status"
+              data-status-tone="ok"
               className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300"
             >
               <CheckIcon size={13} />
@@ -261,6 +266,7 @@ export function CopyGroupsTab({ groupId, groupTitle }: CopyGroupsTabProps) {
           {err ? (
             <div
               role="alert"
+              data-status-tone="error"
               className="w-full rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-rose-700 dark:text-rose-300"
             >
               {err}
@@ -356,10 +362,10 @@ export function CopyGroupsTab({ groupId, groupTitle }: CopyGroupsTabProps) {
               help={t("copyGroups.workspaceNote")}
               htmlFor={workspaceRootId}
             >
-              <div className="flex w-full max-w-[520px] min-w-0 gap-2">
+              <div className="flex w-full max-w-[520px] min-w-0 flex-wrap gap-2">
                 <input
                   id={workspaceRootId}
-                  className={`${inputClass()} min-w-0 flex-1`}
+                  className={`${inputClass()} min-w-0 flex-1 basis-48`}
                   value={workspaceRoot}
                   onChange={(e) => setWorkspaceRoot(e.target.value)}
                   placeholder={sourceRoot || t("copyGroups.workspacePlaceholder")}
@@ -381,16 +387,24 @@ export function CopyGroupsTab({ groupId, groupTitle }: CopyGroupsTabProps) {
                     parentDir={workspaceParentDir}
                     driveLocations={driveSuggestions(workspaceLocations)}
                     error={workspacePickerError}
+                    createError={workspaceCreateError}
+                    onClearCreateError={clearWorkspaceCreateError}
+                    onRetry={
+                      workspaceRetryPath ? () => void retryCreatedWorkspaceDirectory() : undefined
+                    }
                     creatingDirectory={workspacePickerBusy}
                     onSelect={() => {}}
                     onFetch={(path) => void fetchWorkspaceDirectory(path)}
                     onCreateDirectory={createWorkspaceDirectory}
                   />
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="min-w-0 truncate font-mono text-xs text-[var(--color-text-muted)]">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span
+                      className="min-w-0 truncate font-mono text-xs text-[var(--color-text-muted)]"
+                      title={workspaceCurrentDir}
+                    >
                       {workspaceCurrentDir}
                     </span>
-                    <div className="flex shrink-0 gap-2">
+                    <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
                         className={secondaryButtonClass("sm")}
@@ -400,8 +414,16 @@ export function CopyGroupsTab({ groupId, groupTitle }: CopyGroupsTabProps) {
                       </button>
                       <button
                         type="button"
-                        className={primaryButtonClass(!workspaceCurrentDir || workspacePickerBusy)}
-                        disabled={!workspaceCurrentDir || workspacePickerBusy}
+                        className={primaryButtonClass(
+                          !workspaceCurrentDir ||
+                            workspacePickerBusy ||
+                            Boolean(workspacePickerError),
+                        )}
+                        disabled={
+                          !workspaceCurrentDir ||
+                          workspacePickerBusy ||
+                          Boolean(workspacePickerError)
+                        }
                         onClick={() => {
                           setWorkspaceRoot(workspaceCurrentDir);
                           closeWorkspacePicker();
@@ -442,6 +464,7 @@ export function CopyGroupsTab({ groupId, groupTitle }: CopyGroupsTabProps) {
                   >
                     <CheckIcon
                       size={13}
+                      data-status-tone="ok"
                       className="mt-1 shrink-0 text-emerald-600 dark:text-emerald-300"
                     />
                     <span>{item}</span>

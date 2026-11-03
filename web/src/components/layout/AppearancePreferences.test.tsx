@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import type { TextScale, Theme } from "../../types";
 import { AppSettingsMenu } from "./AppSettingsMenu";
 import { MobileMenuSheet } from "./MobileMenuSheet";
+import { applyUiStylePrefs, getUiStylePrefs, setUiStylePrefs } from "../../utils/uiStyle";
+import { useUIStore } from "../../stores/useUIStore";
 
 const { changeLanguage } = vi.hoisted(() => ({ changeLanguage: vi.fn() }));
 vi.mock("react-i18next", () => ({
@@ -25,6 +27,7 @@ describe("appearance choices inside their real hosts", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    useUIStore.setState({ showPendingPrompts: true });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -35,6 +38,8 @@ describe("appearance choices inside their real hosts", () => {
       await pause();
     });
     container.remove();
+    useUIStore.setState({ showPendingPrompts: true });
+    localStorage.removeItem("cccc-pending-prompts");
   });
   async function renderHost(host: "desktop" | "sheet", initialTheme: Theme) {
     function Host() {
@@ -94,7 +99,64 @@ describe("appearance choices inside their real hosts", () => {
       ? !!document.querySelector("[data-app-settings-menu]")
       : !!document.querySelector(".mobile-menu-panel");
   }
+  async function openMore() {
+    const more = document.querySelector<HTMLButtonElement>("[data-appearance-more]")!;
+    if (more.getAttribute("aria-expanded") !== "true") await click(more);
+  }
   for (const host of ["desktop", "sheet"] as const) {
+    it(`${host}: keeps theme and language in view and folds the rest behind one key`, async () => {
+      await renderHost(host, "light");
+      const more = document.querySelector<HTMLButtonElement>("[data-appearance-more]")!;
+      const folded = document.getElementById(more.getAttribute("aria-controls")!)!;
+      const names = (root: ParentNode) =>
+        [...root.querySelectorAll<HTMLElement>("[data-appearance-choice]")].map(
+          (choice) => choice.dataset.appearanceChoice,
+        );
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+      expect(folded.hidden).toBe(true);
+      expect(names(folded)).toEqual([
+        "lcdBody",
+        "lcdWidth",
+        "lcdMotion",
+        "pendingPrompts",
+        "textScale",
+      ]);
+      const preferences = document.querySelector("[data-appearance-preferences]")!;
+      expect(names(preferences).filter((name) => !names(folded).includes(name))).toEqual([
+        "theme",
+        "language",
+      ]);
+      // The key follows what stays in view, so opening it moves nothing above.
+      const language = preferences.querySelector('[data-appearance-choice="language"]')!;
+      expect(
+        language.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      await click(more);
+      expect(more.getAttribute("aria-expanded")).toBe("true");
+      expect(folded.hidden).toBe(false);
+      expect(outerOpen(host)).toBe(true);
+    });
+
+    it(`${host}: changes Waiting for you indicators without dismissing the menu`, async () => {
+      await renderHost(host, "light");
+      await openMore();
+      const choice = document.querySelector<HTMLElement>(
+        '[data-appearance-choice="pendingPrompts"]',
+      )!;
+      const radios = [...choice.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+      expect(radios.map((radio) => radio.textContent)).toEqual([
+        "pendingPromptsShow",
+        "pendingPromptsOff",
+      ]);
+      expect(radios[0].getAttribute("aria-checked")).toBe("true");
+      await click(radios[1]);
+      expect(useUIStore.getState().showPendingPrompts).toBe(false);
+      expect(localStorage.getItem("cccc-pending-prompts")).toBe("false");
+      expect(outerOpen(host)).toBe(true);
+      await click(radios[0]);
+      expect(useUIStore.getState().showPendingPrompts).toBe(true);
+    });
+
     for (const theme of ["light", "dark"] as const) {
       it.each([
         {
@@ -109,6 +171,7 @@ describe("appearance choices inside their real hosts", () => {
         `${host}/${theme}: shows every $name option and applies one in a tap without dismissing its host`,
         async ({ name, options, pick, value }) => {
           await renderHost(host, theme);
+          if (name === "textScale") await openMore();
           const group = document.querySelector<HTMLElement>(
             `[data-appearance-preferences] [data-appearance-choice="${name}"]`,
           )!;
@@ -133,4 +196,72 @@ describe("appearance choices inside their real hosts", () => {
       );
     }
   }
+
+  for (const host of ["desktop", "sheet"] as const) {
+    it(`${host}: offers the body-font, width and motion choices, with no style switch`, async () => {
+      await renderHost(host, "light");
+      const choice = (name: string) =>
+        document.querySelector<HTMLElement>(
+          `[data-appearance-preferences] [data-appearance-choice="${name}"]`,
+        );
+      const radios = (name: string) => [
+        ...(choice(name)?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ?? []),
+      ];
+      expect(choice("uiStyle")).toBeNull();
+      try {
+        expect(radios("lcdBody").map((radio) => radio.textContent)).toEqual([
+          "lcdBodyMono",
+          "lcdBodyPixel",
+        ]);
+        await click(radios("lcdBody")[1]!);
+        expect(document.documentElement.dataset.lcdBody).toBe("pixel");
+        expect(radios("lcdWidth").map((radio) => radio.textContent)).toEqual([
+          "lcdWidthColumn",
+          "lcdWidthWide",
+          "lcdWidthFull",
+        ]);
+        // Hidden where the CSS cap does not apply (below 768px).
+        expect(choice("lcdWidth")!.parentElement!.className).toContain("max-md:hidden");
+        await click(radios("lcdWidth")[1]!);
+        expect(document.documentElement.dataset.lcdWidth).toBe("wide");
+        await click(radios("lcdWidth")[2]!);
+        expect(document.documentElement.dataset.lcdWidth).toBe("full");
+        expect(radios("lcdMotion").map((radio) => radio.textContent)).toEqual([
+          "lcdMotionOn",
+          "lcdMotionOff",
+        ]);
+        await click(radios("lcdMotion")[1]!);
+        expect(document.documentElement.dataset.lcdMotion).toBe("off");
+        expect(document.querySelector("[data-lcd-motion-system]")).toBeNull();
+        expect(outerOpen(host)).toBe(true);
+      } finally {
+        await act(async () =>
+          setUiStylePrefs({ lcdBody: "mono", lcdWidth: "column", lcdMotion: "on" }),
+        );
+      }
+    });
+  }
+
+  it("says under Motion when the system's reduced-motion setting keeps the LCD still", async () => {
+    vi.spyOn(window, "matchMedia").mockImplementation(
+      (query: string) =>
+        ({
+          media: query,
+          matches: query.includes("prefers-reduced-motion"),
+          addEventListener: noop,
+          removeEventListener: noop,
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      await act(async () => applyUiStylePrefs(getUiStylePrefs()));
+      await renderHost("sheet", "light");
+      const hint = document.querySelector("[data-lcd-motion-system]");
+      expect(hint?.textContent).toBe("lcdMotionSystemStill");
+      // The stored choice stays the user's; only what shows is still.
+      expect(document.documentElement.dataset.lcdMotion).toBe("off");
+    } finally {
+      vi.restoreAllMocks();
+      await act(async () => applyUiStylePrefs(getUiStylePrefs()));
+    }
+  });
 });

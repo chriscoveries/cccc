@@ -1,12 +1,13 @@
 import { buttonVariants } from "../ui/button-variants";
 import { PanelRightClose } from "lucide-react";
+import { LcdSpinner } from "../LcdSpinner";
 import { PresentationPreviewModeToggle } from "./PresentationPreviewModeToggle";
 import { PresentationSlotNavigation } from "./PresentationSlotNavigation";
 import { PresentationViewerTitle } from "./PresentationViewerTitle";
 import { GraphicViewer } from "../viewer/GraphicViewer";
 import { getPresentationReferenceHref } from "./presentationAssets";
 import { usePresentationAsset } from "./usePresentationAsset";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../../stores";
 import { MarkdownDocumentSurface } from "../document/MarkdownDocumentSurface";
@@ -17,15 +18,20 @@ import {
   EditIcon,
   ExpandIcon,
   ImageIcon,
+  LcdIcon,
+  MessageSquareIcon,
   MessageSquareTextIcon,
+  MoreHorizontalIcon,
   RefreshIcon,
+  ReplyIcon,
   SplitViewIcon,
   TrashIcon,
   WindowViewIcon,
 } from "../Icons";
 import { ModalFrame } from "../modals/ModalFrame";
 import { SidePanelButton, SidePanelHeader } from "../layout/SidePanelHeader";
-import { useModalA11y } from "../../hooks/useModalA11y";
+import { focusFirst, useModalA11y } from "../../hooks/useModalA11y";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { GroupPresentation, LedgerEvent, PresentationMessageRef } from "../../types";
 import {
   fetchPresentationBrowserSurfaceSession,
@@ -100,6 +106,10 @@ async function dataUrlToFile(dataUrl: string, filename: string): Promise<File | 
   }
 }
 
+// A screen this short folds the viewer's slots and keys away. Phones turned sideways are
+// 320–430px tall.
+const SHORT_VIEWPORT_QUERY = "(max-height: 480px)";
+
 function formatTimestamp(value: string | undefined, locale: string): string {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -168,12 +178,76 @@ function PresentationViewer({
   const isModal = variant === "modal";
   const slotButtonRef = useRef<HTMLButtonElement>(null);
   const hasSlotNavigation = !!onSelectSlot;
+  // A short screen, such as a phone turned sideways, folds the slots, the card's details and
+  // its keys behind one key, so the card keeps the height and nothing covers it.
+  const compact = useMediaQuery(SHORT_VIEWPORT_QUERY);
+  const [chromeOpen, setChromeOpen] = useState(false);
+  const showChrome = !compact || chromeOpen;
+  const chromeId = useId();
+  // Each window names its own title: switching slots keeps the previous window mounted.
+  const titleId = useId();
+  const chromeToggleRef = useRef<HTMLButtonElement | null>(null);
+  // The current slot takes focus on opening; while the slots are folded, the key that
+  // unfolds them does. An empty slot opened from an old quote cannot take focus, so the
+  // viewer's first key does.
+  const initialFocusRef = useMemo(
+    () => ({
+      get current(): HTMLElement | null {
+        const slot = slotButtonRef.current;
+        return slot && !slot.disabled ? slot : chromeToggleRef.current;
+      },
+    }),
+    [],
+  );
   const { modalRef } = useModalA11y(isModal && isOpen, onClose, {
-    initialFocusRef: hasSlotNavigation ? slotButtonRef : undefined,
+    initialFocusRef: hasSlotNavigation ? initialFocusRef : undefined,
   });
+  // The side panel takes focus as the window does, on the same key.
+  const splitRef = useRef<HTMLElement | null>(null);
   useLayoutEffect(() => {
-    if (!isModal && isOpen && hasSlotNavigation) slotButtonRef.current?.focus();
-  }, [isModal, isOpen, hasSlotNavigation, groupId, slotId]);
+    if (isModal || !isOpen || !hasSlotNavigation) return;
+    const target = initialFocusRef.current;
+    if (target) target.focus();
+    else if (splitRef.current) focusFirst(splitRef.current);
+  }, [isModal, isOpen, hasSlotNavigation, groupId, slotId, initialFocusRef]);
+  // Each short screen, and each opening, starts folded: a closed window stays mounted while
+  // its Group is open. A key that disappears while focused, because the slots fold or the
+  // screen grows taller and the unfold key goes, hands focus to the key that replaces it.
+  useEffect(() => setChromeOpen(false), [compact, isOpen]);
+  const chromeHadFocusRef = useRef(false);
+  // The viewer the unfold key sat in, when it held focus as it went.
+  const toggleFocusViewerRef = useRef<HTMLElement | null>(null);
+  const trackChromeFocus = useCallback((node: HTMLDivElement | null) => {
+    if (!node) return undefined;
+    return () => {
+      chromeHadFocusRef.current = node.contains(document.activeElement);
+    };
+  }, []);
+  const attachChromeToggle = useCallback((node: HTMLButtonElement | null) => {
+    chromeToggleRef.current = node;
+    if (!node) return undefined;
+    return () => {
+      toggleFocusViewerRef.current =
+        document.activeElement === node
+          ? node.closest<HTMLElement>('[role="dialog"], section')
+          : null;
+      chromeToggleRef.current = null;
+    };
+  }, []);
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+    if (!showChrome && chromeHadFocusRef.current) chromeToggleRef.current?.focus();
+    const viewer = toggleFocusViewerRef.current;
+    if (!compact && viewer) {
+      // An empty slot opened from an old quote cannot take focus; the viewer's first key
+      // on screen can.
+      const slot = slotButtonRef.current;
+      if (slot && !slot.disabled) slot.focus();
+      else focusFirst(viewer);
+    }
+    chromeHadFocusRef.current = false;
+    toggleFocusViewerRef.current = null;
+  }, [isOpen, showChrome, compact]);
   const [refreshTick, setRefreshTick] = useState(0);
   const [isExpanded, setIsExpanded] = useState(false);
   const [copiedReference, setCopiedReference] = useState(false);
@@ -245,9 +319,14 @@ function PresentationViewer({
   const copyReferenceValue = String(
     card?.content.url || card?.content.workspace_rel_path || href || "",
   ).trim();
-  const viewerPanelClassName = isExpanded
-    ? "h-screen w-screen max-w-none sm:h-[96vh] sm:w-[96vw] sm:max-w-[96vw]"
-    : "h-screen w-screen max-w-none sm:h-[88vh] sm:w-[min(1280px,96vw)]";
+  // On a short screen the window takes the whole screen: the negative margin takes back the
+  // 1rem the frame pads it with from 640px wide, and the safe areas keep it clear of a notch.
+  const viewerPanelClassName = compact
+    ? "h-[100dvh] w-screen max-w-none sm:-m-4 pr-[env(safe-area-inset-right,0px)] pb-[env(safe-area-inset-bottom,0px)] pl-[env(safe-area-inset-left,0px)]"
+    : isExpanded
+      ? "h-screen w-screen max-w-none sm:h-[96vh] sm:w-[96vw] sm:max-w-[96vw]"
+      : "h-screen w-screen max-w-none sm:h-[88vh] sm:w-[min(1280px,96vw)]";
+  const chromeLabel = t("presentationSlotsAndDetailsAction", { defaultValue: "Slots and details" });
   const immersiveViewportClassName = "h-full min-h-0";
   const fullScreenLabel = isExpanded
     ? t("presentationExitFullScreenAction", { defaultValue: "Exit full screen" })
@@ -307,8 +386,10 @@ function PresentationViewer({
         ? t("presentationCompareSnapshotAction", { defaultValue: "Compare with snapshot" })
         : t("presentationOpenQuotedSnapshotAction", { defaultValue: "Open quoted snapshot" })
       : t("presentationHideSnapshotAction", { defaultValue: "Hide snapshot" });
-  const iconButtonClassName = `${buttonVariants({ variant: "ghost", size: "iconRail" })} max-sm:h-11 max-sm:w-11`;
-  const destructiveIconButtonClassName = `${buttonVariants({ variant: "destructive", size: "iconRail" })} max-sm:h-11 max-sm:w-11 max-sm:!border-transparent max-sm:!bg-transparent max-sm:!shadow-none`;
+  // Phone keys are a fixed 44px touch target, like the header's fixed keys, so a larger text
+  // size does not push the details row onto a second line.
+  const iconButtonClassName = `${buttonVariants({ variant: "ghost", size: "iconRail" })} max-sm:h-[44px] max-sm:w-[44px]`;
+  const destructiveIconButtonClassName = `${buttonVariants({ variant: "destructive", size: "iconRail" })} max-sm:h-[44px] max-sm:w-[44px] max-sm:!border-transparent max-sm:!bg-transparent max-sm:!shadow-none`;
   const copiedIconButtonClassName = `${iconButtonClassName} text-[var(--color-accent-success)]`;
   const refreshActionLabel = t("presentationRefreshAction", { defaultValue: "Refresh" });
   const copyActionLabel = copiedReference
@@ -346,39 +427,73 @@ function PresentationViewer({
     }
   };
 
+  const jumpToChatLabel = t("presentationJumpToChatAction", { defaultValue: "Jump to chat" });
+  const replyInChatLabel = t("presentationReplyInChatAction", { defaultValue: "Reply in chat" });
+  // On phones the two chat actions are icon keys, so the title keeps its room beside them.
   const modalHeaderActions = (
     <>
-      {sourceEventId && onOpenMessageContext ? (
+      {compact && (hasSlotNavigation || card) ? (
         <button
+          ref={attachChromeToggle}
           type="button"
-          onClick={() => onOpenMessageContext(sourceEventId)}
+          data-lcd-key
+          data-presentation-action
+          aria-expanded={chromeOpen}
+          aria-controls={chromeId}
+          aria-label={chromeLabel}
+          title={chromeLabel}
+          onClick={() => setChromeOpen((value) => !value)}
           className={classNames(
-            "inline-flex min-h-[40px] items-center justify-center rounded-lg border px-3 text-sm font-medium transition-colors",
+            "inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-lg border transition-colors",
             isDark
               ? "border-white/12 bg-white/[0.06] text-white hover:bg-white/[0.1]"
               : "border-black/10 bg-[rgb(245,245,245)] text-[rgb(35,36,37)] hover:bg-white",
           )}
         >
-          {t("presentationJumpToChatAction", { defaultValue: "Jump to chat" })}
+          <MoreHorizontalIcon size={16} />
+        </button>
+      ) : null}
+      {sourceEventId && onOpenMessageContext ? (
+        <button
+          type="button"
+          data-lcd-key
+          data-presentation-action
+          onClick={() => onOpenMessageContext(sourceEventId)}
+          className={classNames(
+            "inline-flex min-h-[40px] items-center justify-center rounded-lg border px-3 text-sm font-medium transition-colors max-sm:min-w-[40px] max-sm:px-0",
+            isDark
+              ? "border-white/12 bg-white/[0.06] text-white hover:bg-white/[0.1]"
+              : "border-black/10 bg-[rgb(245,245,245)] text-[rgb(35,36,37)] hover:bg-white",
+          )}
+          title={jumpToChatLabel}
+        >
+          <MessageSquareIcon aria-hidden="true" size={16} className="sm:hidden" />
+          <span className="max-sm:sr-only">{jumpToChatLabel}</span>
         </button>
       ) : null}
       {sourceEvent && onReplyToMessage ? (
         <button
           type="button"
+          data-lcd-key
+          data-presentation-action
           onClick={() => onReplyToMessage(sourceEvent)}
           className={classNames(
-            "inline-flex min-h-[40px] items-center justify-center rounded-lg border px-3 text-sm font-medium transition-colors",
+            "inline-flex min-h-[40px] items-center justify-center rounded-lg border px-3 text-sm font-medium transition-colors max-sm:min-w-[40px] max-sm:px-0",
             isDark
               ? "border-white/12 bg-white/[0.06] text-white hover:bg-white/[0.1]"
               : "border-black/10 bg-[rgb(245,245,245)] text-[rgb(35,36,37)] hover:bg-white",
           )}
+          title={replyInChatLabel}
         >
-          {t("presentationReplyInChatAction", { defaultValue: "Reply in chat" })}
+          <ReplyIcon aria-hidden="true" size={16} className="sm:hidden" />
+          <span className="max-sm:sr-only">{replyInChatLabel}</span>
         </button>
       ) : null}
       {canRefresh ? (
         <button
           type="button"
+          data-lcd-key
+          data-presentation-action
           onClick={() => setRefreshTick((value) => value + 1)}
           className={classNames(
             "inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-lg border transition-colors",
@@ -392,9 +507,11 @@ function PresentationViewer({
           <RefreshIcon size={16} />
         </button>
       ) : null}
-      {card ? (
+      {card && !compact ? (
         <button
           type="button"
+          data-lcd-key
+          data-presentation-action
           onClick={() => setIsExpanded((value) => !value)}
           className={classNames(
             "hidden sm:inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-lg border transition-colors",
@@ -411,6 +528,8 @@ function PresentationViewer({
       {supportsSplit && onOpenSplit ? (
         <button
           type="button"
+          data-lcd-key
+          data-presentation-action
           onClick={onOpenSplit}
           className={classNames(
             "inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-lg border transition-colors",
@@ -628,6 +747,93 @@ function PresentationViewer({
     setSnapshotMobileTab("live");
   };
 
+  // The chat keys float over the card's lower corner, except in the window on phones, where
+  // they would cover what the card shows: there they join the details row, and the snapshot
+  // key keeps only its icon and pressed state.
+  const canQuote = !readOnly && !!card && !!onQuoteInChat;
+  const renderSnapshotKey = (inDetails: boolean) =>
+    currentSnapshotUrl ? (
+      <button
+        type="button"
+        data-lcd-key
+        data-presentation-action
+        aria-pressed={snapshotViewMode !== "hidden"}
+        onClick={handleToggleSnapshotView}
+        className={classNames(
+          "inline-flex items-center border transition-colors",
+          inDetails
+            ? "h-[44px] w-[44px] justify-center rounded-lg"
+            : "pointer-events-auto h-10 gap-2 rounded-full px-3 text-sm font-medium shadow-lg backdrop-blur-xl",
+          snapshotViewMode !== "hidden"
+            ? isDark
+              ? "border-white/12 bg-white/[0.08] text-white hover:bg-white/[0.12]"
+              : "border-black/10 bg-[rgb(245,245,245)] text-[rgb(35,36,37)] hover:bg-[rgb(240,240,240)]"
+            : isDark
+              ? "border-white/10 bg-slate-900/78 text-slate-200 hover:bg-slate-900"
+              : "border-black/10 bg-white/88 text-gray-700 hover:bg-white",
+        )}
+        aria-label={snapshotToggleLabel}
+        title={snapshotToggleLabel}
+      >
+        <ImageIcon aria-hidden="true" className="h-4 w-4" strokeWidth={1.5} />
+        {inDetails ? null : <span>{snapshotToggleLabel}</span>}
+      </button>
+    ) : null;
+  // In the details row the Quote label gives way to its icon where the row is too narrow for it
+  // beside the snapshot key and the three 44px keys, even at 125% text. While quoting, the row
+  // key keeps its label, which a longer one could rewrap under the reader's finger, and shows a
+  // spinner in place of its icon, with the pending text as its name.
+  const quoteIconOnly = currentSnapshotUrl
+    ? {
+        key: "@max-[318px]/details:w-[44px] @max-[318px]/details:justify-center @max-[318px]/details:px-0",
+        label: "@max-[318px]/details:hidden",
+      }
+    : {
+        key: "@max-[270px]/details:w-[44px] @max-[270px]/details:justify-center @max-[270px]/details:px-0",
+        label: "@max-[270px]/details:hidden",
+      };
+  const renderQuoteKey = (inDetails: boolean) => {
+    const pendingLabel = t("presentationQuotePendingAction", { defaultValue: "Quoting..." });
+    const name =
+      inDetails && quotePending
+        ? pendingLabel
+        : t("presentationQuoteInChatAction", { defaultValue: "Quote in chat" });
+    return (
+      <button
+        type="button"
+        data-lcd-key
+        data-presentation-action
+        onClick={() => {
+          void handleQuoteInChat();
+        }}
+        disabled={quotePending}
+        className={classNames(
+          "inline-flex items-center gap-2 border text-sm font-medium transition-colors",
+          inDetails
+            ? `h-[44px] rounded-lg px-3 ${quoteIconOnly.key}`
+            : "pointer-events-auto h-10 rounded-full px-3.5 shadow-lg backdrop-blur-xl",
+          "border-[var(--color-border-primary)] bg-[var(--glass-panel-bg)] text-[var(--color-text-primary)] hover:bg-[var(--glass-tab-bg-hover)]",
+          quotePending ? "opacity-70" : "",
+        )}
+        aria-label={name}
+        title={name}
+      >
+        {inDetails && quotePending ? (
+          <LcdSpinner className="h-4 w-4">
+            <MessageSquareTextIcon aria-hidden="true" className="h-4 w-4" strokeWidth={1.5} />
+          </LcdSpinner>
+        ) : (
+          <MessageSquareTextIcon aria-hidden="true" className="h-4 w-4" strokeWidth={1.5} />
+        )}
+        <span className={inDetails ? quoteIconOnly.label : undefined}>
+          {quotePending && !inDetails
+            ? pendingLabel
+            : t("presentationQuoteAction", { defaultValue: "Quote" })}
+        </span>
+      </button>
+    );
+  };
+
   const snapshotPanel = currentSnapshotUrl ? (
     <div
       className={classNames(
@@ -636,6 +842,7 @@ function PresentationViewer({
       )}
     >
       <div
+        data-presentation-snapshot-head
         className={classNames(
           "flex items-start justify-between gap-3 border-b px-4 py-3",
           isDark ? "border-white/10" : "border-black/10",
@@ -643,6 +850,7 @@ function PresentationViewer({
       >
         <div className="min-w-0">
           <div
+            data-presentation-snapshot-title
             className={classNames(
               "text-xs font-semibold uppercase tracking-[0.16em]",
               isDark ? "text-white/85" : "text-[rgb(35,36,37)]/85",
@@ -657,6 +865,7 @@ function PresentationViewer({
           ) : null}
           {quoteContextChanged ? (
             <div
+              data-status-tone="warning"
               className={classNames(
                 "mt-1 text-xs",
                 isDark ? "text-amber-300/90" : "text-amber-700",
@@ -826,110 +1035,131 @@ function PresentationViewer({
     </div>
   );
 
-  const viewerBody = (
-    <div className="flex min-h-0 flex-1 flex-col">
-      {variant === "modal" ? (
-        <div
-          className={classNames(
-            "flex flex-wrap items-center gap-2 border-b px-3 py-2 text-xs",
-            isDark ? "border-white/10 text-slate-400" : "border-black/10 text-gray-600",
-          )}
-        >
-          {card ? (
-            <>
+  const detailsRow =
+    variant === "modal" ? (
+      <div
+        data-presentation-details
+        className={classNames(
+          "@container/details flex flex-wrap items-center gap-2 border-b px-3 py-2 text-xs",
+          isDark ? "border-white/10 text-slate-400" : "border-black/10 text-gray-600",
+        )}
+      >
+        {card ? (
+          <>
+            <span
+              data-presentation-tag
+              data-status-tone="neutral"
+              className={classNames(
+                "rounded-full px-2 py-1 font-medium max-sm:hidden",
+                isDark
+                  ? "bg-white/[0.08] text-white"
+                  : "bg-[rgb(245,245,245)] text-[rgb(35,36,37)]",
+              )}
+            >
+              {getCardTypeLabel(card.card_type, t)}
+            </span>
+            {isWorkspaceLinked ? (
               <span
+                data-presentation-tag
+                data-status-tone="ok"
                 className={classNames(
-                  "rounded-full px-2 py-1 font-medium max-sm:hidden",
-                  isDark
-                    ? "bg-white/[0.08] text-white"
-                    : "bg-[rgb(245,245,245)] text-[rgb(35,36,37)]",
+                  "rounded-full px-2 py-1 font-medium",
+                  isDark ? "bg-emerald-500/10 text-emerald-200" : "bg-emerald-50 text-emerald-700",
                 )}
               >
-                {getCardTypeLabel(card.card_type, t)}
+                {t("presentationWorkspaceLiveBadge", { defaultValue: "Live workspace link" })}
               </span>
-              {isWorkspaceLinked ? (
-                <span
-                  className={classNames(
-                    "rounded-full px-2 py-1 font-medium",
-                    isDark
-                      ? "bg-emerald-500/10 text-emerald-200"
-                      : "bg-emerald-50 text-emerald-700",
-                  )}
-                >
-                  {t("presentationWorkspaceLiveBadge", { defaultValue: "Live workspace link" })}
-                </span>
+            ) : null}
+            {card.source_label ? <span className="max-sm:hidden">{card.source_label}</span> : null}
+            {linkedAsset.stale ? (
+              <span
+                role="status"
+                data-status-tone="warning"
+                className="min-w-0 flex-1 truncate text-amber-700 dark:text-amber-300"
+                title={`${t("presentationRefreshFailed")} (${linkedAsset.error})`}
+              >
+                {t("presentationRefreshFailed")}
+              </span>
+            ) : publishedAt ? (
+              <span className="max-sm:hidden">{publishedAt}</span>
+            ) : null}
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5 max-sm:ml-0 max-sm:w-full max-sm:justify-between">
+              {showWebPreviewModeToggle ? (
+                <PresentationPreviewModeToggle
+                  value={webPreviewMode}
+                  label={previewModeLabel}
+                  options={previewModeOptions}
+                  onChange={setWebPreviewMode}
+                />
               ) : null}
-              {card.source_label ? (
-                <span className="max-sm:hidden">{card.source_label}</span>
-              ) : null}
-              {linkedAsset.stale ? (
-                <span
-                  role="status"
-                  className="min-w-0 flex-1 truncate text-amber-700 dark:text-amber-300"
-                  title={`${t("presentationRefreshFailed")} (${linkedAsset.error})`}
-                >
-                  {t("presentationRefreshFailed")}
-                </span>
-              ) : publishedAt ? (
-                <span className="max-sm:hidden">{publishedAt}</span>
-              ) : null}
-              <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5 max-sm:ml-0 max-sm:w-full max-sm:justify-between">
-                {showWebPreviewModeToggle ? (
-                  <PresentationPreviewModeToggle
-                    value={webPreviewMode}
-                    label={previewModeLabel}
-                    options={previewModeOptions}
-                    onChange={setWebPreviewMode}
-                  />
+              <div className="ml-auto flex items-center gap-1.5 max-sm:gap-1">
+                {canQuote ? (
+                  <div
+                    className={classNames("flex items-center gap-1", compact ? "" : "sm:hidden")}
+                  >
+                    {renderQuoteKey(true)}
+                    {renderSnapshotKey(true)}
+                  </div>
                 ) : null}
-                <div className="ml-auto flex items-center gap-1.5 max-sm:gap-1">
-                  {copyReferenceValue ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void handleCopyReference();
-                      }}
-                      className={copiedReference ? copiedIconButtonClassName : iconButtonClassName}
-                      aria-label={copyActionLabel}
-                      title={copyActionLabel}
-                    >
-                      <CopyIcon size={16} />
-                    </button>
-                  ) : null}
-                  {!readOnly && onReplaceSlot ? (
-                    <button
-                      type="button"
-                      onClick={() => slot && onReplaceSlot(slot.slot_id)}
-                      className={iconButtonClassName}
-                      aria-label={editActionLabel}
-                      title={editActionLabel}
-                    >
-                      <EditIcon size={16} />
-                    </button>
-                  ) : null}
-                  {!readOnly && onClearSlot ? (
-                    <button
-                      type="button"
-                      onClick={() => void handleClearSlot()}
-                      disabled={!!clearingSlotId}
-                      className={destructiveIconButtonClassName}
-                      aria-label={clearActionLabel}
-                      title={clearActionLabel}
-                    >
-                      <TrashIcon size={16} />
-                    </button>
-                  ) : null}
-                </div>
+                {copyReferenceValue ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleCopyReference();
+                    }}
+                    className={copiedReference ? copiedIconButtonClassName : iconButtonClassName}
+                    aria-label={copyActionLabel}
+                    title={copyActionLabel}
+                  >
+                    <CopyIcon size={16} />
+                  </button>
+                ) : null}
+                {!readOnly && onReplaceSlot ? (
+                  <button
+                    type="button"
+                    onClick={() => slot && onReplaceSlot(slot.slot_id)}
+                    className={iconButtonClassName}
+                    aria-label={editActionLabel}
+                    title={editActionLabel}
+                  >
+                    <EditIcon size={16} />
+                  </button>
+                ) : null}
+                {!readOnly && onClearSlot ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleClearSlot()}
+                    disabled={!!clearingSlotId}
+                    className={destructiveIconButtonClassName}
+                    aria-label={clearActionLabel}
+                    title={clearActionLabel}
+                  >
+                    <TrashIcon size={16} />
+                  </button>
+                ) : null}
               </div>
-            </>
-          ) : (
-            <span>
-              {t("presentationMissingCard", { defaultValue: "This presentation slot is empty." })}
-            </span>
-          )}
-        </div>
-      ) : null}
+            </div>
+          </>
+        ) : (
+          <span>
+            {t("presentationMissingCard", { defaultValue: "This presentation slot is empty." })}
+          </span>
+        )}
+      </div>
+    ) : null;
 
+  const viewerBody = (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {isModal && !showChrome && linkedAsset.stale ? (
+        <p
+          role="status"
+          data-status-tone="warning"
+          className="shrink-0 truncate border-b border-[var(--glass-border-subtle)] px-3 py-1 text-xs"
+          title={`${t("presentationRefreshFailed")} (${linkedAsset.error})`}
+        >
+          {t("presentationRefreshFailed")}
+        </p>
+      ) : null}
       <div
         className={classNames(
           "relative min-h-0 flex-1 overflow-hidden",
@@ -937,9 +1167,10 @@ function PresentationViewer({
         )}
       >
         {showSnapshotCompare ? (
-          <div className="mb-3 flex items-center gap-2 lg:hidden">
+          <div data-presentation-snapshot-tabs className="mb-3 flex items-center gap-2 lg:hidden">
             <button
               type="button"
+              aria-pressed={snapshotMobileTab === "live"}
               onClick={() => setSnapshotMobileTab("live")}
               className={classNames(
                 "rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
@@ -956,6 +1187,7 @@ function PresentationViewer({
             </button>
             <button
               type="button"
+              aria-pressed={snapshotMobileTab === "snapshot"}
               onClick={() => setSnapshotMobileTab("snapshot")}
               className={classNames(
                 "rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
@@ -986,7 +1218,7 @@ function PresentationViewer({
               "h-full min-h-0",
               useOuterEvidenceScroll ? "overflow-auto" : "overflow-hidden",
               !useOuterEvidenceScroll && card ? "flex flex-col" : "",
-              useOuterEvidenceScroll && !readOnly && card && onQuoteInChat ? "pb-20" : "",
+              useOuterEvidenceScroll && canQuote ? (isModal ? "sm:pb-20" : "pb-20") : "",
               showSnapshotCompare && snapshotMobileTab !== "live" ? "hidden lg:block" : "",
             )}
           >
@@ -1004,7 +1236,10 @@ function PresentationViewer({
           ) : null}
         </div>
         {showSnapshotOverlay && snapshotPanel ? (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/20 p-4 backdrop-blur-[2px]">
+          <div
+            data-presentation-scrim
+            className="absolute inset-0 z-20 flex items-center justify-center bg-black/20 p-4 backdrop-blur-[2px]"
+          >
             <button
               type="button"
               className="absolute inset-0"
@@ -1018,6 +1253,7 @@ function PresentationViewer({
           <div className="absolute inset-0 z-30 flex items-center justify-center p-4 sm:p-6">
             <button
               type="button"
+              data-presentation-scrim
               className="absolute inset-0 bg-black/60 backdrop-blur-sm"
               onClick={() => setSnapshotLightboxOpen(false)}
               aria-label={t("presentationCloseSnapshotAction", { defaultValue: "Close snapshot" })}
@@ -1025,6 +1261,7 @@ function PresentationViewer({
             <div
               ref={snapshotModalRef}
               role="dialog"
+              data-presentation-snapshot-dialog
               aria-modal="true"
               aria-label={t("presentationSnapshotFromQuoteLabel")}
               className={classNames(
@@ -1033,6 +1270,7 @@ function PresentationViewer({
               )}
             >
               <div
+                data-presentation-snapshot-head
                 className={classNames(
                   "flex items-start justify-between gap-3 border-b px-4 py-3",
                   isDark ? "border-white/10" : "border-black/10",
@@ -1058,6 +1296,7 @@ function PresentationViewer({
                   ) : null}
                   {quoteContextChanged ? (
                     <div
+                      data-status-tone="warning"
                       className={classNames(
                         "mt-1 text-xs",
                         isDark ? "text-amber-300/90" : "text-amber-700",
@@ -1090,50 +1329,15 @@ function PresentationViewer({
             </div>
           </div>
         ) : null}
-        {!readOnly && card && onQuoteInChat ? (
-          <div className="pointer-events-none absolute bottom-[max(1rem,env(safe-area-inset-bottom))] right-5 z-10 flex items-center gap-2">
-            {currentSnapshotUrl ? (
-              <button
-                type="button"
-                onClick={handleToggleSnapshotView}
-                className={classNames(
-                  "pointer-events-auto inline-flex h-10 items-center gap-2 rounded-full border px-3 text-sm font-medium shadow-lg backdrop-blur-xl transition-colors",
-                  snapshotViewMode !== "hidden"
-                    ? isDark
-                      ? "border-white/12 bg-white/[0.08] text-white hover:bg-white/[0.12]"
-                      : "border-black/10 bg-[rgb(245,245,245)] text-[rgb(35,36,37)] hover:bg-[rgb(240,240,240)]"
-                    : isDark
-                      ? "border-white/10 bg-slate-900/78 text-slate-200 hover:bg-slate-900"
-                      : "border-black/10 bg-white/88 text-gray-700 hover:bg-white",
-                )}
-                aria-label={snapshotToggleLabel}
-                title={snapshotToggleLabel}
-              >
-                <ImageIcon aria-hidden="true" className="h-4 w-4" strokeWidth={1.5} />
-                <span>{snapshotToggleLabel}</span>
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => {
-                void handleQuoteInChat();
-              }}
-              disabled={quotePending}
-              className={classNames(
-                "pointer-events-auto inline-flex h-10 items-center gap-2 rounded-full border px-3.5 text-sm font-medium shadow-lg backdrop-blur-xl transition-colors",
-                "border-[var(--color-border-primary)] bg-[var(--glass-panel-bg)] text-[var(--color-text-primary)] hover:bg-[var(--glass-tab-bg-hover)]",
-                quotePending ? "opacity-70" : "",
-              )}
-              aria-label={t("presentationQuoteInChatAction", { defaultValue: "Quote in chat" })}
-              title={t("presentationQuoteInChatAction", { defaultValue: "Quote in chat" })}
-            >
-              <MessageSquareTextIcon aria-hidden="true" className="h-4 w-4" strokeWidth={1.5} />
-              <span>
-                {quotePending
-                  ? t("presentationQuotePendingAction", { defaultValue: "Quoting..." })
-                  : t("presentationQuoteAction", { defaultValue: "Quote" })}
-              </span>
-            </button>
+        {canQuote && !compact ? (
+          <div
+            className={classNames(
+              "pointer-events-none absolute bottom-[max(1rem,env(safe-area-inset-bottom))] right-5 z-10 flex items-center gap-2",
+              isModal ? "max-sm:hidden" : "",
+            )}
+          >
+            {renderSnapshotKey(false)}
+            {renderQuoteKey(false)}
           </div>
         ) : null}
       </div>
@@ -1154,6 +1358,7 @@ function PresentationViewer({
   if (variant === "split") {
     return (
       <section
+        ref={splitRef}
         className={classNames(
           "flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
           "bg-[var(--color-bg-primary)]",
@@ -1172,9 +1377,21 @@ function PresentationViewer({
           onClose={onClose}
           closeLabel={t("presentationCloseDockAction")}
         >
+          {compact && (hasSlotNavigation || card) ? (
+            <SidePanelButton
+              ref={attachChromeToggle}
+              title={chromeLabel}
+              data-presentation-action
+              aria-expanded={chromeOpen}
+              aria-controls={chromeId}
+              onClick={() => setChromeOpen((value) => !value)}
+            >
+              <MoreHorizontalIcon />
+            </SidePanelButton>
+          ) : null}
           {onCollapse && (
             <SidePanelButton title={t("presentationCompactSlots")} onClick={onCollapse}>
-              <PanelRightClose />
+              <LcdIcon icon={PanelRightClose} glyph="square-chevron-right" />
             </SidePanelButton>
           )}
           {onOpenWindow && (
@@ -1188,58 +1405,77 @@ function PresentationViewer({
             {t("presentationRefreshFailed")}
           </span>
         )}
-        {slotNavigation}
-        {(showWebPreviewModeToggle ||
-          canRefresh ||
-          copyReferenceValue ||
-          (!readOnly && (onReplaceSlot || onClearSlot) && slot)) && (
-          <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-[var(--glass-border-subtle)] px-2 py-1">
-            {showWebPreviewModeToggle ? (
-              <PresentationPreviewModeToggle
-                value={webPreviewMode}
-                label={previewModeLabel}
-                options={previewModeOptions}
-                compact
-                onChange={setWebPreviewMode}
-              />
-            ) : null}
-            <div className="ml-auto flex shrink-0 items-center gap-1">
-              {canRefresh && (
-                <SidePanelButton
-                  title={refreshActionLabel}
-                  onClick={() => setRefreshTick((value) => value + 1)}
-                >
-                  <RefreshIcon />
-                </SidePanelButton>
-              )}
-              {copyReferenceValue && (
-                <SidePanelButton title={copyActionLabel} onClick={() => void handleCopyReference()}>
-                  <CopyIcon />
-                </SidePanelButton>
-              )}
-              {!readOnly && onReplaceSlot && slot && (
-                <SidePanelButton
-                  title={editActionLabel}
-                  onClick={() => onReplaceSlot(slot.slot_id)}
-                >
-                  <EditIcon />
-                </SidePanelButton>
-              )}
-              {!readOnly && onClearSlot && slot && (
-                <SidePanelButton
-                  title={clearActionLabel}
-                  onClick={() => void handleClearSlot()}
-                  disabled={!!clearingSlotId}
-                  className={
-                    isDark ? "text-rose-200 hover:bg-rose-500/15" : "text-rose-700 hover:bg-rose-50"
-                  }
-                >
-                  <TrashIcon />
-                </SidePanelButton>
+        <div id={chromeId} hidden={!showChrome} className="shrink-0">
+          {showChrome ? (
+            <div ref={trackChromeFocus}>
+              {slotNavigation}
+              {(showWebPreviewModeToggle ||
+                canRefresh ||
+                copyReferenceValue ||
+                (compact && canQuote) ||
+                (!readOnly && (onReplaceSlot || onClearSlot) && slot)) && (
+                <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-[var(--glass-border-subtle)] px-2 py-1">
+                  {showWebPreviewModeToggle ? (
+                    <PresentationPreviewModeToggle
+                      value={webPreviewMode}
+                      label={previewModeLabel}
+                      options={previewModeOptions}
+                      compact
+                      onChange={setWebPreviewMode}
+                    />
+                  ) : null}
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                    {compact && canQuote ? (
+                      <>
+                        {renderQuoteKey(true)}
+                        {renderSnapshotKey(true)}
+                      </>
+                    ) : null}
+                    {canRefresh && (
+                      <SidePanelButton
+                        title={refreshActionLabel}
+                        onClick={() => setRefreshTick((value) => value + 1)}
+                      >
+                        <RefreshIcon />
+                      </SidePanelButton>
+                    )}
+                    {copyReferenceValue && (
+                      <SidePanelButton
+                        title={copyActionLabel}
+                        onClick={() => void handleCopyReference()}
+                      >
+                        <CopyIcon />
+                      </SidePanelButton>
+                    )}
+                    {!readOnly && onReplaceSlot && slot && (
+                      <SidePanelButton
+                        title={editActionLabel}
+                        onClick={() => onReplaceSlot(slot.slot_id)}
+                      >
+                        <EditIcon />
+                      </SidePanelButton>
+                    )}
+                    {!readOnly && onClearSlot && slot && (
+                      <SidePanelButton
+                        title={clearActionLabel}
+                        data-status-tone="error"
+                        onClick={() => void handleClearSlot()}
+                        disabled={!!clearingSlotId}
+                        className={
+                          isDark
+                            ? "text-rose-200 hover:bg-rose-500/15"
+                            : "text-rose-700 hover:bg-rose-50"
+                        }
+                      >
+                        <TrashIcon />
+                      </SidePanelButton>
+                    )}
+                  </div>
+                </div>
               )}
             </div>
-          </div>
-        )}
+          ) : null}
+        </div>
         {viewerBody}
       </section>
     );
@@ -1250,7 +1486,7 @@ function PresentationViewer({
       isOpen={isOpen}
       isDark={isDark}
       onClose={onClose}
-      titleId="presentation-viewer-title"
+      titleId={titleId}
       title={
         <PresentationViewerTitle
           title={card?.title || t("presentationTitle", { defaultValue: "Presentation" })}
@@ -1265,7 +1501,14 @@ function PresentationViewer({
       headerActions={modalHeaderActions}
       modalRef={modalRef}
     >
-      {slotNavigation}
+      <div id={chromeId} hidden={!showChrome} className="shrink-0">
+        {showChrome ? (
+          <div ref={trackChromeFocus}>
+            {slotNavigation}
+            {detailsRow}
+          </div>
+        ) : null}
+      </div>
       {viewerBody}
     </ModalFrame>
   );

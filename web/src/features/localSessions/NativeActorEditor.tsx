@@ -64,7 +64,7 @@ export function NativeActorEditor(props: EditActorConfigProps) {
         className="space-y-4 overflow-auto p-4 sm:p-6"
       >
         {error && (
-          <p role="alert" className="text-sm text-red-600">
+          <p role="alert" className="text-sm text-red-600" data-status-tone="error">
             {error}
           </p>
         )}

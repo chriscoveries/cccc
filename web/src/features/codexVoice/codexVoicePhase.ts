@@ -1,12 +1,26 @@
 import type { CodexVoicePhase } from "./codexVoiceSession";
 
-export function voicePhaseDotClass(phase: CodexVoicePhase, external: boolean): string {
+// What a Voice status dot reports through data-status-dot.
+export type VoiceDotState = "active" | "attention" | "failed" | "inactive";
+
+/** A connected or external call alone does not establish activity on this page. */
+export function voicePhaseHasLocalActivity(
+  phase: CodexVoicePhase,
+  options: { microphoneMuted: boolean; externalCall: boolean; playbackBlocked: boolean },
+): boolean {
+  if (options.externalCall) return false;
+  if (phase === "listening") return !options.microphoneMuted;
+  if (phase === "speaking") return !options.playbackBlocked;
+  return ["responding", "analysing"].includes(phase);
+}
+
+export function voicePhaseDotState(phase: CodexVoicePhase, external: boolean): VoiceDotState {
   if (external || ["listening", "responding", "speaking", "analysing"].includes(phase)) {
-    return "bg-emerald-400 shadow-[0_0_0_4px_rgba(52,211,153,0.12)]";
+    return "active";
   }
   if (phase === "preparing" || phase === "connecting" || phase === "stopping") {
-    return "animate-pulse bg-amber-400";
+    return "attention";
   }
-  if (phase === "failed") return "bg-rose-500";
-  return "bg-[var(--color-text-tertiary)]";
+  if (phase === "failed") return "failed";
+  return "inactive";
 }

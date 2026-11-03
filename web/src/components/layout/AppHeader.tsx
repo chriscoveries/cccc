@@ -1,6 +1,6 @@
 import { HostResourcesBadge } from "../../features/resources/ResourceProvider";
 import { useUIStore } from "../../stores/useUIStore";
-import { useContext, type Ref } from "react";
+import { type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import { GROUP_STATUS_LABEL_KEYS, getGroupStatusFromSource } from "../../utils/groupStatus";
 import { GroupDoc, GroupRuntimeStatus, TextScale, Theme } from "../../types";
@@ -12,7 +12,7 @@ import { groupRunMenuActions } from "./groupRunMenuActions";
 import { useGroupMenu } from "./useGroupMenu";
 import type { GroupControl } from "../../utils/groupControls";
 import { AppSettingsMenu } from "./AppSettingsMenu";
-import { PendingSummaryContext } from "../../features/pendingReplies/context";
+import { useVisiblePendingSummary } from "../../features/pendingReplies/useVisiblePendingSummary";
 import { aggregatePendingIndicator } from "../../features/pendingReplies/indicator";
 import { PendingIndicatorText } from "../../features/pendingReplies/PendingIndicator";
 
@@ -71,11 +71,12 @@ export function AppHeader({
   mobileReadingOverlay = false,
 }: AppHeaderProps) {
   const { t } = useTranslation("layout");
-  const pending = useContext(PendingSummaryContext);
+  const pending = useVisiblePendingSummary();
   const totalPending = pending
     ? aggregatePendingIndicator(pending.summaries, Object.keys(pending.summaries))
     : null;
   const controlsBusy = useUIStore((state) => state.busy.startsWith("group-"));
+  const isSmallScreen = useUIStore((state) => state.isSmallScreen);
   const groupTitle = groupDoc?.title || (selectedGroupId ? selectedGroupId : t("selectGroup"));
   const canEditGroup = !!selectedGroupId && !webReadOnly && !!onOpenGroupEdit;
   const selectedStatus = selectedGroupId
@@ -108,6 +109,42 @@ export function AppHeader({
           controlsBusy,
         )
       : [],
+  );
+  const workShortcuts = (
+    <div
+      className="hidden min-w-0 flex-1 basis-0 items-center justify-end @min-[760px]/group-header:flex"
+      data-group-work-shortcuts-host
+    >
+      {!webReadOnly && (
+        <div
+          className="flex shrink-0 items-center gap-0.5 border-r border-[var(--glass-border-subtle)] pr-2"
+          data-group-work-shortcuts
+        >
+          <IconButton
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onOpenSearch}
+            disabled={!selectedGroupId}
+            className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+            label={t("searchMessages")}
+          >
+            <SearchIcon size={18} strokeWidth={1.25} />
+          </IconButton>
+          <IconButton
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onOpenContext}
+            disabled={!selectedGroupId}
+            className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+            label={t("context")}
+          >
+            <ClipboardIcon size={18} strokeWidth={1.25} />
+          </IconButton>
+        </div>
+      )}
+    </div>
   );
   return (
     <header
@@ -155,6 +192,7 @@ export function AppHeader({
             <h1
               className="min-w-0 truncate text-base font-semibold leading-tight text-[var(--color-text-primary)]"
               title={groupTitle}
+              data-group-title
             >
               {groupTitle}
             </h1>
@@ -182,7 +220,7 @@ export function AppHeader({
                   data-group-run-control={selectedGroupId}
                   aria-label={statusControlLabel}
                   title={statusControlLabel}
-                  className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-full pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px] md:pointer-coarse:min-h-10 md:pointer-coarse:min-w-10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-text-secondary)] @min-[480px]/group-work-header:relative"
+                  className={`inline-flex min-h-8 min-w-8 items-center justify-center rounded-full pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px] md:pointer-coarse:min-h-10 md:pointer-coarse:min-w-10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-text-secondary)] relative`}
                   aria-haspopup="menu"
                   aria-expanded={runMenu.open}
                   onClick={(event) => runMenu.toggle(event.currentTarget)}
@@ -193,16 +231,18 @@ export function AppHeader({
                     } else runMenu.onKeyDown(event);
                   }}
                 >
+                  {/* The state symbol shows alone; the word stays in the tooltip. Its
+                      frame and ▾ stay at every width: a bare ▶ reads as a play key. */}
                   <GroupStatusIndicator
                     status={selectedStatus}
                     connectionStatus={sseStatus}
                     variant="badge"
-                    className="min-h-8 min-w-8 justify-center pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px] md:pointer-coarse:min-h-10 md:pointer-coarse:min-w-10 [&>span:last-child]:hidden @min-[480px]/group-work-header:[&>span:last-child]:inline !border-transparent !bg-transparent @min-[480px]/group-work-header:!rounded-full @min-[480px]/group-work-header:!border-[var(--glass-border-subtle)] @min-[480px]/group-work-header:pr-6 cursor-pointer transition-colors hover:text-[var(--color-text-primary)]"
+                    className="min-h-8 min-w-8 justify-center pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px] md:pointer-coarse:min-h-10 md:pointer-coarse:min-w-10 [&>span:last-child]:hidden cursor-pointer transition-colors hover:text-[var(--color-text-primary)] pr-6"
                   />
                   <ChevronDownIcon
                     size={13}
                     aria-hidden="true"
-                    className="pointer-events-none absolute right-2 hidden text-[var(--color-text-tertiary)] @min-[480px]/group-work-header:block"
+                    className="pointer-events-none absolute right-2 text-[var(--color-text-tertiary)]"
                   />
                 </button>
               ) : (
@@ -222,40 +262,21 @@ export function AppHeader({
           className="flex shrink-0 items-center gap-1"
           data-group-work-controls-host
         />
-        <div className="hidden min-w-0 flex-1 basis-0 items-center justify-end @min-[760px]/group-header:flex">
-          {!webReadOnly && (
-            <div
-              className="flex shrink-0 items-center gap-0.5 border-r border-[var(--glass-border-subtle)] pr-2"
-              data-group-work-shortcuts
-            >
-              <IconButton
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={onOpenSearch}
-                disabled={!selectedGroupId}
-                className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
-                label={t("searchMessages")}
-              >
-                <SearchIcon size={18} strokeWidth={1.25} />
-              </IconButton>
-              <IconButton
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={onOpenContext}
-                disabled={!selectedGroupId}
-                className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
-                label={t("context")}
-              >
-                <ClipboardIcon size={18} strokeWidth={1.25} />
-              </IconButton>
-            </div>
-          )}
-        </div>
+        {!isSmallScreen ? (
+          // The tools take the right half, as wide as the identity on the left, so the
+          // view switch between them stays centred.
+          <div
+            className="flex min-w-0 flex-1 basis-0 items-center justify-end gap-2"
+            data-lcd-header-end
+          >
+            {workShortcuts}
+          </div>
+        ) : (
+          workShortcuts
+        )}
       </div>
       <div
-        className="flex shrink-0 items-center justify-end gap-1 md:gap-2 md:w-[max(7.5rem,calc(var(--group-side-panel-width,0px)-1rem+4px))]"
+        className="flex shrink-0 items-center justify-end gap-1 md:gap-2 md:min-w-[max(7.5rem,calc(var(--group-side-panel-width,0px)-1rem+4px))]"
         data-group-header-resources
       >
         <HostResourcesBadge />
@@ -286,6 +307,7 @@ export function AppHeader({
               className="shrink-0 max-md:h-[44px] max-md:w-[44px] text-[var(--color-text-secondary)] @min-[760px]/group-header:hidden"
               onClick={onOpenMobileMenu}
               label={t("menu")}
+              data-group-header-menu
             >
               <MoreIcon size={18} />
             </IconButton>

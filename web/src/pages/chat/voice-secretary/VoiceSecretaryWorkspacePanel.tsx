@@ -3,10 +3,10 @@ import { VoiceLiveTranscript } from "./VoiceLiveTranscript";
 import type { VoiceTranscriptPreview } from "./voiceStreamModel";
 import { useMemo, type ReactNode } from "react";
 import { MarkdownDocumentSurface } from "../../../components/document/MarkdownDocumentSurface";
-import { Archive } from "lucide-react";
 import {
   DownloadIcon,
   FileTextIcon,
+  GroupArchiveIcon,
   MessageSquareQuoteIcon,
   MoreIcon,
 } from "../../../components/Icons";
@@ -36,6 +36,8 @@ type VoiceSecretaryWorkspacePanelProps = {
   documentEditing: boolean;
   documentHasUnsavedEdits: boolean;
   documentLoading: boolean;
+  documentError: string;
+  documentConflict: "content" | "target" | "missing" | "unavailable" | null;
   documentRemoteChanged: boolean;
   isDark: boolean;
   recording: boolean;
@@ -50,6 +52,7 @@ type VoiceSecretaryWorkspacePanelProps = {
   onDownloadDocument: () => void;
   onEditDocumentChange: (value: string) => void;
   onLoadLatestDocument: () => void;
+  onOverwriteDocument: () => void;
   onQuoteDocument: () => void;
   onSaveDocument: () => void;
   onToggleDocumentEditing: () => void;
@@ -72,6 +75,8 @@ export function VoiceSecretaryWorkspacePanel({
   documentEditing,
   documentHasUnsavedEdits,
   documentLoading,
+  documentError,
+  documentConflict,
   documentRemoteChanged,
   isDark,
   recording,
@@ -85,6 +90,7 @@ export function VoiceSecretaryWorkspacePanel({
   onDownloadDocument,
   onEditDocumentChange,
   onLoadLatestDocument,
+  onOverwriteDocument,
   onQuoteDocument,
   onSaveDocument,
   onToggleDocumentEditing,
@@ -111,7 +117,8 @@ export function VoiceSecretaryWorkspacePanel({
     "flex min-h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:pointer-events-none disabled:opacity-40";
   const isDefaultDocument =
     !!activeDocumentWritePath && activeDocumentWritePath === captureTargetDocumentPath;
-  const documentEmpty = !documentEditing && !documentLoading && !documentDraft.trim();
+  const documentEmpty =
+    !documentEditing && !documentLoading && !documentError && !documentDraft.trim();
   const metaItems: ReactNode[] =
     view === "document"
       ? [
@@ -135,12 +142,20 @@ export function VoiceSecretaryWorkspacePanel({
             </span>
           ) : null,
           documentHasUnsavedEdits ? (
-            <span key="unsaved" className="font-medium text-amber-700 dark:text-amber-300">
+            <span
+              key="unsaved"
+              data-status-tone="neutral"
+              className="font-medium text-amber-700 dark:text-amber-300"
+            >
               {t("voiceSecretaryUnsavedEditsBadge", { defaultValue: "Unsaved edits" })}
             </span>
           ) : null,
           documentRemoteChanged ? (
-            <span key="remote" className="font-medium text-[var(--color-accent-primary)]">
+            <span
+              key="remote"
+              data-status-tone="warning"
+              className="font-medium text-[var(--color-accent-primary)]"
+            >
               {t("voiceSecretaryRemoteChangedBadge", { defaultValue: "Remote update available" })}
             </span>
           ) : null,
@@ -219,9 +234,12 @@ export function VoiceSecretaryWorkspacePanel({
               );
             })}
           </div>
-          {view === "document" && documentRemoteChanged ? (
+          {view === "document" &&
+          documentConflict !== "unavailable" &&
+          (documentRemoteChanged || documentError) ? (
             <button
               type="button"
+              data-lcd-key
               className={actionClassName}
               onClick={onLoadLatestDocument}
               disabled={!activeDocumentPath || documentLoading}
@@ -236,12 +254,18 @@ export function VoiceSecretaryWorkspacePanel({
           {view === "document" && (documentEditing || documentHasUnsavedEdits) ? (
             <button
               type="button"
+              data-lcd-key
               className={classNames(
                 actionClassName,
                 "font-semibold text-[var(--color-text-primary)]",
               )}
               onClick={onSaveDocument}
-              disabled={!!actionBusy || documentLoading}
+              disabled={
+                !!actionBusy ||
+                documentLoading ||
+                !!documentError ||
+                documentConflict === "unavailable"
+              }
             >
               {actionBusy === "save_doc"
                 ? t("voiceSecretarySavingDocument", { defaultValue: "Saving..." })
@@ -251,8 +275,9 @@ export function VoiceSecretaryWorkspacePanel({
           {view === "document" ? (
             <button
               type="button"
+              data-lcd-key
               onClick={onToggleDocumentEditing}
-              disabled={documentLoading}
+              disabled={documentLoading || !!documentError}
               className={actionClassName}
             >
               {documentEditing
@@ -265,6 +290,7 @@ export function VoiceSecretaryWorkspacePanel({
               <PopoverTrigger asChild>
                 <button
                   type="button"
+                  data-lcd-key
                   data-voice-document-more
                   className={classNames(actionClassName, "px-1.5")}
                   aria-label={t("voiceSecretaryDocumentMoreActions")}
@@ -273,7 +299,12 @@ export function VoiceSecretaryWorkspacePanel({
                   <MoreIcon size={15} aria-hidden="true" />
                 </button>
               </PopoverTrigger>
-              <PopoverContent align="end" sideOffset={6} className="w-52 rounded-xl p-1.5">
+              <PopoverContent
+                data-lcd-menu
+                align="end"
+                sideOffset={6}
+                className="w-52 rounded-xl p-1.5"
+              >
                 <button
                   type="button"
                   onClick={onQuoteDocument}
@@ -305,7 +336,7 @@ export function VoiceSecretaryWorkspacePanel({
                   disabled={!!actionBusy || documentLoading}
                   className={menuItemClassName}
                 >
-                  <Archive size={15} aria-hidden="true" />
+                  <GroupArchiveIcon size={15} aria-hidden="true" />
                   {actionBusy === "archive_doc"
                     ? t("voiceSecretaryArchivingDocument", { defaultValue: "Archiving..." })
                     : t("voiceSecretaryArchiveShort", { defaultValue: "Archive" })}
@@ -316,6 +347,7 @@ export function VoiceSecretaryWorkspacePanel({
           {view === "transcript" ? (
             <button
               type="button"
+              data-lcd-key
               onClick={onClearTranscript}
               disabled={!transcriptCount || recording}
               className={actionClassName}
@@ -335,6 +367,42 @@ export function VoiceSecretaryWorkspacePanel({
         </div>
       </div>
       {statusLine}
+
+      {view === "document" && documentConflict ? (
+        <div
+          data-status-tone="warning"
+          role="alert"
+          className={classNames(
+            "mt-3 flex flex-wrap items-center gap-2 rounded-lg border p-2 text-sm",
+            isDark
+              ? "border-amber-300/25 bg-amber-400/10 text-amber-100"
+              : "border-amber-200 bg-amber-50 text-amber-900",
+          )}
+        >
+          <span className="min-w-0 flex-1">
+            {t(
+              documentConflict === "unavailable"
+                ? "voiceSecretaryDocumentUnavailableDraft"
+                : documentConflict === "target"
+                  ? "voiceSecretaryDocumentTargetConflict"
+                  : documentConflict === "missing"
+                    ? "voiceSecretaryDocumentMissingConflict"
+                    : "voiceSecretaryDocumentContentConflict",
+            )}
+          </span>
+          {documentConflict === "content" ? (
+            <button
+              type="button"
+              data-lcd-key
+              className={actionClassName}
+              disabled={!!actionBusy || documentLoading}
+              onClick={onOverwriteDocument}
+            >
+              {t("voiceSecretaryOverwriteWithDraft")}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       {view === "document" && documentEmpty ? (
         <div
@@ -369,6 +437,7 @@ export function VoiceSecretaryWorkspacePanel({
           })}
           isDark={isDark}
           loading={documentLoading}
+          error={documentError}
           loadingLabel={t("voiceSecretaryDocumentLoading", {
             defaultValue: "Loading document content...",
           })}
@@ -395,6 +464,7 @@ export function VoiceSecretaryWorkspacePanel({
           ) : null}
           {!recording && !processingRows.length && failedRows.length ? (
             <div
+              data-status-tone="error"
               className={classNames(
                 "rounded-2xl border px-3 py-2.5 text-sm",
                 isDark

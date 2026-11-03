@@ -4,16 +4,18 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { CodexVoiceAnalystModal } from "../../components/modals/CodexVoiceAnalystModal";
 import { useCodexVoiceSessionController } from "./useCodexVoiceSessionController";
+import { chetConversationStub } from "../chet/chetTestSupport";
 
 const fixture = vi.hoisted(() => ({
   active: vi.fn(),
   cancel: vi.fn(),
   control: vi.fn(),
+  reset: vi.fn(),
   sessions: [] as Array<{
     callbacks: {
       onPhase(value: string): void;
       onCall(value: unknown): void;
-      onError(code: string): void;
+      onError(code: string, providerCode?: string, recoveryOwners?: string[]): void;
       onAnalyst(value: unknown): void;
     };
     cancel: () => boolean;
@@ -24,7 +26,7 @@ vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: fixture.t }) }));
 vi.mock("../../services/api", () => ({
   fetchActiveCodexVoiceCall: fixture.active,
   cancelCodexVoiceAnalyst: fixture.cancel,
-  resetCodexVoiceAnalyst: vi.fn(),
+  resetCodexVoiceAnalyst: fixture.reset,
   stopCodexVoiceCall: vi.fn(),
 }));
 vi.mock("../../services/api/codexVoice", () => ({
@@ -141,6 +143,7 @@ function App() {
     <>
       <audio ref={current.audioRef} />
       <CodexVoiceAnalystModal
+        chet={chetConversationStub()}
         isOpen
         isDark={false}
         isSmallScreen={false}
@@ -156,6 +159,7 @@ beforeEach(() => {
   fixture.active.mockReset().mockResolvedValue(snapshot());
   fixture.cancel.mockReset().mockResolvedValue({ ok: true, result: { cancelled: true } });
   fixture.control.mockReset();
+  fixture.reset.mockReset();
   fixture.sessions.length = 0;
   vi.stubGlobal("matchMedia", () => ({
     matches: true,
@@ -173,6 +177,22 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 const mount = () => act(async () => root.render(<App />));
+
+it("offers the process record review only beside the error that named its owners", async () => {
+  await mount();
+  await act(async () => current.start());
+  const callbacks = fixture.sessions[0].callbacks;
+  await act(async () => callbacks.onError("codex_voice_recovery_pending", undefined, ["web"]));
+  expect(current.error).toBe("codexVoiceRecoveryRecordsPending");
+  expect(current.recoveryOwners).toEqual(["web"]);
+  expect(host.textContent).toContain("codexVoiceReviewRecoveryRecords");
+  await act(async () => callbacks.onError("provider_error"));
+  expect(current.recoveryOwners).toEqual([]);
+  expect(host.textContent).not.toContain("codexVoiceReviewRecoveryRecords");
+  await act(async () => callbacks.onError("codex_voice_recovery_pending", undefined, ["daemon"]));
+  await act(async () => current.clearError());
+  expect(current.recoveryOwners).toEqual([]);
+});
 
 it("uses the host voice catalog and default without starting a call", async () => {
   const response = snapshot();
@@ -351,7 +371,12 @@ it("keeps the ACP console's independent freshness hint during an owned call", as
 });
 
 it("does not let a slow status read replace the ACP queue accepted by a later control", async () => {
-  fixture.active.mockResolvedValue(snapshot("last result", true, "ready"));
+  const base = snapshot("last result", true, "ready");
+  const permission = { request_id: "0", title: "Run search_web?", kind: "search" };
+  fixture.active.mockResolvedValue({
+    ...base,
+    result: { ...base.result, analyst: { ...base.result.analyst, permissions: [permission] } },
+  });
   await mount();
   await act(async () =>
     [...host.querySelectorAll("button")]
@@ -378,18 +403,11 @@ it("does not let a slow status read replace the ACP queue accepted by a later co
     ],
   };
   fixture.control.mockResolvedValue({ ok: true, result: { accepted: true, analyst: updated } });
-  await act(async () => {
-    const field = host.querySelector("textarea")!;
-    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
-      field,
-      "accepted investigation",
-    );
-    field.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+  // Answering the Runtime's permission request is a control like any other.
   await act(async () =>
-    host
-      .querySelector("form")!
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    [...host.querySelectorAll("button")]
+      .find((b) => b.textContent === "acpControls.allow")!
+      .click(),
   );
   expect(current.analyst?.queued_inputs).toBe(1);
   await act(async () => pending.resolve(snapshot("obsolete", true, "ready")));
@@ -454,4 +472,26 @@ it("resumes scheduled controller polling after its owned call ends without an An
   await act(async () => current.disconnect());
   await act(async () => vi.advanceTimersByTimeAsync(5000));
   expect(fixture.active).toHaveBeenCalledTimes(2);
+});
+
+it("names an unconfirmed reset and refreshes the Voice status instead of retrying it", async () => {
+  fixture.active.mockResolvedValue(snapshot("last result", false, "ready"));
+  fixture.reset.mockResolvedValue({
+    ok: false,
+    error: {
+      code: "codex_voice_recovery_pending",
+      message: "Voice reset cleanup is not yet confirmed.",
+      details: { retryable: false },
+    },
+  });
+  await mount();
+  const reads = fixture.active.mock.calls.length;
+  let started = true;
+  await act(async () => {
+    started = await current.startNewAnalyst();
+  });
+  expect(started).toBe(false);
+  expect(fixture.reset).toHaveBeenCalledOnce();
+  expect(current.error).toBe("codexVoiceErrors.codex_voice_reset_recovery_pending");
+  expect(fixture.active.mock.calls.length).toBeGreaterThan(reads);
 });

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { defaultFilter } from "cmdk";
-import { Check, ChevronsUpDown } from "lucide-react";
+import { CheckIcon, ComboboxCaretIcon } from "@/components/Icons";
 
 import { cn } from "@/lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -101,7 +101,7 @@ export function GroupCombobox({
           )}
         >
           <span className="min-w-0 truncate text-left">{triggerLabel}</span>
-          <ChevronsUpDown className={cn("h-3.5 w-3.5 shrink-0 opacity-70", caretClassName)} />
+          <ComboboxCaretIcon className={cn("h-3.5 w-3.5 shrink-0 opacity-70", caretClassName)} />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -145,7 +145,9 @@ export function GroupCombobox({
                       setOpen(false);
                     }}
                   >
-                    <Check
+                    <CheckIcon
+                      size={24}
+                      absoluteStrokeWidth={false}
                       className={cn("h-4 w-4 shrink-0", selected ? "opacity-100" : "opacity-0")}
                     />
                     <div className="min-w-0 flex-1">

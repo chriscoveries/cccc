@@ -1,4 +1,4 @@
-import { memo, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useContext, useMemo, useState } from "react";
 import { FloatingPortal, autoUpdate, flip, offset, shift, useFloating } from "@floating-ui/react";
 import { useTranslation } from "react-i18next";
 import { useCopyFeedback } from "../hooks/useCopyFeedback";
@@ -7,7 +7,7 @@ import {
   Actor,
   AgentState,
   Task,
-  getActorAccentColor,
+  getActorAccentIndex,
   ChatMessageData,
   MessageAttachment,
   PresentationMessageRef,
@@ -16,7 +16,7 @@ import {
 } from "../types";
 import { formatFullTime, formatMessageTimestamp } from "../utils/time";
 import { classNames } from "../utils/classNames";
-import { getReplyEventId } from "../utils/chatReply";
+import { buildReplyComposerState, getReplyEventId } from "../utils/chatReply";
 import { projectCrossGroupRecipients, projectMessageMode } from "../utils/crossGroupRecipients";
 import { connectGroupLabel, isCrossInstanceInboundMessage } from "../utils/crossInstanceMessages";
 import { getPresentationMessageRefs } from "../utils/presentationRefs";
@@ -30,7 +30,15 @@ import {
   isDelegationSourceOutbound,
 } from "./messageBubbleDelegation";
 import { MessageAttachments } from "./messageBubble/MessageAttachments";
-import { MessageFooter, MessageMetadataHeader } from "./messageBubble/MessageBubbleChrome";
+import { MessageActions } from "./messageBubble/MessageActions";
+import {
+  QUICK_REPLY_EMOJI,
+  QUICK_REPLY_KINDS,
+  sendQuickReply,
+  type QuickReplyKind,
+  type QuickReplyTarget,
+} from "./messageBubble/quickReplies";
+import { MessageFooter } from "./messageBubble/MessageBubbleChrome";
 import { withAuthToken } from "../services/api/base";
 import type { WebModelDeliveryStatus } from "../utils/webModelDeliveryStatus";
 import {
@@ -40,25 +48,25 @@ import {
   getSenderDisplayName,
 } from "./messageBubble/model";
 import { ActorAvatar } from "./ActorAvatar";
-import {
-  formatEventLine,
-  getMessageBubbleMotionClass,
-  mayContainMarkdown,
-} from "./messageBubble/helpers";
+import { formatEventLine, mayContainMarkdown } from "./messageBubble/helpers";
 import { AgentStateTooltip } from "./messageBubble/AgentStateTooltip";
 import { MessageContent } from "./messageBubble/MessageContent";
-import { MessageBubbleSurface } from "./messageBubble/MessageBubbleSurface";
 import { buildMessageCopyText } from "./messageBubble/messageCopyText";
 import { MessageRoutingMetadata } from "./messageBubble/MessageRoutingMetadata";
 import { MessageReplyQuote } from "./messageBubble/MessageReplyQuote";
 import { MessageReferenceSections } from "./messageBubble/MessageReferenceSections";
 import { PendingReplySlot } from "./messageBubble/PendingReplySlot";
 import { PendingReplyStoreContext } from "../features/pendingReplies/store";
-import { pendingReplyView, recordedQuestionText } from "../features/pendingReplies/model";
+import { useMessagePinned } from "../features/pins/pinStore";
+import { PinIcon } from "./Icons";
+import { useGroupStore, useUIStore } from "../stores";
+import { CHET_NAME, CHET_PRINCIPAL, chetGeneration, isChetMessage } from "../utils/chetIdentity";
+import {
+  localizedAnswerReceipt,
+  pendingReplyView,
+  recordedQuestionText,
+} from "../features/pendingReplies/model";
 import { LivePendingStatusContext } from "../features/pendingReplies/liveStatusContext";
-
-const ANIMATED_MESSAGE_BUBBLE_KEYS = new Set<string>();
-const NEW_MESSAGE_ANIMATION_WINDOW_MS = 12000;
 
 function buildSenderAvatarUrl(groupId: string, senderAvatarPath?: string): string {
   const gid = String(groupId || "").trim();
@@ -69,25 +77,6 @@ function buildSenderAvatarUrl(groupId: string, senderAvatarPath?: string): strin
   return withAuthToken(
     `/api/v1/groups/${encodeURIComponent(gid)}/blobs/${encodeURIComponent(blobName)}`,
   );
-}
-
-function shouldAnimateIncomingBubble(messageKey: string, eventTs?: string): boolean {
-  const stableKey = String(messageKey || "").trim();
-  if (!stableKey || ANIMATED_MESSAGE_BUBBLE_KEYS.has(stableKey)) return false;
-
-  const parsedTs = Date.parse(String(eventTs || "").trim());
-  if (!Number.isFinite(parsedTs)) {
-    ANIMATED_MESSAGE_BUBBLE_KEYS.add(stableKey);
-    return false;
-  }
-
-  if (Math.abs(Date.now() - parsedTs) > NEW_MESSAGE_ANIMATION_WINDOW_MS) {
-    ANIMATED_MESSAGE_BUBBLE_KEYS.add(stableKey);
-    return false;
-  }
-
-  ANIMATED_MESSAGE_BUBBLE_KEYS.add(stableKey);
-  return true;
 }
 
 function MessageBubbleBody({
@@ -169,8 +158,19 @@ function MessageBubbleBody({
         isDark={isDark}
       />
 
+      {/* Attachments are part of the message: they follow its text with no rule between
+          them, and the sender's insight about the whole message follows them. */}
+      <MessageAttachments
+        attachments={blobAttachments}
+        blobGroupId={blobGroupId}
+        isUserMessage={isUserMessage}
+        isDark={isDark}
+        attachmentKeyPrefix={stableMessageAttachmentKey}
+        downloadTitle={(name) => t("download", { name })}
+      />
+
       {insight ? (
-        <div className={supportingSectionClass}>
+        <div className={supportingSectionClass} data-message-insight>
           <div className="mb-1.5 text-xs font-semibold uppercase text-[var(--color-text-tertiary)]">
             {t("senderPerspective")}
           </div>
@@ -179,16 +179,6 @@ function MessageBubbleBody({
           </div>
         </div>
       ) : null}
-
-      <MessageAttachments
-        attachments={blobAttachments}
-        blobGroupId={blobGroupId}
-        isUserMessage={isUserMessage}
-        isDark={isDark}
-        attachmentKeyPrefix={stableMessageAttachmentKey}
-        downloadTitle={(name) => t("download", { name })}
-        sectionClassName={supportingSectionClass}
-      />
     </>
   );
 }
@@ -207,12 +197,15 @@ export interface MessageBubbleProps {
   webModelDeliveryStatus?: WebModelDeliveryStatus;
   isHighlighted?: boolean;
   collapseHeader?: boolean;
+  /** The message before this one is from the same sender. */
+  sameSender?: boolean;
   resolvedReplyQuoteText?: string;
   onReply: () => void;
   onShowRecipients: () => void;
   onCopyLink?: (eventId: string) => void;
+  /** Pin or unpin this message; absent where pins are not offered. */
+  onTogglePin?: (eventId: string, pinned: boolean) => void;
   onViewContext?: (eventId: string) => void;
-  onCopyContent?: (ev: LedgerEvent) => void;
   onRelay?: (ev: LedgerEvent) => void;
   onOpenSource?: (srcGroupId: string, srcEventId: string) => void;
   onOpenPresentationRef?: (ref: PresentationMessageRef, event: LedgerEvent) => void;
@@ -235,12 +228,13 @@ export const MessageBubble = memo(
     webModelDeliveryStatus,
     isHighlighted,
     collapseHeader,
+    sameSender,
     resolvedReplyQuoteText,
     onReply,
     onShowRecipients,
     onCopyLink,
+    onTogglePin,
     onViewContext,
-    onCopyContent: _onCopyContent,
     onRelay,
     onOpenSource,
     onOpenPresentationRef,
@@ -249,9 +243,25 @@ export const MessageBubble = memo(
   }: MessageBubbleProps) {
     const isUserMessage = ev.by === "user";
     const isOptimistic = !!(ev.data as Record<string, unknown> | undefined)?._optimistic;
-    const senderAccent = !isUserMessage ? getActorAccentColor(String(ev.by || ""), isDark) : null;
     const isStreaming = !!ev._streaming;
+    // A filtered view's way into the whole conversation; a message still being sent or
+    // written has no place there yet.
+    const showInConversation =
+      onViewContext &&
+      !readOnly &&
+      typeof ev.id === "string" &&
+      ev.id &&
+      !isOptimistic &&
+      !isStreaming
+        ? onViewContext
+        : undefined;
     const canReply = !!getReplyEventId(ev);
+    // Only a message already in the ledger can be pinned.
+    const pinnableId =
+      !readOnly && typeof ev.id === "string" && ev.id && !isOptimistic && !isStreaming
+        ? ev.id
+        : undefined;
+    const pinned = useMessagePinned(groupId, pinnableId);
     const messageText = useMemo(() => formatEventLine(ev), [ev]);
     const pendingStore = useContext(PendingReplyStoreContext);
     const liveStatuses = useContext(LivePendingStatusContext);
@@ -268,10 +278,13 @@ export const MessageBubble = memo(
             },
       [ev, liveEntry, liveStatus],
     );
-    const replyView = !readOnly && pendingStore ? pendingReplyView(replyEvent) : null;
+    // Whether this is a request to the user follows from the event alone, so it
+    // holds while the reply store is not available yet.
+    const userRequest = readOnly ? null : pendingReplyView(replyEvent);
+    const replyView = pendingStore ? userRequest : null;
+    const showPendingPrompts = useUIStore((state) => state.showPendingPrompts);
 
     const [isAgentStateOpen, setIsAgentStateOpen] = useState(false);
-    const [copiedMessageText, setCopiedMessageText] = useState(false);
     const floatingMiddleware = useMemo(() => [offset(8), flip(), shift({ padding: 8 })], []);
     const { refs, floatingStyles, context } = useFloating({
       open: isAgentStateOpen,
@@ -298,7 +311,8 @@ export const MessageBubble = memo(
     const canShowAgentState = useMemo(() => {
       if (isUserMessage) return false;
       const id = String(ev.by || "");
-      if (!id) return false;
+      // Chet is the instance's service, not a member: it has no state in this Group.
+      if (!id || id === CHET_PRINCIPAL) return false;
       return true;
     }, [ev.by, isUserMessage]);
 
@@ -321,8 +335,15 @@ export const MessageBubble = memo(
       String(msgData?.quote_text || resolvedReplyQuoteText || "").trim() || undefined;
     const replyToEventId =
       typeof msgData?.reply_to === "string" ? String(msgData.reply_to || "").trim() : "";
-    const senderSnapshotTitle =
-      typeof msgData?.sender_title === "string" ? String(msgData.sender_title || "").trim() : "";
+    // Chet's name shows only on a message this Group, as it is now, proves Chet wrote.
+    const groupGeneration = useGroupStore((state) =>
+      state.groupDoc?.group_id === groupId ? chetGeneration(state.groupDoc) : "",
+    );
+    const senderSnapshotTitle = isChetMessage(ev, groupGeneration)
+      ? CHET_NAME
+      : typeof msgData?.sender_title === "string"
+        ? String(msgData.sender_title || "").trim()
+        : "";
     const remoteSourceName =
       typeof msgData?.source_user_name === "string"
         ? String(msgData.source_user_name || "").trim()
@@ -338,6 +359,9 @@ export const MessageBubble = memo(
         : "";
     const displayedMessageMode = projectMessageMode(msgData);
     const replyRequested = displayedMessageMode === "request_reply";
+    // With 'Waiting for you' indicators off, a request to the user reads as an
+    // ordinary message; a request between members keeps its mark.
+    const replyMarked = replyRequested && !(userRequest && !showPendingPrompts);
     const isMail = displayedMessageMode === "mail";
     const srcGroupId =
       typeof msgData?.src_group_id === "string" ? String(msgData.src_group_id || "").trim() : "";
@@ -392,8 +416,22 @@ export const MessageBubble = memo(
           return recordedQuestionText(replyView.question, t("pendingReply.recommended"));
       }
       if (delegationSourceOutbound) return getDelegationSourceOutboundStatus(displayMessageText);
-      return getDelegationDisplayText(displayMessageText);
-    }, [delegationSourceOutbound, displayMessageText, replyView?.state, replyView?.question, t]);
+      const receipt = isUserMessage
+        ? localizedAnswerReceipt(ev.data, displayMessageText, {
+            selected: (optionId) => t("answerReceiptSelected", { id: optionId }),
+            other: t("answerReceiptOther"),
+          })
+        : null;
+      return receipt ?? getDelegationDisplayText(displayMessageText);
+    }, [
+      delegationSourceOutbound,
+      displayMessageText,
+      ev.data,
+      isUserMessage,
+      replyView?.state,
+      replyView?.question,
+      t,
+    ]);
     const presentationRefs = useMemo(
       () => getPresentationMessageRefs(msgData?.refs),
       [msgData?.refs],
@@ -407,11 +445,6 @@ export const MessageBubble = memo(
       () => !isStreaming && mayContainMarkdown(bubbleBodyText),
       [bubbleBodyText, isStreaming],
     );
-    const streamPhase = String(
-      (msgData as { stream_phase?: unknown } | undefined)?.stream_phase || "",
-    )
-      .trim()
-      .toLowerCase();
     const stableMessageAttachmentKey = useMemo(() => {
       const clientId =
         typeof msgData?.client_id === "string" ? String(msgData.client_id || "").trim() : "";
@@ -419,20 +452,6 @@ export const MessageBubble = memo(
       const eventId = typeof ev.id === "string" ? String(ev.id || "").trim() : "";
       return eventId || `row:${String(ev.ts || "")}:${String(ev.by || "")}`;
     }, [ev.id, ev.ts, ev.by, msgData]);
-    const shouldAnimateBubbleOnEnter = useMemo(() => {
-      return shouldAnimateIncomingBubble(stableMessageAttachmentKey, String(ev.ts || ""));
-    }, [ev.ts, stableMessageAttachmentKey]);
-    const bubbleMotionClass = useMemo(
-      () =>
-        getMessageBubbleMotionClass({
-          isStreaming,
-          isOptimistic,
-          isNewlyArrived: shouldAnimateBubbleOnEnter,
-          isUserMessage,
-          streamPhase,
-        }),
-      [isOptimistic, isStreaming, isUserMessage, shouldAnimateBubbleOnEnter, streamPhase],
-    );
     const copyableMessageText = useMemo(
       () =>
         buildMessageCopyText({
@@ -506,6 +525,8 @@ export const MessageBubble = memo(
           : displayNameMap,
       [msgData?.dst_instance_id, msgData?.dst_actor_titles, displayNameMap],
     );
+    // A spectator of a read-only exhibit is not the Group's user.
+    const userRecipientLabel = readOnly ? t("senderUser") : t("messageAuthorYou");
     const toLabel = useMemo(() => {
       return buildToLabel({
         hasDestination,
@@ -514,8 +535,17 @@ export const MessageBubble = memo(
         groupLabelById,
         recipients,
         displayNameMap: destinationNames,
+        userLabel: userRecipientLabel,
       });
-    }, [destinationNames, dstGroupId, dstTo, groupLabelById, hasDestination, recipients]);
+    }, [
+      destinationNames,
+      dstGroupId,
+      dstTo,
+      groupLabelById,
+      hasDestination,
+      recipients,
+      userRecipientLabel,
+    ]);
 
     // Sender display name (use title if available)
     const senderActor = useMemo(() => {
@@ -594,26 +624,63 @@ export const MessageBubble = memo(
       visibleReadStatusEntries.length - readPreviewEntries.length,
     );
 
-    useEffect(() => {
-      if (!copiedMessageText) return undefined;
-      const timer = window.setTimeout(() => {
-        setCopiedMessageText(false);
-      }, 1400);
-      return () => window.clearTimeout(timer);
-    }, [copiedMessageText]);
-
+    // The copy actions sit in a menu that closes on use, so the notice confirms it.
     const handleCopyMessageText = useCallback(async () => {
-      const ok = await copyWithFeedback(copyableMessageText, {
+      await copyWithFeedback(copyableMessageText, {
+        successMessage: t("textCopied"),
         errorMessage: t("common:copyFailed", { defaultValue: "Copy failed" }),
       });
-      if (ok) {
-        setCopiedMessageText(true);
-      }
     }, [copyWithFeedback, copyableMessageText, t]);
+
+    // A quick reply is a Reply sent at once. It is offered on a message from a current agent of
+    // this Group where Reply would address that agent alone, in this Group; Chet, IM users and
+    // other Groups or instances write under IDs that name no member. A message relayed from
+    // another Group, even by a member, one still being written and a question with its own
+    // answer card keep to the composer.
+    const quickReplyTarget = useMemo<QuickReplyTarget | null>(() => {
+      if (!senderActor || isStreaming || srcGroupId || msgData?.question) return null;
+      const reply = buildReplyComposerState(ev, groupId, actors, null, groupGeneration);
+      const target = reply?.replyTarget;
+      const author = String(ev.by || "");
+      if (!reply || !target || reply.toText !== author || target.remoteDstGroupId) return null;
+      return {
+        groupId: reply.destGroupId,
+        replyEventId: target.eventId,
+        to: [author],
+        quoteText: target.text,
+      };
+    }, [actors, ev, groupGeneration, groupId, isStreaming, msgData, senderActor, srcGroupId]);
+    const showNotice = useUIStore((state) => state.showNotice);
+    const quickReplies = useMemo(() => {
+      if (!quickReplyTarget) return undefined;
+      const send = async (kind: QuickReplyKind) => {
+        const label = t(`quickReply.${kind}`);
+        const result = await sendQuickReply(quickReplyTarget, kind, t(`quickReply.${kind}Text`));
+        if (result.status === "sent") {
+          showNotice({ message: t("quickReply.sent", { name: senderDisplayName, label }) });
+        } else if (result.status === "failed") {
+          // A retry from the notice reuses the client ID, even after this row has scrolled
+          // away and unmounted: the quick reply module keeps it until the reply is sent.
+          showNotice({
+            message: result.unknown
+              ? t("quickReply.unknown")
+              : t("quickReply.failed", { error: result.message }),
+            actionLabel: t("quickReply.retry"),
+            onAction: () => void send(kind),
+          });
+        }
+      };
+      return QUICK_REPLY_KINDS.map((kind) => ({
+        key: `quick-${kind}`,
+        label: t(`quickReply.${kind}`),
+        emoji: QUICK_REPLY_EMOJI[kind],
+        run: () => void send(kind),
+      }));
+    }, [quickReplyTarget, senderDisplayName, showNotice, t]);
 
     const routingMetadata = (
       <MessageRoutingMetadata
-        toLabel={isDirectUserMessage && !hasSource && !hasDestination ? "" : toLabel}
+        toLabel={toLabel}
         isMail={isMail}
         hasSource={hasSource}
         sourceLabel={sourceLabel}
@@ -629,195 +696,184 @@ export const MessageBubble = memo(
       />
     );
 
+    const agentStateTooltip =
+      isAgentStateOpen && canShowAgentState && !collapseHeader ? (
+        <FloatingPortal>
+          <AgentStateTooltip
+            isOpen={true}
+            canShow={true}
+            isPositioned={isAgentStatePositioned}
+            setFloating={setAgentStateFloating}
+            floatingStyles={floatingStyles}
+            senderDisplayName={senderDisplayName}
+            updatedAt={agentState?.updated_at ? String(agentState.updated_at) : undefined}
+            agentStateDisplay={agentStateDisplay}
+            stateTask={stateTask}
+            blockerCount={blockerCount}
+            stateNext={stateNext}
+            stateChanged={stateChanged}
+          />
+        </FloatingPortal>
+      ) : null;
+
+    const bubbleContent = (
+      <>
+        <MessageBubbleBody
+          event={ev}
+          isUserMessage={isUserMessage}
+          isDark={isDark}
+          quoteText={quoteText}
+          replyToEventId={replyToEventId}
+          presentationRefs={presentationRefs}
+          voiceDocumentRefs={voiceDocumentRefs}
+          taskRefs={taskRefs}
+          taskById={taskById}
+          bodyText={bubbleBodyText}
+          insight={insight}
+          shouldRenderMarkdown={shouldRenderMarkdown}
+          blobAttachments={blobAttachments}
+          blobGroupId={blobGroupId}
+          stableMessageAttachmentKey={stableMessageAttachmentKey}
+          onOpenPresentationRef={onOpenPresentationRef}
+          onOpenTaskRef={onOpenTaskRef}
+          onOpenReplyTarget={onOpenReplyTarget}
+        />
+        <PendingReplySlot
+          event={replyEvent}
+          groupId={groupId}
+          readOnly={readOnly}
+          checking={liveEntry?.checking}
+          onUseComposer={onReply}
+        />
+      </>
+    );
+
+    const messageFooter = (
+      <MessageFooter
+        readOnly={readOnly}
+        obligationSummary={obligationSummary}
+        visibleReadStatusEntries={visibleReadStatusEntries}
+        webModelDeliveryStatus={webModelDeliveryStatus}
+        readPreviewEntries={readPreviewEntries}
+        readPreviewOverflow={readPreviewOverflow}
+        displayNameMap={displayNameMap}
+        isDark={isDark}
+        onShowRecipients={onShowRecipients}
+        event={ev}
+      />
+    );
+
+    const showAgentState = canShowAgentState && !collapseHeader;
+    // A read-only exhibit is watched by spectators, not by the Group's user, so the
+    // user's messages are neither "you" nor set on the reader's side; spectators see
+    // the role in their own language.
+    const fromReader = isUserMessage && !readOnly;
+    const lcdAuthorName = fromReader
+      ? t("messageAuthorYou")
+      : isUserMessage
+        ? t("senderUser")
+        : senderDisplayName;
+    const messageActionProps = {
+      readOnly,
+      copyableMessageText,
+      onCopyMessageText: () => void handleCopyMessageText(),
+      onShowInConversation: showInConversation,
+      onCopyLink,
+      onRelay,
+      onReply,
+      canReply,
+      eventId: typeof ev.id === "string" ? String(ev.id) : undefined,
+      event: ev,
+      quickReplies,
+      pinned,
+      onTogglePin: pinnableId && onTogglePin ? () => onTogglePin(pinnableId, !pinned) : undefined,
+    };
     return (
       <div
         className={classNames(
-          "message-row relative flex w-full min-w-0 gap-2 sm:gap-3 group",
-          // Scale the opposite gutter with the message column, leaving room beyond the desktop avatar.
-          isUserMessage
-            ? "flex-col items-end pl-[clamp(1.5rem,8%,2rem)] sm:items-start sm:flex-row-reverse sm:pl-[clamp(6rem,12%,12rem)]"
-            : "flex-col items-start pr-[clamp(1.5rem,8%,2rem)] sm:flex-row sm:pr-[clamp(6rem,12%,12rem)]",
+          "message-row lcd-row group",
           isOptimistic ? "opacity-95" : "",
+          isHighlighted ? "lcd-row-highlighted" : "",
         )}
+        data-lcd-row
+        data-lcd-user={fromReader || undefined}
+        data-lcd-continued={collapseHeader || undefined}
+        data-lcd-same-sender={sameSender || undefined}
+        data-lcd-show-in-chat={showInConversation ? true : undefined}
+        data-lcd-accent={isUserMessage ? undefined : getActorAccentIndex(String(ev.by || ""))}
       >
-        {/* Desktop Avatar (Hidden on mobile) */}
-        <div className="relative hidden sm:block">
-          <div
-            className={classNames(
-              "mt-1 h-8 w-8 flex-shrink-0",
-              collapseHeader ? "opacity-0 pointer-events-none" : "",
-              canShowAgentState && !collapseHeader ? "cursor-help" : "",
-            )}
-            ref={canShowAgentState && !collapseHeader ? setAgentStateReference : undefined}
-            onMouseEnter={
-              canShowAgentState && !collapseHeader ? () => setIsAgentStateOpen(true) : undefined
-            }
-            onMouseLeave={
-              canShowAgentState && !collapseHeader ? () => setIsAgentStateOpen(false) : undefined
-            }
-            onFocus={
-              canShowAgentState && !collapseHeader ? () => setIsAgentStateOpen(true) : undefined
-            }
-            onBlur={
-              canShowAgentState && !collapseHeader ? () => setIsAgentStateOpen(false) : undefined
-            }
-            tabIndex={canShowAgentState && !collapseHeader ? 0 : undefined}
-            aria-label={
-              canShowAgentState && !collapseHeader
-                ? t("agentStateTooltipLabel", { defaultValue: "View agent state" })
-                : undefined
-            }
-          >
-            <ActorAvatar
-              avatarUrl={senderAvatarUrl || undefined}
-              runtime={senderRuntime || undefined}
-              title={senderDisplayName}
-              isUser={isUserMessage}
-              isDark={isDark}
-              accentRingClassName={senderAccent?.ring}
-            />
-          </div>
-        </div>
-        {isAgentStateOpen && canShowAgentState && !collapseHeader ? (
-          <FloatingPortal>
-            <AgentStateTooltip
-              isOpen={true}
-              canShow={true}
-              isPositioned={isAgentStatePositioned}
-              setFloating={setAgentStateFloating}
-              floatingStyles={floatingStyles}
-              senderDisplayName={senderDisplayName}
-              updatedAt={agentState?.updated_at ? String(agentState.updated_at) : undefined}
-              agentStateDisplay={agentStateDisplay}
-              stateTask={stateTask}
-              blockerCount={blockerCount}
-              stateNext={stateNext}
-              stateChanged={stateChanged}
-            />
-          </FloatingPortal>
-        ) : null}
-
-        {/* Message Content */}
-        <div
-          className={classNames(
-            "flex min-w-0 max-w-full flex-col w-full md:w-auto",
-            isUserMessage ? "items-end" : "items-start",
-          )}
-        >
-          {!collapseHeader ? (
-            <>
-              <MessageMetadataHeader
-                mobile={true}
-                isUserMessage={isUserMessage}
-                isDark={isDark}
-                senderAccentTextClass={senderAccent?.text}
-                senderDisplayName={senderDisplayName}
-                messageTimestamp={messageTimestamp}
-                fullMessageTimestamp={fullMessageTimestamp}
-                senderAvatarUrl={senderAvatarUrl || undefined}
-                senderRuntime={senderRuntime || undefined}
-                avatarRingClassName={senderAccent?.ring}
-                remoteBadgeLabel={remoteBadgeLabel || undefined}
-              >
-                {routingMetadata}
-              </MessageMetadataHeader>
-
-              <MessageMetadataHeader
-                isUserMessage={isUserMessage}
-                isDark={isDark}
-                senderAccentTextClass={senderAccent?.text}
-                senderDisplayName={senderDisplayName}
-                messageTimestamp={messageTimestamp}
-                fullMessageTimestamp={fullMessageTimestamp}
-                remoteBadgeLabel={remoteBadgeLabel || undefined}
-              >
-                {routingMetadata}
-              </MessageMetadataHeader>
-            </>
+        {/* One head line, so names never truncate and the text keeps the full width. */}
+        <div className="lcd-row-head">
+          {collapseHeader ? (
+            <span className="sr-only">{lcdAuthorName}</span>
           ) : (
-            <div className="mb-1 flex min-w-0 flex-wrap items-center gap-x-2 text-xs">
-              {routingMetadata}
-            </div>
-          )}
-
-          {/* Bubble wrapper (allows badge to overflow) */}
-          <div
-            className={classNames(
-              "relative max-w-full min-w-0 md:w-auto",
-              isUserMessage ? "w-auto self-end" : "w-full",
-            )}
-            style={replyRequested ? { minWidth: "min(8.5rem, 85vw)" } : undefined}
-          >
-            {replyRequested && (
-              <span
-                className={classNames(
-                  "absolute -top-2 z-10 text-xs font-semibold px-2 py-0.5 rounded-full border shadow-sm",
-                  isUserMessage ? "left-3" : "right-3",
-                  "bg-violet-50 text-violet-700 dark:bg-violet-950/60 dark:text-violet-200 border-violet-200 dark:border-violet-800",
-                )}
-              >
-                {t("needReply")}
-              </span>
-            )}
-            <MessageBubbleSurface
-              isUserMessage={isUserMessage}
-              isStreaming={isStreaming}
-              motionClass={bubbleMotionClass}
-              replyRequested={replyRequested}
-              isHighlighted={Boolean(isHighlighted)}
+            <span
+              className="lcd-row-who"
+              ref={showAgentState ? setAgentStateReference : undefined}
+              onMouseEnter={showAgentState ? () => setIsAgentStateOpen(true) : undefined}
+              onMouseLeave={showAgentState ? () => setIsAgentStateOpen(false) : undefined}
+              onFocus={showAgentState ? () => setIsAgentStateOpen(true) : undefined}
+              onBlur={showAgentState ? () => setIsAgentStateOpen(false) : undefined}
+              tabIndex={showAgentState ? 0 : undefined}
+              aria-label={
+                showAgentState
+                  ? t("agentStateTooltipLabel", { defaultValue: "View agent state" })
+                  : undefined
+              }
             >
-              <MessageBubbleBody
-                event={ev}
-                isUserMessage={isUserMessage}
-                isDark={isDark}
-                quoteText={quoteText}
-                replyToEventId={replyToEventId}
-                presentationRefs={presentationRefs}
-                voiceDocumentRefs={voiceDocumentRefs}
-                taskRefs={taskRefs}
-                taskById={taskById}
-                bodyText={bubbleBodyText}
-                insight={insight}
-                shouldRenderMarkdown={shouldRenderMarkdown}
-                blobAttachments={blobAttachments}
-                blobGroupId={blobGroupId}
-                stableMessageAttachmentKey={stableMessageAttachmentKey}
-                onOpenPresentationRef={onOpenPresentationRef}
-                onOpenTaskRef={onOpenTaskRef}
-                onOpenReplyTarget={onOpenReplyTarget}
-              />
-              <PendingReplySlot
-                event={replyEvent}
-                groupId={groupId}
-                readOnly={readOnly}
-                checking={liveEntry?.checking}
-                onUseComposer={onReply}
-              />
-            </MessageBubbleSurface>
+              {isUserMessage ? null : (
+                <ActorAvatar
+                  avatarUrl={senderAvatarUrl || undefined}
+                  runtime={senderRuntime || undefined}
+                  title={senderDisplayName}
+                  isDark={isDark}
+                  sizeClassName="h-5 w-5"
+                  textClassName="text-[0.6875rem]"
+                  className="lcd-tile"
+                />
+              )}
+              <span className="lcd-row-name">{lcdAuthorName}</span>
+            </span>
+          )}
+          {remoteBadgeLabel ? <span className="lcd-tag">{remoteBadgeLabel}</span> : null}
+          <span className="lcd-row-route">
+            {routingMetadata}
+            {/* The reply card below already shows the request and its state. */}
+            {replyMarked && !replyView ? <span className="lcd-tag">{t("needReply")}</span> : null}
+          </span>
+          <time
+            className="lcd-row-time"
+            dateTime={String(ev.ts || "")}
+            title={fullMessageTimestamp}
+          >
+            {messageTimestamp}
+          </time>
+          {pinned ? (
+            <span className="lcd-row-pin" title={t("pins.pinnedMark")}>
+              <PinIcon size={12} aria-hidden="true" />
+              <span className="sr-only">{t("pins.pinnedMark")}</span>
+            </span>
+          ) : null}
+          {/* Where messages have no hover bar to carry it, or no room on it (lcd.css), a
+              filtered view shows its way into the whole conversation here, after the time. */}
+          {showInConversation ? (
+            <button
+              type="button"
+              className="lcd-row-jump"
+              onClick={() => showInConversation(String(ev.id))}
+            >
+              {t("showInConversation")}
+            </button>
+          ) : null}
+          <MessageActions part="bar" {...messageActionProps} />
+          <MessageActions part="menu" {...messageActionProps} />
+        </div>
+        {agentStateTooltip}
+        <div className="lcd-row-body">
+          <div className={classNames("lcd-row-content", isStreaming ? "lcd-row-streaming" : "")}>
+            {bubbleContent}
           </div>
-
-          <MessageFooter
-            readOnly={readOnly}
-            obligationSummary={obligationSummary}
-            visibleReadStatusEntries={visibleReadStatusEntries}
-            webModelDeliveryStatus={webModelDeliveryStatus}
-            readPreviewEntries={readPreviewEntries}
-            readPreviewOverflow={readPreviewOverflow}
-            displayNameMap={displayNameMap}
-            isDark={isDark}
-            isMail={isMail}
-            copiedMessageText={copiedMessageText}
-            copyableMessageText={copyableMessageText}
-            onCopyMessageText={() => void handleCopyMessageText()}
-            onShowRecipients={onShowRecipients}
-            onViewContext={onViewContext}
-            onCopyLink={onCopyLink}
-            onRelay={onRelay}
-            onReply={onReply}
-            canReply={canReply}
-            eventId={typeof ev.id === "string" ? String(ev.id) : undefined}
-            event={ev}
-          />
+          {messageFooter}
         </div>
       </div>
     );
@@ -836,7 +892,9 @@ export const MessageBubble = memo(
       prevProps.webModelDeliveryStatus === nextProps.webModelDeliveryStatus &&
       prevProps.isHighlighted === nextProps.isHighlighted &&
       prevProps.collapseHeader === nextProps.collapseHeader &&
+      prevProps.sameSender === nextProps.sameSender &&
       prevProps.onViewContext === nextProps.onViewContext &&
+      prevProps.onTogglePin === nextProps.onTogglePin &&
       prevProps.onRelay === nextProps.onRelay &&
       prevProps.onOpenSource === nextProps.onOpenSource &&
       prevProps.onOpenPresentationRef === nextProps.onOpenPresentationRef &&

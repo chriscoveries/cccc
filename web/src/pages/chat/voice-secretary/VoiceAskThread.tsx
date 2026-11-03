@@ -10,6 +10,7 @@ import { LazyMarkdownRenderer } from "../../../components/LazyMarkdownRenderer";
 import { classNames } from "../../../utils/classNames";
 import { SecretaryTaskRow } from "./SecretaryTaskRow";
 import { secretaryTaskNeedsAttention, secretaryTaskRunning } from "./secretaryTaskLineModel";
+import { voiceAskStatusTone } from "./voiceAskStatus";
 import type { SecretaryTasksController } from "./useSecretaryTasks";
 
 type AskItemView = { item: AssistantVoiceAskFeedback; sortAt: number; status: string };
@@ -22,7 +23,6 @@ export function VoiceAskThread({
   documentKey,
   tasks,
   statusLabel,
-  statusClassName,
   formatTime,
   formatFullTime,
   onOpenDocument,
@@ -39,7 +39,6 @@ export function VoiceAskThread({
   documentKey: (document: AssistantVoiceDocument) => string;
   tasks: SecretaryTasksController;
   statusLabel: (status: string) => string;
-  statusClassName: (status: string) => string;
   formatTime: (value: number) => string;
   formatFullTime: (value: number) => string;
   onOpenDocument: (document: AssistantVoiceDocument) => void;
@@ -59,11 +58,9 @@ export function VoiceAskThread({
     tasks.tasks.find((task) => task.target.request_id === requestId && !task.superseded_by);
   const linkClassName = (enabled: boolean) =>
     classNames(
-      "max-w-full truncate rounded-full border px-2 py-0.5 text-xs transition-colors disabled:cursor-default disabled:opacity-70",
+      "max-w-full truncate border px-2 py-0.5 text-xs transition-colors disabled:cursor-default disabled:opacity-70",
       enabled
-        ? isDark
-          ? "border-cyan-300/20 bg-cyan-300/10 text-cyan-100 hover:bg-cyan-300/16"
-          : "border-cyan-200 bg-cyan-50 text-cyan-800 hover:bg-cyan-100"
+        ? "border-[var(--lcd-link)] text-[var(--lcd-link)]"
         : "border-[var(--glass-border-subtle)] text-[var(--color-text-muted)]",
     );
   const smallButton =
@@ -86,6 +83,7 @@ export function VoiceAskThread({
           <button
             type="button"
             className={smallButton}
+            data-lcd-key
             onClick={onClear}
             disabled={clearing}
             title={t("voiceSecretaryClearRequestsTitle")}
@@ -95,7 +93,11 @@ export function VoiceAskThread({
         ) : null}
       </div>
       {tasks.error ? (
-        <p role="alert" className="px-1 pb-2 text-xs text-rose-600 dark:text-rose-300">
+        <p
+          role="alert"
+          data-status-tone="error"
+          className="px-1 pb-2 text-xs text-rose-600 dark:text-rose-300"
+        >
           {tasks.error}
         </p>
       ) : null}
@@ -137,12 +139,9 @@ export function VoiceAskThread({
             >
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                 <span
-                  className={classNames(
-                    "rounded-full px-2 py-0.5 font-semibold",
-                    status
-                      ? statusClassName(status)
-                      : "bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]",
-                  )}
+                  data-voice-ask-status
+                  data-status-tone={(status && voiceAskStatusTone(status)) || "neutral"}
+                  className="px-2 py-0.5 font-semibold"
                 >
                   {status ? statusLabel(status) : t("voiceSecretaryReplyReadyShort")}
                 </span>
@@ -223,6 +222,7 @@ export function VoiceAskThread({
                       {sourceUrls.map((url) => (
                         <a
                           key={url}
+                          data-voice-source-link
                           href={url}
                           target="_blank"
                           rel="noreferrer"
@@ -247,12 +247,22 @@ export function VoiceAskThread({
               ) : null}
               <div className="mt-1 flex flex-wrap items-center gap-1">
                 {reply ? (
-                  <button type="button" className={smallButton} onClick={() => onCopyReply(item)}>
+                  <button
+                    type="button"
+                    className={smallButton}
+                    data-lcd-key
+                    onClick={() => onCopyReply(item)}
+                  >
                     {t("copy")}
                   </button>
                 ) : null}
                 {reply || status === "needs_user" ? (
-                  <button type="button" className={smallButton} onClick={() => onFollowUp(item)}>
+                  <button
+                    type="button"
+                    className={smallButton}
+                    data-lcd-key
+                    onClick={() => onFollowUp(item)}
+                  >
                     {t("voiceSecretaryFollowUp")}
                   </button>
                 ) : null}
@@ -260,6 +270,7 @@ export function VoiceAskThread({
                   <button
                     type="button"
                     className={smallButton}
+                    data-lcd-key
                     disabled={!!tasks.busy}
                     onClick={() => void tasks.act(task, "cancel")}
                   >
@@ -272,6 +283,7 @@ export function VoiceAskThread({
                   <button
                     type="button"
                     className={smallButton}
+                    data-lcd-key
                     onClick={() => onShowExecution(task)}
                   >
                     {t("settings:voiceSettings.viewExecution")}

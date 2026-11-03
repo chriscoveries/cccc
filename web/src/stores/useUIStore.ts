@@ -20,7 +20,7 @@ interface UINotice {
   onAction?: () => void;
 }
 
-export type ChatFilter = "all" | "user" | "mail" | "request_reply" | "pending_user";
+export type ChatFilter = "all" | "user" | "pinned" | "pending_user";
 /** Empty means unrestricted; entries are concrete event.by identities. */
 export type ChatSenderFilter = string[];
 
@@ -44,6 +44,12 @@ function normalizeChatSenderFilter(value: unknown): ChatSenderFilter {
 export type ChatFollowMode = "follow" | "detached";
 export const CHAT_SCROLL_SNAPSHOT_COORDINATE_VERSION = 1;
 
+/** A message on screen when a snapshot was taken, with its offset as for anchorId. */
+export interface ChatVisibleMessage {
+  id: string;
+  offsetPx: number;
+}
+
 export interface ChatScrollSnapshot {
   coordinateVersion: typeof CHAT_SCROLL_SNAPSHOT_COORDINATE_VERSION;
   mode: ChatFollowMode;
@@ -51,6 +57,14 @@ export interface ChatScrollSnapshot {
   offsetPx: number;
   scrollTop?: number;
   updatedAt: number;
+  /** The filtered view that took the snapshot; another view restores by focus instead. */
+  viewKey?: string;
+  /** The message being read (last touched, else mid-list) and its offset, as for anchorId. */
+  focusId?: string;
+  focusOffsetPx?: number;
+  /** The messages on screen, the one being read first. Another view keeps the first it shows.
+   * A follow snapshot carries only a message the reader touched. */
+  visible?: ChatVisibleMessage[];
 }
 
 export type GroupWorkView = "messages" | "terminals";
@@ -116,12 +130,16 @@ interface UIState {
   sidebarOpen: boolean;
   sidebarCollapsed: boolean; // Desktop sidebar collapsed state
   sidebarWidth: number;
+  /** Counts and the filter for requests waiting for the user's answer. */
+  showPendingPrompts: boolean;
   isSmallScreen: boolean;
   composerHeight: number | null;
   chatSessions: Record<string, ChatSessionState>;
   actorBusy: Record<string, number>;
   webReadOnly: boolean;
   canAccessGlobalSettings: boolean | null;
+  /** The current Web principal, not bootstrap access to settings. */
+  isWebAdmin: boolean | null;
   workspaceFileViewerGroupId: string;
   sseStatus: "connected" | "connecting" | "disconnected";
   sseError: SSEErrorDetail | null;
@@ -139,6 +157,7 @@ interface UIState {
   setSidebarOpen: (v: boolean) => void;
   setSidebarCollapsed: (v: boolean) => void;
   setSidebarWidth: (v: number) => void;
+  setShowPendingPrompts: (v: boolean) => void;
   toggleSidebarCollapsed: () => void;
   setShowScrollButton: (groupId: string, v: boolean) => void;
   setChatUnreadCount: (groupId: string, v: number) => void;
@@ -167,6 +186,7 @@ interface UIState {
   setWorkspaceFileViewerGroupId: (groupId: string) => void;
   setWebReadOnly: (v: boolean) => void;
   setCanAccessGlobalSettings: (v: boolean | null) => void;
+  setIsWebAdmin: (v: boolean | null) => void;
   setSSEStatus: (v: "connected" | "connecting" | "disconnected") => void;
   setSSEError: (v: SSEErrorDetail | null) => void;
 }
@@ -184,6 +204,7 @@ let noticeTimeoutId: number | null = null;
 // localStorage key for sidebar collapsed state
 const SIDEBAR_COLLAPSED_KEY = "cccc-sidebar-collapsed";
 const SIDEBAR_WIDTH_KEY = "cccc-sidebar-width";
+const PENDING_PROMPTS_KEY = "cccc-pending-prompts";
 const CHAT_SESSIONS_KEY = "cccc-chat-sessions";
 
 export function clampSidebarWidth(value: number): number {
@@ -195,6 +216,17 @@ export function clampSidebarWidth(value: number): number {
 export function getSidebarWidthCssValue(value: number): string {
   const preferred = clampSidebarWidth(value);
   return `clamp(${SIDEBAR_MIN_WIDTH}px, ${preferred}px, min(${SIDEBAR_MAX_WIDTH}px, ${SIDEBAR_MAX_VIEWPORT_PERCENT}vw))`;
+}
+
+// On a phone the Group list is a drawer over the chat. A visit without a Group opens it; a page
+// opened on a Group or one of its messages, as from a notification or a reload, shows that
+// conversation instead.
+function loadSidebarOpen(): boolean {
+  try {
+    return !new URLSearchParams(window.location.search).get("group")?.trim();
+  } catch {
+    return true;
+  }
 }
 
 function loadSidebarCollapsed(): boolean {
@@ -211,6 +243,22 @@ function saveSidebarCollapsed(collapsed: boolean): void {
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed));
   } catch (e) {
     console.warn("Failed to persist sidebar state to localStorage:", e);
+  }
+}
+
+function loadPendingPrompts(): boolean {
+  try {
+    return localStorage.getItem(PENDING_PROMPTS_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function savePendingPrompts(show: boolean): void {
+  try {
+    localStorage.setItem(PENDING_PROMPTS_KEY, String(show));
+  } catch {
+    // The choice still applies until this page is closed.
   }
 }
 
@@ -288,10 +336,10 @@ function sanitizeChatSessions(value: unknown): Record<string, ChatSessionState> 
       voiceRecognitionLanguage: voiceRecognitionLanguage(session.voiceRecognitionLanguage),
       workView: session.workView === "terminals" ? "terminals" : "messages",
       terminalPage: sanitizeTerminalPage(session.terminalPage),
+      // Filters this version no longer offers, such as Mail, open as All.
       chatFilter:
         session.chatFilter === "user" ||
-        session.chatFilter === "mail" ||
-        session.chatFilter === "request_reply" ||
+        session.chatFilter === "pinned" ||
         session.chatFilter === "pending_user"
           ? session.chatFilter
           : "all",
@@ -382,14 +430,16 @@ export const useUIStore = create<UIState>((set) => ({
   errorMsg: "",
   notice: null,
   isTransitioning: false,
-  sidebarOpen: true,
+  sidebarOpen: loadSidebarOpen(),
   sidebarCollapsed: loadSidebarCollapsed(),
   sidebarWidth: loadSidebarWidth(),
+  showPendingPrompts: loadPendingPrompts(),
   isSmallScreen: false,
   composerHeight: loadComposerHeight(),
   chatSessions: loadChatSessions(),
   webReadOnly: false,
   canAccessGlobalSettings: null,
+  isWebAdmin: null,
   workspaceFileViewerGroupId: "",
   sseStatus: "disconnected" as const,
   sseError: null as SSEErrorDetail | null,
@@ -459,6 +509,10 @@ export const useUIStore = create<UIState>((set) => ({
     saveSidebarWidth(next);
     set({ sidebarWidth: next });
   },
+  setShowPendingPrompts: (show) => {
+    savePendingPrompts(show);
+    set({ showPendingPrompts: show });
+  },
   toggleSidebarCollapsed: () =>
     set((state) => {
       const next = !state.sidebarCollapsed;
@@ -497,12 +551,10 @@ export const useUIStore = create<UIState>((set) => ({
       saveChatSessions(chatSessions);
       return { chatSessions };
     }),
+  // Filters keep the snapshot: the next view restores the message being read from it.
   setChatFilter: (groupId, v) =>
     set((state) => {
-      const chatSessions = updateChatSession(state.chatSessions, groupId, {
-        chatFilter: v,
-        scrollSnapshot: null,
-      });
+      const chatSessions = updateChatSession(state.chatSessions, groupId, { chatFilter: v });
       saveChatSessions(chatSessions);
       return { chatSessions };
     }),
@@ -510,7 +562,6 @@ export const useUIStore = create<UIState>((set) => ({
     set((state) => {
       const chatSessions = updateChatSession(state.chatSessions, groupId, {
         chatSenderFilter: normalizeChatSenderFilter(v),
-        scrollSnapshot: null,
       });
       saveChatSessions(chatSessions);
       return { chatSessions };
@@ -584,6 +635,7 @@ export const useUIStore = create<UIState>((set) => ({
   setWorkspaceFileViewerGroupId: (groupId) => set({ workspaceFileViewerGroupId: groupId }),
   setWebReadOnly: (v) => set({ webReadOnly: v }),
   setCanAccessGlobalSettings: (v) => set({ canAccessGlobalSettings: v }),
+  setIsWebAdmin: (v) => set({ isWebAdmin: v }),
   setSSEStatus: (v) => set({ sseStatus: v }),
   setSSEError: (v) => set({ sseError: v }),
 }));

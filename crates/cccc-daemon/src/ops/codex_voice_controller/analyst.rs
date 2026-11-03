@@ -46,6 +46,11 @@ impl CodexVoiceAnalyst {
     pub fn queued_inputs(&self) -> usize {
         self.lifecycle.queued_inputs()
     }
+
+    /// In-flight lifecycle IDs, or None if their owner is currently busy.
+    pub fn try_in_flight(&self) -> Option<(Vec<String>, Vec<String>)> {
+        self.lifecycle.try_in_flight()
+    }
     pub fn permissions(&self) -> Vec<serde_json::Value> {
         self.session.permissions()
     }
@@ -73,6 +78,14 @@ impl CodexVoiceAnalyst {
     }
     pub async fn submit_input(&self, id: &str, text: &str) -> Result<VoiceDelegationAdmission> {
         self.lifecycle.admit_terminal(id, text).await
+    }
+
+    pub async fn submit_group_input(
+        &self,
+        id: &str,
+        text: &str,
+    ) -> Result<VoiceDelegationAdmission> {
+        self.lifecycle.admit_group(id, text).await
     }
 
     /// A retired console row must not turn a previously accepted input into new work.
@@ -118,8 +131,16 @@ impl CodexVoiceAnalyst {
 
     pub async fn shutdown(&self) -> Result<()> {
         self.session
-            .stop(self.session.generation())
+            .stop_for_voice(self.session.generation())
             .await
             .context("stop Voice Analyst")
+    }
+
+    /// Send an emergency signal only to this Analyst's owned local processes.
+    /// A successful signal does not itself confirm shutdown.
+    pub fn terminate_local_processes(&self) -> Result<bool> {
+        self.session
+            .terminate_local_processes()
+            .context("terminate owned Voice Analyst processes")
     }
 }

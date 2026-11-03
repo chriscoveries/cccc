@@ -79,6 +79,7 @@ export function useGroupMenu(label: string, actions: GroupMenuActionItem[]) {
               },
             })}
             className="z-max min-w-[180px] max-w-[calc(100vw-24px)] rounded-xl p-1.5 shadow-2xl glass-panel"
+            data-group-menu
           >
             {actions.map((action, index) => (
               <Fragment key={action.label}>

@@ -68,6 +68,8 @@ export type WorkspaceFile = {
 
 export type GroupDoc = {
   generation?: string;
+  /** Names the generation of a Group created before generations were stored. */
+  created_at?: string;
   group_id: string;
   title?: string;
   topic?: string;
@@ -363,6 +365,8 @@ export type Actor = {
   runtime_session_status?: string | null;
   runtime_session_resume_eligible?: boolean | null;
   runtime_session_last_resume_error?: string | null;
+  /** The original PTY is waiting for the user before managed runtime admission. */
+  runtime_confirmation_required?: boolean;
   submit?: "enter" | "newline" | "none";
   profile_id?: string;
   profile_scope?: "global" | "user";
@@ -631,6 +635,8 @@ export type ReplyTarget = {
   eventId: string;
   by: string;
   text: string;
+  /** A reply to a message Chet wrote goes back to Chet, which has no Mail. */
+  toChet?: boolean;
   connectInstanceId?: string;
   remoteDstGroupId?: string;
   remoteDstTo?: string[];
@@ -1016,6 +1022,7 @@ export type AssistantVoiceDocument = {
   workspace_path?: string;
   content?: string;
   content_sha256?: string;
+  content_target_id?: string;
   content_chars?: number;
   revision_count?: number;
   source_segment_count?: number;
@@ -1663,311 +1670,8 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
   custom: { label: "Custom", desc: "Manual MCP installation needed" },
 };
 
-// Runtime colors for visual distinction
-// Dark theme: semi-transparent dark backgrounds with bright text
-// Light theme: semi-transparent light backgrounds with darker text
-export const RUNTIME_COLORS: Record<
-  string,
-  {
-    // Dark theme
-    bg: string;
-    text: string;
-    border: string;
-    dot: string;
-    // Light theme
-    bgLight: string;
-    textLight: string;
-    borderLight: string;
-    dotLight: string;
-  }
-> = {
-  pi: {
-    bg: "bg-slate-900/40",
-    text: "text-slate-200",
-    border: "border-slate-500/60",
-    dot: "bg-slate-300",
-    bgLight: "bg-slate-100",
-    textLight: "text-slate-800",
-    borderLight: "border-slate-300",
-    dotLight: "bg-slate-600",
-  },
-  amp: {
-    bg: "bg-rose-900/30",
-    text: "text-rose-300",
-    border: "border-rose-600/50",
-    dot: "bg-rose-400",
-    bgLight: "bg-rose-50",
-    textLight: "text-rose-700",
-    borderLight: "border-rose-300",
-    dotLight: "bg-rose-500",
-  },
-  auggie: {
-    bg: "bg-teal-900/30",
-    text: "text-teal-300",
-    border: "border-teal-600/50",
-    dot: "bg-teal-400",
-    bgLight: "bg-teal-50",
-    textLight: "text-teal-700",
-    borderLight: "border-teal-300",
-    dotLight: "bg-teal-500",
-  },
-  claude: {
-    bg: "bg-orange-900/30",
-    text: "text-orange-300",
-    border: "border-orange-600/50",
-    dot: "bg-orange-400",
-    bgLight: "bg-orange-50",
-    textLight: "text-orange-700",
-    borderLight: "border-orange-300",
-    dotLight: "bg-orange-500",
-  },
-  cline: {
-    bg: "bg-gray-900/40",
-    text: "text-gray-200",
-    border: "border-gray-500/60",
-    dot: "bg-gray-300",
-    bgLight: "bg-gray-100",
-    textLight: "text-gray-800",
-    borderLight: "border-gray-300",
-    dotLight: "bg-gray-600",
-  },
-  codex: {
-    bg: "bg-emerald-900/30",
-    text: "text-emerald-300",
-    border: "border-emerald-600/50",
-    dot: "bg-emerald-400",
-    bgLight: "bg-emerald-50",
-    textLight: "text-emerald-700",
-    borderLight: "border-emerald-300",
-    dotLight: "bg-emerald-500",
-  },
-  copilot: {
-    bg: "bg-slate-900/40",
-    text: "text-slate-200",
-    border: "border-slate-500/60",
-    dot: "bg-slate-300",
-    bgLight: "bg-slate-100",
-    textLight: "text-slate-800",
-    borderLight: "border-slate-300",
-    dotLight: "bg-slate-600",
-  },
-  cursor: {
-    bg: "bg-zinc-900/40",
-    text: "text-zinc-200",
-    border: "border-zinc-500/60",
-    dot: "bg-zinc-300",
-    bgLight: "bg-zinc-100",
-    textLight: "text-zinc-800",
-    borderLight: "border-zinc-300",
-    dotLight: "bg-zinc-600",
-  },
-  devin: {
-    bg: "bg-sky-900/30",
-    text: "text-sky-300",
-    border: "border-sky-600/50",
-    dot: "bg-sky-400",
-    bgLight: "bg-sky-50",
-    textLight: "text-sky-700",
-    borderLight: "border-sky-300",
-    dotLight: "bg-sky-500",
-  },
-  kiro: {
-    bg: "bg-purple-900/30",
-    text: "text-purple-300",
-    border: "border-purple-600/50",
-    dot: "bg-purple-400",
-    bgLight: "bg-purple-50",
-    textLight: "text-purple-700",
-    borderLight: "border-purple-300",
-    dotLight: "bg-purple-500",
-  },
-  kilo: {
-    bg: "bg-lime-900/30",
-    text: "text-lime-300",
-    border: "border-lime-600/50",
-    dot: "bg-lime-400",
-    bgLight: "bg-lime-50",
-    textLight: "text-lime-800",
-    borderLight: "border-lime-300",
-    dotLight: "bg-lime-500",
-  },
-  antigravity: {
-    bg: "bg-blue-900/30",
-    text: "text-blue-300",
-    border: "border-blue-600/50",
-    dot: "bg-blue-400",
-    bgLight: "bg-blue-50",
-    textLight: "text-blue-700",
-    borderLight: "border-blue-300",
-    dotLight: "bg-blue-500",
-  },
-  droid: {
-    bg: "bg-violet-900/30",
-    text: "text-violet-300",
-    border: "border-violet-600/50",
-    dot: "bg-violet-400",
-    bgLight: "bg-violet-50",
-    textLight: "text-violet-700",
-    borderLight: "border-violet-300",
-    dotLight: "bg-violet-500",
-  },
-  grok: {
-    bg: "bg-neutral-900/40",
-    text: "text-neutral-200",
-    border: "border-neutral-500/60",
-    dot: "bg-neutral-300",
-    bgLight: "bg-neutral-100",
-    textLight: "text-neutral-800",
-    borderLight: "border-neutral-300",
-    dotLight: "bg-neutral-600",
-  },
-  hermes: {
-    bg: "bg-cyan-900/30",
-    text: "text-cyan-300",
-    border: "border-cyan-600/50",
-    dot: "bg-cyan-400",
-    bgLight: "bg-cyan-50",
-    textLight: "text-cyan-700",
-    borderLight: "border-cyan-300",
-    dotLight: "bg-cyan-500",
-  },
-  kimi: {
-    bg: "bg-lime-900/30",
-    text: "text-lime-300",
-    border: "border-lime-600/50",
-    dot: "bg-lime-400",
-    bgLight: "bg-lime-50",
-    textLight: "text-lime-700",
-    borderLight: "border-lime-300",
-    dotLight: "bg-lime-500",
-  },
-  opencode: {
-    bg: "bg-stone-900/40",
-    text: "text-stone-200",
-    border: "border-stone-500/60",
-    dot: "bg-stone-300",
-    bgLight: "bg-stone-100",
-    textLight: "text-stone-800",
-    borderLight: "border-stone-300",
-    dotLight: "bg-stone-600",
-  },
-  web_model: {
-    bg: "bg-indigo-900/30",
-    text: "text-indigo-300",
-    border: "border-indigo-600/50",
-    dot: "bg-indigo-400",
-    bgLight: "bg-indigo-50",
-    textLight: "text-indigo-700",
-    borderLight: "border-indigo-300",
-    dotLight: "bg-indigo-500",
-  },
-  chatgpt_dots: {
-    bg: "bg-indigo-900/30",
-    text: "text-indigo-300",
-    border: "border-indigo-600/50",
-    dot: "bg-indigo-400",
-    bgLight: "bg-indigo-50",
-    textLight: "text-indigo-700",
-    borderLight: "border-indigo-300",
-    dotLight: "bg-indigo-500",
-  },
-  grok_web_model: {
-    bg: "bg-indigo-900/30",
-    text: "text-indigo-300",
-    border: "border-indigo-600/50",
-    dot: "bg-indigo-400",
-    bgLight: "bg-indigo-50",
-    textLight: "text-indigo-700",
-    borderLight: "border-indigo-300",
-    dotLight: "bg-indigo-500",
-  },
-  custom: {
-    bg: "bg-zinc-800/50",
-    text: "text-zinc-300",
-    border: "border-zinc-500/50",
-    dot: "bg-zinc-400",
-    bgLight: "bg-zinc-100",
-    textLight: "text-zinc-700",
-    borderLight: "border-zinc-300",
-    dotLight: "bg-zinc-500",
-  },
-  user: {
-    bg: "bg-sky-900/30",
-    text: "text-sky-300",
-    border: "border-sky-600/50",
-    dot: "bg-sky-400",
-    bgLight: "bg-sky-50",
-    textLight: "text-sky-700",
-    borderLight: "border-sky-300",
-    dotLight: "bg-sky-500",
-  },
-};
-
-// Helper to get runtime color, with fallback
-export function getRuntimeColor(runtime?: string, isDark: boolean = true) {
-  const colors = RUNTIME_COLORS[runtime || "codex"] || RUNTIME_COLORS.codex;
-  if (isDark) {
-    return { bg: colors.bg, text: colors.text, border: colors.border, dot: colors.dot };
-  }
-  return {
-    bg: colors.bgLight,
-    text: colors.textLight,
-    border: colors.borderLight,
-    dot: colors.dotLight,
-  };
-}
-
-const ACTOR_ACCENTS = [
-  // Dark theme accents are intentionally soft (low-saturation ring + readable name color).
-  {
-    ring: "ring-sky-400/35",
-    text: "text-sky-300",
-    ringLight: "ring-sky-300",
-    textLight: "text-sky-700",
-  },
-  {
-    ring: "ring-indigo-400/35",
-    text: "text-indigo-300",
-    ringLight: "ring-indigo-300",
-    textLight: "text-indigo-700",
-  },
-  {
-    ring: "ring-violet-400/35",
-    text: "text-violet-300",
-    ringLight: "ring-violet-300",
-    textLight: "text-violet-700",
-  },
-  {
-    ring: "ring-fuchsia-400/35",
-    text: "text-fuchsia-300",
-    ringLight: "ring-fuchsia-300",
-    textLight: "text-fuchsia-700",
-  },
-  {
-    ring: "ring-cyan-400/35",
-    text: "text-cyan-300",
-    ringLight: "ring-cyan-300",
-    textLight: "text-cyan-700",
-  },
-  {
-    ring: "ring-teal-400/35",
-    text: "text-teal-300",
-    ringLight: "ring-teal-300",
-    textLight: "text-teal-700",
-  },
-  {
-    ring: "ring-emerald-400/35",
-    text: "text-emerald-300",
-    ringLight: "ring-emerald-300",
-    textLight: "text-emerald-700",
-  },
-  {
-    ring: "ring-amber-400/35",
-    text: "text-amber-300",
-    ringLight: "ring-amber-300",
-    textLight: "text-amber-700",
-  },
-];
+/** Number of accent slots; an actor keeps its slot, and the LCD accent it maps to. */
+const ACTOR_ACCENT_COUNT = 8;
 
 function _fnv1a32(input: string): number {
   // Deterministic, fast, and stable across JS engines.
@@ -1979,12 +1683,10 @@ function _fnv1a32(input: string): number {
   return hash >>> 0;
 }
 
-export function getActorAccentColor(actorId?: string, isDark: boolean = true) {
+/** Stable per-actor slot in the accent palette. */
+export function getActorAccentIndex(actorId?: string): number {
   const id = String(actorId || "").trim();
-  const idx = id ? _fnv1a32(id) % ACTOR_ACCENTS.length : 0;
-  const a = ACTOR_ACCENTS[idx] || ACTOR_ACCENTS[0];
-  if (isDark) return { ring: a.ring, text: a.text };
-  return { ring: a.ringLight, text: a.textLight };
+  return id ? _fnv1a32(id) % ACTOR_ACCENT_COUNT : 0;
 }
 
 export function supportsAcpMode(runtime?: string | null): boolean {

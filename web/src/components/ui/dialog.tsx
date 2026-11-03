@@ -52,9 +52,11 @@ function useReturnFocus({ onOpenAutoFocus, onCloseAutoFocus }: AutoFocusHandlers
   } satisfies AutoFocusHandlers;
 }
 
+type DialogContentProps = React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>;
+
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
+  DialogContentProps
 >(({ className, children, ...props }, ref) => {
   const ariaDescribedBy = props["aria-describedby"];
   const returnFocus = useReturnFocus(props);

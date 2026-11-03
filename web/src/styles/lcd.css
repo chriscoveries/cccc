@@ -1,0 +1,2211 @@
+/* ============================================
+   LCD pixel style, the Web UI's only look
+
+   index.html marks <html data-ui-style="lcd"> and <body data-lcd-scope>, so these
+   rules reach the whole page and everything portalled into the body. The palette
+   lives in --lcd-* variables, and the product tokens are mapped onto it below.
+   Components still carry the classes of the former classic look; comments here
+   call those "classic". Font licenses ship under /ui/licenses/fonts/.
+   ============================================ */
+
+/* IBM Plex Mono 2.5.0 (@ibm/plex-mono), IBM's complete files as released: the reserved
+   name "Plex" stays with an original release, and accents keep their base glyph's font. */
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("@/assets/fonts/lcd/IBMPlexMono-Regular.woff2") format("woff2");
+}
+
+/* SemiBold also serves bold, so headings never get synthetic weight. */
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 600 700;
+  font-display: swap;
+  src: url("@/assets/fonts/lcd/IBMPlexMono-SemiBold.woff2") format("woff2");
+}
+
+/* Fusion Pixel 12px (2026.10.25): separate Chinese and Japanese glyph forms. */
+@font-face {
+  font-family: "Fusion Pixel 12 SC";
+  font-display: swap;
+  src: url("@/assets/fonts/lcd/fusion-pixel-12px-proportional-zh_hans.otf.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Fusion Pixel 12 JA";
+  font-display: swap;
+  src: url("@/assets/fonts/lcd/fusion-pixel-12px-proportional-ja.otf.woff2") format("woff2");
+}
+
+/* Use the Japanese glyph shapes in pixel body text while keeping RoundPix for Latin. */
+@font-face {
+  font-family: "Fusion Pixel 12 JA Body";
+  font-display: swap;
+  src: url("@/assets/fonts/lcd/fusion-pixel-12px-proportional-ja.otf.woff2") format("woff2");
+  unicode-range: U+2E80-9FFF, U+F900-FAFF, U+FF00-FFEF, U+20000-2FA1F;
+}
+
+@font-face {
+  font-family: "Departure Mono";
+  font-display: swap;
+  src: url("@/assets/fonts/lcd/DepartureMono-Regular.woff2") format("woff2");
+}
+
+/* The pixel body font: the author's own release file, so it keeps its reserved
+   names (ZLabs-RoundPix-OFL.txt). */
+@font-face {
+  font-family: "RoundPix 16";
+  font-display: swap;
+  src: url("@/assets/fonts/lcd/ZLabsRoundPix_16px_M_CN.ttf.woff2") format("woff2");
+}
+
+/* Palette: light, then dark.
+   Light keeps the screen's grey-green (OKLCH hue ~123, chroma ~0.03). Its lightness was
+   screened with APCA Lc, which estimates perceived contrast on mid-tone grounds, with
+   WCAG 2 ratios as a floor and a review of the real page: body >= 85, secondary >= 75,
+   placeholder >= 60 and 4.5:1, control outlines >= 45 and 3:1, dividers >= 15. The
+   earlier #c6ceb8 gave body Lc 73. The panel, a step darker for menus and cards, costs
+   text about 5 Lc: placeholder and outline tones are dark enough to keep their floors on
+   it too, while body and secondary text keep Lc 80 and 70 there, enough for labels. */
+:root[data-ui-style="lcd"] {
+  --lcd-bg: #dae2cb;
+  --lcd-panel: #d1d9c1;
+  --lcd-panel-2: #c8d2b8;
+  --lcd-raised: #e2e9d5;
+  --lcd-plate: #f1f5e6;
+  /* Text on the plate, which stays light in both themes. */
+  --lcd-plate-ink: #3e4737;
+  --lcd-ink: #161a0d;
+  --lcd-ink-strong: #0e120c;
+  --lcd-dim: #3e4236;
+  --lcd-muted: #575b4f;
+  --lcd-rule: #bcc2b1;
+  --lcd-rule-strong: #767a6d;
+  /* The line between messages. */
+  --lcd-sep: #bcc2b1;
+  --lcd-wait: #832c0d;
+  --lcd-on-wait: #eef0e6;
+  --lcd-danger: #7e2f18;
+  --lcd-link: #164a63;
+  --lcd-sel-bg: #161a0d;
+  --lcd-sel-fg: #dae2cb;
+  --lcd-sel-soft: #c8d2b8;
+  --lcd-code-bg: #c9d3b9;
+  --lcd-overlay: rgba(14, 18, 12, 0.35);
+  --lcd-font-cjk:
+    "Noto Sans Mono CJK SC", "Noto Sans CJK SC", "PingFang SC", "Hiragino Sans", "Microsoft YaHei",
+    "Yu Gothic", "Meiryo", monospace;
+  --lcd-font-body: "IBM Plex Mono", var(--lcd-font-cjk);
+  --lcd-font-pixel: "Fusion Pixel 12 SC", var(--lcd-font-body);
+  --lcd-font-brand: "Departure Mono", var(--lcd-font-body);
+}
+
+:root[data-ui-style="lcd"]:lang(ja) {
+  --lcd-font-cjk:
+    "Noto Sans Mono CJK JP", "Noto Sans CJK JP", "Hiragino Sans", "Yu Gothic", "Meiryo",
+    "Noto Sans Mono CJK SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", monospace;
+  --lcd-font-pixel: "Fusion Pixel 12 JA", var(--lcd-font-body);
+}
+
+:root[data-ui-style="lcd"][data-lcd-body="pixel"] {
+  --lcd-font-body: "RoundPix 16", "IBM Plex Mono", var(--lcd-font-cjk);
+}
+
+:root[data-ui-style="lcd"][data-lcd-body="pixel"]:lang(ja) {
+  --lcd-font-body: "Fusion Pixel 12 JA Body", "RoundPix 16", "IBM Plex Mono", var(--lcd-font-cjk);
+}
+
+:root[data-ui-style="lcd"].dark {
+  --lcd-bg: #1d221d;
+  --lcd-panel: #262c26;
+  --lcd-panel-2: #29302a;
+  --lcd-raised: #232923;
+  --lcd-plate: #cdd3c4;
+  --lcd-ink: #d0d6c8;
+  --lcd-ink-strong: #e5eadd;
+  /* Ground and body stay as tuned; secondary text rises from Lc 48 to 60. */
+  --lcd-dim: #adb8ad;
+  --lcd-muted: #9ba69b;
+  --lcd-rule: #2e352e;
+  --lcd-rule-strong: #6e7764;
+  /* The dark rule all but vanishes on the screen; between messages the line takes
+     the strong rule mixed 45% into the screen. */
+  --lcd-sep: #41483d;
+  --lcd-wait: #f2ae4c;
+  --lcd-on-wait: #1d221d;
+  --lcd-danger: #ee9c80;
+  --lcd-link: #86c4e2;
+  --lcd-sel-bg: #d0d6c8;
+  --lcd-sel-fg: #1d221d;
+  --lcd-sel-soft: #29302a;
+  --lcd-code-bg: #262c26;
+  --lcd-overlay: rgba(0, 0, 0, 0.5);
+}
+
+/* The page ground. */
+:root[data-ui-style="lcd"] body,
+:root[data-ui-style="lcd"] [data-group-shell] {
+  background: var(--lcd-bg);
+}
+
+/* Product tokens, type and corners. */
+:root[data-ui-style="lcd"] [data-lcd-scope] {
+  --color-body-bg: var(--lcd-bg);
+  --color-sidebar-bg: var(--lcd-bg);
+  --color-sidebar-border: var(--lcd-rule);
+  --color-sidebar-item-hover: var(--lcd-sel-soft);
+  --color-sidebar-item-active: var(--lcd-sel-soft);
+  --color-chat-bg: var(--lcd-bg);
+
+  --color-bg-primary: var(--lcd-bg);
+  --color-bg-secondary: var(--lcd-panel);
+  --color-bg-tertiary: var(--lcd-panel-2);
+  --color-bg-elevated: var(--lcd-raised);
+  --color-bg-overlay: var(--lcd-overlay);
+
+  --glass-bg: var(--lcd-bg);
+  --glass-bg-hover: var(--lcd-sel-soft);
+  --glass-bg-active: var(--lcd-sel-soft);
+  --glass-border: var(--lcd-rule);
+  --glass-border-subtle: var(--lcd-rule);
+  --glass-border-gradient: none;
+  --glass-shadow: none;
+  --glass-shadow-lg: none;
+  --glass-inner-glow: none;
+  --glass-glow: none;
+  --glass-blur: 0px;
+  --glass-blur-lg: 0px;
+  --glass-tab-bg: transparent;
+  --glass-tab-bg-hover: var(--lcd-sel-soft);
+  --glass-tab-bg-active: var(--lcd-raised);
+  --glass-tab-border-active: var(--lcd-rule-strong);
+  --glass-tab-shadow-active: none;
+  --glass-bubble-bg: transparent;
+  --glass-bubble-border: var(--lcd-rule);
+  --glass-bubble-shadow: none;
+  --glass-panel-bg: var(--lcd-bg);
+  --glass-panel-border: var(--lcd-rule);
+  /* Components use the accent fill as a soft tint under ordinary text, so it stays soft
+     here; a selected control that should read inverse sets --lcd-sel-bg/-fg itself. */
+  --glass-accent-bg: var(--lcd-sel-soft);
+  --glass-accent-bg-hover: var(--lcd-sel-soft);
+  --glass-accent-border: var(--lcd-ink);
+  --glass-accent-glow: none;
+  --glass-accent-shadow: none;
+  --gradient-primary: linear-gradient(var(--lcd-ink), var(--lcd-ink));
+  --gradient-accent: linear-gradient(var(--lcd-ink), var(--lcd-ink));
+  --gradient-subtle: linear-gradient(var(--lcd-panel), var(--lcd-panel));
+  --gradient-shine: none;
+
+  --color-border-primary: var(--lcd-rule-strong);
+  --color-border-secondary: var(--lcd-rule);
+  --color-border-focus: var(--lcd-ink);
+
+  --color-text-primary: var(--lcd-ink);
+  --color-text-secondary: var(--lcd-dim);
+  --color-text-tertiary: var(--lcd-muted);
+  --color-text-muted: var(--lcd-muted);
+  --color-text-inverse: var(--lcd-sel-fg);
+
+  --color-accent-primary: var(--lcd-ink);
+  --color-accent-secondary: var(--lcd-link);
+  --color-accent-warning: var(--lcd-wait);
+  --color-accent-danger: var(--lcd-danger);
+
+  --background: var(--lcd-bg);
+  --foreground: var(--lcd-ink);
+  --card: var(--lcd-raised);
+  --card-foreground: var(--lcd-ink);
+  --popover: var(--lcd-raised);
+  --popover-foreground: var(--lcd-ink);
+  --primary: var(--lcd-ink);
+  --primary-foreground: var(--lcd-sel-fg);
+  --secondary: var(--lcd-panel-2);
+  --secondary-foreground: var(--lcd-ink);
+  --muted: var(--lcd-panel-2);
+  --muted-foreground: var(--lcd-dim);
+  --accent: var(--lcd-sel-soft);
+  --accent-foreground: var(--lcd-ink);
+  --destructive: var(--lcd-danger);
+  --destructive-foreground: var(--lcd-sel-fg);
+  --border: var(--lcd-rule);
+  --input: var(--lcd-rule-strong);
+  --ring: var(--lcd-ink);
+  --focus-ring: 0 0 0 1px var(--lcd-bg), 0 0 0 2px var(--lcd-ink);
+
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+  --radius-4xl: 0px;
+
+  --font-sans: var(--lcd-font-body);
+  --font-mono: var(--lcd-font-body);
+  font-family: var(--lcd-font-body);
+  font-synthesis: none;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] ::selection {
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+/* One focus mark in the scope: the dashed outline. Focus rings would stack on it. */
+:root[data-ui-style="lcd"] [data-lcd-scope] :focus-visible {
+  outline: 1px dashed var(--lcd-ink);
+  outline-offset: 2px;
+  --tw-ring-shadow: 0 0 #0000;
+  --tw-ring-offset-shadow: 0 0 #0000;
+}
+
+/* The native switch input is transparent; put its focus mark on the visible track. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  input[role="switch"]:focus-visible
+  + [data-switch-track] {
+  outline: 1px dashed var(--lcd-ink);
+  outline-offset: 2px;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-switch-track]::after {
+  border-radius: 0;
+}
+
+/* Status colours describe meaning rather than remapping palette shades,
+   which can otherwise turn a foreground and its background into the same colour. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-status-tone="error"], [data-settings-notice="error"], .destructive-key) {
+  border-color: var(--lcd-danger);
+  background-color: transparent;
+  color: var(--lcd-danger);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-status-tone="warning"], [data-settings-notice="warning"]) {
+  border-color: var(--lcd-wait);
+  background-color: transparent;
+  color: var(--lcd-wait);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-status-tone="info"], [data-settings-notice="info"]) {
+  border-color: var(--lcd-link);
+  background-color: transparent;
+  color: var(--lcd-link);
+}
+
+/* Neutral marks a state that is neither good nor bad news, such as "optional" or
+   "hidden"; it reads like ok, as the LCD gives success no colour of its own. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-status-tone="ok"], [data-status-tone="neutral"]) {
+  border-color: var(--lcd-rule-strong);
+  background-color: transparent;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-status-tone="muted"] {
+  color: var(--lcd-dim);
+}
+
+/* Reversing both colours through a transition can make the text vanish midway. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(button[data-status-tone="error"], .destructive-key) {
+  transition: none;
+}
+
+@media (hover: hover) {
+  :root[data-ui-style="lcd"]
+    [data-lcd-scope]
+    :is(button[data-status-tone="error"], .destructive-key):hover:not(:disabled) {
+    background-color: var(--lcd-danger);
+    color: var(--lcd-bg);
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] button[data-status-tone="ok"]:hover:not(:disabled) {
+    background-color: var(--lcd-sel-soft);
+  }
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-settings-card="danger"] {
+  border-color: var(--lcd-danger);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-settings-card="danger"] h3 {
+  color: var(--lcd-danger);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-settings-code] {
+  background: var(--lcd-code-bg);
+  color: var(--lcd-ink);
+}
+
+/* A status dot takes the colour of its meaning, square like every LCD corner and
+   without the classic halo. Attention keeps its pulse, as a spinner keeps turning. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-status-dot] {
+  box-shadow: none;
+}
+
+/* Neutral marks something worth a glance that is neither working nor waiting on
+   you, such as changes inside a folder; it is drawn like active. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-status-dot="active"], [data-status-dot="neutral"]) {
+  background: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-status-dot="attention"] {
+  background: var(--lcd-wait);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-status-dot="failed"] {
+  background: var(--lcd-danger);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-status-dot="inactive"] {
+  background: var(--lcd-dim);
+}
+
+/* Chet's head fills its tile, so its unread mark sits over the drawing; a ring of the
+   sidebar ground keeps the mark apart from the head's pixels. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-chet-mark] [data-status-dot] {
+  box-shadow: 0 0 0 2px var(--lcd-bg);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-search-match] {
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+/* Recipient state remains distinguishable by its symbol and its accessible name. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-recipient-result="success"] [role="img"] {
+  color: var(--lcd-ink);
+}
+
+/* An actor or destination can matter to the operation; keep its name readable. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-inbox-heading],
+    [data-inbox-sender],
+    [data-recipient-name],
+    [data-recipient-destination]
+  ) {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+/* The mark-read label can fill a phone header at enlarged text sizes. Give the
+   heading and close key their own row, then place the action below them. */
+@media (max-width: 480px) {
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-modal-header].inbox-modal-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.5rem;
+    padding-inline: 0.75rem;
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] .inbox-modal-header [data-inbox-heading] {
+    font-size: 1rem;
+    line-height: 1.35;
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] .inbox-modal-header > #inbox-title {
+    grid-column: 1;
+    grid-row: 1;
+    padding-right: 0;
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] .inbox-modal-header > div:last-child {
+    display: contents;
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] .inbox-modal-header [data-modal-close] {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] .inbox-modal-header [data-inbox-action] {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+  }
+
+  /* Keep a readable name column; wrap the controls only when they cannot fit. */
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-recipient-row] {
+    flex-wrap: wrap;
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-recipient-summary] {
+    flex: 1 1 min(100%, 10rem);
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-recipient-controls] {
+    max-width: 100%;
+    margin-left: auto;
+  }
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-settings-info-popover]
+  [data-settings-info-title] {
+  color: var(--lcd-ink);
+}
+
+/* The chosen access goal is a draft; the saved badge remains a separate fact. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-settings-choice] {
+  transition: none;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-settings-choice="active"] {
+  border-color: var(--lcd-ink);
+  background: var(--lcd-sel-bg);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-settings-choice="active"]
+  :is([data-settings-choice-title], [data-settings-choice-hint], [data-settings-choice-saved]) {
+  color: var(--lcd-sel-fg);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-settings-choice="active"]
+  [data-settings-choice-saved] {
+  border-color: var(--lcd-sel-fg);
+  background: transparent;
+}
+
+/* ---------- Message log rows (S1) ---------- */
+:root[data-ui-style="lcd"] {
+  --lcd-name-0: #164a63;
+  --lcd-name-1: #2f3d75;
+  --lcd-name-2: #4a347e;
+  --lcd-name-3: #6b2457;
+  --lcd-name-4: #1d5459;
+  --lcd-name-5: #1f5042;
+  --lcd-name-6: #2f4f1f;
+  --lcd-name-7: #5b4a12;
+}
+
+:root[data-ui-style="lcd"].dark {
+  --lcd-name-0: #86c4e2;
+  --lcd-name-1: #a9b4ec;
+  --lcd-name-2: #c0a9ee;
+  --lcd-name-3: #e2a6cf;
+  --lcd-name-4: #8ccfd2;
+  --lcd-name-5: #8fcfb8;
+  --lcd-name-6: #a8cb8c;
+  --lcd-name-7: #d7bf7a;
+}
+
+/* A message is a head line and its text. The head carries who, to whom and when,
+   so names never truncate, and the text keeps the full width below it, starting
+   under the author's name. */
+:root[data-ui-style="lcd"] .lcd-row {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  /* The row's own text (author, insight, request card) matches the Markdown body,
+     so nothing around a message is set larger than the message itself. */
+  font-size: 0.875rem;
+  line-height: 1.7;
+}
+
+/* Messages read as a ledger. A hairline in the space above a message marks a change
+   of speaker; messages that follow from the same sender are set apart by space alone.
+   Each message, an agent's or yours, is as wide as its own text, and its line spans
+   exactly that width, so no line reaches past its message. Space inside a message is
+   reduced (see the Markdown spacing further down) so that it reads apart from the
+   space between messages. Messages get no ground and no hover tone: a fill on every
+   message turned the page into blocks, and a tone change over a whole message read as
+   a jump. Padding, not margin, keeps the space inside the row the virtual list
+   measures; the line sits halfway down it. */
+:root[data-ui-style="lcd"] .lcd-row {
+  --lcd-row-gap: 1.75rem;
+  padding-top: var(--lcd-row-gap);
+}
+
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-continued] {
+  --lcd-row-gap: 0.875rem;
+}
+
+:root[data-ui-style="lcd"] .lcd-row:not([data-lcd-same-sender])::after {
+  content: "";
+  position: absolute;
+  top: calc(var(--lcd-row-gap) / 2);
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--lcd-sep);
+  pointer-events: none;
+}
+
+/* The message below its space, which a jump outlines. */
+:root[data-ui-style="lcd"] .lcd-row::before {
+  content: "";
+  position: absolute;
+  inset: var(--lcd-row-gap) 0 0 -0.5rem;
+  pointer-events: none;
+}
+
+/* One centred reading column for the conversation, its filters, notices and the
+   composer, so lines stay readable on wide screens and your side stays within reach.
+   The column alone sets their width, over a notice's own cap. The wide and full-width
+   choices give wide tables and code more room; the side spacing stays. The breakpoint
+   matches where the menu offers those choices. */
+:root[data-ui-style="lcd"] .chat-reading-width {
+  max-width: none;
+}
+
+@media (min-width: 768px) {
+  :root[data-ui-style="lcd"]:not([data-lcd-width="full"]) .chat-reading-width {
+    max-width: 56rem;
+    margin-inline: auto;
+  }
+
+  :root[data-ui-style="lcd"][data-lcd-width="wide"] .chat-reading-width {
+    max-width: 80rem;
+  }
+
+  /* The conversation scrolls in a box only as wide as the column with its side padding and
+     24px set aside for the two scrollbar gutters (10px each in Chromium on Linux), so the
+     scrollbar sits beside the messages rather than at the window's edge. A wheel over the
+     margins still scrolls it (useMarginWheel). The key back to the latest message keeps to
+     the box's lower right, clear of its scrollbar, whose gutter does not shrink with the
+     text. */
+  :root[data-ui-style="lcd"]:not([data-lcd-width="full"]) .chat-reading-scroller {
+    width: 100%;
+    max-width: calc(56rem + 2rem + 24px);
+    margin-inline: auto;
+  }
+
+  :root[data-ui-style="lcd"][data-lcd-width="wide"] .chat-reading-scroller {
+    max-width: calc(80rem + 2rem + 24px);
+  }
+
+  :root[data-ui-style="lcd"][data-lcd-width="full"] [data-lcd-scope] [data-scroll-latest] {
+    right: max(0.75rem, 12px);
+  }
+
+  :root[data-ui-style="lcd"]:not([data-lcd-width="full"]) [data-lcd-scope] [data-scroll-latest] {
+    right: calc(max(0px, (100% - 56rem - 2rem - 24px) / 2) + max(0.75rem, 12px));
+  }
+
+  :root[data-ui-style="lcd"][data-lcd-width="wide"] [data-lcd-scope] [data-scroll-latest] {
+    right: calc(max(0px, (100% - 80rem - 2rem - 24px) / 2) + max(0.75rem, 12px));
+  }
+}
+
+/* A pixel font is crisp only at its design size: RoundPix is drawn on 16px. */
+:root[data-ui-style="lcd"][data-lcd-body="pixel"] .lcd-row,
+:root[data-ui-style="lcd"][data-lcd-body="pixel"] .lcd-row .markdown-body.prose-sm {
+  font-size: 1rem;
+}
+
+:root[data-ui-style="lcd"] .lcd-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.125rem 1ch;
+  min-width: 0;
+  min-height: 1.75rem;
+  line-height: 1.5;
+}
+
+/* Continued messages from the same author keep only route and time, under the text column. */
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-continued] .lcd-row-head {
+  padding-left: calc(1.25rem + 0.75ch);
+}
+
+:root[data-ui-style="lcd"] .lcd-row-time {
+  color: var(--lcd-muted);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* A pinned message keeps a small pin after its time; the tip names it. */
+:root[data-ui-style="lcd"] .lcd-row-pin {
+  display: inline-flex;
+  align-self: center;
+  color: var(--lcd-muted);
+}
+
+/* Where messages have no hover bar, as on touch screens or in a narrow column, or no room on it
+   for Show in chat, a filtered view gives every message it lists a way into the whole
+   conversation: a short underlined key after the time, in ink so it reads as something to
+   press, and set in reverse under the pointer like the other keys. */
+:root[data-ui-style="lcd"] .lcd-row-jump {
+  color: var(--lcd-ink);
+  font-size: 0.8125rem;
+  text-decoration: underline;
+  text-underline-offset: 0.25em;
+  white-space: nowrap;
+}
+
+:root[data-ui-style="lcd"] .lcd-row-jump:hover {
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+/* Without the bar, ⋮ ends the head line instead of taking a row under the text or a column
+   beside it, so the text keeps the column's width; on a coarse pointer its 44px target sets
+   the head line's height, and author, route and time centre on it. Where the bar shows (the
+   same query as in chatMessage.css), ⋮ gives way to it. */
+:root[data-ui-style="lcd"] .lcd-row:has(.message-actions-menu) .lcd-row-head {
+  align-items: center;
+}
+
+/* The key keeps its icon at its right edge, so ⋮ ends where the text does while the whole key,
+   and its focus ring, stay inside the column, which clips what reaches past it in a long
+   conversation. */
+:root[data-ui-style="lcd"] .lcd-row .message-actions-menu {
+  margin-left: auto;
+}
+
+:root[data-ui-style="lcd"] .lcd-row .message-actions-menu > button {
+  justify-content: flex-end;
+  padding-right: 0;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] .lcd-row .message-actions-menu > button:focus-visible {
+  outline-offset: -2px;
+}
+
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-user] .message-actions-menu {
+  margin-left: 0;
+}
+
+@media (pointer: coarse) {
+  :root[data-ui-style="lcd"] .lcd-row-jump {
+    min-height: 44px;
+    padding-inline: 0.5ch;
+  }
+}
+
+/* The name gives the head its baseline, so author, route and time sit on one line;
+   the avatar centres on it. */
+:root[data-ui-style="lcd"] .lcd-row-who {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.75ch;
+  min-width: 0;
+  max-width: 100%;
+}
+
+:root[data-ui-style="lcd"] .lcd-row-who > .lcd-tile {
+  align-self: center;
+}
+
+:root[data-ui-style="lcd"] .lcd-row-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-accent="0"] .lcd-row-name {
+  color: var(--lcd-name-0);
+}
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-accent="1"] .lcd-row-name {
+  color: var(--lcd-name-1);
+}
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-accent="2"] .lcd-row-name {
+  color: var(--lcd-name-2);
+}
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-accent="3"] .lcd-row-name {
+  color: var(--lcd-name-3);
+}
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-accent="4"] .lcd-row-name {
+  color: var(--lcd-name-4);
+}
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-accent="5"] .lcd-row-name {
+  color: var(--lcd-name-5);
+}
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-accent="6"] .lcd-row-name {
+  color: var(--lcd-name-6);
+}
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-accent="7"] .lcd-row-name {
+  color: var(--lcd-name-7);
+}
+
+/* Your own messages: the name is set in reverse, the way r8 marked "you". */
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-user] .lcd-row-name {
+  padding: 0 0.5ch;
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+/* Your own messages also sit on your side: head and text on the right, the text itself
+   left-aligned. Agents stay on the left, however many there are. */
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-user] {
+  max-width: 85%;
+  margin-left: auto;
+}
+
+/* A jump outlines your message around its text, on your side. */
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-user]::before {
+  right: -0.5rem;
+}
+
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-user] .lcd-row-head {
+  justify-content: flex-end;
+}
+
+:root[data-ui-style="lcd"] .lcd-row[data-lcd-user] .lcd-row-body {
+  width: fit-content;
+  margin-left: auto;
+  padding-left: 0;
+}
+
+/* Rows measure the conversation's own column, not the window, which a side panel or a
+   large text size can leave narrow. */
+:root[data-ui-style="lcd"] [data-message-column] {
+  container: messages / inline-size;
+}
+
+/* In a column 36rem wide or more the two sides mirror each other: an agent's message
+   keeps the same room from the right edge as yours keeps from the left. A narrower
+   column, as on a phone, gives agents the full width for their text. */
+@container messages (min-width: 36rem) {
+  :root[data-ui-style="lcd"] .lcd-row,
+  :root[data-ui-style="lcd"] .lcd-row[data-lcd-user] {
+    max-width: calc(100% - clamp(6rem, 12%, 12rem));
+  }
+}
+
+/* With a pointer, the actions show in the free space beside the head instead of keeping a
+   place in it, so a short message, and its line, stay as wide as its text. They follow the
+   time on an agent's head and come before your name on yours, and showing them moves nothing.
+   The head's own end space, which the line spans, meets them, so the pointer reaches them
+   without leaving the message. A head stops 12.5rem short of the column's far edge, room for
+   the widest set of actions also at the smallest text size, so a long head wraps instead of
+   pushing them off the screen. A column narrower than 28rem has no such room: there, as on a
+   phone, every action is in ⋮ at the end of the head. The query is the one in chatMessage.css. */
+@media (hover: hover) and (pointer: fine) {
+  @container messages (width >= 28rem) {
+    :root[data-ui-style="lcd"] .lcd-row:has(.message-actions-menu) .lcd-row-head {
+      align-items: baseline;
+    }
+
+    :root[data-ui-style="lcd"] .lcd-row-head {
+      position: relative;
+      width: fit-content;
+      max-width: calc(100cqi - 12.5rem);
+      padding-right: 1ch;
+    }
+
+    :root[data-ui-style="lcd"] .lcd-row[data-lcd-user] .lcd-row-head {
+      margin-left: auto;
+      padding-right: 0;
+      padding-left: 1ch;
+    }
+
+    :root[data-ui-style="lcd"] .lcd-row .lcd-row-head > [data-message-actions-inline] {
+      position: absolute;
+      top: 50%;
+      left: 100%;
+      width: max-content;
+      translate: 0 -50%;
+    }
+
+    :root[data-ui-style="lcd"]
+      .lcd-row[data-lcd-user]
+      .lcd-row-head
+      > [data-message-actions-inline] {
+      right: 100%;
+      left: auto;
+    }
+
+    /* In a filtered view Show in chat follows the time and the bar keeps its usual keys
+       within their 12.5rem, unless the column can spare the 19rem that the bar needs with
+       Show in chat leading it: then the bar carries it and its heads keep that room free.
+       One query decides both places, so exactly one of them shows at any width. */
+    :root[data-ui-style="lcd"] .lcd-row [data-message-actions-inline] > [data-show-in-chat] {
+      display: none;
+    }
+
+    :root[data-ui-style="lcd"]
+      .lcd-row
+      [data-message-actions-inline]
+      > [data-show-in-chat]
+      + button {
+      border-left: 0;
+    }
+  }
+
+  @container messages (width >= 36rem) {
+    :root[data-ui-style="lcd"] .lcd-row[data-lcd-show-in-chat] .lcd-row-head {
+      max-width: calc(100cqi - 19rem);
+    }
+
+    :root[data-ui-style="lcd"] .lcd-row-jump {
+      display: none;
+    }
+
+    :root[data-ui-style="lcd"] .lcd-row [data-message-actions-inline] > [data-show-in-chat] {
+      display: inline-flex;
+    }
+
+    :root[data-ui-style="lcd"]
+      .lcd-row
+      [data-message-actions-inline]
+      > [data-show-in-chat]
+      + button {
+      border-left: 1px solid var(--lcd-rule-strong);
+    }
+  }
+}
+
+/* Runtime logos and avatars stay as drawn, on a small light plate. */
+:root[data-ui-style="lcd"] .lcd-tile {
+  border-radius: 0;
+  border: 1px solid var(--lcd-rule-strong);
+  background: var(--lcd-plate);
+  color: var(--lcd-plate-ink);
+  box-shadow: none;
+  --tw-ring-shadow: 0 0 #0000;
+}
+
+/* The text starts under the author's name. */
+:root[data-ui-style="lcd"] .lcd-row-body {
+  min-width: 0;
+  padding: 0.125rem 0 0.5rem calc(1.25rem + 0.75ch);
+}
+
+:root[data-ui-style="lcd"] .lcd-row-route {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.125rem 1ch;
+  min-width: 0;
+  color: var(--lcd-muted);
+  font-size: 0.8125rem;
+}
+
+:root[data-ui-style="lcd"] .lcd-row-route:empty {
+  display: none;
+}
+
+:root[data-ui-style="lcd"] .lcd-tag {
+  padding: 0 0.5ch;
+  border: 1px solid var(--lcd-rule-strong);
+  color: var(--lcd-dim);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+:root[data-ui-style="lcd"] .lcd-row-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Code: the screen's own recessed panel, ink text and one rule, in both themes;
+   set in IBM Plex Mono under either body font, as r8 specified. */
+:root[data-ui-style="lcd"] [data-lcd-scope] .code-block-wrapper,
+:root[data-ui-style="lcd"] [data-lcd-scope] .markdown-body pre {
+  border: 1px solid var(--lcd-rule-strong);
+  background-color: var(--lcd-code-bg);
+  box-shadow: none;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] .markdown-body :is(pre, code),
+:root[data-ui-style="lcd"] [data-lcd-scope] .code-block-lang {
+  font-family: "IBM Plex Mono", var(--lcd-font-body);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] .markdown-body :is(pre, pre code) {
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] .code-block-header {
+  border-bottom: 1px solid var(--lcd-rule-strong);
+  background-color: var(--lcd-panel-2);
+  color: var(--lcd-dim);
+  font-family: var(--lcd-font-body);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] .copy-button {
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] .copy-button:hover {
+  border-color: var(--lcd-sel-bg);
+  background-color: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+/* "Copied" is confirmed by its words, not by the classic green. */
+:root[data-ui-style="lcd"] [data-lcd-scope] .copy-button.copied {
+  border-color: var(--lcd-rule-strong);
+  background-color: transparent;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] .copy-button :is(.copied-icon, .copied-text) {
+  color: inherit;
+}
+
+/* The sender's insight supports the message, so it reads a step below it: its
+   label and text run as one line under the message, without a rule above. */
+:root[data-ui-style="lcd"] .lcd-row [data-message-insight] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 1ch;
+  margin-top: 0.625rem;
+  padding-top: 0;
+  border-top: 0;
+}
+
+:root[data-ui-style="lcd"] .lcd-row [data-message-insight] > :first-child {
+  margin: 0;
+  white-space: nowrap;
+}
+
+:root[data-ui-style="lcd"] .lcd-row [data-message-insight] > :last-child {
+  flex: 1 1 16rem;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+/* Markdown takes the LCD ink. Typography's own greys are tuned for white and
+   near-black pages: its bullets vanished on the light screen, and its inverted
+   quotes outshone the body on the dark one. Set here, they serve both themes. */
+:root[data-ui-style="lcd"] [data-lcd-scope] .prose {
+  --tw-prose-body: var(--lcd-ink);
+  --tw-prose-headings: var(--lcd-ink-strong);
+  --tw-prose-lead: var(--lcd-dim);
+  --tw-prose-links: var(--lcd-link);
+  --tw-prose-bold: var(--lcd-ink-strong);
+  --tw-prose-counters: var(--lcd-dim);
+  --tw-prose-bullets: var(--lcd-dim);
+  --tw-prose-hr: var(--lcd-rule);
+  --tw-prose-quotes: var(--lcd-ink);
+  --tw-prose-quote-borders: var(--lcd-rule-strong);
+  --tw-prose-captions: var(--lcd-dim);
+  --tw-prose-kbd: var(--lcd-ink);
+  --tw-prose-code: var(--lcd-ink-strong);
+  --tw-prose-th-borders: var(--lcd-rule-strong);
+  --tw-prose-td-borders: var(--lcd-rule);
+}
+
+/* Inside a message, the space around paragraphs, lists, quotes, code, tables and
+   headings is reduced, so a heading or a break inside a report reads apart from the
+   start of another message, which also takes a line. A Markdown rule is a short mark
+   in the text column for the same reason. */
+:root[data-ui-style="lcd"]
+  .lcd-row
+  .markdown-body.prose-sm
+  :is(p, ul, ol, blockquote, pre, .code-block-wrapper, .markdown-table-scroll) {
+  margin-block: 0.625em;
+}
+
+:root[data-ui-style="lcd"] .lcd-row .markdown-body.prose-sm :is(h1, h2, h3, h4) {
+  margin-top: 1em;
+  margin-bottom: 0.375em;
+}
+
+:root[data-ui-style="lcd"] .lcd-row .markdown-body.prose-sm hr {
+  width: 4rem;
+  margin-block: 0.875em;
+  border-top: 1px solid var(--lcd-rule-strong);
+}
+
+:root[data-ui-style="lcd"] .lcd-row .markdown-body.prose-sm > :first-child {
+  margin-top: 0;
+}
+
+:root[data-ui-style="lcd"] .lcd-row .markdown-body.prose-sm > :last-child {
+  margin-bottom: 0;
+}
+
+/* On the message (the row's ::before), not the row box, whose top is the space
+   above the message. */
+:root[data-ui-style="lcd"] .lcd-row.lcd-row-highlighted::before {
+  outline: 1px dashed var(--lcd-ink);
+  outline-offset: 2px;
+}
+
+/* Message actions are one strip of keys: without colour, a frame is what says
+   "press me", and the key under the pointer is set in reverse. Keys are 1.5rem tall, within
+   the head line, and their icons follow the text size like their labels. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-message-actions-inline] {
+  justify-content: flex-start;
+  gap: 0;
+  border: 1px solid var(--lcd-rule-strong);
+  background: var(--lcd-bg);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-message-actions-inline] > button {
+  min-height: 1.5rem;
+  padding: 0 1ch;
+  border-radius: 0;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-message-actions-inline] > button svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-message-actions-inline] > button + button {
+  border-left: 1px solid var(--lcd-rule-strong);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-message-actions-inline] > button:hover {
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+/* S2: on desktop, members and tools share the header's right half (AppHeader), as
+   wide as the identity on the left, so the view switch between them stays centred.
+   The tools keep their width; members take the rest and fold the overflow into "+N". */
+:root[data-ui-style="lcd"] [data-lcd-header-end] > [data-group-work-shortcuts-host] {
+  flex: 0 0 auto;
+}
+
+/* Header keys share one size. Each key draws its own frame and neighbours share an
+   edge, so a group of keys is exactly as tall as a lone key at every width. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-group-view-switch],
+    [data-group-work-shortcuts],
+    [data-group-side-panel-controls-host]
+  ) {
+  gap: 0;
+  padding: 0;
+  border-width: 0;
+  background: transparent;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-group-view-switch], [data-group-work-shortcuts], [data-group-side-panel-controls-host])
+  > button
+  + button {
+  margin-left: -1px;
+}
+
+/* The view switch is one control, framed in ink; the current view is set in reverse. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-view-switch] > button {
+  height: 2rem;
+  padding: 0 1.5ch;
+  border: 1px solid var(--lcd-ink);
+  color: var(--lcd-ink);
+  box-shadow: none;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-view-switch] > button[aria-pressed="true"] {
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-group-view-switch]
+  > button[aria-pressed="false"]:hover {
+  background: var(--lcd-sel-soft);
+}
+
+/* Header tools are keys framed in the strong rule; the key under the pointer is set
+   in reverse. On a phone the view switch folds into one toggle, a key like these. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-group-work-shortcuts], [data-group-side-panel-controls-host])
+  > button,
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is([data-app-settings-trigger], [data-group-view-toggle]) {
+  border: 1px solid var(--lcd-rule-strong);
+}
+
+/* Past the phone layout the header menu key is the size of the other header keys. */
+@media (min-width: 768px) {
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-group-header-menu] {
+    width: 2rem;
+    height: 2rem;
+  }
+}
+
+/* The run control is a key at every width: the state shape and ▾ share one frame,
+   reversed under the pointer and while its menu is open. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-run-controls] > span {
+  border-color: var(--lcd-rule-strong);
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-run-controls][aria-expanded="true"] > span {
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-run-controls][aria-expanded="true"] > svg {
+  color: var(--lcd-sel-fg);
+}
+
+/* The pending count sits in the sidebar key's corner, flush with its frame, so it
+   neither breaks the frame nor runs into the title. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-sidebar-toggle]
+  > span:has(> [data-pending-state]) {
+  display: flex;
+  top: -1px;
+  right: -1px;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-sidebar-toggle] [data-pending-state] {
+  min-width: 16px;
+  padding: 0 3px;
+  line-height: 16px;
+}
+
+:root[data-ui-style="lcd"] [data-group-header-resources] > .border-l {
+  border-left-width: 0;
+  padding-left: 0;
+}
+
+/* Only for a real pointer: a tapped key would otherwise stay reversed. */
+@media (hover: hover) {
+  :root[data-ui-style="lcd"]
+    [data-lcd-scope]
+    :is([data-group-work-shortcuts], [data-group-side-panel-controls-host])
+    > button:hover:not(:disabled),
+  :root[data-ui-style="lcd"]
+    [data-lcd-scope]
+    :is([data-app-settings-trigger], [data-group-view-toggle]):hover,
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-group-run-controls]:hover > span {
+    background: var(--lcd-sel-bg);
+    color: var(--lcd-sel-fg);
+  }
+
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-group-run-controls]:hover > svg {
+    color: var(--lcd-sel-fg);
+  }
+}
+
+/* A secondary key beside a primary one (mark it with data-lcd-key): framed at rest,
+   reversed under the pointer, so it reads as a button without colour. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-key] {
+  border: 1px solid var(--lcd-rule-strong);
+  color: var(--lcd-ink);
+  transition: none;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-key]:hover:not(:disabled) {
+  border-color: var(--lcd-sel-bg);
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+/* A primary key built by hand rather than with the shared Button (mark it with
+   data-lcd-primary): filled in ink like the Button's primary variant and the composer's
+   Send. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-primary] {
+  border: 1px solid var(--lcd-ink);
+  background: var(--lcd-ink);
+  color: var(--lcd-bg);
+  transition: none;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-primary]:hover:not(:disabled) {
+  border-color: var(--lcd-ink-strong);
+  background: var(--lcd-ink-strong);
+}
+
+/* A text field or select built by hand (mark it with data-lcd-field) is a control, framed
+   in the strong rule like a key; focus darkens the frame to ink. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-field] {
+  border-color: var(--lcd-rule-strong);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-field]:focus {
+  border-color: var(--lcd-ink);
+}
+
+/* Members: the runtime tile alone, in one centred line above the composer. The tile
+   shows the state; the tooltip (hover or keyboard focus) and the accessible name carry
+   the words. */
+:root[data-ui-style="lcd"] .lcd-members {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.25rem;
+  width: 100%;
+  min-width: 0;
+}
+
+/* Tiles that do not fit wrap onto a clipped second line; RuntimeDock reads that
+   and offers them behind "+N". The row holds the keys and the open line under them;
+   the row gap starts a wrapped line below the clipped box. */
+:root[data-ui-style="lcd"] .lcd-members-row {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  justify-content: center;
+  gap: 0.375rem 0.25rem;
+  height: calc(2.5rem + 0.375rem);
+  min-width: 0;
+  overflow: hidden;
+}
+
+:root[data-ui-style="lcd"] .lcd-member-cell {
+  display: flex;
+  min-width: 0;
+}
+
+:root[data-ui-style="lcd"] .lcd-member {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1ch;
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--lcd-ink);
+  font-size: 0.8125rem;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+:root[data-ui-style="lcd"] .lcd-member:hover {
+  background: var(--lcd-sel-soft);
+}
+
+/* In the row a key is larger than its drawing, so the hover shade keeps to the 2rem box
+   (under a member's tile it stays hidden, as before; "+N" spans its own width). */
+:root[data-ui-style="lcd"] .lcd-member:not([data-listed]):hover {
+  background: linear-gradient(var(--lcd-sel-soft), var(--lcd-sel-soft)) center / 2rem 2rem no-repeat;
+}
+
+:root[data-ui-style="lcd"] .lcd-member-more:hover {
+  background-size: 100% 2rem;
+}
+
+/* A member key is 2.5rem with its 2rem tile in the middle, leaving room for the state
+   lines drawn outside the tile (lcdMotion.css). */
+:root[data-ui-style="lcd"] .lcd-member:not([data-listed]) {
+  position: relative;
+  min-width: 2.5rem;
+  height: 2.5rem;
+}
+
+/* The member whose terminal or live work is open: underlined, like a chosen tab. In
+   the row the line runs under the key, clear of the busy ring. */
+:root[data-ui-style="lcd"] .lcd-member[data-active] {
+  box-shadow: inset 0 -2px 0 var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] .lcd-member[data-active]:not([data-listed]) {
+  box-shadow: none;
+}
+
+:root[data-ui-style="lcd"] .lcd-member[data-active]:not([data-listed])::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -0.3125rem;
+  left: 0;
+  height: 2px;
+  background: var(--lcd-ink);
+}
+
+/* The tile covers the key's hover background, so its thin line darkens instead;
+   busy and attention keep their own lines. */
+:root[data-ui-style="lcd"]
+  .lcd-member:not([data-listed]):is([data-tone="idle"], [data-tone="stopped"]):hover
+  .lcd-tile {
+  border-color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] .lcd-member-tile {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Unread Mail top right, filled; queued input bottom right, outlined. They sit in
+   the tile's corners: the tile fills its key, and the row clips what overhangs. */
+:root[data-ui-style="lcd"] .lcd-member-mark {
+  position: absolute;
+  right: 0;
+  min-width: 0.75rem;
+  padding: 0 0.125rem;
+  font-size: 0.5625rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 0.75rem;
+  text-align: center;
+}
+
+:root[data-ui-style="lcd"] .lcd-member-mark[data-mark="mail"] {
+  top: 0;
+  background: var(--lcd-ink);
+  color: var(--lcd-bg);
+}
+
+:root[data-ui-style="lcd"] .lcd-member-mark[data-mark="queue"] {
+  bottom: 0;
+  border: 1px solid var(--lcd-ink);
+  background: var(--lcd-bg);
+  color: var(--lcd-ink);
+  line-height: 0.625rem;
+}
+
+/* In the "+N" list the name sits beside the tile; the row has room for the ring. */
+:root[data-ui-style="lcd"] .lcd-member[data-listed] {
+  justify-content: flex-start;
+  width: 100%;
+  height: 2.5rem;
+  padding: 0 0.75ch;
+}
+
+:root[data-ui-style="lcd"] .lcd-member-name {
+  min-width: 0;
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+/* "+N" and add draw a tile-sized box inside the same target, so they line up
+   with the member tiles and stay quieter than them; add is an empty, dashed slot.
+   Tiles are the size of a standard key and follow the text size. */
+:root[data-ui-style="lcd"] .lcd-member-more,
+:root[data-ui-style="lcd"] .lcd-member-add {
+  position: relative;
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
+:root[data-ui-style="lcd"] .lcd-member-more::before,
+:root[data-ui-style="lcd"] .lcd-member-add::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid var(--lcd-rule-strong);
+  translate: -50% -50%;
+  pointer-events: none;
+}
+
+/* Touch screens give every button a 44px square target (index.css). The member keys
+   keep it, and at larger text sizes grow with the ring instead; the row grows to hold
+   them, and the tiles keep their 2rem drawing. */
+@media (pointer: coarse) {
+  :root[data-ui-style="lcd"] .lcd-members-row {
+    height: calc(max(2.5rem, 44px) + 0.375rem);
+  }
+
+  :root[data-ui-style="lcd"] .lcd-member:not([data-listed]) {
+    min-width: max(2.5rem, 44px);
+    height: max(2.5rem, 44px);
+  }
+}
+
+:root[data-ui-style="lcd"] .lcd-member-add::before {
+  border-style: dashed;
+}
+
+:root[data-ui-style="lcd"] .lcd-member-more {
+  gap: 0.25ch;
+  padding: 0 0.5ch;
+}
+
+/* "+N" can carry its Mail and queue marks, so its box spans the button's width. */
+:root[data-ui-style="lcd"] .lcd-member-more::before {
+  left: 0;
+  width: auto;
+  right: 0;
+  translate: 0 -50%;
+}
+
+/* A menu (a Group's run state or sidebar row, a workspace entry, an Actor's quick
+   controls, the composer's mention and command lists) is a framed list like the members
+   popover. Items are its menuitems, options or buttons, in ink and one colour throughout;
+   the item under the pointer, keyboard focus or a list's selection is set in reverse. */
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *):is([data-group-menu], [data-lcd-menu]) {
+  border: 1px solid var(--lcd-rule-strong);
+  background: var(--lcd-panel);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *):is([data-group-menu], [data-lcd-menu])
+  :is([role^="menuitem"], [role="option"], button) {
+  border-color: var(--lcd-rule);
+  background: transparent;
+  box-shadow: none;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *):is([data-group-menu], [data-lcd-menu])
+  :is([role^="menuitem"], [role="option"], button)
+  * {
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *):is([data-group-menu], [data-lcd-menu])
+  :is([role^="menuitem"], [role="option"], button):is([data-tone="danger"], .destructive-key) {
+  color: var(--lcd-danger);
+}
+
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *):is([data-group-menu], [data-lcd-menu])
+  :is([role^="menuitem"], [role="option"], button):is(
+    :hover,
+    :focus-visible,
+    [aria-selected="true"]
+  ):not(:disabled) {
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+/* A secondary line (description, id) is dim; a kind tag is framed in the text colour.
+   Both follow an item set in reverse. A list's own selection bar is redundant there. The
+   dim colour already sets a hint apart, so classic fading would only cost contrast. */
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *):is([data-group-menu], [data-lcd-menu])
+  [data-lcd-hint] {
+  color: var(--lcd-dim);
+  opacity: 1;
+}
+
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *):is([data-group-menu], [data-lcd-menu])
+  :is([role^="menuitem"], [role="option"], button):is(
+    :hover,
+    :focus-visible,
+    [aria-selected="true"]
+  )
+  [data-lcd-hint] {
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *):is([data-group-menu], [data-lcd-menu])
+  [data-lcd-tag] {
+  border: 1px solid currentColor;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *):is([data-group-menu], [data-lcd-menu])
+  [data-option-mark] {
+  display: none;
+}
+
+:root[data-ui-style="lcd"] .lcd-members-popover {
+  width: auto;
+  min-width: 12rem;
+  max-width: min(24rem, calc(100vw - 2rem));
+  max-height: min(60vh, 24rem);
+  overflow-y: auto;
+  border: 1px solid var(--lcd-rule-strong);
+  border-radius: 0;
+  background: var(--lcd-panel);
+  box-shadow: none;
+  backdrop-filter: none;
+  animation: none;
+}
+
+/* Inside the scope surfaces separate by 1px rules: no drop shadows (rings stay,
+   some controls draw their border with one) and no entrance or exit motion.
+   Spinners keep turning; they report work in progress. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [class*="shadow-"] {
+  --tw-shadow: 0 0 #0000;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [class*="animate-in"],
+:root[data-ui-style="lcd"] [data-lcd-scope] [class*="animate-scale"],
+:root[data-ui-style="lcd"] [data-lcd-scope] [class*="animate-fade"] {
+  animation: none;
+}
+
+/* Streamed text lands at once, as on a terminal: the reduced-motion presentation. */
+:root[data-ui-style="lcd"] [data-lcd-scope] .stream-text-animate-segment {
+  opacity: 1;
+  filter: none;
+  transform: none;
+  animation: none;
+}
+
+/* Sidebar: the open Group is set in reverse; status is a shape, never only a colour. */
+:root[data-ui-style="lcd"] [data-lcd-scope] .glass-group-item-active {
+  border-color: var(--lcd-sel-bg);
+  background: var(--lcd-sel-bg);
+  box-shadow: none;
+  color: var(--lcd-sel-fg);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] .glass-group-item-active :is(span, button, svg) {
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"] .lcd-group-symbol {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+
+:root[data-ui-style="lcd"] .lcd-group-symbol[data-lcd-shape]::before {
+  content: "";
+  box-sizing: border-box;
+}
+
+:root[data-ui-style="lcd"] .lcd-group-symbol[data-lcd-shape="run"]::before {
+  width: 0.625em;
+  height: 0.75em;
+  background: currentColor;
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
+
+:root[data-ui-style="lcd"] .lcd-group-symbol[data-lcd-shape="idle"]::before {
+  width: 0.5em;
+  height: 0.5em;
+  border: 1.5px solid currentColor;
+  transform: rotate(45deg);
+}
+
+:root[data-ui-style="lcd"] .lcd-group-symbol[data-lcd-shape="paused"]::before {
+  width: 0.5em;
+  height: 0.75em;
+  border-right: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+}
+
+:root[data-ui-style="lcd"] .lcd-group-symbol[data-lcd-shape="stop"]::before {
+  width: 0.625em;
+  height: 0.625em;
+  background: currentColor;
+}
+
+:root[data-ui-style="lcd"] .lcd-group-symbol[data-lcd-shape="offline"]::before {
+  width: 0.625em;
+  height: 2px;
+  background: currentColor;
+}
+
+/* Counts of requests waiting on you take the one "waiting on you" colour. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-pending-state] {
+  border-radius: 0;
+  background: var(--lcd-wait);
+  color: var(--lcd-on-wait);
+}
+
+/* No round corners in the LCD grid. The radius tokens are zero; this also reaches
+   literal radii (`rounded`, `rounded-full`) and product classes that hard-code theirs.
+   A busy spinner keeps its ring: it is still while animations are off, and a square
+   with one open side would read as a glyph. A record mark keeps its dot as well
+   (lcdVoiceSecretary.css): a square reads as stop. */
+:root[data-ui-style="lcd"] :is([data-lcd-scope], [data-lcd-scope] *):not(.animate-spin) {
+  border-radius: 0;
+}
+
+/* Kept apart: a browser without this pseudo-element would drop the whole rule above. */
+:root[data-ui-style="lcd"] [data-lcd-scope] ::-webkit-scrollbar-thumb {
+  border-radius: 0;
+}
+
+/* The recipient card hard-codes palette colours for both themes; restate them here. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-recipient-card] {
+  border-color: var(--lcd-rule-strong);
+  background: var(--lcd-panel);
+  backdrop-filter: none;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-recipient-card] :is(span, button) {
+  color: var(--lcd-dim);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-recipient-badge] {
+  border-color: var(--lcd-rule-strong);
+  border-radius: 0;
+  background: transparent;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-recipient-id] {
+  background: var(--lcd-code-bg);
+  color: var(--lcd-ink);
+}
+
+/* Phones keep the classic dock's place and order; the avatar tile replaces the ring. */
+/* Tailwind's scale utilities set the separate `scale` property, which `transform: none`
+   does not clear; the LCD keys keep their size when opened, hovered or pressed. */
+:root[data-ui-style="lcd"] [data-lcd-scope] :is([data-lcd-dock-button], [data-lcd-dock-add]) {
+  border-radius: 0;
+  --tw-shadow: 0 0 #0000;
+  transform: none;
+  scale: none;
+  transition: none;
+}
+
+/* Tile states, shared by header tiles and the phone dock: a thin plate edge when idle,
+   dimmed when stopped, as in the classic dock. Busy and attention lines sit outside the
+   tile, with the motion rules (lcdMotion.css). */
+:root[data-ui-style="lcd"] :is(.lcd-member, [data-lcd-dock-button])[data-tone="stopped"] .lcd-tile {
+  filter: grayscale(1);
+  opacity: 0.45;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-dock-button][data-active] {
+  background: var(--lcd-sel-soft);
+}
+
+/* An empty slot, the size of a tile, as in the header strip. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-lcd-dock-add] > span {
+  border-color: var(--lcd-rule-strong);
+  border-style: dashed;
+  border-radius: 0;
+  background: transparent;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-dock-badge] {
+  border: 1px solid var(--lcd-ink);
+  border-radius: 0;
+  background: var(--lcd-bg);
+  color: var(--lcd-ink);
+}
+
+/* Pixel type in three places only: the brand, the Group name and the pending
+   card's title. Sizes are whole multiples of each font's grid at 100% text
+   size and follow the text-size setting. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-brand-name] {
+  font-family: var(--lcd-font-brand);
+  font-size: 1.375rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.5rem;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-group-title] {
+  font-family: var(--lcd-font-pixel);
+  font-size: 1.5rem;
+  font-weight: 400;
+  line-height: 1.75rem;
+}
+
+/* S3: only the pending reply is emphasised. A double frame in the "waiting on
+   you" colour with the title on its top edge; a closed question ends with one
+   status line instead. A message is as wide as its text, but a question keeps
+   82ch, as the column allows, so a short one still has room to answer in. */
+:root[data-ui-style="lcd"] [data-lcd-scope] form[data-pending-reply] {
+  position: relative;
+  width: 82ch;
+  max-width: 100%;
+  margin-top: 1rem;
+  padding: 0.75rem 1.5ch 0.5rem;
+  border: 3px double var(--lcd-wait);
+}
+
+/* With 'Waiting for you' indicators off, the question keeps its choices under the
+   plain rule that a closed question has, without the frame or its title. */
+:root[data-ui-style="lcd"] [data-lcd-scope] form[data-pending-reply][data-pending-reply-quiet] {
+  padding-inline: 0;
+  border-width: 1px 0 0;
+  border-style: solid;
+  border-color: var(--glass-border-subtle);
+}
+
+/* The title sits in the frame's top line like a legend, at the pixel font's own 12px. */
+:root[data-ui-style="lcd"] .lcd-ask-title {
+  position: absolute;
+  top: -0.6875rem;
+  left: 1.25ch;
+  max-width: calc(100% - 2.5ch);
+  overflow: hidden;
+  padding: 0 0.75ch;
+  background: var(--lcd-wait);
+  color: var(--lcd-on-wait);
+  font-family: var(--lcd-font-pixel);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The action shares the last row: over the right end of "Other", whose text is
+   short, or beside the answer box once Other is chosen. */
+/* The last row holds "Other" and the action. When the row is too short for both,
+   the action wraps below it instead of covering the text. */
+:root[data-ui-style="lcd"] [data-pending-reply] .lcd-ask-other {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  column-gap: 1ch;
+  margin: 0;
+  border-bottom: 1px solid var(--lcd-rule);
+}
+
+:root[data-ui-style="lcd"] [data-pending-reply] .lcd-ask-other > label {
+  flex: 1 1 auto;
+  border-bottom-width: 0;
+}
+
+:root[data-ui-style="lcd"] .lcd-ask-action {
+  flex: 0 1 auto;
+  max-width: 100%;
+}
+
+/* A long action label wraps inside its button rather than leaving the card. */
+:root[data-ui-style="lcd"] :is(.lcd-ask-action, .lcd-ask-answer) > button {
+  max-width: 100%;
+  white-space: normal;
+}
+
+:root[data-ui-style="lcd"] .lcd-ask-answer {
+  container-type: inline-size;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 0.5rem 1ch;
+  margin-top: 0.5rem;
+}
+
+/* The box keeps room to write; below that width the action moves under it. */
+:root[data-ui-style="lcd"] .lcd-ask-answer textarea {
+  flex: 1 1 20ch;
+  min-width: 0;
+}
+
+:root[data-ui-style="lcd"] .lcd-ask-answer > button {
+  flex: 0 1 auto;
+}
+
+/* The send key shows its words; its send mark is for a narrow answer box only. */
+:root[data-ui-style="lcd"] [data-ask-send-mark] {
+  display: none;
+}
+
+/* Beside a narrow answer box (a phone) the words would take a third of the row, so
+   the key keeps only the send mark, square; the words stay its name and tooltip. */
+@container (max-width: 30rem) {
+  :root[data-ui-style="lcd"] .lcd-ask-answer > [data-ask-send] {
+    flex: 0 0 auto;
+    width: 2rem;
+    padding: 0;
+  }
+
+  :root[data-ui-style="lcd"] .lcd-ask-answer [data-ask-send-label] {
+    display: none;
+  }
+
+  :root[data-ui-style="lcd"] .lcd-ask-answer [data-ask-send-mark] {
+    display: inline-flex;
+  }
+}
+
+/* With a mouse the rows and the action can be compact; touch keeps 44px targets. */
+@media (pointer: fine) {
+  :root[data-ui-style="lcd"] [data-pending-reply] fieldset label {
+    min-height: 2.25rem;
+    padding-top: 0.375rem;
+    padding-bottom: 0.375rem;
+  }
+
+  :root[data-ui-style="lcd"] :is(.lcd-ask-action, .lcd-ask-answer) > button {
+    min-height: 2rem;
+    padding: 0 1.5ch;
+  }
+
+  :root[data-ui-style="lcd"] .lcd-ask-action {
+    margin-bottom: 0.125rem;
+  }
+}
+
+/* Options are ruled rows; the chosen one is shaded, as in r8. */
+:root[data-ui-style="lcd"] [data-pending-reply] fieldset label {
+  margin: 0;
+  border-width: 0 0 1px;
+  border-color: var(--lcd-rule);
+  background: transparent;
+  padding-left: 0.5ch;
+  padding-right: 0.5ch;
+}
+
+:root[data-ui-style="lcd"] [data-pending-reply] fieldset label:has(input:checked) {
+  background: var(--lcd-sel-soft);
+}
+
+/* Single choice is a pixel ring, so it never reads as a checkbox; the chosen one
+   gets a solid centre. Drawn on a 7-cell grid at 2px a cell, crisp at 1x and 2x. */
+:root[data-ui-style="lcd"] [data-pending-reply] input[type="radio"] {
+  --lcd-ring: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 7 7' shape-rendering='crispEdges'%3E%3Cpath d='M2 0h3v1H2zM1 1h1v1H1zM5 1h1v1H5zM0 2h1v3H0zM6 2h1v3H6zM1 5h1v1H1zM5 5h1v1H5zM2 6h3v1H2z'/%3E%3C/svg%3E");
+  --lcd-ring-on: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 7 7' shape-rendering='crispEdges'%3E%3Cpath d='M2 0h3v1H2zM1 1h1v1H1zM5 1h1v1H5zM0 2h1v3H0zM6 2h1v3H6zM1 5h1v1H1zM5 5h1v1H5zM2 6h3v1H2zM2 2h3v3H2z'/%3E%3C/svg%3E");
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border: 0;
+  background: var(--lcd-ink);
+  -webkit-mask: var(--lcd-ring) center / 14px 14px no-repeat;
+  mask: var(--lcd-ring) center / 14px 14px no-repeat;
+}
+
+:root[data-ui-style="lcd"] [data-pending-reply] input[type="radio"]:checked {
+  -webkit-mask-image: var(--lcd-ring-on);
+  mask-image: var(--lcd-ring-on);
+}
+
+:root[data-ui-style="lcd"] [data-pending-reply] input[type="radio"]:disabled {
+  background: var(--lcd-muted);
+}
+
+:root[data-ui-style="lcd"] [data-pending-reply] [data-recommended-tag] {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--lcd-ink-strong);
+  font-weight: 600;
+}
+
+/* A box means "press me", so a note like Recommended is bracketed instead. */
+:root[data-ui-style="lcd"] [data-pending-reply] [data-recommended-tag]::before {
+  content: "[";
+}
+
+:root[data-ui-style="lcd"] [data-pending-reply] [data-recommended-tag]::after {
+  content: "]";
+}
+
+/* A closed question ends with one status line, not another box. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-pending-reply-closed] {
+  max-width: 82ch;
+  margin-top: 0.25rem;
+  padding: 0;
+  border: 0;
+  color: var(--lcd-dim);
+}
+
+/* Forced colours replace backgrounds, which would hide the masked ring. */
+@media (forced-colors: active) {
+  :root[data-ui-style="lcd"] [data-pending-reply] input[type="radio"] {
+    appearance: auto;
+    -webkit-mask: none;
+    mask: none;
+  }
+}
+
+/* Composer. The voice tools sit in the composer's own row, with no box inside the box;
+   while recording, the row and the stop button turn ink instead of the classic rose. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-voice-assistant-row-control] {
+  border-color: transparent;
+  background: transparent;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-voice-assistant-row-control][data-recording] {
+  border-color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-voice-assistant-row-control]
+  > button[aria-pressed="true"] {
+  background: var(--lcd-ink);
+  color: var(--lcd-bg);
+}
+
+/* Workspace files read like a listing: rows in ink, the open one in reverse. A git
+   status is its letter; only a conflict takes the danger tone. File text is ink. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-workspace-row] {
+  background: transparent;
+  color: var(--lcd-ink);
+  transition: none;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-workspace-row]:hover:not([aria-selected="true"]) {
+  background: var(--lcd-sel-soft);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-workspace-row][aria-selected="true"] {
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-workspace-row] [data-git-status] {
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-workspace-row]:not([aria-selected="true"])
+  [data-git-status="conflicted"] {
+  color: var(--lcd-danger);
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-workspace-row][aria-selected="true"]
+  [data-status-dot] {
+  background: var(--lcd-sel-fg);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-workspace-text] {
+  color: var(--lcd-ink);
+}
+
+/* On a phone the Files panel fills a full-screen surface whose own classic background
+   shows around it (safe areas, short content), so the surface takes the LCD ground. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-mobile-surface] {
+  background: var(--lcd-bg);
+  color: var(--lcd-ink);
+}
+
+/* The grab handle of a bottom sheet: a plain bar, no rounded pill. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-sheet-handle] {
+  border-radius: 0;
+  background: var(--lcd-rule-strong);
+}
+
+/* Images in messages: the frame and the canvas behind the picture (or its failure
+   placeholder) take the LCD tones; the picture itself keeps its colours, so it does not
+   fade under the pointer either (the frame shows the hover). Text inside the frame is
+   ink unless a hook says otherwise. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-image-frame] {
+  border-color: var(--lcd-rule-strong);
+  background: transparent;
+  box-shadow: none;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-image-frame]:hover {
+  background: var(--lcd-sel-soft);
+}
+
+:root[data-ui-style="lcd"] :where([data-lcd-scope] [data-image-frame] *) {
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-image-canvas] {
+  border-color: var(--lcd-rule-strong);
+  background-color: var(--lcd-panel);
+  box-shadow: none;
+  opacity: 1;
+}
+
+/* A head strip inside a framed panel: the rule below it separates, no tint. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-panel-head] {
+  background: transparent;
+}
+
+/* The avatar picker of an Actor dialog: the tile is the member tile; under the pointer or
+   focus the camera mark appears in a reversed square instead of a scrim, so it stays
+   legible on any picture, however light. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-avatar-scrim] {
+  border-radius: 0;
+  background: transparent;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-avatar-scrim] > svg {
+  box-sizing: content-box;
+  padding: 2px;
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+  filter: none;
+}
+
+/* An empty Group's setup steps: framed boxes in ink. Text inside takes the ink unless a
+   hook says otherwise (a muted hint, the Copy key, the primary key); :where keeps this
+   default below those hooks. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-setup-checklist] {
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] :where([data-lcd-scope] [data-setup-checklist] *) {
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-setup-step] {
+  border-color: var(--lcd-rule-strong);
+  background: transparent;
+}
+
+/* A headless Actor's trace reads as one LCD sheet: the ground with the rule, panels for
+   its cards, ink text. Inside it, colour classes default to that sheet (:where keeps the
+   default below every hook); live and done markers, muted labels and tones are hooks.
+   The sticky head stays opaque so the trace scrolls under it. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-headless-trace] {
+  border-color: var(--lcd-rule-strong);
+  background: var(--lcd-bg);
+  box-shadow: none;
+  backdrop-filter: none;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] :where([data-lcd-scope] [data-headless-trace] *) {
+  border-color: var(--lcd-rule);
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  backdrop-filter: none;
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-headless-trace] [data-trace-head] {
+  border-color: var(--lcd-rule-strong);
+  background: var(--lcd-bg);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-headless-trace] [data-trace-card] {
+  background-color: var(--lcd-panel);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-headless-trace] [data-trace-rule] {
+  background: var(--lcd-rule);
+}
+
+/* The capability center page reads like Settings: its sections are a list in ink, the
+   open one in reverse, and a chosen filter or toggle is reversed too. The item shown in
+   the details is shaded in the table and ringed in ink as a card. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-capability-nav] button {
+  border-color: var(--lcd-rule-strong);
+  color: var(--lcd-ink);
+  transition: none;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-capability-nav] button[aria-current="page"],
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-capability-center] button[aria-pressed="true"] {
+  border-color: var(--lcd-sel-bg);
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-capability-nav] button[aria-current="page"] * {
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-capability-center] [aria-current="true"] {
+  --tw-ring-color: var(--lcd-ink);
+}
+
+/* The monospaced face runs wider than the classic one, so the search field keeps a row
+   of its own above the state filter instead of shrinking beside it. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-capability-filters] {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* An action tile's icon sits on the tile itself, and the tile's second line takes the
+   reversed colour with the rest of the tile under the pointer. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-control-icon] {
+  background: transparent;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-capability-center]
+  :is([data-lcd-key], button[data-status-tone="error"]):hover:not(:disabled)
+  * {
+  color: inherit;
+}
+
+/* A Web Model Actor's panel reads in ink on the screen ground. Its bar and the browser's
+   address strip are ruled strips rather than tinted bars, and the delivery choice shows
+   keyboard focus with the dashed mark on the visible label (its radio is hidden). */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-web-model-panel] {
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] :is([data-web-model-bar], [data-browser-bar]) {
+  border-color: var(--lcd-rule);
+  background: transparent;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-browser-bar] {
+  color: var(--lcd-dim);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-web-model-delivery] input:focus-visible + span {
+  outline: 1px dashed var(--lcd-ink);
+  outline-offset: 2px;
+  --tw-ring-shadow: 0 0 #0000;
+  --tw-ring-offset-shadow: 0 0 #0000;
+}
+
+/* The projected browser's page keeps its own colours. Around it, and in the placeholder
+   shown before it arrives, is the screen ground; an error laid over the page keeps a
+   solid ground so it stays legible. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-browser-canvas] {
+  background: transparent;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-browser-placeholder] {
+  border-color: var(--lcd-rule);
+  color: var(--lcd-dim);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-browser-error] {
+  background-color: var(--lcd-bg);
+  box-shadow: none;
+}
+
+/* The browser's own keys are filled in the classic look; here they are framed like any key. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-browser-bar] [data-lcd-key] {
+  background-color: transparent;
+}
+
+/* Resize handles carry no glow. The sidebar's grip is a rule that darkens under the pointer
+   and turns ink while dragging; the side panel's band (its line already follows the border
+   tokens) shows the soft selection only while dragging. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-resize-grip] {
+  border-radius: 0;
+  background-color: var(--lcd-rule);
+  box-shadow: none;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [role="separator"]:hover [data-resize-grip] {
+  background-color: var(--lcd-rule-strong);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-resize-band] {
+  border-radius: 0;
+  background-color: transparent;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [role="separator"][data-resizing] [data-resize-grip] {
+  background-color: var(--lcd-ink);
+}
+
+/* The side panel's handle while it is dragged. */
+:root[data-ui-style="lcd"]
+  :is([data-lcd-scope], [data-lcd-scope] *)[role="separator"][data-resizing]
+  [data-resize-band] {
+  background-color: var(--lcd-sel-soft);
+}

@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 
 import { MessageSquareTextIcon } from "../Icons";
+import { LcdSpinner } from "../LcdSpinner";
 
 export function VirtualMessageListEmptyState({
   isLoadingHistory,
@@ -21,7 +22,7 @@ export function VirtualMessageListEmptyState({
     return (
       <div className="flex h-full flex-col items-center justify-center pb-20 text-center">
         <div className="glass-panel flex items-center gap-2 rounded-full px-3 py-1.5 text-[var(--color-text-secondary)] shadow-md">
-          <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+          <LcdSpinner className="h-4 w-4" />
           <span className="text-xs">{t("loadingHistory", { defaultValue: "Loading..." })}</span>
         </div>
       </div>
@@ -33,10 +34,10 @@ export function VirtualMessageListEmptyState({
       <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-[var(--glass-border-subtle)] bg-[var(--glass-tab-bg)] text-[var(--color-text-muted)]">
         <MessageSquareTextIcon size={28} />
       </div>
-      <p className="text-sm font-medium text-[var(--color-text-secondary)]">
+      <p className="text-sm font-medium text-balance text-[var(--color-text-secondary)]">
         {emptyMessage ?? t(isFilteredEmpty ? "noResults" : "emptyStateTitle")}
       </p>
-      {!isFilteredEmpty ? (
+      {!isFilteredEmpty && !emptyMessage ? (
         <>
           <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
             {t("emptyStateSubtitle")}

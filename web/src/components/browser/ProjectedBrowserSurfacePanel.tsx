@@ -1021,14 +1021,9 @@ export function ProjectedBrowserSurfacePanel({
     "relative flex flex-col overflow-hidden outline-none",
     chromeMode === "embedded"
       ? "rounded-none"
-      : classNames(
-          "rounded-3xl border",
-          isDark
-            ? "border-white/10 bg-slate-950/80"
-            : "border-black/10 bg-[linear-gradient(180deg,#ffffff_0%,#f6f8fb_100%)]",
-        ),
+      : "border border-[var(--lcd-rule)] bg-[var(--lcd-bg)]",
     isExpanded
-      ? "h-full w-full shadow-2xl sm:h-[min(92dvh,980px)] sm:w-[min(96vw,1600px)]"
+      ? "h-full w-full sm:h-[min(92dvh,980px)] sm:w-[min(96vw,1600px)]"
       : viewportClassName || "flex-1 min-h-0",
   );
 
@@ -1078,6 +1073,7 @@ export function ProjectedBrowserSurfacePanel({
                   : "border-black/10 bg-white/75 text-gray-700",
               ),
         )}
+        data-browser-bar
       >
         <span
           className={classNames(
@@ -1094,6 +1090,13 @@ export function ProjectedBrowserSurfacePanel({
                   ? "bg-white/[0.08] text-white"
                   : "bg-[rgb(245,245,245)] text-[rgb(35,36,37)]",
           )}
+          data-status-tone={
+            sessionState.state === "ready"
+              ? "ok"
+              : sessionState.state === "failed"
+                ? "error"
+                : "neutral"
+          }
         >
           {sessionState.state === "ready"
             ? texts.ready
@@ -1110,6 +1113,7 @@ export function ProjectedBrowserSurfacePanel({
             "inline-flex shrink-0 items-center rounded-full p-0.5",
             isDark ? "bg-white/[0.06]" : "bg-black/[0.045]",
           )}
+          data-browser-view-switch
         >
           {(["page", "browser"] as const).map((mode) => {
             const selected = effectiveViewerMode === mode;
@@ -1155,6 +1159,7 @@ export function ProjectedBrowserSurfacePanel({
                   : "bg-cyan-50 text-cyan-700",
             )}
             role="status"
+            data-status-tone={refreshFeedback === "failed" ? "error" : "info"}
           >
             {refreshFeedbackLabel}
           </span>
@@ -1163,6 +1168,7 @@ export function ProjectedBrowserSurfacePanel({
           <button
             type="button"
             onClick={() => setIsExpanded((value) => !value)}
+            data-lcd-key
             className={classNames(
               "inline-flex h-9 w-9 items-center justify-center rounded-full transition-colors",
               isDark
@@ -1178,6 +1184,7 @@ export function ProjectedBrowserSurfacePanel({
         <button
           type="button"
           onClick={handleBack}
+          data-lcd-key
           className={classNames(
             "rounded-full px-3 py-1 font-medium transition-colors",
             isDark
@@ -1191,6 +1198,7 @@ export function ProjectedBrowserSurfacePanel({
           <button
             type="button"
             onClick={handleReconnect}
+            data-lcd-key
             className={classNames(
               "rounded-full px-3 py-1 font-medium transition-colors",
               isDark
@@ -1208,11 +1216,13 @@ export function ProjectedBrowserSurfacePanel({
           "relative flex min-h-0 flex-1 items-center justify-center overflow-hidden",
           chromeMode === "embedded" ? "bg-white" : "p-4",
         )}
+        data-browser-canvas
       >
         {vncAvailable ? (
           <div className="relative h-full w-full">
             <div
               ref={vncTargetRef}
+              data-browser-canvas
               className={classNames(
                 "h-full w-full overflow-hidden",
                 chromeMode === "embedded"
@@ -1226,6 +1236,7 @@ export function ProjectedBrowserSurfacePanel({
                   "pointer-events-none absolute inset-0 flex items-center justify-center text-sm",
                   isDark ? "text-slate-400" : "text-gray-500",
                 )}
+                data-browser-placeholder
               >
                 {sessionState.message || texts.waiting}
               </div>
@@ -1255,6 +1266,7 @@ export function ProjectedBrowserSurfacePanel({
               "flex h-full min-h-[320px] w-full items-center justify-center rounded-2xl border border-dashed text-sm",
               isDark ? "border-white/10 text-slate-400" : "border-black/10 text-gray-500",
             )}
+            data-browser-placeholder
           >
             {sessionState.message ||
               (sessionState.state === "starting" ? texts.starting : texts.waiting)}
@@ -1269,6 +1281,8 @@ export function ProjectedBrowserSurfacePanel({
                 ? "border-rose-500/20 bg-rose-500/10 text-rose-100"
                 : "border-rose-200 bg-white/90 text-rose-700",
             )}
+            data-status-tone="error"
+            data-browser-error
           >
             {panelError}
           </div>

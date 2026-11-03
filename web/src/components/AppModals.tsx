@@ -1,7 +1,8 @@
 import { requestWorkspaceNavigation } from "../stores/workspaceNavigation";
 // AppModals renders all modal components in one place.
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { LcdSpinner } from "./LcdSpinner";
 import { SearchModal } from "./SearchModal";
 import { MobileMenuSheet } from "./layout/MobileMenuSheet";
 import { CreateGroupModal } from "./modals/CreateGroupModal";
@@ -22,7 +23,9 @@ import { findPresentationSlot } from "../utils/presentation";
 import { buildPresentationRefForSlot } from "../utils/presentationRefs";
 import { formatGroupSettingsUpdateError } from "../utils/groupSettingsErrors";
 import { appendQuotedOriginalPerspective, getMessageInsight } from "../utils/messagePerspective";
+import { installedRuntimeFor } from "../utils/installedRuntime";
 import { projectCrossGroupRecipients, projectMessageMode } from "../utils/crossGroupRecipients";
+import { CHET_NAME, CHET_PRINCIPAL } from "../utils/chetIdentity";
 import {
   useGroupStore,
   useUIStore,
@@ -40,6 +43,7 @@ import {
   GroupSettings,
   ChatMessageData,
   PresentationMessageRef,
+  type SupportedRuntime,
   TextScale,
   Theme,
 } from "../types";
@@ -86,14 +90,13 @@ function sortPresentationSlotIds(slotIds: string[]): string[] {
   });
 }
 
-function LazyModalFallback({ isDark: _ }: { isDark?: boolean }) {
+function LazyModalFallback() {
+  const { t } = useTranslation("common");
   return (
-    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
-      <div className="rounded-2xl px-5 py-4 text-sm shadow-xl glass-modal min-w-[120px] flex items-center justify-center font-medium text-[var(--color-text-secondary)]">
-        <span className="flex items-center gap-2">
-          <span className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--color-text-muted)] border-t-transparent" />
-          <span>Loading...</span>
-        </span>
+    <div className="fixed inset-0 z-[90] flex items-center justify-center glass-overlay">
+      <div className="flex min-w-[120px] items-center justify-center gap-2 px-5 py-4 text-sm font-medium text-[var(--color-text-secondary)] glass-modal">
+        <LcdSpinner className="h-4 w-4" />
+        <span>{t("loading")}</span>
       </div>
     </div>
   );
@@ -438,6 +441,43 @@ export function AppModals({
     t,
   });
 
+  // The form opens on Codex. When Codex is not installed but another command-line runtime is, as
+  // for someone with only Claude Code, show that one instead of a disabled Add. Detection can finish
+  // after the reader has started, so leave the runtime alone once they have picked one themselves
+  // (the same one included), or while they use their own command or a Runtime Profile.
+  const newActorRuntimePickedRef = useRef(false);
+  useEffect(() => {
+    if (modals.addActor) newActorRuntimePickedRef.current = false;
+  }, [modals.addActor]);
+  useEffect(() => {
+    if (!modals.addActor || runtimeDetectionStatus !== "ready") return;
+    if (newActorRuntimePickedRef.current || !newActorUseDefaultCommand || newActorUseProfile)
+      return;
+    const installed = installedRuntimeFor(newActorRuntime, runtimes);
+    if (!installed || installed === newActorRuntime) return;
+    // As when the reader switches: a command typed for the old runtime must not come back with it.
+    setNewActorRuntime(installed);
+    setNewActorCommand(
+      String(runtimes.find((item) => item.name === installed)?.recommended_command || "").trim(),
+    );
+  }, [
+    modals.addActor,
+    newActorRuntime,
+    newActorUseDefaultCommand,
+    newActorUseProfile,
+    runtimeDetectionStatus,
+    runtimes,
+    setNewActorCommand,
+    setNewActorRuntime,
+  ]);
+  const pickNewActorRuntime = useCallback(
+    (runtime: SupportedRuntime) => {
+      newActorRuntimePickedRef.current = true;
+      setNewActorRuntime(runtime);
+    },
+    [setNewActorRuntime],
+  );
+
   const rememberPresentationViewerSlot = useCallback((groupId: string, slotId: string) => {
     const normalizedGroupId = String(groupId || "").trim();
     const normalizedSlotId = String(slotId || "").trim();
@@ -546,7 +586,10 @@ export function AppModals({
       : (Array.isArray(metaData?.to) ? metaData.to : [])
           .map((x) => String(x || "").trim())
           .filter((s) => s.length > 0);
-    const toLabel = toTokensList.length > 0 ? toTokensList.join(", ") : "@all";
+    const toLabel =
+      toTokensList.length > 0
+        ? toTokensList.map((token) => (token === CHET_PRINCIPAL ? CHET_NAME : token)).join(", ")
+        : "@all";
     const messageMode = projectMessageMode(metaData) || "send";
     const rs =
       messageMetaEvent._read_status && typeof messageMetaEvent._read_status === "object"
@@ -625,8 +668,23 @@ export function AppModals({
               cancelled: !!os["user"]?.cancelled,
             }
           : null,
+        // Chet takes a message in its own panel, which this Group's ledger does not
+        // record, so only a request's reply or cancellation is shown for it.
+        os[CHET_PRINCIPAL]?.reply_requested
+          ? {
+              id: CHET_PRINCIPAL,
+              label: CHET_NAME,
+              cleared: !!os[CHET_PRINCIPAL]?.replied || !!os[CHET_PRINCIPAL]?.cancelled,
+              deliveryState: "",
+              read: false,
+              replied: !!os[CHET_PRINCIPAL]?.replied,
+              replyRequested: true,
+              cancelled: !!os[CHET_PRINCIPAL]?.cancelled,
+            }
+          : null,
       ].filter(Boolean) as Array<{
         id: string;
+        label?: string;
         cleared: boolean;
         deliveryState: string;
         read: boolean;
@@ -1285,7 +1343,7 @@ export function AppModals({
       />
 
       {presentationViewerSlotIds.length > 0 ? (
-        <Suspense fallback={<LazyModalFallback isDark={isDark} />}>
+        <Suspense fallback={<LazyModalFallback />}>
           {presentationViewerSlotIds.map((slotId) => {
             const slot = findPresentationSlot(groupPresentation, slotId);
             const version = String(slot?.card?.published_at || "empty").trim() || "empty";
@@ -1360,7 +1418,7 @@ export function AppModals({
       ) : null}
 
       {modals.context ? (
-        <Suspense fallback={<LazyModalFallback isDark={isDark} />}>
+        <Suspense fallback={<LazyModalFallback />}>
           <ContextModal
             isOpen={modals.context}
             onClose={() => closeModal("context")}
@@ -1377,7 +1435,7 @@ export function AppModals({
       ) : null}
 
       {modals.settings ? (
-        <Suspense fallback={<LazyModalFallback isDark={isDark} />}>
+        <Suspense fallback={<LazyModalFallback />}>
           <SettingsModal
             codexVoice={codexVoice}
             isOpen={modals.settings}
@@ -1516,6 +1574,13 @@ export function AppModals({
         createGroupName={createGroupName}
         setCreateGroupName={setCreateGroupName}
         dirBrowseError={directoryBrowser.error}
+        dirCreateError={directoryBrowser.createError}
+        onClearDirCreateError={directoryBrowser.clearCreateError}
+        onRetryDir={
+          directoryBrowser.retryPath
+            ? () => void directoryBrowser.retryCreatedDirectory()
+            : undefined
+        }
         creatingDirectory={directoryBrowser.creating}
         onFetchDirContents={directoryBrowser.fetchContents}
         onCreateDirectory={directoryBrowser.createDirectory}
@@ -1525,6 +1590,7 @@ export function AppModals({
           closeModal("createGroup");
           resetCreateGroupForm();
           directoryBrowser.setError("");
+          directoryBrowser.clearCreateError();
         }}
       />
 
@@ -1557,7 +1623,7 @@ export function AppModals({
         actorProfilesBusy={actorProfilesBusy}
         onRequestActorProfiles={loadActorProfiles}
         runtime={newActorRuntime}
-        onChangeRuntime={setNewActorRuntime}
+        onChangeRuntime={pickNewActorRuntime}
         command={newActorCommand}
         onChangeCommand={setNewActorCommand}
         useDefaultCommand={newActorUseDefaultCommand}

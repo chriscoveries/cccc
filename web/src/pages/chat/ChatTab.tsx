@@ -5,7 +5,6 @@ import {
   lazy,
   Suspense,
   useCallback,
-  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -24,20 +23,22 @@ import {
   isBrowserWebModelRuntime,
 } from "../../types";
 import { VirtualMessageList } from "../../components/VirtualMessageList";
-import { getMessageAnchorOffset } from "../../components/virtualMessageListAnchorRestore";
+import { getReadingTopAnchorOffset } from "../../components/virtualMessageListAnchorRestore";
 import { PendingReplyEditingContext } from "../../components/messageBubble/PendingReplyEditingContext";
 import { LivePendingStatusContext } from "../../features/pendingReplies/liveStatusContext";
-import { PendingSummaryContext } from "../../features/pendingReplies/context";
-import { pendingFilterIndicator } from "../../features/pendingReplies/indicator";
+import { useWaitingFilterIndicator } from "../../features/pendingReplies/useWaitingFilterIndicator";
 import { useLivePendingStatuses } from "../../features/pendingReplies/useLivePendingStatuses";
 import { NotificationPrompt } from "../../features/pushNotifications/NotificationPrompt";
 import { useNotificationPromptOffer } from "../../features/pushNotifications/useNotificationPromptOffer";
 import { classNames } from "../../utils/classNames";
+import { buttonVariants } from "../../components/ui/button-variants";
 import { ChatComposer } from "./ChatComposer";
 import { ChatFilterTabs } from "./ChatFilterTabs";
+import { usePinnedIds } from "../../features/pins/pinStore";
 import { GroupWorkArea, type RuntimeActorRenderer } from "./GroupWorkArea";
 import { RuntimeDock } from "./RuntimeDock";
 import { ChatSenderFilter } from "./ChatSenderFilter";
+import { pinnedEmptyKey } from "../../hooks/chat/chatMessageFilters";
 import { useChatTab } from "../../hooks/useChatTab";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
@@ -61,6 +62,7 @@ import {
   readChatGptAppPermissionHintDismissed,
 } from "../../utils/chatGptAppPermissionHint";
 import { useRuntimeDockWorkCards } from "./useRuntimeDockWorkCards";
+import { useFloatingDockReserve } from "./useFloatingDockReserve";
 import { type ComposerMentionKind } from "./chatMentionSuggestions";
 import { useWorkspaceFiles } from "../../components/workspace/useWorkspaceFiles";
 import { WorkspaceFilesTrigger } from "../../components/workspace/WorkspaceFilesTrigger";
@@ -101,23 +103,13 @@ function ChatLazyFallback({ className }: { className?: string }) {
   return <div className={classNames("min-h-0", className)} />;
 }
 
-function ChatGptAppPermissionNotice({
-  isDark,
-  onDismiss,
-}: {
-  isDark: boolean;
-  onDismiss: () => void;
-}) {
+function ChatGptAppPermissionNotice({ onDismiss }: { onDismiss: () => void }) {
   const { t } = useTranslation("chat");
+  // Framed like the notification offer above the composer, with the same key.
   return (
     <div className="flex-shrink-0 px-2 pb-1.5 sm:px-2.5">
       <div
-        className={classNames(
-          "mx-auto flex max-w-5xl items-start gap-2 rounded-md border px-3 py-2 text-xs leading-5 shadow-sm",
-          isDark
-            ? "border-amber-400/25 bg-amber-500/10 text-amber-100"
-            : "border-amber-200 bg-amber-50 text-amber-800",
-        )}
+        className="chat-reading-width mx-auto flex max-w-5xl items-start gap-2.5 rounded-lg border border-[var(--color-border-primary)] bg-[var(--color-bg-elevated)] px-3 py-2 text-xs leading-5 text-[var(--color-text-primary)] shadow-sm"
         role="status"
         aria-live="polite"
       >
@@ -126,12 +118,8 @@ function ChatGptAppPermissionNotice({
         <button
           type="button"
           onClick={onDismiss}
-          className={classNames(
-            "inline-flex min-h-7 shrink-0 items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-current",
-            isDark ? "hover:bg-white/10" : "hover:bg-amber-100",
-          )}
-          aria-label={t("webModelDelivery.permissionHintDismiss")}
-          title={t("webModelDelivery.permissionHintDismiss")}
+          className={buttonVariants({ variant: "ghost", size: "sm" })}
+          data-lcd-key
         >
           {t("webModelDelivery.permissionHintDismiss")}
         </button>
@@ -145,6 +133,8 @@ export interface ChatTabProps {
   isDark: boolean;
   isSmallScreen: boolean;
   readOnly?: boolean;
+  /** The viewer may create a Group, so the empty chat can offer it. */
+  canCreateGroup?: boolean;
   mobileAppHeaderReserved?: boolean;
   onMobileReadingHiddenChange?: (hidden: boolean) => void;
   onMobileReadingOverlayChange?: (overlay: boolean) => void;
@@ -200,6 +190,7 @@ export function ChatTab({
   isDark,
   isSmallScreen,
   readOnly,
+  canCreateGroup = false,
   mobileAppHeaderReserved = false,
   onMobileReadingHiddenChange,
   onMobileReadingOverlayChange,
@@ -236,7 +227,6 @@ export function ChatTab({
   setMentionActorScope,
   setMentionTargetGroupId,
 }: ChatTabProps) {
-  const pendingSummary = useContext(PendingSummaryContext);
   const shortTouchViewport = useShortTouchViewport();
   const [composerInputFocused, setComposerInputFocused] = useState(false);
   const [inlineReplyEditor, setInlineReplyEditor] = useState<string | null>(null);
@@ -280,6 +270,12 @@ export function ChatTab({
     pendingDaemonUnsupported,
     retryPendingPage,
     pendingActive,
+    pinnedActive,
+    pinnedError,
+    pinnedUnavailable,
+    retryPinned,
+    pinnedTabOffered,
+    toggleMessagePin,
     viewMessageContext,
     chatViewKey,
     chatWindowProps,
@@ -287,6 +283,8 @@ export function ChatTab({
     chatInitialScrollAnchorId,
     chatInitialScrollAnchorOffsetPx,
     chatInitialScrollOffsetPx,
+    chatInitialScrollHighlight,
+    liveJumpActive,
     chatHighlightEventId,
     isLoadingHistory,
     hasMoreHistory,
@@ -341,14 +339,16 @@ export function ChatTab({
     // Actions
     sendMessage,
     copyMessageLink,
-    copyMessageText,
     startReply,
     showRecipients,
     relayMessage,
     openSourceMessage,
-    exitChatWindow,
+    returnToLatest,
     handleScrollButtonClick,
     handleScrollChange,
+    onContextReady,
+    onReachedContextEnd,
+    onLoadNewerContext,
     handleScrollSnapshot,
     addAgent,
   } = useChatTab({
@@ -466,6 +466,12 @@ export function ChatTab({
   );
   const isBusinessEmptyState = chatMessages.length === 0 && chatEmptyState === "business_empty";
   const isFilteredEmptyState = chatMessages.length === 0 && chatEmptyState === "filtered_empty";
+  // Waiting for you and Pinned are read from the server rather than the loaded conversation.
+  const projectionActive = pendingActive || pinnedActive;
+  // The open Group's pins, read when it opens and again when the page becomes visible.
+  const groupPins = usePinnedIds(selectedGroupId, pinnedTabOffered);
+  const pinnedCount = groupPins?.loaded ? groupPins.ids.length : null;
+  const pinnedEmpty = pinnedEmptyKey(pinnedError, pinnedCount);
   const listIsLoadingHistory = isLoadingHistory || isHydratingEmptyState;
   const listHasMoreHistory = hasMoreHistory || isHydratingEmptyState;
   const liveWorkCards = useRuntimeDockWorkCards({
@@ -729,13 +735,10 @@ export function ChatTab({
     ],
   );
 
-  const waitingIndicator =
-    pendingSummary && selectedGroupId
-      ? pendingFilterIndicator(
-          pendingSummary.summaries[selectedGroupId],
-          chatFilter === "pending_user",
-        )
-      : null;
+  const waitingIndicator = useWaitingFilterIndicator(
+    selectedGroupId,
+    chatFilter === "pending_user",
+  );
   const hasChatFilter = chatFilter !== "all" || chatSenderFilter.length > 0;
   const showMessageFilters =
     !readOnly &&
@@ -751,6 +754,19 @@ export function ChatTab({
   const focusActiveFilter = useCallback(() => {
     messageFiltersRef.current?.querySelector<HTMLElement>('[aria-pressed="true"]')?.focus();
   }, []);
+  // The key that opened a message from a filtered view leaves with its row. Focus goes to
+  // the opened view's way back, not into the message list, where it would end the brief
+  // hold that keeps the message in place.
+  const windowReturnKeyRef = useRef<HTMLButtonElement | null>(null);
+  const showInConversation = useCallback(
+    (eventId: string) => {
+      viewMessageContext(eventId);
+      requestAnimationFrame(() => {
+        if (document.activeElement === document.body) windowReturnKeyRef.current?.focus();
+      });
+    },
+    [viewMessageContext],
+  );
   // Keep the scroll viewport fixed beneath the mobile header and filters, so
   // showing or hiding those controls cannot move the reader's anchor. The
   // overlay reserves a fixed height, so extra rows under the filters keep the
@@ -765,6 +781,8 @@ export function ChatTab({
     !showSetupNotice &&
     !senderHistoryError &&
     !pendingPageError &&
+    !pinnedError &&
+    !(pinnedUnavailable.length > 0 && toggleMessagePin) &&
     showMessageFilters;
   useLayoutEffect(() => {
     onMobileReadingOverlayChange?.(overlayMobileChrome);
@@ -775,12 +793,15 @@ export function ChatTab({
     reachedLatestWhileHidden.current = selectedGroupId;
   }, [selectedGroupId]);
   const reading = useMobileReadingChrome(
-    overlayMobileChrome && !composerInputFocused && inlineReplyEditor === null,
+    overlayMobileChrome && inlineReplyEditor === null,
     selectedGroupId,
     scrollRef,
     onMobileReadingHiddenChange,
     rememberReachedLatest,
   );
+  // The phone's members grow with a line of agent activity; the list's end room follows them.
+  const [dockFade, setDockFade] = useState<HTMLDivElement | null>(null);
+  useFloatingDockReserve(dockFade, scrollRef, isSmallScreen);
   useKeepInlineReplyVisible(
     scrollRef,
     (isSmallScreen || shortTouchViewport) && inlineReplyEditor !== null,
@@ -808,8 +829,11 @@ export function ChatTab({
             <section
               className="relative flex min-h-0 min-w-0 flex-1 flex-col"
               onTouchStartCapture={reading.onTouchStartCapture}
+              onTouchMoveCapture={reading.onTouchMoveCapture}
               onTouchEndCapture={reading.onTouchEndCapture}
               onTouchCancelCapture={reading.onTouchCancelCapture}
+              onCompositionStartCapture={reading.onCompositionStartCapture}
+              onCompositionEndCapture={reading.onCompositionEndCapture}
               onScrollCapture={reading.onScrollCapture}
               onPointerDownCapture={(event) => {
                 if (event.target instanceof Element && event.target.closest("footer")) {
@@ -848,51 +872,39 @@ export function ChatTab({
                     {chatWindowProps && (
                       <div className="px-4 pt-4">
                         <div
-                          className={classNames(
-                            "flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 shadow-sm",
-                            isDark
-                              ? "border-slate-700/50 bg-slate-900/40"
-                              : "border-gray-200 bg-white/70",
-                          )}
+                          className="flex items-center justify-between gap-3 border border-[var(--color-border-primary)] bg-[var(--color-bg-elevated)] px-4 py-3"
                           role="status"
                           aria-label={t("viewingMessage")}
                         >
                           <div className="min-w-0">
-                            <div
-                              className={classNames(
-                                "text-sm font-semibold",
-                                isDark ? "text-slate-200" : "text-gray-800",
-                              )}
-                            >
+                            <div className="text-sm font-semibold text-[var(--color-text-primary)]">
                               {t("viewingMessage")}
                             </div>
-                            <div
-                              className={classNames(
-                                "text-xs mt-0.5",
-                                isDark ? "text-slate-400" : "text-gray-600",
-                              )}
-                            >
+                            <div className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
                               {isLoadingHistory
                                 ? t("loadingContext")
-                                : chatWindowProps.hasMoreBefore || chatWindowProps.hasMoreAfter
+                                : chatWindowProps.hasMoreBefore
                                   ? t("contextTruncated")
-                                  : t("contextLoaded")}
+                                  : chatWindowProps.hasMoreAfter
+                                    ? t("contextNewerNotLoaded")
+                                    : t("contextLoaded")}
                             </div>
                           </div>
-                          {!readOnly && (
-                            <button
-                              type="button"
-                              className={classNames(
-                                "flex-shrink-0 text-xs font-semibold px-3 py-1.5 min-h-[36px] flex items-center rounded-full border transition-colors",
-                                isDark
-                                  ? "border-slate-600 text-slate-200 hover:bg-slate-800/60"
-                                  : "border-gray-200 text-gray-800 hover:bg-gray-100",
-                              )}
-                              onClick={exitChatWindow}
-                            >
-                              {t(hasChatFilter ? "returnToFilteredChat" : "returnToLatest")}
-                            </button>
-                          )}
+                          <button
+                            ref={windowReturnKeyRef}
+                            type="button"
+                            className={buttonVariants({ variant: "ghost", size: "sm" })}
+                            data-lcd-key
+                            onClick={(event) =>
+                              returnToLatest(
+                                event.detail === 0 ||
+                                  document.activeElement === event.currentTarget,
+                                hasChatFilter,
+                              )
+                            }
+                          >
+                            {t(hasChatFilter ? "returnToFilteredChat" : "returnToLatest")}
+                          </button>
                         </div>
                       </div>
                     )}
@@ -995,6 +1007,7 @@ export function ChatTab({
                           filter={chatFilter}
                           onChange={setChatFilter}
                           waiting={waitingIndicator}
+                          pinned={pinnedTabOffered ? { count: pinnedCount } : null}
                           isSmallScreen={isSmallScreen}
                         />
                         <ChatSenderFilter
@@ -1015,6 +1028,34 @@ export function ChatTab({
                             onClick={() => void retrySenderHistory()}
                           >
                             {t("common:retry")}
+                          </button>
+                        </div>
+                      ) : null}
+                      {pinnedError ? (
+                        <div
+                          role="status"
+                          className="chat-reading-width flex items-center gap-2 pb-2 text-xs text-[var(--color-text-secondary)]"
+                        >
+                          <span>{t("pins.loadFailed")}</span>
+                          <button type="button" className="min-h-9 underline" onClick={retryPinned}>
+                            {t("common:retry")}
+                          </button>
+                        </div>
+                      ) : null}
+                      {pinnedUnavailable.length && toggleMessagePin ? (
+                        <div
+                          role="status"
+                          className="chat-reading-width flex items-center gap-2 pb-2 text-xs text-[var(--color-text-secondary)]"
+                        >
+                          <span>{t("pins.unavailable", { count: pinnedUnavailable.length })}</span>
+                          <button
+                            type="button"
+                            className="min-h-9 underline"
+                            onClick={() => {
+                              for (const id of pinnedUnavailable) void toggleMessagePin(id, false);
+                            }}
+                          >
+                            {t("pins.removeUnavailable")}
                           </button>
                         </div>
                       ) : null}
@@ -1055,6 +1096,7 @@ export function ChatTab({
                             "w-full max-w-md",
                             isDark ? "text-slate-200" : "text-gray-800",
                           )}
+                          data-setup-checklist
                         >
                           {readOnly ? (
                             <div
@@ -1062,6 +1104,7 @@ export function ChatTab({
                                 "text-sm",
                                 isDark ? "text-slate-400" : "text-gray-600",
                               )}
+                              data-status-tone="muted"
                             >
                               {t("noMessagesYet")}
                             </div>
@@ -1100,65 +1143,93 @@ export function ChatTab({
                           webModelDeliveryStatusByEventId={webModelDeliveryStatusByEventId}
                           viewKey={chatViewKey}
                           topInsetPx={overlayMobileChrome ? MOBILE_READING_CHROME_HEIGHT_PX : 0}
-                          followOnViewChangeKey={pendingActive ? undefined : chatViewKey}
+                          followOnViewChangeKey={projectionActive ? undefined : chatViewKey}
                           initialScrollTargetId={
-                            pendingActive ? undefined : chatInitialScrollTargetId
+                            projectionActive ? undefined : chatInitialScrollTargetId
                           }
+                          // Waiting for you and Pinned open at their newest message unless given
+                          // a message to keep. A message given no height starts at the reading top.
                           initialScrollAnchorId={
-                            pendingActive ? chatMessages.at(-1)?.id : chatInitialScrollAnchorId
+                            projectionActive
+                              ? chatInitialScrollAnchorId || chatMessages.at(-1)?.id
+                              : chatInitialScrollAnchorId
                           }
                           initialScrollAnchorOffsetPx={
-                            pendingActive
-                              ? getMessageAnchorOffset(
-                                  0,
-                                  (overlayMobileChrome ? MOBILE_READING_CHROME_HEIGHT_PX : 0) + 8,
-                                )
-                              : chatInitialScrollAnchorOffsetPx
+                            chatInitialScrollAnchorOffsetPx ??
+                            getReadingTopAnchorOffset(
+                              overlayMobileChrome ? MOBILE_READING_CHROME_HEIGHT_PX : 0,
+                            )
                           }
                           initialScrollOffsetPx={chatInitialScrollOffsetPx}
+                          highlightInitialScrollAnchor={chatInitialScrollHighlight}
                           highlightEventId={chatHighlightEventId}
+                          liveJumpActive={liveJumpActive}
+                          contextWindow={!!chatWindowProps}
                           className={
-                            !chatWindowProps &&
-                            runtimeActors.length > 0 &&
-                            !hideDockForKeyboard &&
-                            !reading.hidden
-                              ? isSmallScreen
-                                ? "pb-1"
-                                : "pb-[calc(4rem_-_10px)]"
+                            // Room to scroll the last message clear of the members over the
+                            // list. It stays while reading hides them, so hiding them never
+                            // moves the list, and goes only for a keyboard (chatMessage.css).
+                            !chatWindowProps && runtimeActors.length > 0 && !hideDockForKeyboard
+                              ? classNames(
+                                  "chat-list-over-dock",
+                                  !reading.hidden && "chat-dock-shown",
+                                )
                               : undefined
                           }
                           scrollRef={scrollRef}
                           onReply={startReply}
                           onShowRecipients={showRecipients}
                           onCopyLink={copyMessageLink}
-                          onCopyContent={copyMessageText}
+                          onTogglePin={toggleMessagePin}
                           onViewContext={
-                            hasChatFilter && !chatWindowProps ? viewMessageContext : undefined
+                            hasChatFilter && !chatWindowProps ? showInConversation : undefined
                           }
                           onRelay={relayMessage}
                           onOpenSource={openSourceMessage}
                           onOpenPresentationRef={openPresentationRef}
                           onOpenTaskRef={openTaskRef}
-                          showScrollButton={showScrollButton && !(pendingActive && isSmallScreen)}
+                          // The jump key floats over the list's corner; while an answer is being
+                          // written it would cover that card's send key, so it waits.
+                          showScrollButton={
+                            showScrollButton &&
+                            !(pendingActive && isSmallScreen) &&
+                            inlineReplyEditor === null
+                          }
                           onScrollButtonClick={handleScrollButtonClick}
                           chatUnreadCount={chatUnreadCount}
                           sendScrollRequest={sendScrollRequest}
                           onSendScrollRequestConsumed={consumeSendScrollRequest}
                           onScrollChange={handleScrollChange}
+                          onContextReady={onContextReady}
+                          onReachedContextEnd={onReachedContextEnd}
+                          onLoadNewerContext={onLoadNewerContext}
+                          isLoadingNewerContext={chatWindowProps?.isLoadingAfter}
+                          newerContextError={chatWindowProps?.afterError}
                           onScrollSnapshot={handleScrollSnapshot}
                           isLoadingHistory={listIsLoadingHistory}
                           hasMoreHistory={listHasMoreHistory}
+                          hasActiveFilters={hasChatFilter && !chatWindowProps}
                           isFilteredEmpty={isFilteredEmptyState}
                           emptyMessage={
-                            pendingActive
+                            !selectedGroupId
                               ? t(
-                                  pendingDaemonUnsupported
-                                    ? "pendingReply.daemonUnsupported"
-                                    : pendingPageError
-                                      ? "pendingReply.loadFailed"
-                                      : "pendingReply.empty",
+                                  readOnly
+                                    ? "noGroupSelectedReadOnly"
+                                    : canCreateGroup
+                                      ? "noGroupSelected"
+                                      : "noGroupSelectedNoCreate",
                                 )
-                              : undefined
+                              : pendingActive
+                                ? t(
+                                    pendingDaemonUnsupported
+                                      ? "pendingReply.daemonUnsupported"
+                                      : pendingPageError
+                                        ? "pendingReply.loadFailed"
+                                        : "pendingReply.empty",
+                                  )
+                                : pinnedActive && pinnedEmpty
+                                  ? t(pinnedEmpty)
+                                  : undefined
                           }
                           onLoadMore={loadMoreHistory}
                         />
@@ -1167,27 +1238,69 @@ export function ChatTab({
                   )}
 
                   {!chatWindowProps && runtimeActors.length > 0 ? (
-                    <div
-                      className={classNames(
-                        "pointer-events-none z-20",
-                        isSmallScreen ? "shrink-0" : "absolute inset-x-0 bottom-2",
-                        (hideDockForKeyboard || reading.hidden) && "hidden",
-                      )}
-                      data-runtime-dock-keyboard-hidden={hideDockForKeyboard || undefined}
-                    >
-                      <RuntimeDock
-                        groupId={selectedGroupId}
-                        runtimeActors={runtimeActors}
-                        liveWorkCards={liveWorkCards}
-                        activeRuntimeActorId={activeRuntimeActorId}
-                        isDark={isDark}
-                        isSmallScreen={isSmallScreen}
-                        readOnly={readOnly}
-                        actorStatusProvisional={selectedGroupActorStatusProvisional}
-                        onAddAgent={!readOnly ? addAgent : undefined}
-                        onOpenRuntimeActor={onOpenRuntimeActor}
-                      />
-                    </div>
+                    !isSmallScreen && workView === "messages" ? (
+                      // Only the member controls catch input. The list keeps its full
+                      // viewport and can scroll its final message above this overlay; text
+                      // passing under it fades out behind the members' keys (chatMessage.css).
+                      <div
+                        className={classNames(
+                          "pointer-events-none absolute inset-x-0 bottom-0 z-20 px-2 sm:px-4",
+                          // A touch screen's keyboard leaves little height; the input needs it.
+                          hideDockForKeyboard && "hidden",
+                        )}
+                      >
+                        <div className="chat-reading-width">
+                          <div className="chat-dock-fade">
+                            <RuntimeDock
+                              placement="row"
+                              motionVisible={!hideDockForKeyboard}
+                              groupId={selectedGroupId}
+                              runtimeActors={runtimeActors}
+                              liveWorkCards={liveWorkCards}
+                              activeRuntimeActorId={activeRuntimeActorId}
+                              isDark={isDark}
+                              isSmallScreen={isSmallScreen}
+                              readOnly={readOnly}
+                              actorStatusProvisional={selectedGroupActorStatusProvisional}
+                              onAddAgent={!readOnly ? addAgent : undefined}
+                              onOpenRuntimeActor={onOpenRuntimeActor}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        className={classNames(
+                          "pointer-events-none absolute inset-x-0 z-20",
+                          // On a phone the dock floats over the message list; elsewhere it
+                          // floats over the work area's panes, which keep their own ground.
+                          isSmallScreen ? "bottom-0" : "bottom-2",
+                          (hideDockForKeyboard || reading.hidden) && "hidden",
+                        )}
+                        data-runtime-dock-keyboard-hidden={hideDockForKeyboard || undefined}
+                      >
+                        {/* Hidden by display, its rings restart on return; this lets them
+                            take the shared phase again instead of their old offsets. */}
+                        <div
+                          ref={setDockFade}
+                          className={isSmallScreen ? "chat-dock-fade" : undefined}
+                        >
+                          <RuntimeDock
+                            motionVisible={!(hideDockForKeyboard || reading.hidden)}
+                            groupId={selectedGroupId}
+                            runtimeActors={runtimeActors}
+                            liveWorkCards={liveWorkCards}
+                            activeRuntimeActorId={activeRuntimeActorId}
+                            isDark={isDark}
+                            isSmallScreen={isSmallScreen}
+                            readOnly={readOnly}
+                            actorStatusProvisional={selectedGroupActorStatusProvisional}
+                            onAddAgent={!readOnly ? addAgent : undefined}
+                            onOpenRuntimeActor={onOpenRuntimeActor}
+                          />
+                        </div>
+                      </div>
+                    )
                   ) : null}
                 </GroupWorkArea>
 
@@ -1218,10 +1331,7 @@ export function ChatTab({
               {!readOnly && (
                 <>
                   {showAppPermissionNotice ? (
-                    <ChatGptAppPermissionNotice
-                      isDark={isDark}
-                      onDismiss={dismissAppPermissionNotice}
-                    />
+                    <ChatGptAppPermissionNotice onDismiss={dismissAppPermissionNotice} />
                   ) : null}
                   {notificationOffer.visible && !hideDockForKeyboard ? (
                     <NotificationPrompt
@@ -1229,59 +1339,61 @@ export function ChatTab({
                       restoreFocus={focusActiveFilter}
                     />
                   ) : null}
-                  <ChatComposer
-                    isDark={isDark}
-                    isSmallScreen={isSmallScreen}
-                    keepExpanded={mobileAppHeaderReserved}
-                    selectedGroupId={selectedGroupId}
-                    actors={actors}
-                    recipientActorsBusy={recipientActorsBusy}
-                    selectedGroupActorsHydrating={selectedGroupActorsHydrating}
-                    destGroupId={destGroupId}
-                    setDestGroupId={setDestGroupId}
-                    composerGroupSettled={composerGroupSettled}
-                    composerRouteGroups={composerRouteGroups}
-                    destGroupScopeLabel={destGroupScopeLabel}
-                    busy={busy}
-                    recentMessages={chatMessages}
-                    suggestionSourceMessages={suggestionSourceMessages}
-                    replyTarget={replyTarget}
-                    onCancelReply={cancelReply}
-                    quotedPresentationRef={quotedPresentationRef}
-                    onClearQuotedPresentationRef={clearQuotedPresentationRef}
-                    quotedVoiceDocumentRef={quotedVoiceDocumentRef}
-                    onQuoteVoiceDocumentRef={handleQuoteVoiceDocumentReference}
-                    onClearQuotedVoiceDocumentRef={clearQuotedVoiceDocumentRef}
-                    toTokens={toTokens}
-                    onToggleRecipient={toggleRecipient}
-                    onClearRecipients={clearRecipients}
-                    composerFiles={composerFiles}
-                    onRemoveComposerFile={removeComposerFile}
-                    appendComposerFiles={appendComposerFiles}
-                    fileInputRef={fileInputRef}
-                    composerRef={composerRef}
-                    setComposerText={setComposerText}
-                    composerGroupMentionTokens={composerGroupMentionTokens}
-                    setComposerGroupMentionTokens={setComposerGroupMentionTokens}
-                    composerAgentMentionTokens={composerAgentMentionTokens}
-                    setComposerAgentMentionTokens={setComposerAgentMentionTokens}
-                    messageMode={messageMode}
-                    setMessageMode={setMessageMode}
-                    onSendMessage={sendMessage}
-                    showMentionMenu={showMentionMenu}
-                    setShowMentionMenu={setShowMentionMenu}
-                    mentionSuggestions={mentionSuggestions}
-                    connectMentionStatus={
-                      mentionKind === "group" ? connectMentionStatus : undefined
-                    }
-                    mentionSelectedIndex={mentionSelectedIndex}
-                    setMentionSelectedIndex={setMentionSelectedIndex}
-                    setMentionFilter={setMentionFilter}
-                    setMentionKind={setMentionKind}
-                    setMentionActorScope={setMentionActorScope}
-                    setMentionTargetGroupId={setMentionTargetGroupId}
-                    slashCommands={slashCommands}
-                  />
+                  {selectedGroupId ? (
+                    <ChatComposer
+                      isDark={isDark}
+                      isSmallScreen={isSmallScreen}
+                      keepExpanded={mobileAppHeaderReserved}
+                      selectedGroupId={selectedGroupId}
+                      actors={actors}
+                      recipientActorsBusy={recipientActorsBusy}
+                      selectedGroupActorsHydrating={selectedGroupActorsHydrating}
+                      destGroupId={destGroupId}
+                      setDestGroupId={setDestGroupId}
+                      composerGroupSettled={composerGroupSettled}
+                      composerRouteGroups={composerRouteGroups}
+                      destGroupScopeLabel={destGroupScopeLabel}
+                      busy={busy}
+                      recentMessages={chatMessages}
+                      suggestionSourceMessages={suggestionSourceMessages}
+                      replyTarget={replyTarget}
+                      onCancelReply={cancelReply}
+                      quotedPresentationRef={quotedPresentationRef}
+                      onClearQuotedPresentationRef={clearQuotedPresentationRef}
+                      quotedVoiceDocumentRef={quotedVoiceDocumentRef}
+                      onQuoteVoiceDocumentRef={handleQuoteVoiceDocumentReference}
+                      onClearQuotedVoiceDocumentRef={clearQuotedVoiceDocumentRef}
+                      toTokens={toTokens}
+                      onToggleRecipient={toggleRecipient}
+                      onClearRecipients={clearRecipients}
+                      composerFiles={composerFiles}
+                      onRemoveComposerFile={removeComposerFile}
+                      appendComposerFiles={appendComposerFiles}
+                      fileInputRef={fileInputRef}
+                      composerRef={composerRef}
+                      setComposerText={setComposerText}
+                      composerGroupMentionTokens={composerGroupMentionTokens}
+                      setComposerGroupMentionTokens={setComposerGroupMentionTokens}
+                      composerAgentMentionTokens={composerAgentMentionTokens}
+                      setComposerAgentMentionTokens={setComposerAgentMentionTokens}
+                      messageMode={messageMode}
+                      setMessageMode={setMessageMode}
+                      onSendMessage={sendMessage}
+                      showMentionMenu={showMentionMenu}
+                      setShowMentionMenu={setShowMentionMenu}
+                      mentionSuggestions={mentionSuggestions}
+                      connectMentionStatus={
+                        mentionKind === "group" ? connectMentionStatus : undefined
+                      }
+                      mentionSelectedIndex={mentionSelectedIndex}
+                      setMentionSelectedIndex={setMentionSelectedIndex}
+                      setMentionFilter={setMentionFilter}
+                      setMentionKind={setMentionKind}
+                      setMentionActorScope={setMentionActorScope}
+                      setMentionTargetGroupId={setMentionTargetGroupId}
+                      slashCommands={slashCommands}
+                    />
+                  ) : null}
                 </>
               )}
             </section>

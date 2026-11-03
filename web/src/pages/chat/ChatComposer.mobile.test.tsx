@@ -4,6 +4,8 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vite-plus/test";
 import { useComposerStore } from "../../stores/useComposerStore";
 import { useGroupStore } from "../../stores";
+import { useUIStore } from "../../stores/useUIStore";
+import type { ReplyTarget } from "../../types";
 import { ChatComposer } from "./ChatComposer";
 
 const voice = vi.hoisted(() => vi.fn());
@@ -12,10 +14,18 @@ vi.mock("./LazyVoiceSecretaryComposerControl", () => ({
   LazyVoiceSecretaryComposerControl: () => <button onClick={voice}>voice</button>,
 }));
 
-function Harness() {
+function Harness({
+  mode = "send",
+  initialTokens = [],
+  replyTarget = null,
+}: {
+  mode?: "send" | "request_reply" | "mail";
+  initialTokens?: string[];
+  replyTarget?: ReplyTarget;
+}) {
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [tokens, setTokens] = useState<string[]>([]);
+  const [tokens, setTokens] = useState<string[]>(initialTokens);
   const noop = () => {};
   return (
     <ChatComposer
@@ -27,7 +37,7 @@ function Harness() {
       setDestGroupId={noop}
       composerGroupSettled
       busy=""
-      replyTarget={null}
+      replyTarget={replyTarget}
       onCancelReply={noop}
       quotedPresentationRef={null}
       onClearQuotedPresentationRef={noop}
@@ -45,7 +55,7 @@ function Harness() {
       fileInputRef={fileInputRef}
       composerRef={composerRef}
       setComposerText={useComposerStore.getState().setComposerText}
-      messageMode="send"
+      messageMode={mode}
       setMessageMode={noop}
       onSendMessage={noop}
       showMentionMenu={false}
@@ -65,6 +75,42 @@ function Harness() {
     />
   );
 }
+
+it("uses the Web principal for Chet and shows Send instead of the saved Mail preference", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  useComposerStore.setState({ composerText: "hello" });
+  useUIStore.setState({ isWebAdmin: false });
+  const originalRefreshSettings = useGroupStore.getState().refreshSettings;
+  useGroupStore.setState({ refreshSettings: async () => {} });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const chet = () =>
+    [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "@chet",
+    );
+  try {
+    await act(async () => root.render(<Harness />));
+    expect(chet()).toBeUndefined();
+    await act(async () => useUIStore.setState({ isWebAdmin: true }));
+    expect(chet()).toBeDefined();
+    await act(async () =>
+      root.render(<Harness key="selected" mode="mail" initialTokens={["@chet"]} />),
+    );
+    expect(host.querySelector("[data-composer-send-primary]")?.getAttribute("aria-label")).toBe(
+      "sendMessage",
+    );
+    await act(async () =>
+      host.querySelector<HTMLButtonElement>("[data-composer-send-options]")?.click(),
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).not.toContain("modeMail");
+  } finally {
+    await act(async () => root.unmount());
+    useUIStore.setState({ isWebAdmin: null });
+    useGroupStore.setState({ refreshSettings: originalRefreshSettings });
+    host.remove();
+  }
+});
 
 it("keeps a compact control in place until its first click and preserves recipient selection", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -106,6 +152,70 @@ it("keeps a compact control in place until its first click and preserves recipie
     expect(host.querySelector(".compact-composer-recipients")?.textContent).toContain("@foreman");
   } finally {
     await act(async () => root.unmount());
+    useGroupStore.setState({ refreshSettings: originalRefreshSettings });
+    host.remove();
+  }
+});
+
+it("says under the recipients why Send + Reply cannot go to @all, and clears it when fixed", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  useComposerStore.setState({ composerText: "check this" });
+  const originalRefreshSettings = useGroupStore.getState().refreshSettings;
+  useGroupStore.setState({ refreshSettings: async () => {} });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const reason = () => host.querySelector("[data-composer-send-blocked]")?.textContent ?? null;
+  try {
+    await act(async () => root.render(<Harness mode="send" initialTokens={["@all"]} />));
+    expect(reason()).toBeNull();
+
+    await act(async () =>
+      root.render(<Harness key="reply" mode="request_reply" initialTokens={["@all"]} />),
+    );
+    expect(reason()).toBe("modeSendReplyRequiresConcrete");
+    const all = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent === "@all",
+    )!;
+    await act(async () => all.click());
+    expect(reason()).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    useComposerStore.setState({ composerText: "" });
+    useGroupStore.setState({ refreshSettings: originalRefreshSettings });
+    host.remove();
+  }
+});
+
+it("answers Chet's message with Send when Mail is the saved preference", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  useComposerStore.setState({ composerText: "hello" });
+  useUIStore.setState({ isWebAdmin: true });
+  const originalRefreshSettings = useGroupStore.getState().refreshSettings;
+  useGroupStore.setState({ refreshSettings: async () => {} });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    // A reply to Chet names no recipient; Chet has no Mail, so Mail is neither used nor offered.
+    await act(async () =>
+      root.render(
+        <Harness
+          mode="mail"
+          replyTarget={{ eventId: "chet-event", by: "Chet", text: "Done?", toChet: true }}
+        />,
+      ),
+    );
+    expect(host.querySelector("[data-composer-send-primary]")?.getAttribute("aria-label")).toBe(
+      "sendMessage",
+    );
+    await act(async () =>
+      host.querySelector<HTMLButtonElement>("[data-composer-send-options]")?.click(),
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).not.toContain("modeMail");
+  } finally {
+    await act(async () => root.unmount());
+    useUIStore.setState({ isWebAdmin: null });
     useGroupStore.setState({ refreshSettings: originalRefreshSettings });
     host.remove();
   }

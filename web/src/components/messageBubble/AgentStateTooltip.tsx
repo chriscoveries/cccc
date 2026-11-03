@@ -30,7 +30,7 @@ export function AgentStateTooltip({
   stateNext: string;
   stateChanged: string;
 }) {
-  const { t } = useTranslation("chat");
+  const { t, i18n } = useTranslation("chat");
   if (!isOpen || !canShow) return null;
 
   return (
@@ -43,6 +43,7 @@ export function AgentStateTooltip({
         isPositioned ? "opacity-100" : "opacity-0",
       )}
       role="status"
+      // The tooltip opens from a chat message, which takes the LCD look when it is on.
     >
       <div className="flex items-center gap-2">
         <div className="text-xs font-semibold text-[var(--color-text-primary)]">
@@ -53,7 +54,7 @@ export function AgentStateTooltip({
             className="ml-auto text-xs tabular-nums text-[var(--color-text-tertiary)]"
             title={formatFullTime(updatedAt)}
           >
-            {t("updated", { time: formatTime(updatedAt) })}
+            {t("updated", { time: formatTime(updatedAt, i18n?.language) })}
           </div>
         ) : null}
       </div>
@@ -69,7 +70,10 @@ export function AgentStateTooltip({
               </span>
             ) : null}
             {blockerCount > 0 ? (
-              <span className="rounded bg-rose-500/15 px-2 py-0.5 text-xs text-rose-600 dark:text-rose-300">
+              <span
+                className="rounded bg-rose-500/15 px-2 py-0.5 text-xs text-rose-600 dark:text-rose-300"
+                data-status-tone="error"
+              >
                 {t("blockersShort", { count: blockerCount })}
               </span>
             ) : null}

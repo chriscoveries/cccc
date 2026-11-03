@@ -1,0 +1,245 @@
+/* ---------- LCD dialogs ----------
+   Every dialog shares this frame. Keys are sized by pointer, not width: a touch
+   screen keeps the 44px targets of the global coarse-pointer rule, in px so text
+   scaling cannot shrink them, and a fine pointer gets the compact 2rem keys of the
+   chat header. */
+
+/* The header gives its height back to the content. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-modal-header] {
+  padding-top: max(0.375rem, env(safe-area-inset-top, 0px));
+  padding-bottom: 0.375rem;
+}
+
+@media (pointer: fine) {
+  :root[data-ui-style="lcd"] [data-lcd-scope] [data-modal-close] {
+    min-width: 2rem;
+    min-height: 2rem;
+    width: 2rem;
+    height: 2rem;
+  }
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-modal-close] {
+  border-color: var(--lcd-rule-strong);
+  background: transparent;
+  color: var(--lcd-ink);
+}
+
+/* A text field is a control, framed in the strong rule like a key; the plain rule
+   separates sections. The chat page's fields keep their own styles. */
+:root[data-ui-style="lcd"]
+  :is([role="dialog"][data-lcd-scope], [data-lcd-scope] [role="dialog"])
+  .glass-input {
+  border-color: var(--lcd-rule-strong);
+}
+
+/* Native checkboxes and radios tick in ink, not the browser's blue. */
+:root[data-ui-style="lcd"]
+  :is([role="dialog"][data-lcd-scope], [data-lcd-scope] [role="dialog"])
+  :is(input[type="checkbox"], input[type="radio"]) {
+  accent-color: var(--lcd-ink);
+}
+
+/* A status note is one colour: what it nests (a dismiss key, a footnote) takes the
+   note's colour, and its code sits on the code ground, not a tint of the old hue. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-status-tone]
+  :is(
+    [class*="text-rose-"],
+    [class*="text-red-"],
+    [class*="text-amber-"],
+    [class*="text-orange-"]
+  ) {
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-status-tone] :is(code, pre) {
+  border-radius: 0;
+  background: var(--lcd-code-bg);
+  color: inherit;
+}
+
+/* A role is not a status: the foreman and peer badges are plain framed tags. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-role-badge] {
+  border-color: var(--lcd-rule-strong);
+  background: transparent;
+  color: var(--lcd-ink);
+}
+
+/* Secrets waiting for Save are a draft, not a success: framed in the strong rule, in
+   ink. A key marked for removal keeps its strike-through inside a dashed danger frame. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-secret-pending] {
+  border: 1px solid var(--lcd-rule-strong);
+  background: transparent;
+  color: var(--lcd-ink);
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-secret-pending] [class*="text-emerald-"] {
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-secret-row="remove"] {
+  border-style: dashed;
+  border-color: var(--lcd-danger);
+  background: transparent;
+}
+
+/* A switch is one control of keys sharing edges, framed in ink, the current one in
+   reverse, like the chat page's view switch: the settings scope, every segmented
+   choice (settings pages, the appearance menu), the search kinds, the Voice
+   panes on phones, the workspace's Files and Changes, a Group's connection mode, a Web
+   Model's page or browser view and its delivery choice, the Voice Secretary's views and
+   document views, and a presentation's switch between its current view and a quoted
+   snapshot.
+   Reversed keys switch at once: a colour transition would pass through text the colour
+   of its ground. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-settings-scope-switch],
+    [data-segmented-choice],
+    [data-search-kind],
+    [data-voice-pane-switch],
+    [data-workspace-mode-switch],
+    [data-connect-mode-switch],
+    [data-browser-view-switch],
+    [data-voice-panel-views],
+    [data-voice-document-views],
+    [data-presentation-snapshot-tabs],
+    [data-presentation-preview-mode],
+    [data-presentation-slot-switch],
+    [data-web-model-delivery]
+  ) {
+  gap: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-settings-scope-switch] > button,
+    [data-segmented-choice] > [role="radio"],
+    [data-search-kind] > button,
+    [data-voice-pane-switch] > button,
+    [data-workspace-mode-switch] > button,
+    [data-connect-mode-switch] > button,
+    [data-browser-view-switch] > button,
+    [data-voice-panel-views] > button,
+    [data-voice-document-views] > button,
+    [data-presentation-snapshot-tabs] > button,
+    [data-presentation-preview-mode] > button,
+    [data-presentation-slot-switch] > button,
+    [data-web-model-delivery] > label > input + span
+  ) {
+  border: 1px solid var(--lcd-ink);
+  color: var(--lcd-ink);
+  font-weight: 400;
+  transition: none;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-settings-scope-switch] > button + button,
+    [data-segmented-choice] > [role="radio"] + [role="radio"],
+    [data-search-kind] > button + button,
+    [data-voice-pane-switch] > button + button,
+    [data-workspace-mode-switch] > button + button,
+    [data-connect-mode-switch] > button + button,
+    [data-browser-view-switch] > button + button,
+    [data-voice-panel-views] > button + button,
+    [data-voice-document-views] > button + button,
+    [data-presentation-snapshot-tabs] > button + button,
+    [data-presentation-preview-mode] > button + button,
+    [data-presentation-slot-switch] > button + button,
+    [data-web-model-delivery] > label + label
+  ) {
+  margin-left: -1px;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-settings-scope-switch] > button[aria-pressed="true"],
+    [data-segmented-choice] > [role="radio"][aria-checked="true"],
+    [data-search-kind] > button[aria-pressed="true"],
+    [data-voice-pane-switch] > button[aria-pressed="true"],
+    [data-workspace-mode-switch] > button[aria-pressed="true"],
+    [data-connect-mode-switch] > button[aria-pressed="true"],
+    [data-browser-view-switch] > button[aria-pressed="true"],
+    [data-voice-panel-views] > button[aria-pressed="true"],
+    [data-voice-document-views] > button[aria-pressed="true"],
+    [data-presentation-snapshot-tabs] > button[aria-pressed="true"],
+    [data-presentation-preview-mode] > button[aria-pressed="true"],
+    [data-presentation-slot-switch] > button[aria-pressed="true"],
+    [data-web-model-delivery] > label > input:checked + span
+  ) {
+  background: var(--lcd-sel-bg);
+  color: var(--lcd-sel-fg);
+}
+
+/* A key with a second line (the connection mode's requirement) reverses as a whole. */
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-connect-mode-switch]
+  > button[aria-pressed="true"]
+  * {
+  color: inherit;
+}
+
+/* The connection mode's keys wrap onto two rows on a narrow screen, so each key overlaps
+   the key beside it or above it by the shared pixel, and the switch gives that pixel back. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-connect-mode-switch] {
+  padding: 1px 0 0 1px;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-connect-mode-switch] > button {
+  margin: -1px 0 0 -1px;
+}
+
+/* A Web Model's delivery choice hides a radio in each label, and the label's visible span is
+   the key: the switch drops its own frame, and a reversed key's experimental tag reverses
+   with it. Its fieldset disables the radios, so the hover list asks the radio, inside
+   :where() to leave the shared rule's specificity as it was. */
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-web-model-delivery] {
+  border-width: 0;
+}
+
+:root[data-ui-style="lcd"] [data-lcd-scope] [data-web-model-delivery] > label > input + span {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  [data-web-model-delivery]
+  > label
+  > input:checked
+  + span
+  * {
+  border-color: currentColor;
+  color: inherit;
+}
+
+:root[data-ui-style="lcd"]
+  [data-lcd-scope]
+  :is(
+    [data-settings-scope-switch] > button[aria-pressed="false"],
+    [data-segmented-choice] > [role="radio"][aria-checked="false"],
+    [data-search-kind] > button[aria-pressed="false"],
+    [data-voice-pane-switch] > button[aria-pressed="false"],
+    [data-workspace-mode-switch] > button[aria-pressed="false"],
+    [data-connect-mode-switch] > button[aria-pressed="false"],
+    [data-browser-view-switch] > button[aria-pressed="false"],
+    [data-voice-panel-views] > button[aria-pressed="false"],
+    [data-voice-document-views] > button[aria-pressed="false"],
+    [data-presentation-snapshot-tabs] > button[aria-pressed="false"],
+    [data-presentation-preview-mode] > button[aria-pressed="false"],
+    [data-presentation-slot-switch] > button[aria-pressed="false"],
+    [data-web-model-delivery] > label > input:not(:checked):where(:not(:disabled)) + span
+  ):hover:not(:disabled) {
+  background: var(--lcd-sel-soft);
+}

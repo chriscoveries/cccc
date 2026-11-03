@@ -23,6 +23,7 @@ function controller(
     playbackBlocked: false,
     outputStatus: { queued: 0, blocked: null },
     error: "",
+    recoveryOwners: [],
     refreshError: "",
     isStarting: false,
     isEngaged: false,
@@ -53,7 +54,55 @@ function controller(
 
 describe("CodexVoiceDock", () => {
   it.each(["sidebar", "mobile", "collapsed"] as const)(
-    "identifies the selected service and voice in the %s dock before a call",
+    "marks something new in Chet's history on the %s entry, naming it only in its tooltip",
+    (surface) => {
+      const markup = (unread: boolean) =>
+        renderToStaticMarkup(
+          <CodexVoiceDock
+            controller={controller()}
+            chetUnread={unread}
+            variant={surface === "mobile" ? "mobile" : "sidebar"}
+            collapsed={surface === "collapsed"}
+            onOpen={vi.fn()}
+            onStart={vi.fn()}
+          />,
+        );
+      expect(markup(false)).not.toContain("data-chet-unread");
+      const unread = markup(true);
+      expect(unread).toContain("data-chet-unread");
+      expect(unread).toContain('aria-label="modals:chet.open · modals:chet.unread"');
+      expect(unread).toContain("Chet · modals:chet.subtitle · modals:chet.unread");
+    },
+  );
+
+  it.each(["sidebar", "mobile", "collapsed"] as const)(
+    "shows Chet's head in the %s dock, moving only while Chet itself works",
+    (surface) => {
+      const markup = (overrides: Partial<CodexVoiceSessionController>, chetWorking = false) =>
+        renderToStaticMarkup(
+          <CodexVoiceDock
+            controller={controller(overrides)}
+            chetWorking={chetWorking}
+            variant={surface === "mobile" ? "mobile" : "sidebar"}
+            collapsed={surface === "collapsed"}
+            onOpen={vi.fn()}
+            onStart={vi.fn()}
+          />,
+        );
+      expect(markup({})).toContain('data-chet-head="idle"');
+      expect(markup({}, true)).toContain('data-chet-head="working"');
+      expect(markup({ analystWorking: true })).toContain('data-chet-head="working"');
+      // A live call is not Chet's work: the call controls show it and the head stays idle.
+      expect(markup({ phase: "listening", owned: true, isEngaged: true })).toContain(
+        'data-chet-head="idle"',
+      );
+      // Something that needs a look takes the head's place with the alert mark.
+      expect(markup({ error: "Needs attention" })).not.toContain("data-chet-head");
+    },
+  );
+
+  it.each(["sidebar", "mobile", "collapsed"] as const)(
+    "names Chet, not the next call's service, in the %s dock before a call",
     (surface) => {
       const html = renderToStaticMarkup(
         <CodexVoiceDock
@@ -66,12 +115,10 @@ describe("CodexVoiceDock", () => {
           onStart={vi.fn()}
         />,
       );
-      expect(html).toContain("modals:codexVoiceProviders.grok");
-      expect(html).toContain("Eve");
-      expect(html).toContain("modals:codexVoicePhase.idle");
-      if (surface !== "collapsed")
-        expect(html).toMatch(/>Eve · modals:codexVoicePhase.idle<\/span>/);
-      expect(html).not.toContain("Cove");
+      expect(html).toContain("modals:chet.subtitle");
+      expect(html).not.toContain("modals:codexVoiceProviders.grok");
+      expect(html).not.toContain("Eve");
+      if (surface !== "collapsed") expect(html).toMatch(/>Chet<\/span>/);
     },
   );
 
@@ -115,13 +162,15 @@ describe("CodexVoiceDock", () => {
     expect(html).not.toContain("modals:codexVoicePhase.idle");
   });
 
-  it("does not advertise Ready when Realtime credentials are unavailable", () => {
+  it("keeps Chet available when only the voice call is not ready", () => {
     const state = controller();
     state.readiness = { ...state.readiness!, realtime_credentials_available: false };
     const html = renderToStaticMarkup(
       <CodexVoiceDock controller={state} onOpen={vi.fn()} onStart={vi.fn()} />,
     );
-    expect(html).toContain("modals:codexVoiceCallBlocked");
+    // Text needs no Realtime credentials, so a voice problem does not mark Chet as blocked.
+    expect(html).toContain("modals:chet.subtitle");
+    expect(html).not.toContain("modals:codexVoiceCallBlocked");
     expect(html).not.toContain("modals:codexVoicePhase.idle");
   });
 
@@ -142,11 +191,11 @@ describe("CodexVoiceDock", () => {
         onStart={vi.fn()}
       />,
     );
-    expect(html).toContain("modals:codexVoiceAnalystPhase.working");
+    expect(html).toContain("modals:chet.state.working");
     expect(html).not.toContain("layout:codexVoiceAnalystReady");
   });
 
-  it("waits for readiness rather than claiming Ready before the first snapshot", () => {
+  it("claims nothing about readiness before the first snapshot", () => {
     const html = renderToStaticMarkup(
       <CodexVoiceDock
         controller={controller({ readiness: null })}
@@ -154,15 +203,24 @@ describe("CodexVoiceDock", () => {
         onStart={vi.fn()}
       />,
     );
-    expect(html).toContain("modals:codexVoiceChecking");
+    expect(html).toContain("modals:chet.subtitle");
     expect(html).not.toContain("modals:codexVoicePhase.idle");
   });
+
+  it("shows Chet's own work while no Analyst snapshot reports it", () => {
+    const html = renderToStaticMarkup(
+      <CodexVoiceDock controller={controller()} chetWorking onOpen={vi.fn()} onStart={vi.fn()} />,
+    );
+    expect(html).toContain("modals:chet.state.working");
+    expect(html).toContain('data-chet-head="working"');
+  });
+
   it("keeps two stable global actions: open console and start voice", () => {
     const html = renderToStaticMarkup(
       <CodexVoiceDock controller={controller()} onOpen={vi.fn()} onStart={vi.fn()} />,
     );
 
-    expect(html).toContain('aria-label="layout:codexVoiceOpenConsole"');
+    expect(html).toContain('aria-label="modals:chet.open"');
     expect(html).toContain('aria-label="layout:codexVoiceStart"');
     expect(html).toContain("lucide-audio-lines");
     expect(html).not.toContain("lucide-mic");
@@ -179,7 +237,7 @@ describe("CodexVoiceDock", () => {
       />,
     );
 
-    expect(html).toContain('aria-label="layout:codexVoiceOpenConsole"');
+    expect(html).toContain('aria-label="modals:chet.open"');
     expect(html).toContain('aria-label="modals:codexVoiceStop"');
     expect(html).not.toContain("modals:codexVoiceMute");
   });
@@ -189,11 +247,11 @@ describe("CodexVoiceDock", () => {
       <CodexVoiceDock controller={controller()} collapsed onOpen={vi.fn()} onStart={vi.fn()} />,
     );
 
-    expect(html).toContain('aria-label="layout:codexVoiceOpenConsole"');
+    expect(html).toContain('aria-label="modals:chet.open"');
     expect(html).toContain('aria-label="layout:codexVoiceStart"');
   });
 
-  it("reports the global warm Analyst without exposing Group state", () => {
+  it("reports the global assistant without exposing Group state", () => {
     const html = renderToStaticMarkup(
       <CodexVoiceDock
         controller={controller({
@@ -210,7 +268,7 @@ describe("CodexVoiceDock", () => {
       />,
     );
 
-    expect(html).toContain("layout:codexVoiceAnalystReady");
+    expect(html).toContain("modals:chet.subtitle");
     expect(html).not.toContain("Alpha");
     expect(html).not.toContain("g_beta");
   });

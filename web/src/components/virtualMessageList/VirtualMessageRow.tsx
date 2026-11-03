@@ -16,6 +16,7 @@ type VirtualMessageRowProps = {
   resolvedReplyQuoteText?: string;
   collapseHeader?: boolean;
   compactSpacing?: boolean;
+  sameSender?: boolean;
   actorById: Map<string, Actor>;
   actors: Actor[];
   displayNameMap: Map<string, string>;
@@ -30,7 +31,7 @@ type VirtualMessageRowProps = {
   onReply: (event: LedgerEvent) => void;
   onShowRecipients: (eventId: string) => void;
   onCopyLink?: (eventId: string) => void;
-  onCopyContent?: (event: LedgerEvent) => void;
+  onTogglePin?: (eventId: string, pinned: boolean) => void;
   onRelay?: (event: LedgerEvent) => void;
   onOpenSource?: (srcGroupId: string, srcEventId: string) => void;
   onOpenPresentationRef?: (ref: PresentationMessageRef, event: LedgerEvent) => void;
@@ -45,6 +46,7 @@ export const VirtualMessageRow = memo(function VirtualMessageRow({
   resolvedReplyQuoteText,
   collapseHeader,
   compactSpacing,
+  sameSender,
   measureElement,
   highlightEventId,
   onReply,
@@ -83,6 +85,7 @@ export const VirtualMessageRow = memo(function VirtualMessageRow({
         event={message}
         resolvedReplyQuoteText={resolvedReplyQuoteText}
         collapseHeader={collapseHeader}
+        sameSender={sameSender}
         isHighlighted={!!highlightEventId && String(message.id || "") === String(highlightEventId)}
         onReply={() => onReply(message)}
         onShowRecipients={() => {

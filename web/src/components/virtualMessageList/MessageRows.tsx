@@ -19,7 +19,7 @@ type MessageRowsProps = Pick<
   | "onShowRecipients"
   | "onViewContext"
   | "onCopyLink"
-  | "onCopyContent"
+  | "onTogglePin"
   | "onRelay"
   | "onOpenSource"
   | "onOpenPresentationRef"
@@ -62,8 +62,8 @@ export function MessageRows({
   onReply,
   onShowRecipients,
   onCopyLink,
+  onTogglePin,
   onViewContext,
-  onCopyContent,
   onRelay,
   onOpenSource,
   onOpenPresentationRef,
@@ -81,8 +81,8 @@ export function MessageRows({
     groupId,
     groupLabelById,
     onCopyLink,
+    onTogglePin,
     onViewContext,
-    onCopyContent,
     onRelay,
     onOpenSource,
     onOpenPresentationRef,
@@ -97,6 +97,7 @@ export function MessageRows({
       <div
         ref={contentRef}
         className="chat-reading-width"
+        data-message-column
         style={{
           height: `${totalVirtualSize}px`,
           width: "100%",
@@ -117,6 +118,7 @@ export function MessageRows({
               resolvedReplyQuoteText={getReplyQuoteText(message, messageTextById)}
               collapseHeader={grouping.collapseHeader}
               compactSpacing={grouping.compactSpacing}
+              sameSender={grouping.sameSender}
               agentState={agentStateById.get(String(message.by || "")) || null}
               webModelDeliveryStatus={deliveryStatus(message)}
               highlightEventId={effectiveHighlightEventId}
@@ -131,7 +133,12 @@ export function MessageRows({
   }
 
   return (
-    <div ref={contentRef} className="chat-reading-width" style={{ marginTop: nonVirtualTopMargin }}>
+    <div
+      ref={contentRef}
+      className="chat-reading-width"
+      data-message-column
+      style={{ marginTop: nonVirtualTopMargin }}
+    >
       {messages.map((message, index) => {
         const grouping = getMessageRowGrouping(
           index > 0 ? messages[index - 1] : undefined,
@@ -164,6 +171,7 @@ export function MessageRows({
                 String(message.id || "") === String(effectiveHighlightEventId)
               }
               collapseHeader={grouping.collapseHeader}
+              sameSender={grouping.sameSender}
               onReply={() => onReply(message)}
               onShowRecipients={() => {
                 if (message.id) onShowRecipients(String(message.id));

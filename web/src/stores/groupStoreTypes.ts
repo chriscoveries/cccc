@@ -84,6 +84,7 @@ export interface GroupState {
     pendingEventId?: string;
     streamId: string;
     ts: string;
+    firstTextTs?: string;
     fullText: string;
     eventText: string;
     activities: StreamingActivity[];
@@ -140,8 +141,10 @@ export interface GroupState {
   refreshPresentation: (groupId?: string) => Promise<void>;
   loadGroup: (groupId: string) => Promise<void>;
   warmGroup: (groupId: string) => Promise<void>;
-  loadMoreHistory: (groupId?: string) => Promise<void>;
-  openChatWindow: (groupId: string, centerEventId: string) => Promise<void>;
+  loadMoreHistory: (groupId?: string) => Promise<void | false>;
+  /** Resolves to false when the message and its neighbours could not be loaded. */
+  openChatWindow: (groupId: string, centerEventId: string) => Promise<boolean>;
+  loadMoreChatWindowAfter: (groupId: string) => Promise<void>;
   closeChatWindow: (groupId?: string) => void;
 }
 
@@ -165,5 +168,6 @@ export type GroupStoreAsyncActions = Pick<
   | "warmGroup"
   | "loadMoreHistory"
   | "openChatWindow"
+  | "loadMoreChatWindowAfter"
   | "closeChatWindow"
 >;

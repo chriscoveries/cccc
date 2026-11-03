@@ -1,108 +1,11 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { StopIcon, TerminalIcon, VoiceWaveformIcon } from "../../components/Icons";
+import { StopIcon, TerminalIcon } from "../../components/Icons";
 import { Button } from "../../components/ui/button";
 import { RUNTIME_INFO } from "../../types";
 import type { CodexVoiceSessionController } from "./useCodexVoiceSessionController";
 import { VoiceAcpConsole } from "./VoiceAcpConsole";
 import { VoiceAnalystTerminal } from "./VoiceAnalystTerminal";
-
-export function CodexVoiceConversationPane({
-  controller,
-  visible,
-  children,
-  analystExpanded,
-  onToggleAnalyst,
-  analystBar,
-}: {
-  controller: CodexVoiceSessionController;
-  visible: boolean;
-  children?: ReactNode;
-  analystExpanded: boolean;
-  onToggleAnalyst(): void;
-  analystBar?: ReactNode;
-}) {
-  const { t } = useTranslation("modals");
-  const conversationRef = useRef<HTMLDivElement | null>(null);
-  const followTranscriptRef = useRef(true);
-
-  useEffect(() => {
-    if (!visible || !followTranscriptRef.current) return;
-    const frame = window.requestAnimationFrame(() => {
-      const container = conversationRef.current;
-      if (container) container.scrollTop = container.scrollHeight;
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [controller.conversation, visible]);
-
-  return (
-    <section
-      className={`${visible ? "flex" : "hidden"} min-h-0 min-w-0 flex-col lg:flex`}
-      id="codex-voice-conversation-pane"
-      aria-labelledby="codex-voice-conversation-heading"
-    >
-      <PaneHeader className="hidden lg:flex">
-        <h3
-          id="codex-voice-conversation-heading"
-          className="text-sm font-semibold text-[var(--color-text-primary)]"
-        >
-          {t("codexVoiceConversation")}
-        </h3>
-        {analystExpanded ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={onToggleAnalyst}
-            aria-expanded
-            aria-controls="codex-voice-analyst-pane"
-          >
-            {t("codexVoiceHideAnalyst")}
-          </Button>
-        ) : null}
-      </PaneHeader>
-      {children}
-      <div
-        ref={conversationRef}
-        className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5"
-        onScroll={(event) => {
-          const element = event.currentTarget;
-          followTranscriptRef.current =
-            element.scrollHeight - element.clientHeight - element.scrollTop < 80;
-        }}
-      >
-        {controller.conversation.map((turn) => (
-          <TranscriptBlock
-            key={turn.id}
-            label={t(turn.role === "user" ? "codexVoiceYouSaid" : "codexVoiceAssistantSaid")}
-            text={turn.text}
-          />
-        ))}
-        {!controller.conversation.length ? (
-          controller.isEngaged ? (
-            <PaneEmptyState
-              icon={<VoiceWaveformIcon size={22} />}
-              title={t("codexVoiceConversationListening")}
-              live
-            />
-          ) : (
-            <PaneEmptyState
-              icon={<VoiceWaveformIcon size={22} />}
-              title={t("codexVoiceConversationEmptyTitle")}
-              hint={t("codexVoiceConversationReady")}
-            />
-          )
-        ) : null}
-      </div>
-      {controller.conversation.length ? (
-        <p className="flex-none border-t border-[var(--glass-border-subtle)] px-5 py-2 text-[11px] text-[var(--color-text-muted)]">
-          {t("codexVoiceConversationHistoryHint")}
-        </p>
-      ) : null}
-      {analystBar}
-    </section>
-  );
-}
 
 /** One line for a collapsed Analyst: what it is, whether it is ready, and what needs the user. */
 export function CodexVoiceAnalystSummaryBar({
@@ -113,6 +16,7 @@ export function CodexVoiceAnalystSummaryBar({
   errorText,
   hasNewResult,
   onExpand,
+  actions,
 }: {
   controller: CodexVoiceSessionController;
   analystPhase: string;
@@ -121,6 +25,8 @@ export function CodexVoiceAnalystSummaryBar({
   errorText: string;
   hasNewResult: boolean;
   onExpand(): void;
+  /** Controls for the Analyst's current work, before the expand action. */
+  actions?: ReactNode;
 }) {
   const { t } = useTranslation("modals");
   const runtime = controller.readiness?.analyst_runtime;
@@ -135,27 +41,29 @@ export function CodexVoiceAnalystSummaryBar({
         aria-hidden="true"
         className="flex-none text-[var(--color-accent-primary)]"
       />
-      <span className="font-semibold text-[var(--color-text-primary)]">
-        {t("codexVoiceAnalystTitle")}
-      </span>
+      <span className="font-semibold text-[var(--color-text-primary)]">{t("chet.activity")}</span>
       {runtimeLabel ? (
         <span className="text-[var(--color-text-muted)]">· {runtimeLabel}</span>
       ) : null}
       {notReady ? (
-        <span className="text-amber-700 dark:text-amber-300">
+        <span className="text-amber-700 dark:text-amber-300" data-status-tone="warning">
           · {t("codexVoiceAnalystNotReady")}
         </span>
       ) : analystPhase ? (
         <span className="min-w-0 truncate text-[var(--color-text-muted)]">· {analystPhase}</span>
       ) : null}
       {attentionCount ? (
-        <span className="rounded-full bg-amber-400/15 px-2 py-0.5 font-semibold text-amber-700 dark:text-amber-200">
+        <span
+          className="rounded-full bg-amber-400/15 px-2 py-0.5 font-semibold text-amber-700 dark:text-amber-200"
+          data-pending-state
+        >
           {t("codexVoiceAnalystNeedsInput", { count: attentionCount })}
         </span>
       ) : null}
       {errorText ? (
         <span
           className="min-w-0 max-w-full truncate text-rose-600 dark:text-rose-300"
+          data-status-tone="error"
           title={errorText}
         >
           {errorText}
@@ -166,17 +74,20 @@ export function CodexVoiceAnalystSummaryBar({
           {t("codexVoiceAnalystNewResult")}
         </span>
       ) : null}
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        className="ml-auto"
-        onClick={onExpand}
-        aria-expanded={false}
-        aria-controls="codex-voice-analyst-pane"
-      >
-        {t("codexVoiceShowAnalyst")}
-      </Button>
+      <span className="ml-auto flex flex-wrap items-center gap-1">
+        {actions}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={onExpand}
+          aria-expanded={false}
+          aria-controls="codex-voice-analyst-pane"
+          data-lcd-key
+        >
+          {t("codexVoiceShowAnalyst")}
+        </Button>
+      </span>
     </div>
   );
 }
@@ -200,6 +111,9 @@ export function CodexVoiceAnalystPane({
   const analyst = controller.analyst;
   const runtime = controller.readiness?.analyst_runtime;
   const runtimeLabel = runtime ? RUNTIME_INFO[runtime]?.label || runtime : "";
+  const cancelLabel = t(
+    analyst?.structured ? "actors:acpControls.cancel" : "codexVoiceCancelInvestigation",
+  );
 
   return (
     <section
@@ -208,14 +122,15 @@ export function CodexVoiceAnalystPane({
       aria-labelledby="codex-voice-analyst-heading"
     >
       <PaneHeader>
-        <div className="min-w-0">
+        {/* The key moves below the title only when the title itself could not sit beside it. */}
+        <div className="min-w-0 flex-[1_1_10rem]">
           <div className="flex min-w-0 items-center gap-2">
             <TerminalIcon size={16} className="flex-none text-[var(--color-accent-primary)]" />
             <h3
               id="codex-voice-analyst-heading"
               className="flex-none whitespace-nowrap text-sm font-semibold text-[var(--color-text-primary)]"
             >
-              {t("codexVoiceAnalystTitle")}
+              {t("chet.activity")}
             </h3>
             {runtimeLabel ? (
               <span className="truncate text-xs text-[var(--color-text-muted)]">
@@ -224,31 +139,37 @@ export function CodexVoiceAnalystPane({
             ) : null}
           </div>
           {notReady ? (
-            <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+            <p
+              className="mt-1 text-xs text-amber-700 dark:text-amber-300"
+              data-status-tone="warning"
+            >
               {t("codexVoiceAnalystNotReady")}
             </p>
           ) : analystPhase ? (
             <p className="mt-1 text-xs text-[var(--color-text-muted)]">{analystPhase}</p>
           ) : null}
         </div>
-        <div className="flex flex-none items-center gap-1">
+        <div className="flex min-w-0 items-center gap-1">
           {controller.analystWorking ? (
             <Button
               type="button"
               variant="ghost"
               size="sm"
+              className="max-sm:min-h-11 max-sm:min-w-11"
+              aria-label={cancelLabel}
+              data-lcd-key
               onClick={() => void controller.cancelInvestigation()}
             >
               <StopIcon size={14} />
-              {t(
-                analyst?.structured ? "actors:acpControls.cancel" : "codexVoiceCancelInvestigation",
-              )}
+              <span className="hidden sm:inline">{cancelLabel}</span>
             </Button>
           ) : analyst ? (
             <Button
               type="button"
               variant="ghost"
               size="sm"
+              className="max-sm:min-h-11"
+              data-lcd-key
               disabled={controller.isEngaged}
               onClick={() => {
                 if (window.confirm(t("codexVoiceNewAnalystConfirm"))) {
@@ -266,6 +187,7 @@ export function CodexVoiceAnalystPane({
       !(analyst?.structured && analyst.warning === "analyst_turn_failed" && analyst.last_error) ? (
         <div
           className="flex-none border-b border-amber-400/25 bg-amber-400/8 px-5 py-2.5 text-xs leading-5 text-amber-700 dark:text-amber-300"
+          data-status-tone="warning"
           role="status"
         >
           {controller.analystWarning}
@@ -297,24 +219,10 @@ export function CodexVoiceAnalystPane({
   );
 }
 
-function TranscriptBlock({ label, text }: { label: string; text: string }) {
-  return (
-    <div>
-      <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-        {label}
-      </div>
-      <div className="mt-1.5 whitespace-pre-wrap break-words text-[15px] leading-7 text-[var(--color-text-primary)]">
-        {text}
-      </div>
-    </div>
-  );
-}
-
-/** Both panes share one header height so their dividers line up. */
 function PaneHeader({ className = "flex", children }: { className?: string; children: ReactNode }) {
   return (
     <div
-      className={`${className} min-h-14 flex-none items-center justify-between gap-3 border-b border-[var(--glass-border-subtle)] px-4 py-2 sm:px-5`}
+      className={`${className} min-h-14 flex-none items-center justify-between gap-3 border-b border-[var(--glass-border-subtle)] flex-wrap px-4 py-2 sm:px-5`}
     >
       {children}
     </div>

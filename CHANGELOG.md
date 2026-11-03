@@ -6,6 +6,275 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 
 ## [Unreleased]
 
+## [0.4.47]
+
+### Added
+
+- **Chet**, the global assistant, can receive text without opening a voice call. The former
+  Voice Analyst is now called Chet; its Runtime is configured under **Settings → This instance →
+  Voice → Chet → Runtime**. Chet shares that session with assistant-mode voice. Sent inputs,
+  observed voice transcripts, work receipts and results are kept on the machine running CCCC; unsent drafts stay
+  in the browser. A selected Group is included as context when a message is sent. An
+  unconfirmed result stays visible and is not automatically replayed. Replies to messages Chet
+  sends to a Group as Chet stay in the Group's chat and can reach Chet whether or not a call is
+  active, as the next entry describes; replies to handoffs that earlier versions sent under your
+  name can reach Chet only during an assistant voice call, and delivery is not guaranteed.
+  Adjacent Chet voice
+  transcripts can be expanded from a grouped row, with incomplete transcripts marked; when shown
+  with a result, the voice task wording is also expandable. Chet's written results retain a solid
+  rule at the left; its spoken transcripts appear as lighter lines marked with the voice icon. Concise and standard voice instructions
+  prefer a brief spoken account over reading a long result, while detailed mode and the user's
+  explicit spoken requests remain in effect.
+- **Chet in Groups**: a Group member can message Chet by choosing `@chet` as the only recipient,
+  with **Send** or **Send + Reply**; Mail is not available for Chet, and a member whose ID or title is
+  `chet` makes `@chet` ambiguous, so the send is refused. In the Web UI a CCCC administrator can
+  choose `@chet` in a Group's recipient row. Group messages that Chet can take up are queued as
+  turns of their own, after the requests you type or speak, and Chet is instructed to answer
+  questions and requests in the Group, while an acknowledgement alone needs no reply; its messages
+  there are labelled **Chet**, and replying to one without other recipients goes back to Chet.
+  Group messages enter Chet's usual session, which can also hold your own
+  conversation and other Groups' content; keeping those out of a Group, and leaving work outside a
+  Group to you, are instructions to the model, not isolation or a permission limit. Chet's
+  conversation lists each Group message with its sender, Group and time and opens it in its Group;
+  once Chet has finished, it links the reply it finds in the Group or says that none is seen yet.
+  While the conversation is closed, the Chet entry shows a dot for a new Group message, answer or
+  request that did not start; a browser that has never opened the conversation counts such items
+  already in history as new. Cancelling your own request leaves Group messages waiting for Chet in
+  its queue. During a call, a member's reply to a message Chet sent while the call was recording
+  can be read aloud; the recording state approximates which messages belong to the call. Chet does
+  not forward messages between Groups or send through Connect: those requests are refused rather
+  than sent under your name.
+- When the Web interface on the server changes, for example after an upgrade, an open page offers **Refresh page** and **Later**. The page checks when it reconnects to the server or comes back into view, and never reloads by itself: **Refresh page** first asks for confirmation, since unsaved changes on the page could be lost, and **Later** hides the notice until the interface changes again. Pages opened before this version cannot show the notice; reload them once after upgrading.
+- **‘Waiting for you’ indicators** under Appearance can turn off what marks requests waiting for your answer: the sidebar's counts, including the archived Groups' total and the one on the phone's sidebar button, and the Waiting for you filter inside each Group. Those requests then read as ordinary messages: one without a question is answered with the message's Reply, and one that asks a question still shows it so you can answer in place, without the Waiting for you frame, and an answer already being sent keeps its form until it is confirmed; browser notifications keep their own switch under Settings → Notifications. The indicators show by default; the choice is saved in the browser.
+- **Quick reply**: the **More** menu of a message from one of the Group's agents offers four ready replies, **Agree, go ahead**, **Explain why**, **Try another way** and **Give me choices**, each led by an emoji under the caption **Quick reply · sends immediately**. Choosing one sends it at once to that agent alone as a reply quoting the message, without the composer, and a notice confirms it. Chet's messages, messages from or sent to another Group or CCCC instance and questions answered in their own card have no quick replies. When CCCC cannot confirm that a quick reply was sent, the notice says so and offers **Retry**; a retry can send the reply twice.
+- **Pinned messages**: a message's menu offers **Pin message**, and a small pin follows the time of
+  a pinned message. The chat's **Pinned** tab shows how many messages the Group has pinned and lists
+  them in full, in conversation order, each with **Show in chat**; one unpinned there stays listed,
+  so it can be pinned again, until the tab is left or the page is shown again. Pins belong to the
+  Group and are kept by the daemon outside the ledger: everyone who uses the Group in the Web UI
+  shares them, and a page reads them again when the Group opens or the page becomes visible. A
+  read-only exhibit neither shows nor changes them, agents do not receive them in messages or tools,
+  and Copy Groups packages leave them out. A Group keeps up to 100 pins; a pin whose message can no
+  longer be read is reported and can be removed.
+- **Claude's confirmations in its terminal**: when a managed Claude agent cannot start until you
+  trust its workspace or accept Claude's disclaimer for `--dangerously-skip-permissions`, CCCC
+  opens Claude's own prompt in the agent's terminal, with the agent's settings, and never answers
+  it for you. The agent shows **Awaiting your confirmation in the terminal**, and the terminal
+  says what to do. Launching or restarting the agent opens that terminal; if you have moved to
+  another tab of the Group, a notice offers **Open confirmation terminal** while confirmation is
+  pending, and from another Group the notice names the Group and agent. After you accept, CCCC
+  tries to connect the managed session, and messages wait for it. If the prompt ends
+  without a connection, for example because it was declined or closed, automatic starts do not
+  reopen that prompt during this daemon run. Choose **Launch** or **Relaunch**, or start the Group
+  yourself, to retry. A daemon restart can also retry agents in a running Group; it does not grant
+  confirmation. Messages stay queued, and the Group's other agents still start. Pausing or
+  stopping the Group closes a waiting prompt. Before, an unaccepted disclaimer stopped the start
+  with instructions to run Claude by hand, accept, exit and retry; workspace trust already used the
+  terminal.
+
+### Changed
+
+- The Web interface has a new look, a pixel-terminal screen, light or dark with the theme. It replaces the previous look, with no choice to bring that back, and covers the whole interface, including the chat page, the task board, Settings, the frames around terminals and terminal history, headless traces, workspace files, the capability center, Web Model panels, the global Chet panel and its dock, a Group's Voice Secretary panel and its notes in the composer, presentations, dialogs, menus and notices. Surfaces are separated by thin rules rather than shadows, dialogs dim the page behind them without blurring it, and keyboard focus shows a dashed outline. On desktop the members' status is one centered row of icons over the end of the conversation, with no band of its own: the conversation ends with room for it, so the last message scrolls clear of the row, and text scrolled under it fades out behind the icons only, so the conversation stays in view on either side of them. On phones the members' bar, one touch key tall, at least 44px and growing with the text size, floats the same way, and while it shows, the key back to the latest message rises above it. Icons are pixel glyphs, mainly from Pixelarticons; runtime logos keep their existing artwork. In the chat, your messages sit on the right and agents' messages on the left, each as wide as its content, header and attachments included; in a wide reading column both keep the same room from the opposite edge. Each run of messages from one sender opens with a thin line that spans its first message, while messages that follow from the same sender are set apart by space alone; space inside a message is reduced so that it reads apart from the space between messages, a Markdown rule inside a message is a short mark, recipients and time are set a step lighter than the author, attachments follow the message's text with no rule between them, and a sender's insight follows the text and attachments, with its label and no rule above. On screens 768px and wider the conversation keeps a centered reading column, which **Message area width** under Appearance widens to **Wide** or **Full**; the choice is saved in the browser. With a centered column the scrollbar sits beside it and the key back to the latest message at its lower right, and the mouse wheel scrolls the conversation from the blank space on either side. On phones, a message's actions menu (⋮) ends its header line, so the text gets more room. The task board follows: tasks read as rows, the open one in reverse; on desktop the search, assignee and filter row stays pinned above the board, and on phones a pinned row of keys jumps between columns; search highlights title matches, keeps matching IDs visible, and shows excerpts for matches in other fields. Settings reads as one configuration page: the scope and the open page are set in reverse, fields are framed and actions are keys. **Body font** under Appearance sets most of the page's text in monospace, the default, or in a pixel font. Characters a font lacks fall back to other available fonts; this includes Chinese and Japanese characters in monospace, and some Japanese and Traditional Chinese characters in pixel. In the Japanese interface, pixel body text prefers the bundled Japanese glyphs where available. With a Group open, the page loads about 0.8 MiB of fonts, which the browser may cache, and the pixel body font adds 0.3 MiB; their licenses ship with the Web assets. Tested in Chromium on Linux; Safari, Firefox, Windows display scaling, macOS and phones still need acceptance testing.
+- The interface calls a Group's members **agents** instead of Actors, in the Web UI, CLI help, the terminal interface, the README and the guides. Commands such as `cccc actor add`, API and MCP fields such as `actor_id`, and links to the guides' existing sections are unchanged.
+- Activity, feedback and the composer's typing hint move in whole steps. A busy member's icon has a ring of pixel dots with a bright head stepping round it; the ring can light briefly when the page sees that work return to idle. When the page sees a member start needing your attention, its icon's double line in the waiting color blinks three times, then stays; **+N** takes the same line when a member behind it needs attention. Waits for sending, history, files, quotes, Web Model delivery, runtime detection and key refresh show a small pixel spinner once they last longer than a quarter of a second; until then, buttons keep their existing icon or label. In a headless agent's live trace, a block cursor can follow the newest text, though not after code blocks, tables and some other structures: solid while text arrives, blinking after a short pause, hollow after 10 seconds without new text. Reconnecting shows three filling dots, the composer's typing hint uses the block cursor, and the Voice Secretary level meter lights 16 segments. **Motion** under Appearance stills these; the system's reduced-motion setting does the same, and Appearance says so. The level meter keeps showing the live level.
+- The Chet control below the Group list and the title of Chet's panel show Chet as a pixel head drawn in the screen's ink; when something needs a look, the control shows an alert mark in its place, as before. The head blinks now and then and moves while Chet has work being sent, queued or carried out; **Motion** under Appearance and the system's reduced-motion setting hold it still, with its working face shown while that work remains.
+- When **Send + Reply** is chosen while @all or @peers is among the recipients, the composer now shows how to fix it below the recipients: remove @all and @peers, or clear the recipients to ask the Foreman.
+- Answers you give under a request, which agents receive as `Selected B: <label>` or `Other: <text>`, show that prefix in the interface language in the chat when the message has that recognized form. The stored message, copying and search keep the original text.
+- OpenCode agents show the official OpenCode mark, unchanged from OpenCode's repository. License notices for it and for the Bootstrap Icons, LobeHub Icons, Pi, Cline and Pixelarticons artwork used in the Web interface now ship with the Web assets. The unused Claude PNG logo is removed; Claude agents keep the same icon. The bundled Cline SVG now identifies the changes made to its source file.
+- Short times such as "5m ago" and "Oct 23" in the Agents tab and agent state, the context panel, the task editor, message search, Inbox, the Web Model panel and headless traces now follow the interface language, for example 5分钟前 in Chinese and 5分前 in Japanese. English keeps its familiar short forms.
+- The chat's floating ↓ button is named **Back to latest**, and its name and tooltip include the number of new messages, up to 99+; that count is the Group's own and can include messages outside the current filter. In a list too short to scroll it appears only with such a count. It steps aside while you write an answer to a request, so it no longer covers the answer's send key. Focusing an item in the message list cancels a pending forced jump to the bottom, so the browser can bring it into view; following new messages while you stay at the bottom works as before.
+- The answer box under a request grows with your answer up to a height limit, then scrolls; it fits again when the screen turns or narrows. On narrow screens its send key shows only the send mark, leaving the box more room, while the key's name and tooltip keep the words.
+- While a message is being sent, the send key's name and tooltip say **Sending…**.
+- Changing a chat filter keeps your place. While you read earlier messages, the message you were reading, the last one you clicked, tapped or reached with Tab while it remains on screen, or the one across the middle of the list once you move on, stays at the same height when the new view has it, as far as the view can scroll; if it does not, the first other message from your screen that the new view has stays put instead. Otherwise the nearest loaded message from that part of the conversation takes its place, shown from its top and briefly outlined. Following the latest messages still follows them, except that a message you clicked or tapped keeps its height in a view that has it; this also carries a message over from a list too short to scroll. A view you only look at, without scrolling or interacting with its messages, leaves your place unchanged, so switching back returns exactly where you were. **Waiting for you** and **Pinned** keep a message from your screen only when they list it, and otherwise open at their newest message. Messages that are not loaded, such as older ones a filter has not reached yet, cannot be kept. Before, a filter that lacked the message at the top of the screen opened at its newest message, and the place you had been reading was lost.
+- Message actions: **Reply**, **Forward** and a copy icon, which copies the message content as **Copy text** did, stay on the bar shown with a message, and **Copy link** moves into its **⋯** menu. With a mouse, the bar shows beside the message header while the pointer or keyboard focus is on the message, after the time or before your name, in the free space next to it, so showing it moves nothing. Where the conversation's column is too narrow for the bar, such as beside the files panel or at a large text size, the message menu (⋮) at the end of its header holds every action instead, as on touch screens. On touch screens, the message menu lists every action in the same order. Copying text or a link is confirmed by a notice in the interface language; before, the link notice was always in English, and copying text from the touch menu showed no confirmation.
+- In a filtered chat view, **Show in chat** (定位到聊天位置 in Chinese, 会話で表示 in Japanese) leads the bar shown beside a message's header where the column has room for it; otherwise, and on touch screens, it follows the message's time. It replaces **View context**, which sat in the message's **⋯** menu. It opens the message with the messages around it in the whole conversation, and **Back to filtered conversation** returns to the filtered view at the place you were reading; before, the filtered view reopened at its newest message. If the message cannot be opened, a notice says so; before, the view stayed as it was without a word. Opened from the keyboard, focus moves to **Back to filtered conversation** instead of being lost. The opened view's status line no longer calls the nearby messages "context".
+- **Relay** is now **Forward** in English and 転送 in Japanese, including its dialog; Chinese already said 转发. A message that came from another Group is marked **From** that Group instead of **Relayed from** it, because messages sent directly from another Group, delegation requests and Connect messages carry the same mark as forwards. An agent's delegation request to another Group says **Delegated to** instead of **Relayed to**. The dialog's group search and its empty result are now translated into Chinese and Japanese.
+- On phones, the button for adding an agent stays in place beside the members instead of scrolling away with them.
+- In Settings, the ⓘ beside **This group** and **This instance** is now a key of its own that opens with a click, a tap or the keyboard, on desktop and on phones. It explains both scopes, including why **This instance** may be locked, and says so when no Group is open. Settings info popovers take keyboard focus when they open, stay within the screen and scroll when their text is long; Escape returns to the ⓘ. Web Access choices now expose their selected state to assistive technology.
+- Capability center: a built-in capability's details now offer one **Disable**, not two. **Disable** turns off its Group-wide enablement, which applies to everyone in the Group, and your own use of it there (for example, after a slash command). Agents keep their own use. If only part of it can be turned off, or it is still enabled afterwards, the page says so. If the capability state cannot be read, the page reports the error and keeps the last state it could read until it can be read again.
+- Web Model delivery choice: on touch screens its two keys are at least 44px wide and tall; with a mouse they are unchanged. While the choice is unavailable (read-only, or saving), it no longer reacts to the pointer.
+- Opening an archived Voice document scrolls to it and moves keyboard focus there.
+- Voice Secretary: on touch screens, the new document name field is at least 44px tall.
+- **Connect existing sessions** moved from the end of the Group list to a **Connect sessions** key above the Group list, or an icon under **New** when the sidebar is collapsed, so it stays in view however many Groups there are and no longer looks like a Group. The sidebar no longer shows a **Working Groups** heading; screen readers still name the list.
+- **Connect existing sessions** starts with the **Target Group** and the sessions to choose. Its setup steps show one app at a time, chosen under **App to connect**, with an example prompt to start from, and troubleshooting has a section of its own. Both stay folded, except that the setup steps open by themselves when the dialog first finds no sessions; when a listed session cannot take messages yet, the dialog offers **See troubleshooting**.
+- Creating a folder while choosing one, for a new Group, an agent's working folder or a Copy Groups import, keeps the typed name and says why a name was refused: it already exists, it is not a valid folder name, or you may not create a folder there. If the new folder cannot be opened, the picker says so and offers **Retry**. After a folder fails to open in Copy Groups, **Use this folder** waits until a folder opens; before, it could use the folder shown before.
+- **Settings and more** opens with your account, where your access includes it, and the full settings entry, which no longer carry arrows because they open dialogs, and ends with Appearance. Theme and language stay in view; body font, message area width, motion, ‘Waiting for you’ indicators and text size fold under **More appearance settings**, folded each time the menu opens.
+- In the Web chat, a message addressed only to you now names you as its recipient, as a message to an agent names the agent. Before, it showed no recipient, so where agents also write to each other you had to infer from a missing label that a message was for you; it now shows **→ You**, and a recipient list that includes you says **You** instead of `user`. A read-only exhibit, whose viewers are not the Group's user, shows **User**.
+- Enlarged message images and videos open over the whole window instead of a fixed-width panel. In image and diagram viewers, Ctrl/⌘ + wheel and pinch zoom at the pointer while the plain wheel still scrolls, a click switches between fit and actual size (double-tap on touch screens), and rendered diagrams and workspace SVG previews can grow to fill the view. A click on the empty area around an enlarged message image closes it; releasing a drag does not.
+- Web development tooling now overrides oxfmt's tinypool dependency from 2.1.0 to 2.1.2. This affects the development formatter dependency, not the shipped Web runtime.
+- `cccc_task` lists planned and active tasks as one short row each, with counts for every status, instead of returning every task with its notes, checklist and outcome. A row shows the task's id, title, status, owner, priority, blockers, checklist progress, revision and update time; `task_id` reads one task in full. `status`, `query` (which also finds done tasks), `attention`, `include_archived`, `limit` and `offset` choose and page what is listed. In a probe group of 60 tasks, 15 of them open, the default list falls from about 98,000 characters to about 2,900.
+- `cccc_coordination` no longer repeats the task list and the board. Its attention lists use the same short rows, at most 10 per list, with the full count beside a longer list. In the same group its result falls from about 196,000 characters to under 300.
+- Bootstrap suggests `cccc_context_get(detail="overview")` and `cccc_task()` as the next reads, and the help says to read a task in full before updating its notes or checklist.
+- MCP receipts from `cccc_message_send`, `cccc_message_reply`, `cccc_tracked_send` and `cccc_file_send` no longer echo text or insight that exactly matches what the caller sent; `mcp_omitted_fields` names each omission. Text the daemon changed, such as an expanded question, is still returned, and the ledger keeps every message in full.
+- The daemon's unfiltered `task_list` result includes `tasks_version`, so a full list and its version come from the same read.
+- The chat's **Mail** and **Requests** tabs make way for **Pinned**: the tabs are now **Waiting
+  for you** (while requests wait for you), **All**, **Pinned** and **User-related**. Mail and
+  requests still carry their marks in the conversation, but they can no longer be listed by type.
+  A Group last viewed under one of the removed tabs opens under **All**.
+- A web link (`http:`, `https:` or `//`) in a message, or anywhere else the Web UI renders
+  Markdown without its own link handling, opens in a new tab instead of replacing the CCCC page,
+  including a full link to CCCC itself. Relative links, in-page anchors and `mailto:` links work
+  as before.
+
+### Removed
+
+- The Web `delegate_contact` route and daemon `relay_user_delegation` operation, which sent a
+  human's request under a Group member's identity. Use the Web `send_cross_group` route to send as
+  `user`; replies return to the human sender instead of a relaying member.
+
+### Fixed
+
+- Images you sent from this page no longer turn into **Image preview unavailable** when the
+  conversation shows them again more than a minute after sending, for example after changing the
+  chat filter, opening **Show in chat** or scrolling back through a long conversation. They kept
+  loading the page's temporary copy of the file, which is released a minute after the upload is
+  confirmed, until the page was reloaded; they now load the stored copy.
+- On phones, touch-scrolling toward newer messages now also hides the header and filters when the
+  gesture starts on a message link or action, or after a filter was tapped. Hiding the members' bar
+  no longer removes the list's bottom space, which pulled a reader near the latest message to the
+  end and brought the header back. A deliberate touch scroll moves focus out of the main message
+  box, so the browser can dismiss its keyboard; a draft stays, and an input method's composition in
+  progress or an answer being written under a request is left alone. Scrolling done by the page,
+  such as for new messages, does not move focus.
+- When an agent's terminal is replaced while a queued message is being delivered, CCCC no longer
+  sends that submission to the new terminal on the strength of checks made on the old one.
+- Building the Web interface from source on a case-insensitive file system, as macOS and Windows
+  use by default, no longer resolves Chet's conversation view to a file of the same name in
+  other letter case.
+- A filtered conversation with older history offers **Load older results** above the messages,
+  even when the current matches do not fill the screen or an older page contains no matches.
+  A short unfiltered conversation with older history offers it too. Before, a nonempty list could
+  leave earlier messages unreachable because loading them depended on scrolling to the top.
+- Web access tokens restricted to certain Groups could access, change or delete other Groups.
+  Authorization now consistently checks the Group identified by the route.
+- Copy Groups excludes Weixin login credentials, DingTalk reply sessions, pending IM binding keys
+  and legacy actor secrets, as well as in-progress temporary files in the Group root and its
+  state directory. Previously these could be included in a copy package even though credentials
+  and temporary authorization state are meant to stay on the original instance.
+- The Web routes for sending, replying, sending attachments and sending to another Group now send
+  as the authenticated human's `user` identity and reject a caller-supplied agent or Chet author
+  and internal runtime authority fields. Previously a caller with Group access could claim an
+  agent's identity through the request body.
+- MCP `cccc_file` and `cccc_file_send` accept absolute paths inside the effective workspace,
+  including for Connect attachment sends. Paths outside that workspace and symlinks that escape
+  it are still rejected.
+- The MCP tool `cccc_message_send` now refuses `event_id` and `reply_to` and points to
+  `cccc_message_reply`, which answers an existing message. Before, a send that named a message
+  went out as a reply and dropped an explicit mode, so a request for a reply arrived as a plain
+  message. Blank values still count as absent.
+- Opening a message, for example from a notification, a message link or search, now shows it in
+  the live conversation when it is already loaded and no filter is on, so new messages keep
+  arriving. Before, every opened message showed a fixed excerpt that new messages never reached
+  until **Return to latest** was chosen. A message that is not loaded still opens on its own:
+  scrolling down past its end, or **Load newer messages**, loads the messages that follow, and
+  scrolling on from the newest returns to the live conversation when no filter is on. Earlier
+  messages cannot be loaded there, which the notice now says instead of "Context is truncated".
+  **Return to latest** is now also offered in the read-only exhibit view. While you read earlier
+  messages, a new message no longer sends the view to the top when the conversation reaches 80
+  messages, and the floating **Back to latest** button returns to the live conversation as **Return
+  to latest** does, keeping the new-message count until the live conversation is at or near its end.
+  Reaching the bottom of the older-message window, or coming back to that window from a workspace
+  file, no longer clears the count.
+- An opened message now appears just below the header and is held there briefly as the view settles, unless you scroll first. Before, messages settling above it could push it up, hiding its sender line, or on a phone the whole message.
+- On phones, opening a message, for example from a notification, and opening or reloading a page on a Group show the conversation instead of covering it with the Group list. Opening the Web UI without a Group still shows the list first.
+- A notification click is less likely to lose its message when an open page or the browser is
+  slow to respond. The notification worker now hands the message to the open page even when
+  focusing or finding that page takes longer than the brief time after a click, and the page acts
+  on a click that reaches it up to a minute late. Before, a slow lookup or focus could leave the
+  worker without handing off the click, and the page ignored one delivered over 10 seconds after
+  the worker's deadline.
+- The answer box under **Other** in a question card sends with Ctrl+Enter, or ⌘+Enter on a Mac, as
+  the composer does. While an input method is composing, Enter stays with it.
+- Web Model: a Codex-style `cccc_apply_patch` with an **Add File** or **Move to** target already
+  present when the patch is prepared now rejects the conflict before writing any section.
+  Previously, it could overwrite the target on Windows or apply earlier sections before failing
+  on Linux.
+- Windows: for PTY agents, cmd.exe now starts in the intended workspace when its local drive path
+  can be safely simplified. CCCC gave the PTY the workspace as a `\\?\` path, which cmd.exe does not
+  accept as a working directory, so agents started through cmd.exe began in the Windows directory.
+  Workspace paths shown to agents in bootstrap, the startup prompt, the context line of later
+  messages and `cccc_repo` drop the prefix in the same cases. UNC paths, reserved names and paths
+  over the legacy length limit keep it, so an agent that would start through cmd.exe there, directly
+  or for a `.cmd` or `.bat` shim, is now refused with an explanation instead of starting in the
+  Windows directory or failing with an invalid directory name. The check goes by the name of the
+  program CCCC starts: a custom command processor set in ComSpec, or cmd.exe started by the program
+  itself, is not checked.
+- Windows: the global secretary no longer stops at its permission check with "This Codex version
+  did not confirm the secretary permission profile". Codex reports the secretary's workspace
+  without the `\\?\` prefix of the path CCCC gives it, and CCCC compared the two as text. CCCC now
+  resolves the reported path and compares it with the workspace; a relative path or one that
+  cannot be resolved still fails the check. Checking that a Hermes session belongs to the
+  workspace before resuming it compares the directory the same way.
+- The read-only exhibit view now refuses a connection to the Voice Secretary's transcription before
+  it starts, as it refuses other changes; before, only the recording lease check stopped it.
+- Voice lifecycle and Web Access: applying a saved Web binding now stops the active Voice call and Chet Runtime before restarting Web. If cleanup cannot be confirmed, the current Web remains available and the new binding is not yet active; retry **Apply now** or start Voice again to retry cleanup.
+  - Voice Stop, Chet session reset, and Runtime settings replacement keep track of resources that still need cleanup, including when a request is interrupted. A new Voice start or Web Apply requires the earlier cleanup to be confirmed, or reports that Voice is busy or recovery is pending. The Web interface explains these states in English, Chinese and Japanese.
+  - On Unix, the Web host uses separate process recovery records for Voice when reusing an independently running daemon. If a previous Web process left resources whose cleanup cannot be confirmed, Web stays available while Voice waits for recovery. See the [Web UI guide](https://chesterra.github.io/cccc/guide/web-ui) for retry and diagnostics.
+  - When CCCC cannot confirm that processes from an earlier Web or daemon run have ended, the Voice error offers **Review earlier processes**, and the Secretary panel shows **Review** while the daemon's records wait. The review lists each record and why CCCC is still waiting; you can check a record again or accept it. Accepting stops CCCC waiting for that record but does not stop the old work, which may still change files or send requests that cost money. **Accept all** accepts two or more records one at a time and stops when anything changes. Records that need offline review show the `cccc daemon process-recovery` commands. This replaces removing records under `CCCC_HOME/web-processes` by hand.
+  - On Linux, process cleanup now prefers stronger process identity and leaves records it cannot confirm for review; some systems still rely on approximate matching, which can misjudge. When a trusted source shows that a record comes from an earlier boot, CCCC releases it without signalling, on the premise that one `CCCC_HOME` is used on one host at a time. On macOS, the crash watchdog is unchanged, but the next start no longer stops leftover process groups by approximate matching: it releases a record from this version once its process and its process group have both ended, or a record from an earlier version once its process group has ended, and keeps the others for review. This release was not verified natively on macOS or on older Linux kernels.
+- Local ASR models: a failed update no longer marks a working model as failed. If an update fails, the installed model is kept, with the error shown beside it when CCCC can record it; if CCCC stops during an update, it is kept too. It stays usable as long as it has every file the model requires. Before, a failed update left the model's files intact but showed it as failed. Each install now unpacks into a new directory and switches to it in one atomic step, only once that directory holds every file the model requires.
+  - Downloaded archives are deleted once unpacked, unless the model requires the archive file itself; the live model, for example, takes about 1.1 GB instead of 2.1 GB after its next install or update. A replaced version is deleted when the next install starts, after an install completes, or when CCCC Web starts, but not while a recognition in progress still uses it. Downloading, unpacking, writing and removing models no longer occupy the Web server's async workers.
+  - If a model's `install-state.json` cannot be read or is damaged, the model shows as failed instead of not installed, and installing does not overwrite the file: restore read access if it is intact, or reinstall, which replaces the model's files. Model IDs in a local `config/voice-models.json` must now start with a lowercase letter or digit and must not end with `.`. If that file exists but cannot be read, model operations report the error instead of quietly using only the built-in models.
+  - Earlier versions of CCCC show a model installed or updated by this version as not installed; after a downgrade, install it again.
+- The product name at the top of the sidebar now hides when it does not fit, for example at 125% text size, instead of being cut off.
+- On short screens, the header's settings menu can scroll to **All settings**. In message search on narrow screens, the sender filter moves to its own line instead of shrinking to its arrow.
+- In raw headless traces, queued, stalled and cancelled turn and control events no longer appear running; on narrow cards, titles and details wrap instead of overlapping.
+- In headless traces, a tool call that has finished is no longer marked as successful: a Pi agent's failed calls also finish, with a summary such as `bash failed`. For the calls it lists, the compact trace now shows such a summary on a line of its own when it says more than the call's title and tool name; previously, it showed the summary only in the tooltip.
+- Recorded tool calls made before an agent starts writing now appear in its headless trace when the text does, as long as the calls are in recent history. After a reload, both calls and text must be in the recent history the Web loads.
+- In the expanded agent view, long names no longer run under Close: they are truncated, with the full name in the tooltip, and the role label stays on one line. On touch screens, Close is at least 44px.
+- The agent quick-controls menu fits the available height and scrolls on short screens.
+- In the composer, the `/` menu narrows to fit narrow screens instead of scrolling its container sideways.
+- Workspace: the name field when creating, renaming or moving an entry shows its border again. A long path or error now scrolls on short screens, so the title, the close button and the actions stay reachable.
+- The Group connections dialog stays usable on short, narrow screens and with long Group names: the content scrolls, and on narrow screens the two connection modes stack.
+- The Voice document archive scrolls when it holds many documents, including when an error is shown.
+- On narrow screens, the Chet Runtime setup explanation wraps and scrolls instead of being squeezed out of view; its Cancel and Submit controls show icons, and the output keeps a minimum height.
+- Voice Secretary on narrow screens: the record key's label wraps instead of running past the panel, and while recording, the target document's name wraps (long names too) while the live text gives way. In the composer, the recording note keeps **Open document** in view.
+- Voice Secretary on narrow screens: scrolling a read-only document or transcript continues into the surrounding panel at its edge, so the request input below can be reached; the editor keeps its own scroll.
+- Voice Secretary: the compact recording notice wraps instead of being cut off, and when space is tight, a transcript entry's source, time and details wrap without being squeezed out.
+- Voice Secretary: an Ask whose outcome could not be confirmed is marked like one that needs your input (in the waiting color instead of grey), since it waits for you to confirm before it is retried.
+- On narrow screens, a presentation opened from a quote in the chat shows **Jump to chat** and **Reply in chat** as icon keys, so its title is no longer squeezed out of the header and the header keys stay on screen.
+- In the Voice Secretary editor, saving a document that changed since it was opened no longer silently overwrites the newer text. Your draft stays, and you can load the latest version or, after confirming, overwrite it with your draft; a document that moved or is no longer available cannot be overwritten from the old draft. Text typed while a save or request is in progress is kept, and an unsaved draft survives switching Groups in the same page. For SDK and IPC callers, daemon operation `assistant_voice_document_save` accepts `expected_content_sha256` and `expected_target_id`, sent together with `content` and taken from the document as last read; a changed file returns `voice_document_conflict` with its `current_sha256`, and a changed storage target returns `voice_document_target_conflict`, in both cases without writing. Save results, and `assistant_voice_document_list` with a `document_path`, carry the `content_target_id` to send. Calls without these fields save unconditionally, as before.
+- The Voice Secretary editor keeps leading and trailing whitespace, empty documents and consistent CRLF or CR line endings when a document is edited and saved.
+- Forward keeps the source message and form reachable on short screens, and long recipient IDs can wrap within the dialog. When there is room on a narrow screen, the selected recipient is visible alongside the destination when Forward opens; the source remains reachable by scrolling back.
+- Reselecting the current destination no longer clears its loaded members. When a selection includes individual members and the destination changes, Forward clears the selection and asks for a new choice before sending; group selectors remain selected when no individual members were selected.
+- Forward now describes an empty selection as the destination group's default recipients. Reset still uses that default, which may be the foreman or a broadcast, according to the destination group's settings. When Forward first opens it still explicitly selects `@all`.
+- On screens narrower than 640px, a presentation's **Quote** key and its snapshot key now sit in the row of actions above the card instead of floating over its lower corner, where they could hide part of an image or web page, and Markdown and table cards no longer keep empty space for them. In a tight row Quote shows only its icon, and the viewer's icon keys keep a 44px touch size at larger text sizes, so the action keys can stay on one line.
+- On screens up to 480px tall, such as a phone turned sideways, the presentation viewer leaves the room to the card: the slots, the card's details and its keys fold behind one **Slots and details** key, a window fills the whole screen inside the safe-area insets the browser reports, and **Quote** and the snapshot key sit with the details instead of floating over the card. A failed refresh of a linked file still shows above the card while the details are folded. In Chrome's touch emulation at 640×360, an image in a window grew from about 55×31 to 341×192 pixels.
+- Switching back to a presentation slot opened before, opening the side panel's card in a window, or opening a read-only viewer from an old quote of a slot that has since been emptied, keeps keyboard focus in the viewer instead of dropping it to the page, and each open window is named after its own card. A window shown again now appears at once, so focus can enter it; it still fades out.
+- In the Web chat, messages relayed in a row from another instance by different members each show their author. Before, a message that followed within three minutes could fold under the previous member's header, as if that member had written it.
+- The presentation viewer's "Quoting…" text is now translated into Chinese and Japanese.
+- Certain long Markdown messages and documents with many links take less time to display.
+- In the composer, a recipient chosen at the edge of the recipient row stays in view when the clear button appears.
+- On narrow screens, code block and diagram headers give their actions more room, so a copy confirmation no longer stacks one character per line.
+- Returning to an open Group, by switching back to its tab or window, now checks whether the live connection has gone quiet or fallen behind the server's latest event. If so, the page starts reconnecting, and a reconnect that was waiting out its delay starts immediately. A successful catch-up can retrieve the chat messages missed in between. While you read earlier messages, messages retrieved this way count towards **Back to latest**, once each, even if their live event also arrives or a sender filter loaded them first. Before, a stalled connection could stay silent until its 45-second watchdog fired, and retrieved messages added nothing to the count.
+- The README quick start, in English, Chinese and Japanese, and the parallel-tracks example in the use-cases guide added an agent named `foreman`, an ID CCCC reserves, so that step failed on every new setup. They now add `lead`, which as the first agent becomes the foreman, and the README sends to it with the `@foreman` selector; a bare `--to foreman` names no recipient.
+- Adding an agent with a reserved ID, such as `foreman`, `user` or `all`, now says that the ID is reserved. Before, it said the ID had to be letters or numbers, which it already was.
+- `cccc status` shows each Group's first member as its foreman, as the Web UI and the terminal panel do. Before, it read a role field that CCCC leaves empty when it adds or updates an agent, so every member was listed as a peer; it also no longer lists internal helpers.
+- Before any working group exists or is selected, the Web chat says to select one, or to create one where you may, and shows no message box. Before, it offered the message box and the Send key, and sending did nothing.
+- When the requested Web address is already in use, CCCC now reports the host and port and suggests `--port`. Before, it showed only the operating system error.
+- A Web Model peer, such as a ChatGPT or Grok Web Model agent that is not the foreman, can set and change reminders addressed to itself through `cccc_automation`, as other peers can. Its tool route refused every built-in capability tool to Web Model peers, so the call failed with "requires a Web Model foreman actor". The daemon still decides each change by role: reminders to others or the whole Group stay with the foreman or the user, scheduled Group or agent control stays with the user, and the other built-in capability tools that the Web Model schema does not list stay foreman-only for Web Model agents.
+- Two CLI daemon test fixtures now run in child processes, so their process-wide guard cannot retain a deleted temporary home in the test runner and break a later process launch. This changes test isolation only.
+- In Chinese and Japanese, about forty labels and messages that showed English or their internal
+  key name are now translated. They include the add-agent form's ID and role labels, the local
+  speech-recognition model settings, the message-template editor in automation rules, and the
+  Presentation heading on quoted messages. The Japanese local speech-recognition settings were also
+  rewritten in plain Japanese.
+- Local speech-recognition components show their state in words, such as Ready or Installing, in
+  all three languages, instead of internal values such as `not_installed`.
+- A searchable list with no match says so in the interface language; Chinese and Japanese showed
+  "No matching results" in English.
+- In the `/` menu, CCCC's own commands, `/install` and `/cccc-self-evolution`, are described in
+  Chinese and Japanese; other skills keep the description they come with.
+- The Notebook settings no longer show "Authentication browser is idle." before any Google sign-in
+  has started.
+- When Codex is not installed but another command-line runtime is, the add-agent form opens on an
+  installed one, such as Claude Code, instead of on Codex with Add disabled. A runtime, command or
+  Runtime Profile you choose yourself is kept, also when detection finishes after you have started.
+- The `cccc_task` and `cccc_coordination` tool descriptions now say which updates replace content
+  whole: a task's notes and checklist, and the brief's constraints. For a task they also say to
+  list it first and send the combined content with its revision. Sending only a new paragraph, a
+  changed checklist item or a new constraint replaces the existing content.
+
 ## [0.4.46]
 
 ### Added

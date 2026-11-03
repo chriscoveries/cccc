@@ -1,4 +1,5 @@
 import type { ReactNode, Ref } from "react";
+import { CloseIcon } from "../Icons";
 import { getModalOverlayStyle } from "./modalOverlayStyle";
 
 interface ModalFrameProps {
@@ -54,19 +55,9 @@ export function ModalFrame({
       disabled={closeDisabled}
       className={`flex min-h-10 min-w-10 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded-lg border border-[var(--color-border-primary)] bg-[var(--glass-panel-bg)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--glass-tab-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--color-border-focus)] disabled:cursor-not-allowed disabled:opacity-50 ${floatingCloseButtonClassName}`}
       aria-label={closeAriaLabel}
+      data-modal-close
     >
-      {closeIcon || (
-        <svg
-          className="h-4 w-4"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={2.5}
-          aria-hidden="true"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-        </svg>
-      )}
+      {closeIcon || <CloseIcon className="h-4 w-4" aria-hidden="true" />}
     </button>
   );
 
@@ -75,13 +66,15 @@ export function ModalFrame({
       className={
         inline
           ? `relative flex h-full min-h-0 min-w-0 flex-col ${isOpen ? "" : "hidden"}`
-          : `fixed inset-0 z-50 flex items-stretch justify-center p-0 transition-[opacity,visibility] duration-200 sm:items-center sm:p-4 ${
+          : `fixed inset-0 z-50 flex items-stretch justify-center p-0 duration-200 sm:items-center sm:p-4 ${
+              // A window shows at once, so focus can enter it on the frame it opens;
+              // it stays visible while it fades out.
               isOpen
-                ? "visible opacity-100 animate-fade-in"
-                : "pointer-events-none invisible opacity-0"
+                ? "visible opacity-100 animate-fade-in transition-opacity"
+                : "pointer-events-none invisible opacity-0 transition-[opacity,visibility]"
             }`
       }
-      style={getModalOverlayStyle({ inline, isOpen })}
+      style={getModalOverlayStyle({ inline })}
       aria-hidden={isOpen ? undefined : true}
       inert={!isOpen ? true : undefined}
     >
@@ -108,6 +101,7 @@ export function ModalFrame({
       >
         {hasHeaderContent ? (
           <div
+            data-modal-header
             className={`flex flex-shrink-0 items-center justify-between gap-4 border-b safe-area-inset-top border-[var(--glass-border-subtle)] ${surface === "solid" ? "px-4 py-3 sm:px-5" : "px-5 py-4 sm:px-6 sm:py-5"} ${
               surface === "solid" ? "bg-[var(--color-bg-primary)]" : "bg-[var(--glass-panel-bg)]"
             } ${headerClassName}`}

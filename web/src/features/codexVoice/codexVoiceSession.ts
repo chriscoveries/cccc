@@ -21,11 +21,13 @@ import {
   boundedText,
   failure,
   failureCode,
+  failureRecoveryOwners,
   normalizedErrorCode,
   RealtimeTranscriptAccumulator,
   realtimeTranscriptUpdate,
   realtimeProviderError,
   shouldForwardProviderEvent,
+  type TranscriptFrame,
 } from "./codexVoiceProtocol";
 import { CodexVoiceProviderChannel } from "./codexVoiceProviderChannel";
 import { CodexVoicePeerMonitor } from "./codexVoicePeerMonitor";
@@ -174,7 +176,7 @@ export class CodexVoiceBrowserSession {
         signal: requestAbort.signal,
       });
       this.requestAbort = null;
-      if (!response.ok) throw failure(response.error.code);
+      if (!response.ok) throw failure(response.error.code, response.error.details);
       if (this.stopping) {
         // Abort can lose to a completed HTTP response. Release only this
         // generation; it must not occupy the lease or stop a newer call.
@@ -183,6 +185,7 @@ export class CodexVoiceBrowserSession {
         return;
       }
       this.call = response.result.call;
+      this.transcripts.bindCall(this.call.generation, this.call.mode === "assistant");
       this.analyst = response.result.analyst;
       this.callbacks.onCall(this.call);
       this.callbacks.onAnalyst(this.analyst);
@@ -211,7 +214,10 @@ export class CodexVoiceBrowserSession {
       // A cancelled startup is finished. Rejecting it later would let its
       // controller failure handler interfere with a newly started call.
       if (this.stopping) return;
-      this.callbacks.onError(failureCode(error));
+      const recoveryOwners = failureRecoveryOwners(error);
+      if (recoveryOwners.length)
+        this.callbacks.onError(failureCode(error), undefined, recoveryOwners);
+      else this.callbacks.onError(failureCode(error));
       this.callbacks.onPhase("failed");
       await this.stop({ notifyPhase: false });
       throw error;
@@ -274,9 +280,13 @@ export class CodexVoiceBrowserSession {
       });
     }
     this.sendServerMessage({ type: "provider_receipt", ...this.providerChannel.receipt() });
+    // Turns cut off by the end still belong in history, marked as unfinished.
+    this.sendTranscripts(this.transcripts.takeUnfinished());
     this.sendServerMessage({ type: "stop" });
     this.eventSocket?.close();
     this.eventSocket = null;
+    if (this.transcripts.abandonOffered())
+      this.callbacks.onConversation?.(this.transcripts.history());
     this.providerChannel.close();
     this.peer?.close();
     this.peer = null;
@@ -314,6 +324,10 @@ export class CodexVoiceBrowserSession {
       }
       case "notification_status":
         this.callbacks.onNotificationPaused?.(message.paused === true);
+        break;
+      case "transcript_receipt":
+        if (typeof message.id === "string" && this.transcripts.receipt(message.id, message.result))
+          this.callbacks.onConversation?.(this.transcripts.history());
         break;
       case "provider_command":
         this.providerChannel.send(
@@ -375,8 +389,12 @@ export class CodexVoiceBrowserSession {
   private async handleProviderMessage(data: unknown): Promise<void> {
     let text: string;
     if (typeof data === "string") text = data;
-    else if (data instanceof Blob) text = await data.text();
-    else if (data instanceof ArrayBuffer) text = new TextDecoder().decode(data);
+    else if (data instanceof Blob) {
+      // RTC channels default to ArrayBuffer; Grok's WebSocket exposes binary
+      // frames as Blob, while its JSON events use text frames. A transport that
+      // supplies JSON as Blob must preserve arrival order across this decode.
+      text = await data.text();
+    } else if (data instanceof ArrayBuffer) text = new TextDecoder().decode(data);
     else return;
     // Blob decoding can finish after orderly stop. A late event must not
     // overwrite the stopped/failed call's status or the next call's UI.
@@ -435,6 +453,7 @@ export class CodexVoiceBrowserSession {
           this.callbacks.onPhase(transcript.final ? "listening" : "speaking");
       }
     }
+    this.sendTranscripts(this.transcripts.takeFinished());
     if (shouldForwardProviderEvent(event, provider)) {
       const value = asRecord(event);
       const id = provider === "grok" ? value?.call_id : asRecord(value?.item)?.id;
@@ -460,6 +479,15 @@ export class CodexVoiceBrowserSession {
 
   private sendServerMessage(message: unknown): boolean {
     return this.eventSocket?.send(message) || false;
+  }
+
+  /** Offers turns to Chet history; one the socket cannot take was never sent. */
+  private sendTranscripts(frames: TranscriptFrame[]): void {
+    if (!frames.length) return;
+    for (const frame of frames) {
+      if (!this.sendServerMessage(frame)) this.transcripts.receipt(frame.id, "not_saved");
+    }
+    this.callbacks.onConversation?.(this.transcripts.history());
   }
 
   private async fail(code: string, providerCode?: string): Promise<void> {

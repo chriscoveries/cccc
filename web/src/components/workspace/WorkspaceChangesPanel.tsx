@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { GitBranch, File, Folder } from "lucide-react";
+import { LcdIcon } from "../Icons";
 import type { WorkspaceChange } from "../../services/api/workspace";
 import type { WorkspaceFilesController } from "./useWorkspaceFiles";
 
@@ -14,7 +15,7 @@ export function WorkspaceChangesPanel({ files }: { files: WorkspaceFilesControll
     );
   if (changes.error)
     return (
-      <p role="alert" className="break-words p-3 text-sm text-rose-600">
+      <p role="alert" className="break-words p-3 text-sm text-rose-600" data-status-tone="error">
         {changes.error}
       </p>
     );
@@ -48,7 +49,7 @@ export function WorkspaceChangesPanel({ files }: { files: WorkspaceFilesControll
   return (
     <div className="min-h-0 flex-1 overflow-auto py-2">
       <p className="flex items-center gap-2 px-3 text-xs">
-        <GitBranch className="h-3.5 w-3.5 shrink-0" />
+        <LcdIcon icon={GitBranch} glyph="git-branch" className="h-3.5 w-3.5 shrink-0" />
         <span className="truncate" title={status.branch}>
           {status.branch}
         </span>
@@ -57,7 +58,7 @@ export function WorkspaceChangesPanel({ files }: { files: WorkspaceFilesControll
         {t("workspaceGit.savedOnly")}
       </p>
       {status.limited && (
-        <p role="status" className="px-3 py-2 text-xs text-amber-600">
+        <p role="status" className="px-3 py-2 text-xs text-amber-600" data-status-tone="warning">
           {t("workspaceGit.limited")}
         </p>
       )}
@@ -86,9 +87,9 @@ export function WorkspaceChangesPanel({ files }: { files: WorkspaceFilesControll
                 className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-[var(--glass-tab-bg)] aria-pressed:bg-[var(--glass-tab-bg)] sm:py-1.5"
               >
                 {entry.directory ? (
-                  <Folder className="h-3.5 w-3.5 shrink-0" />
+                  <LcdIcon icon={Folder} glyph="folder" className="h-3.5 w-3.5 shrink-0" />
                 ) : (
-                  <File className="h-3.5 w-3.5 shrink-0" />
+                  <LcdIcon icon={File} glyph="file" className="h-3.5 w-3.5 shrink-0" />
                 )}
                 <span className="min-w-0 flex-1 truncate">{entry.path}</span>
                 <span className="shrink-0 font-mono text-[var(--color-text-secondary)]">

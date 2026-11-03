@@ -2,7 +2,13 @@ import type { ReactNode } from "react";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ChevronRight, Folder, FolderOpen, Pencil, X } from "lucide-react";
+import { Folder, FolderOpen } from "lucide-react";
+import {
+  ChevronRightIcon,
+  LcdIcon,
+  SecretClearIcon,
+  SecretEditIcon,
+} from "../../../components/Icons";
 import { IconButton } from "../../../components/ui/icon-button";
 import type { VoiceFolder } from "../../../services/api/voiceDocumentLibrary";
 import type { AssistantVoiceDocument } from "../../../types";
@@ -107,6 +113,7 @@ export function SortableFolder({
     >
       <div
         data-voice-folder
+        data-voice-folder-drop={highlighted || undefined}
         className={classNames(
           "group/folder flex min-w-0 items-center rounded-lg pr-1 transition-colors",
           highlighted
@@ -133,12 +140,20 @@ export function SortableFolder({
               : "text-gray-800 focus-visible:ring-black/25",
           )}
         >
-          <ChevronRight
+          <ChevronRightIcon
             size={14}
+            strokeWidth={2}
+            absoluteStrokeWidth={false}
             aria-hidden="true"
             className={classNames("shrink-0 opacity-50 transition-transform", open && "rotate-90")}
           />
-          <FolderIcon size={15} aria-hidden="true" className="shrink-0 opacity-70" />
+          <LcdIcon
+            icon={FolderIcon}
+            glyph="folder"
+            size={15}
+            aria-hidden="true"
+            className="shrink-0 opacity-70"
+          />
           <span className="min-w-0 flex-1 truncate pl-0.5">{folder.name}</span>
           <span className="shrink-0 px-1 text-xs font-normal text-[var(--color-text-muted)]">
             {count}
@@ -149,14 +164,14 @@ export function SortableFolder({
           disabled={busy}
           onClick={onRename}
         >
-          <Pencil size={13} />
+          <SecretEditIcon size={13} />
         </FolderAction>
         <FolderAction
           label={t("voiceFolderRemove", { defaultValue: "Remove folder" })}
           disabled={busy}
           onClick={onRemove}
         >
-          <X size={13} />
+          <SecretClearIcon size={13} />
         </FolderAction>
       </div>
       {children}
@@ -208,6 +223,7 @@ export function RootDropZone({
     <div
       ref={setNodeRef}
       data-voice-folder-root
+      data-voice-folder-drop={active && isOver ? "" : undefined}
       className={classNames(
         "min-h-16 space-y-0.5 rounded-lg pb-6 transition-colors",
         active && "outline-1 -outline-offset-1 outline-dashed outline-[var(--glass-border-subtle)]",

@@ -1,13 +1,7 @@
-import { Plus } from "lucide-react";
+import { PlusIcon } from "../../Icons";
 import type { Task } from "../../../types";
 import { classNames } from "../../../utils/classNames";
-import {
-  statusTone,
-  taskStatus,
-  taskStatusLabel,
-  taskTitle,
-  type ContextTranslator,
-} from "../model";
+import { taskStatus, taskStatusLabel, taskTitle, type ContextTranslator } from "../model";
 import type { ContextModalUi } from "../ui";
 
 export function TaskSubtaskList({
@@ -48,7 +42,13 @@ export function TaskSubtaskList({
             onClick={onAddSubtask}
             className={classNames(ui.buttonSecondaryClass, "gap-1.5")}
           >
-            <Plus className="size-4" aria-hidden="true" />
+            <PlusIcon
+              size={24}
+              strokeWidth={2}
+              absoluteStrokeWidth={false}
+              className="size-4"
+              aria-hidden="true"
+            />
             {tr("context.addSubtask", "Add subtask")}
           </button>
         ) : null}
@@ -73,10 +73,8 @@ export function TaskSubtaskList({
                       {taskTitle(subtask)}
                     </span>
                     <span
-                      className={classNames(
-                        "shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium",
-                        statusTone(status),
-                      )}
+                      data-task-subtask-status=""
+                      className="shrink-0 px-2 py-0.5 text-[11px] font-medium"
                     >
                       {taskStatusLabel(status, tr)}
                     </span>

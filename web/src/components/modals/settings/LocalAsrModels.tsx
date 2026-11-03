@@ -24,6 +24,14 @@ function shortHash(value: string | undefined): string {
   return raw.length > 16 ? `${raw.slice(0, 12)}...${raw.slice(-6)}` : raw;
 }
 
+/** A component's status in words; a status this version does not know is shown as reported. */
+function componentStatusLabel(
+  status: string,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  return t(`assistants.componentStatus.${status}`, { defaultValue: status });
+}
+
 function serviceModelStatusLabel(
   status: string,
   model: AssistantServiceModel | null | undefined,
@@ -34,17 +42,21 @@ function serviceModelStatusLabel(
     Number(model?.progress_percent || 0) >= 100 &&
     model?.installed !== true
   ) {
-    return t("assistants.componentStatusShort", {
-      status: "installing",
-      defaultValue: "{{status}}",
-    });
+    return componentStatusLabel("installing", t);
   }
-  if (status !== "downloading")
-    return t("assistants.componentStatusShort", { status, defaultValue: "{{status}}" });
-  return `${t("assistants.componentStatusShort", { status, defaultValue: "{{status}}" })} ${Math.round(Number(model?.progress_percent || 0))}%`;
+  if (status !== "downloading") return componentStatusLabel(status, t);
+  return `${componentStatusLabel(status, t)} ${Math.round(Number(model?.progress_percent || 0))}%`;
 }
 
-function StatusPill({ children, tone }: { children: ReactNode; tone: "on" | "off" | "info" }) {
+function StatusPill({
+  children,
+  tone,
+  lcdTone,
+}: {
+  children: ReactNode;
+  tone: "on" | "off" | "info";
+  lcdTone?: "ok" | "error" | "neutral";
+}) {
   const classes =
     tone === "on"
       ? "border border-emerald-600/15 bg-emerald-50 text-emerald-800 dark:border-emerald-400/18 dark:bg-emerald-400/10 dark:text-emerald-200"
@@ -53,6 +65,7 @@ function StatusPill({ children, tone }: { children: ReactNode; tone: "on" | "off
         : "border border-black/10 bg-[rgb(245,245,245)] text-[rgb(35,36,37)] dark:border-white/12 dark:bg-white/[0.08] dark:text-white";
   return (
     <span
+      data-status-tone={lcdTone ?? (tone === "on" ? "ok" : tone === "off" ? "error" : "neutral")}
       className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium shadow-[inset_0_1px_0_rgba(255,255,255,0.55)] ${classes}`}
     >
       {children}
@@ -482,7 +495,11 @@ export function LocalAsrModels({
   if (!assistantState) {
     return (
       <section aria-label={t("assistants.localAsrTitle")} className="mt-4 space-y-3">
-        <p role={error ? "alert" : "status"} className="text-sm text-[var(--color-text-secondary)]">
+        <p
+          role={error ? "alert" : "status"}
+          data-status-tone={error ? "error" : undefined}
+          className="text-sm text-[var(--color-text-secondary)]"
+        >
           {error || t("common:loading")}
         </p>
         {error && (
@@ -510,7 +527,12 @@ export function LocalAsrModels({
               <div className="text-sm font-semibold text-[var(--color-text-primary)]">
                 {t("assistants.localAsrTitle", { defaultValue: "Local ASR" })}
               </div>
-              <StatusPill tone={localAsrStatusTone}>{localAsrStatusLabel}</StatusPill>
+              <StatusPill
+                tone={localAsrStatusTone}
+                lcdTone={localAsrInstalling || localAsrUpdateAvailable ? "neutral" : undefined}
+              >
+                {localAsrStatusLabel}
+              </StatusPill>
               {localAsrDiskUsage ? <StatusPill tone="info">{localAsrDiskUsage}</StatusPill> : null}
             </div>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-[var(--color-text-muted)]">
@@ -561,10 +583,7 @@ export function LocalAsrModels({
                       : "info"
                 }
               >
-                {t("assistants.componentStatusShort", {
-                  status: streamingRuntimeStatus,
-                  defaultValue: "{{status}}",
-                })}
+                {componentStatusLabel(streamingRuntimeStatus, t)}
               </StatusPill>
             </div>
             <p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">
@@ -651,7 +670,10 @@ export function LocalAsrModels({
         {streamingRuntime?.error?.message ||
         liveServiceAsrModel?.error?.message ||
         finalServiceAsrModel?.error?.message ? (
-          <p className="mt-3 text-xs leading-5 text-rose-700 dark:text-rose-300">
+          <p
+            data-status-tone="error"
+            className="mt-3 text-xs leading-5 text-rose-700 dark:text-rose-300"
+          >
             {t("assistants.serviceRuntimeError", {
               message: String(
                 streamingRuntime?.error?.message ||
@@ -696,7 +718,10 @@ export function LocalAsrModels({
             })}
           </p>
           {diarizationModel?.error?.message ? (
-            <p className="mt-1 text-xs leading-5 text-rose-700 dark:text-rose-300">
+            <p
+              data-status-tone="error"
+              className="mt-1 text-xs leading-5 text-rose-700 dark:text-rose-300"
+            >
               {t("assistants.serviceRuntimeError", {
                 message: String(diarizationModel.error.message || ""),
               })}
@@ -845,7 +870,11 @@ export function LocalAsrModels({
   return (
     <section aria-label={t("assistants.localAsrTitle")}>
       {error && (
-        <p role="alert" className="break-words text-sm text-rose-600 dark:text-rose-300">
+        <p
+          role="alert"
+          data-status-tone="error"
+          className="break-words text-sm text-rose-600 dark:text-rose-300"
+        >
           {error}
         </p>
       )}

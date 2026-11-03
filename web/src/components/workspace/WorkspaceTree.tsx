@@ -7,9 +7,10 @@ import {
   FileSymlink,
   Folder,
   FolderSymlink,
-  Loader2,
   MoreHorizontal,
 } from "lucide-react";
+import { LcdIcon } from "../Icons";
+import { LcdSpinner } from "../LcdSpinner";
 import { classNames } from "../../utils/classNames";
 import type { WorkspaceEntry, WorkspaceGitStatus } from "../../types";
 import type { TreeNode } from "./workspaceTreeModel";
@@ -19,7 +20,6 @@ type Props = {
   dropTarget?: string | null;
   rows: TreeNode[];
   selectedPath: string;
-  isDark: boolean;
   onToggleDirectory: (path: string) => void;
   onOpenFile: (path: string) => void;
   onRetryDirectory: (path: string) => void;
@@ -28,26 +28,23 @@ type Props = {
   onReveal: (row: HTMLElement) => void;
 };
 
-const GIT_BADGE: Record<WorkspaceGitStatus, { letter: string; light: string; dark: string }> = {
-  modified: { letter: "M", light: "text-amber-600", dark: "text-amber-300" },
-  added: { letter: "A", light: "text-emerald-600", dark: "text-emerald-300" },
-  deleted: { letter: "D", light: "text-rose-600", dark: "text-rose-300" },
-  renamed: { letter: "R", light: "text-violet-600", dark: "text-violet-300" },
-  untracked: { letter: "U", light: "text-sky-600", dark: "text-sky-300" },
-  conflicted: { letter: "!", light: "text-rose-700", dark: "text-rose-200" },
+const GIT_BADGE: Record<WorkspaceGitStatus, string> = {
+  modified: "M",
+  added: "A",
+  deleted: "D",
+  renamed: "R",
+  untracked: "U",
+  conflicted: "!",
 };
 
-function GitBadge({ status, isDark }: { status: WorkspaceGitStatus; isDark: boolean }) {
-  const badge = GIT_BADGE[status];
+function GitBadge({ status }: { status: WorkspaceGitStatus }) {
   return (
     <span
       aria-label={status}
-      className={classNames(
-        "ml-1 w-3 shrink-0 text-center text-[11px] font-semibold tabular-nums",
-        isDark ? badge.dark : badge.light,
-      )}
+      data-git-status={status}
+      className="ml-1 w-3 shrink-0 text-center text-[11px] font-semibold tabular-nums"
     >
-      {badge.letter}
+      {GIT_BADGE[status]}
     </span>
   );
 }
@@ -57,7 +54,6 @@ function WorkspaceTreeRows({
   dropTarget,
   rows,
   selectedPath,
-  isDark,
   onToggleDirectory,
   onOpenFile,
   onRetryDirectory,
@@ -173,6 +169,7 @@ function WorkspaceTreeRows({
               }}
               aria-expanded={entry.is_dir ? node.expanded : undefined}
               aria-selected={selected}
+              data-workspace-row
               title={
                 entry.ignored
                   ? entry.path + " · " + t("workspaceGitIgnored", { defaultValue: "Git ignored" })
@@ -191,23 +188,18 @@ function WorkspaceTreeRows({
                   entry.is_dir &&
                   "ring-1 ring-inset ring-[var(--color-border-focus)]",
                 entry.unavailable ? "cursor-default" : "cursor-pointer",
-                selected
-                  ? isDark
-                    ? "bg-cyan-400/12 text-cyan-100"
-                    : "bg-cyan-500/10 text-cyan-900"
-                  : isDark
-                    ? "text-slate-200 hover:bg-white/6"
-                    : "text-slate-700 hover:bg-black/5",
               )}
             >
               <span className="flex w-4 shrink-0 items-center justify-center opacity-70">
                 {entry.is_dir ? (
                   node.loading ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
+                    <LcdSpinner className="h-3 w-3">
+                      <LcdIcon icon={ChevronRight} glyph="chevron-right" className="h-3.5 w-3.5" />
+                    </LcdSpinner>
                   ) : node.expanded ? (
-                    <ChevronDown className="h-3.5 w-3.5" />
+                    <LcdIcon icon={ChevronDown} glyph="chevron-down" className="h-3.5 w-3.5" />
                   ) : (
-                    <ChevronRight className="h-3.5 w-3.5" />
+                    <LcdIcon icon={ChevronRight} glyph="chevron-right" className="h-3.5 w-3.5" />
                   )
                 ) : null}
               </span>
@@ -219,7 +211,20 @@ function WorkspaceTreeRows({
                     : undefined
                 }
               >
-                <Icon aria-hidden="true" className="h-3.5 w-3.5" />
+                <LcdIcon
+                  icon={Icon}
+                  glyph={
+                    entry.is_symlink
+                      ? entry.is_dir
+                        ? "folder-link"
+                        : "file-link"
+                      : entry.is_dir
+                        ? "folder"
+                        : "file"
+                  }
+                  aria-hidden="true"
+                  className="h-3.5 w-3.5"
+                />
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block truncate">{entry.name}</span>
@@ -229,14 +234,12 @@ function WorkspaceTreeRows({
                   </span>
                 )}
               </span>
-              {entry.git_status ? <GitBadge status={entry.git_status} isDark={isDark} /> : null}
+              {entry.git_status ? <GitBadge status={entry.git_status} /> : null}
               {!entry.git_status && entry.git_dirty_descendant ? (
                 <span
                   aria-hidden="true"
-                  className={classNames(
-                    "ml-1 h-1.5 w-1.5 shrink-0 rounded-full",
-                    isDark ? "bg-amber-300/70" : "bg-amber-500/70",
-                  )}
+                  data-status-dot="neutral"
+                  className="ml-1 h-1.5 w-1.5 shrink-0"
                 />
               ) : null}
               <button
@@ -254,7 +257,12 @@ function WorkspaceTreeRows({
                   onContextMenu(entry, rect.left, rect.bottom, event.currentTarget);
                 }}
               >
-                <MoreHorizontal aria-hidden="true" className="h-4 w-4" />
+                <LcdIcon
+                  icon={MoreHorizontal}
+                  glyph="more-horizontal"
+                  aria-hidden="true"
+                  className="h-4 w-4"
+                />
               </button>
             </div>
             {node.error ? (

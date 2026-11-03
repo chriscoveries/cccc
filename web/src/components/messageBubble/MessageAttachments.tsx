@@ -18,7 +18,6 @@ export function MessageAttachments({
   isDark,
   attachmentKeyPrefix,
   downloadTitle,
-  sectionClassName,
 }: {
   attachments: MessageAttachment[];
   blobGroupId: string;
@@ -26,7 +25,6 @@ export function MessageAttachments({
   isDark: boolean;
   attachmentKeyPrefix: string;
   downloadTitle: (name: string) => string;
-  sectionClassName?: string;
 }) {
   const imageAttachments = attachments.filter((attachment) => isImageAttachment(attachment));
   const videoAttachments = attachments.filter((attachment) => isVideoAttachment(attachment));
@@ -38,12 +36,13 @@ export function MessageAttachments({
   if (attachments.length <= 0 || !blobGroupId) return null;
 
   return (
-    <div className={sectionClassName || "mt-3"}>
+    <div className="mt-3" data-message-attachments>
       {imageAttachments.length > 0 && (
         <div
           className={classNames(
             "max-w-full items-start gap-2",
             useImageGrid ? "grid w-fit grid-cols-2" : "flex max-w-[min(30rem,82vw)] flex-col gap-3",
+            !useImageGrid && !isUserMessage && "w-[min(30rem,82vw)]",
           )}
         >
           {imageAttachments.map((attachment, index) => {
@@ -81,6 +80,7 @@ export function MessageAttachments({
         <div
           className={classNames(
             "flex max-w-full flex-col items-start gap-3",
+            !isUserMessage && "w-[min(30rem,82vw)]",
             imageAttachments.length > 0 && "mt-3",
           )}
         >
@@ -91,7 +91,6 @@ export function MessageAttachments({
               title: attachment.title,
               localPreviewUrl: attachment.local_preview_url,
               fallbackLabel: "video",
-              preferStoredPreview: true,
             });
             return (
               <VideoPreview

@@ -1,11 +1,13 @@
 import type { Task } from "../../types";
 
-/** The part of a task a board search matched, when the card does not show it. */
-export interface TaskSearchExcerpt {
-  field: "title" | "outcome" | "notes" | "handoff_to";
+/** A match in the original source field; offsets are JavaScript string indexes. */
+export interface TaskSearchMatch {
+  field: "title" | "id" | "outcome" | "notes" | "assignee" | "priority" | "handoff_to";
   before: string;
   match: string;
   after: string;
+  start: number;
+  end: number;
 }
 
 // Text before the match is kept short, measured in display width, so the
@@ -54,6 +56,12 @@ function findMatch(text: string, query: string): [number, number] | null {
   if (lowered.length === text.length) return [at, at + query.length];
   // Casing lengthened a character (İ becomes two units): map both ends back.
   return [originalCharacter(text, at)[0], originalCharacter(text, at + query.length - 1)[1]];
+}
+
+/** Search a displayed string without assuming how much of it fits on screen. */
+export function taskSearchTextMatch(text: string, query: string): [number, number] | null {
+  const wanted = query.trim().toLowerCase();
+  return wanted ? findMatch(text, wanted) : null;
 }
 
 // Intl.Segmenter is not in the ES2020 lib this project compiles against.
@@ -110,25 +118,26 @@ function excerpt(text: string, [start, end]: [number, number]) {
 }
 
 /**
- * Where the search matched a task, unless the text passed as shown (the
- * openings of what the card displays) already contains it; a quote may still
- * repeat a match the card shows further on. The server matches these fields;
- * a match it found but this cannot (casing that differs in context) shows
- * nothing rather than a wrong place.
+ * The first searchable field that matches, without guessing rendered width.
+ * Prefer title and ID because they have their own visible location on a card.
  */
-export function taskSearchExcerpt(
-  task: Task,
-  query: string,
-  shown: ReadonlyArray<string | null | undefined>,
-): TaskSearchExcerpt | null {
-  // Cased like the server's query: the whole string, so context rules agree.
+export function taskSearchMatch(task: Task, query: string): TaskSearchMatch | null {
   const wanted = query.trim().toLowerCase();
   if (!wanted) return null;
-  if (shown.some((text) => text && findMatch(text, wanted))) return null;
-  for (const field of ["title", "outcome", "notes", "handoff_to"] as const) {
+  for (const field of [
+    "title",
+    "id",
+    "outcome",
+    "notes",
+    "assignee",
+    "priority",
+    "handoff_to",
+  ] as const) {
     const text = String(task[field] || "");
     const found = text && findMatch(text, wanted);
-    if (found) return { field, ...excerpt(text, found) };
+    if (found) {
+      return { field, ...excerpt(text, found), start: found[0], end: found[1] };
+    }
   }
   return null;
 }
