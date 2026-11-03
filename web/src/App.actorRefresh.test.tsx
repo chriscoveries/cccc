@@ -124,7 +124,12 @@ import App from "./App";
 const GROUP_A = "g_reconcile_alpha";
 const GROUP_B = "g_reconcile_beta";
 type ActorKind = "native" | "managed";
-type RequestRecord = { method: string; pathname: string; at: number };
+type RequestRecord = {
+  method: string;
+  pathname: string;
+  at: number;
+  resourceObservation: boolean;
+};
 let host: HTMLDivElement;
 let root: Root;
 let requests: RequestRecord[];
@@ -168,7 +173,8 @@ async function serveRequest(input: string | URL | Request, init?: RequestInit): 
     "http://cccc.test",
   );
   const method = init?.method || "GET";
-  requests.push({ method, pathname: url.pathname, at: Date.now() });
+  const resourceObservation = url.searchParams.get("include_resources") === "true";
+  requests.push({ method, pathname: url.pathname, at: Date.now(), resourceObservation });
   if (method !== "GET") {
     unexpectedRequests.push(`${method} ${url.pathname}`);
     throw new Error(`Unexpected mutation: ${method} ${url.pathname}`);
@@ -187,7 +193,10 @@ async function serveRequest(input: string | URL | Request, init?: RequestInit): 
   if (groupMatch && actorsByGroup[groupMatch[1]]) {
     const [, groupId, resource] = groupMatch;
     if (resource === "actors") {
-      const held = nextActorRead?.groupId === groupId ? nextActorRead : null;
+      // Resource sampling and actor-status reconciliation use the same path
+      // but distinct requests; only reconciliation owns the held response.
+      const held =
+        !resourceObservation && nextActorRead?.groupId === groupId ? nextActorRead : null;
       if (held) nextActorRead = null;
       const actors = held ? await held.result : structuredClone(actorsByGroup[groupId]);
       // Bound the unchanged-response loop so both sides use identical latency.
@@ -306,7 +315,10 @@ async function openApp(kind: ActorKind, actorPatch: Partial<Actor> = {}) {
 }
 
 function actorRequests(groupId: string) {
-  return requests.filter((request) => request.pathname === `/api/v1/groups/${groupId}/actors`);
+  return requests.filter(
+    (request) =>
+      request.pathname === `/api/v1/groups/${groupId}/actors` && !request.resourceObservation,
+  );
 }
 
 function visibleActor() {
@@ -369,6 +381,14 @@ it.each(["native", "managed"] as const)(
     requests = [];
     await advance(10000);
     expect(actorRequests(GROUP_A)).toHaveLength(0);
+    // The group header remains visible; its separate resource observation is
+    // expected and must not be mistaken for hidden-pane reconciliation.
+    expect(
+      requests.filter(
+        (request) =>
+          request.pathname === `/api/v1/groups/${GROUP_A}/actors` && request.resourceObservation,
+      ),
+    ).toHaveLength(1);
     expect(
       requests.filter((request) => request.pathname.includes("/local_sessions/")),
     ).toHaveLength(0);
