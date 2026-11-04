@@ -436,6 +436,12 @@ impl AnalystSession {
         self.process.as_ref().and_then(|process| process.id())
     }
 
+    /// Only the provider's own child is an exit source; a terminal viewer is
+    /// a separate runtime session and must not be used to infer its status.
+    pub(crate) fn provider_exit_status(&self) -> Option<std::process::ExitStatus> {
+        self.process.as_ref()?.exit_status().ok().flatten()
+    }
+
     pub(crate) async fn respond_error(&self, id: Value, error: Value) -> io::Result<()> {
         self.protocol.respond_error(id, error).await
     }
