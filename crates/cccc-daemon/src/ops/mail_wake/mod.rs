@@ -1310,7 +1310,7 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
-    fn restart_cue_control(confirmed: bool, test_name: &str) {
+    fn restart_cue_control(confirmed: bool, notice_before_restart: bool, test_name: &str) {
         const CHILD: &str = "CCCC_MAIL_WAKE_RESTART_CONTROL";
         if std::env::var_os(CHILD).is_some() {
             let home = HomeLayout::from_path(
@@ -1361,11 +1361,18 @@ mod tests {
                 let events =
                     cccc_core::ledger::read_all(&store.ledger_path(&group_id).expect("ledger"))
                         .expect("events");
-                assert!(events.iter().any(|event| {
-                    event.kind == "system.notify"
-                        && event.data.get("kind") == Some(&json!("mail_notice"))
-                        && event.data.get("target_actor_id") == Some(&json!(actor.id))
-                }));
+                let matching: Vec<_> = events
+                    .iter()
+                    .filter(|event| {
+                        event.kind == "system.notify"
+                            && event.data.get("kind") == Some(&json!("mail_notice"))
+                            && event.data.get("target_actor_id") == Some(&json!(actor.id))
+                            && event.data["context"]["source_event_ids"]
+                                .as_array()
+                                .is_some_and(|ids| ids.contains(&json!(attempt.source_event_id)))
+                    })
+                    .collect();
+                assert_eq!(matching.len(), 1, "notice must not be duplicated");
             } else {
                 // No owner registry is carried into this process; neither a
                 // missing owner nor a replacement is authority to relaunch.
@@ -1456,6 +1463,20 @@ mod tests {
             budget.settle(&attempt, true).expect("settle group");
             state.global.settle(&attempt).expect("settle global");
         }
+        if notice_before_restart {
+            // Labeled crash window: durably append a notice and leave the cue
+            // uncleared before checking recovery in a fresh process.
+            let result = cccc_core::automation::notify_wake_mail(&home, &group.group_id, &actor.id)
+                .expect("append notice before restart");
+            assert!(result.unread_failure.is_none());
+            assert_eq!(result.notifications.len(), 1);
+            assert_eq!(result.notifications[0].data["target_actor_id"], actor.id);
+            assert!(
+                result.notifications[0].data["context"]["source_event_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.contains(&json!(event.id)))
+            );
+        }
         let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
             .args(["--exact", test_name, "--nocapture"])
             .env(CHILD, "1")
@@ -1471,6 +1492,7 @@ mod tests {
     fn restart_cue_repairs_only_with_confirmed_owner() {
         restart_cue_control(
             true,
+            false,
             "ops::mail_wake::tests::restart_cue_repairs_only_with_confirmed_owner",
         );
     }
@@ -1480,7 +1502,18 @@ mod tests {
     fn restart_cue_holds_when_owner_unproven() {
         restart_cue_control(
             false,
+            false,
             "ops::mail_wake::tests::restart_cue_holds_when_owner_unproven",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_cue_accepts_the_notice_already_appended_before_crash() {
+        restart_cue_control(
+            true,
+            true,
+            "ops::mail_wake::tests::restart_cue_accepts_the_notice_already_appended_before_crash",
         );
     }
 

@@ -170,8 +170,19 @@ pub(super) fn notify_confirmed_mail_wake(
 ) -> std::io::Result<bool> {
     let result = cccc_core::automation::notify_wake_mail(home, group_id, actor_id)?;
     let failure = result.unread_failure.as_ref().map(ToString::to_string);
-    let confirmed = result.notifications.iter().any(|event| {
-        event.data.get("kind").and_then(serde_json::Value::as_str) == Some("mail_notice")
+    // A partial append may already have committed notices that need dispatch.
+    apply(home, result, &AtomicBool::new(false));
+    if let Some(error) = failure {
+        return Err(std::io::Error::other(error));
+    }
+    // The reducer can suppress a duplicate after a crash between appending the
+    // notice and clearing the cue. Only the durable ledger can confirm both the
+    // newly appended and the previously committed case.
+    let store = GroupStore::new(home.clone())?;
+    let events = cccc_core::ledger::read_all(&store.ledger_path(group_id)?)?;
+    Ok(events.iter().any(|event| {
+        event.kind == "system.notify"
+            && event.data.get("kind").and_then(serde_json::Value::as_str) == Some("mail_notice")
             && event
                 .data
                 .get("target_actor_id")
@@ -183,10 +194,7 @@ pub(super) fn notify_confirmed_mail_wake(
                 .and_then(|context| context.get("source_event_ids"))
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(source_event_id)))
-    });
-    // A partial append may already have committed notices that need dispatch.
-    apply(home, result, &AtomicBool::new(false));
-    failure.map_or(Ok(confirmed), |error| Err(std::io::Error::other(error)))
+    }))
 }
 
 fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
