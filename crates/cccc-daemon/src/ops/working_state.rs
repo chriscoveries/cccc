@@ -105,10 +105,15 @@ pub(super) fn fields(
             ),
         }
     } else if runner_effective == "headless" {
-        ("idle".to_owned(), "headless_running".to_owned(), None, None)
+        (
+            "unknown".to_owned(),
+            "headless_running".to_owned(),
+            None,
+            None,
+        )
     } else {
         (
-            "waiting".to_owned(),
+            "unknown".to_owned(),
             "pty_running_state_unknown".to_owned(),
             None,
             None,

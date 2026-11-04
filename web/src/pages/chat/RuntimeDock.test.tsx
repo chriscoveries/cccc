@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import type { Actor, LedgerEvent } from "../../types";
 import { RuntimeDock } from "./RuntimeDock";
+import capturedActivity from "../../hooks/__fixtures__/working-state-capture.json";
 import type { LiveWorkCard } from "./liveWorkCards";
 import { getRuntimeRingTone } from "./runtimeDockRingTone";
 
@@ -114,6 +115,15 @@ it("shows confirmation from refreshed Actors and keeps the existing terminal ent
   expect(mocks.open).toHaveBeenCalledExactlyOnceWith("alpha");
   await render({ runtime_confirmation_required: false });
   expect(host.textContent).not.toContain("actors:runtimeConfirmationPending");
+});
+
+it("labels captured untracked runners as unknown rather than idle or waiting", async () => {
+  for (const captured of capturedActivity) {
+    // The state is the corrected projection of a real captured activity row.
+    await render({ ...captured, effective_working_state: "unknown" });
+    expect(host.textContent).toContain("Working state unknown");
+    expect(activity()).toBeNull();
+  }
 });
 
 it("moves the ring only while work is in progress", async () => {

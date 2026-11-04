@@ -445,6 +445,8 @@ export function AgentTab({
     if (isWebModel) return t(actor.enabled ? "webAccessEnabled" : "webAccessPaused");
     if (!isRunning) return t("stopped");
     if (workingState === "error") return t("common:error");
+    if (workingState === "unknown")
+      return t("workingStateUnknown", { defaultValue: "Working state unknown" });
     if (workingState === "working" || workingState === "waiting" || workingState === "stuck")
       return t(workingState);
     return t("running");
@@ -759,7 +761,10 @@ export function AgentTab({
         ? runtimeStatusText
         : !isHeadless && connectionStatus !== "connected"
           ? t(connectionStatus === "disconnected" ? "connectionLost" : "chat:workView.connecting")
-          : workingState === "waiting" || workingState === "stuck" || workingState === "error"
+          : workingState === "waiting" ||
+              workingState === "stuck" ||
+              workingState === "error" ||
+              workingState === "unknown"
             ? runtimeStatusText
             : !isHeadless && terminalReady && !terminalWritable
               ? t("readOnlyConnection")
