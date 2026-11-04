@@ -1542,7 +1542,8 @@ function EditActorConfigModal({
               </div>
 
               <div className="mt-4 space-y-4">
-                {(!isWebModelRuntime(conversationRuntime) && !savedActor?.external_session_id) || wakeOnMail ? (
+                {(!isWebModelRuntime(conversationRuntime) && !savedActor?.external_session_id) ||
+                wakeOnMail ? (
                   <label className="flex items-start gap-2 text-sm text-[var(--color-text-primary)]">
                     <input
                       type="checkbox"
