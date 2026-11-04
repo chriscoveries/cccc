@@ -284,7 +284,7 @@ jobs:
           # must be compiled in rather than assumed: drop the cached asset
           # crate so its embed expands against the downloaded bundle.
           cargo clean --package cccc-pair-web
-          cargo build --package cccc --features cccc-pair-web/embedded-debug --bin cccc --locked
+          cargo build --package cccc --bin cccc --locked --features cccc-web/embedded-debug
           # --workspace reuses the test build above; the live probes exist only
           # in cccc-pair-daemon.
           cargo test --workspace --lib --locked -- --list > offline-native-tests.txt
