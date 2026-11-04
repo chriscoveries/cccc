@@ -211,6 +211,9 @@ pub enum LedgerAction {
         /// Accepted for compatibility; the current daemon does not use this flag.
         #[arg(long)]
         force: bool,
+        /// Also create a verified zstd copy of the sealed segment (Linux only).
+        #[arg(long)]
+        zstd: bool,
     },
 }
 
