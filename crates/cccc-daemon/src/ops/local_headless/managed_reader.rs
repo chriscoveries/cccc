@@ -48,11 +48,11 @@ pub(super) fn spawn(
                         actor_id = %session.actor_id,
                         "managed Actor event reader fell behind; stopping the unreplayable session"
                     );
-                    stop_after_provider_exit(&session);
+                    stop_after_reader_end(&session, ReaderEnd::Lagged);
                     break;
                 }
                 Err(RecvError::Closed) => {
-                    stop_after_provider_exit(&session);
+                    stop_after_reader_end(&session, ReaderEnd::Closed);
                     break;
                 }
             }
@@ -61,11 +61,54 @@ pub(super) fn spawn(
 }
 
 pub(super) fn stop_after_provider_exit(session: &Session) {
-    record_provider_exit_if_first(
+    // Observe the provider before stopping it; the stop itself must not be
+    // mistaken for evidence that the provider had independently exited.
+    let status = session.managed.provider_exit_status();
+    let reason = if status.is_some() {
+        "process_exit"
+    } else {
+        "provider_disconnected"
+    };
+    let exit_code = status
+        .as_ref()
+        .and_then(|exit| exit.code())
+        .and_then(|code| u32::try_from(code).ok());
+    let exit_detail = status.map(|exit| exit.to_string());
+    record_managed_stop_if_first(
         session.stop_after_process_exit(),
         &session.home,
         &session.group_id,
         &session.actor_id,
+        reason,
+        exit_code,
+        exit_detail.as_deref(),
+    );
+}
+
+#[derive(Clone, Copy)]
+enum ReaderEnd {
+    Lagged,
+    Closed,
+}
+
+impl ReaderEnd {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Lagged => "reader_lagged",
+            Self::Closed => "reader_closed",
+        }
+    }
+}
+
+fn stop_after_reader_end(session: &Session, end: ReaderEnd) {
+    record_managed_stop_if_first(
+        session.stop_after_process_exit(),
+        &session.home,
+        &session.group_id,
+        &session.actor_id,
+        end.reason(),
+        None,
+        None,
     );
 }
 
@@ -184,18 +227,26 @@ pub(crate) async fn verify_claude_reader_release(
     }
 }
 
-fn record_provider_exit_if_first(
+fn record_managed_stop_if_first(
     first_stop: bool,
     home: &cccc_core::HomeLayout,
     group_id: &str,
     actor_id: &str,
+    reason: &str,
+    exit_code: Option<u32>,
+    exit_detail: Option<&str>,
 ) {
     if !first_stop {
         return;
     }
-    if let Err(error) =
-        super::super::actor_runtime::record_process_exit(home, group_id, actor_id, None)
-    {
+    if let Err(error) = super::super::actor_runtime::record_managed_stop(
+        home,
+        group_id,
+        actor_id,
+        exit_code,
+        exit_detail,
+        reason,
+    ) {
         tracing::warn!(
             ?error,
             group_id,
@@ -207,7 +258,7 @@ fn record_provider_exit_if_first(
 
 #[cfg(test)]
 mod tests {
-    use super::record_provider_exit_if_first;
+    use super::{ReaderEnd, record_managed_stop_if_first};
     use cccc_contracts::{Actor, ActorRuntime};
     use cccc_core::{GroupStore, HomeLayout, ledger};
 
@@ -226,8 +277,24 @@ mod tests {
             })
             .expect("actor");
 
-        record_provider_exit_if_first(true, &home, &group.group_id, "opencode-1");
-        record_provider_exit_if_first(false, &home, &group.group_id, "opencode-1");
+        record_managed_stop_if_first(
+            true,
+            &home,
+            &group.group_id,
+            "opencode-1",
+            "provider_disconnected",
+            None,
+            None,
+        );
+        record_managed_stop_if_first(
+            false,
+            &home,
+            &group.group_id,
+            "opencode-1",
+            "provider_disconnected",
+            None,
+            None,
+        );
 
         let path = store.ledger_path(&group.group_id).expect("ledger path");
         let events = ledger::read_all(&path).expect("ledger");
@@ -238,9 +305,79 @@ mod tests {
         assert_eq!(stopped.len(), 1);
         assert_eq!(stopped[0].by, "system");
         assert_eq!(stopped[0].data["actor_id"], "opencode-1");
-        assert_eq!(stopped[0].data["reason"], "process_exit");
+        assert_eq!(stopped[0].data["reason"], "provider_disconnected");
         assert_eq!(stopped[0].data["source"], "managed_reader");
         assert!(stopped[0].data["exit_code"].is_null());
         assert!(!stopped[0].data.contains_key("exit_detail"));
+    }
+
+    #[test]
+    fn captured_reader_stops_do_not_invent_process_exits() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/managed_stop_capture.json"
+        ))
+        .expect("captured stop events");
+        let reader_stops = capture["reader_stops"].as_array().expect("reader stops");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("managed stop capture", "").expect("group");
+        store
+            .mutate(&group.group_id, |document| {
+                document.actors.push(Actor::new("worker"));
+                Ok(())
+            })
+            .expect("actor");
+        let reasons = [
+            ReaderEnd::Closed.reason(),
+            ReaderEnd::Lagged.reason(),
+            "provider_disconnected",
+        ];
+        assert_eq!(
+            reasons,
+            ["reader_closed", "reader_lagged", "provider_disconnected"]
+        );
+        assert_eq!(reader_stops.len(), reasons.len());
+        for (captured, reason) in reader_stops.iter().zip(reasons) {
+            assert_eq!(captured["data"]["reason"], "process_exit");
+            assert!(captured["data"]["exit_code"].is_null());
+            record_managed_stop_if_first(
+                true,
+                &home,
+                &group.group_id,
+                "worker",
+                reason,
+                None,
+                None,
+            );
+        }
+        let actual = &capture["runtime_stop"]["data"];
+        let code = actual["exit_code"]
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok());
+        let detail = actual["exit_detail"].as_str();
+        record_managed_stop_if_first(
+            true,
+            &home,
+            &group.group_id,
+            "worker",
+            "process_exit",
+            code,
+            detail,
+        );
+        let events =
+            ledger::read_all(&store.ledger_path(&group.group_id).expect("path")).expect("ledger");
+        let stops = events
+            .iter()
+            .filter(|event| event.kind == "actor.stop")
+            .collect::<Vec<_>>();
+        assert_eq!(stops.len(), 4);
+        for (stop, reason) in stops.iter().zip(reasons) {
+            assert_eq!(stop.data["reason"], reason);
+            assert!(stop.data["exit_code"].is_null());
+        }
+        assert_eq!(stops[3].data["reason"], "process_exit");
+        assert_eq!(stops[3].data["exit_code"], actual["exit_code"]);
+        assert_eq!(stops[3].data["exit_detail"], actual["exit_detail"]);
     }
 }

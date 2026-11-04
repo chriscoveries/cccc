@@ -22,7 +22,7 @@ pub(super) use confirmation::{
 #[cfg(test)]
 pub(super) use confirmation::{confirmation_required, require_restored_managed_actor};
 pub use persistence::persist_lifecycle;
-pub(crate) use reconcile::record_process_exit;
+pub(crate) use reconcile::record_managed_stop;
 pub use reconcile::{reap_exited, reconcile_exited};
 pub(crate) use workspace::LaunchWorkspace;
 pub(super) use workspace::{caller_scope, displayed_scope, effective_scope, session_prompt};
