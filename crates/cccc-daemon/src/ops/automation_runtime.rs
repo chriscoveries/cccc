@@ -179,8 +179,7 @@ pub(super) fn notify_confirmed_mail_wake(
     // notice and clearing the cue. Only the durable ledger can confirm both the
     // newly appended and the previously committed case.
     let store = GroupStore::new(home.clone())?;
-    let events = cccc_core::ledger::read_all(&store.ledger_path(group_id)?)?;
-    Ok(events.iter().any(|event| {
+    cccc_core::ledger::contains_validated(&store.ledger_path(group_id)?, |event| {
         event.kind == "system.notify"
             && event.data.get("kind").and_then(serde_json::Value::as_str) == Some("mail_notice")
             && event
@@ -194,7 +193,7 @@ pub(super) fn notify_confirmed_mail_wake(
                 .and_then(|context| context.get("source_event_ids"))
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(source_event_id)))
-    }))
+    })
 }
 
 fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {

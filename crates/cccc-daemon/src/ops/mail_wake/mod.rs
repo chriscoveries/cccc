@@ -1310,7 +1310,12 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
-    fn restart_cue_control(confirmed: bool, notice_before_restart: bool, test_name: &str) {
+    fn restart_cue_control(
+        confirmed: bool,
+        notice_before_restart: bool,
+        ledger_fault: Option<&str>,
+        test_name: &str,
+    ) {
         const CHILD: &str = "CCCC_MAIL_WAKE_RESTART_CONTROL";
         if std::env::var_os(CHILD).is_some() {
             let home = HomeLayout::from_path(
@@ -1357,22 +1362,67 @@ mod tests {
                     &wake_origin(&attempt),
                 )
                 .expect("matching owner control");
-                repair_cues(&home, &group_id).expect("repair cue");
-                let events =
-                    cccc_core::ledger::read_all(&store.ledger_path(&group_id).expect("ledger"))
-                        .expect("events");
-                let matching: Vec<_> = events
-                    .iter()
-                    .filter(|event| {
-                        event.kind == "system.notify"
-                            && event.data.get("kind") == Some(&json!("mail_notice"))
-                            && event.data.get("target_actor_id") == Some(&json!(actor.id))
-                            && event.data["context"]["source_event_ids"]
-                                .as_array()
-                                .is_some_and(|ids| ids.contains(&json!(attempt.source_event_id)))
-                    })
-                    .collect();
-                assert_eq!(matching.len(), 1, "notice must not be duplicated");
+                let ledger = store.ledger_path(&group_id).expect("ledger");
+                let original = std::fs::read(&ledger).expect("saved ledger bytes");
+                let backup = ledger.with_extension("held");
+                let expected = match ledger_fault {
+                    Some("malformed") => {
+                        // Labeled truncation fault derived from retained Mail.
+                        // A complete matching notice remains before this tail.
+                        let captured = include_bytes!("fixtures/mail.json");
+                        let mut file = std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&ledger)
+                            .expect("fault writer");
+                        std::io::Write::write_all(&mut file, &captured[..captured.len() / 2])
+                            .expect("truncated captured record");
+                        std::io::Write::write_all(&mut file, b"\n").expect("fault newline");
+                        file.sync_all().expect("sync fault");
+                        Some(std::fs::read(&ledger).expect("fault bytes"))
+                    }
+                    Some("unreadable") => {
+                        // Owned scratch path becomes a directory, so even a
+                        // privileged CI runner gets a real source-read error.
+                        std::fs::rename(&ledger, &backup).expect("retain ledger");
+                        std::fs::create_dir(&ledger).expect("unreadable source");
+                        None
+                    }
+                    None => None,
+                    Some(_) => panic!("unknown ledger fault"),
+                };
+                let repair = repair_cues(&home, &group_id);
+                if ledger_fault.is_some() {
+                    assert!(
+                        cccc_core::ledger::contains_validated(&ledger, |_| true).is_err(),
+                        "even an earlier match must not hide a later read/parse failure",
+                    );
+                    assert!(repair.is_err(), "read/parse uncertainty must hold");
+                    if let Some(expected) = expected {
+                        assert_eq!(std::fs::read(&ledger).expect("fault retained"), expected);
+                    } else {
+                        assert!(ledger.is_dir());
+                        assert_eq!(std::fs::read(&backup).expect("ledger retained"), original);
+                    }
+                } else {
+                    repair.expect("repair cue");
+                    let events =
+                        cccc_core::ledger::read_all(&store.ledger_path(&group_id).expect("ledger"))
+                            .expect("events");
+                    let matching: Vec<_> = events
+                        .iter()
+                        .filter(|event| {
+                            event.kind == "system.notify"
+                                && event.data.get("kind") == Some(&json!("mail_notice"))
+                                && event.data.get("target_actor_id") == Some(&json!(actor.id))
+                                && event.data["context"]["source_event_ids"]
+                                    .as_array()
+                                    .is_some_and(|ids| {
+                                        ids.contains(&json!(attempt.source_event_id))
+                                    })
+                        })
+                        .collect();
+                    assert_eq!(matching.len(), 1, "notice must not be duplicated");
+                }
             } else {
                 // No owner registry is carried into this process; neither a
                 // missing owner nor a replacement is authority to relaunch.
@@ -1383,11 +1433,34 @@ mod tests {
                 );
                 assert!(cccc_runtime::status(&group_id, &actor.id).is_err());
             }
+            if notice_before_restart && ledger_fault.is_none() {
+                let events =
+                    cccc_core::ledger::read_all(&store.ledger_path(&group_id).expect("ledger"))
+                        .expect("retained notices");
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| {
+                            event.kind == "system.notify"
+                                && event.data["kind"] == "mail_notice"
+                                && event.data["target_actor_id"] == actor.id
+                                && event.data["context"]["source_event_ids"]
+                                    .as_array()
+                                    .is_some_and(|ids| {
+                                        ids.contains(&json!(attempt.source_event_id))
+                                    })
+                        })
+                        .count(),
+                    1,
+                    "the pre-crash notice stays unique even without a proven owner",
+                );
+            }
             let mut guard = homes().lock().expect("homes");
             let state = home_state(&home, &mut guard).expect("state");
             let budget = group_budget(&home, state, &group_id).expect("budget");
-            assert_eq!(budget.cue_pending(&actor.id), !confirmed);
-            if !confirmed {
+            let held = !confirmed || ledger_fault.is_some();
+            assert_eq!(budget.cue_pending(&actor.id), held);
+            if held {
                 assert_eq!(budget.settled_attempt(&actor.id), Some(&attempt));
             }
             return;
@@ -1493,6 +1566,7 @@ mod tests {
         restart_cue_control(
             true,
             false,
+            None,
             "ops::mail_wake::tests::restart_cue_repairs_only_with_confirmed_owner",
         );
     }
@@ -1503,6 +1577,7 @@ mod tests {
         restart_cue_control(
             false,
             false,
+            None,
             "ops::mail_wake::tests::restart_cue_holds_when_owner_unproven",
         );
     }
@@ -1513,7 +1588,41 @@ mod tests {
         restart_cue_control(
             true,
             true,
+            None,
             "ops::mail_wake::tests::restart_cue_accepts_the_notice_already_appended_before_crash",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_cue_retains_notice_when_owner_unproven() {
+        restart_cue_control(
+            false,
+            true,
+            None,
+            "ops::mail_wake::tests::restart_cue_retains_notice_when_owner_unproven",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_cue_holds_on_malformed_tail_after_matching_notice() {
+        restart_cue_control(
+            true,
+            true,
+            Some("malformed"),
+            "ops::mail_wake::tests::restart_cue_holds_on_malformed_tail_after_matching_notice",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_cue_holds_on_ledger_read_failure() {
+        restart_cue_control(
+            true,
+            true,
+            Some("unreadable"),
+            "ops::mail_wake::tests::restart_cue_holds_on_ledger_read_failure",
         );
     }
 
