@@ -92,7 +92,13 @@ export function HostResourcesBadge() {
       role="img"
       aria-label={`Host RAM: ${formatBytes(used)} used, ${formatBytes(memory.available_bytes)} available`}
     >
-      RAM {formatBytes(used)} / {formatBytes(memory.available_bytes)}
+      <span className="sm:hidden">
+        RAM {formatBytes(used).replace(" GiB", "G").replace(" MiB", "M")}/
+        {formatBytes(memory.available_bytes).replace(" GiB", "G").replace(" MiB", "M")}
+      </span>
+      <span className="hidden sm:inline">
+        RAM {formatBytes(used)} / {formatBytes(memory.available_bytes)}
+      </span>
     </span>
   );
 }

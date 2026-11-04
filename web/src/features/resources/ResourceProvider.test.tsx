@@ -71,6 +71,7 @@ it("renders and clears the captured process and host readings", async () => {
     );
   });
   expect(host.textContent).toContain("RAM 14.5 GiB / 16.1 GiB");
+  expect(host.textContent).toContain("RAM 14.5G/16.1G");
   expect(host.textContent).toContain("12 MiB · 100.0%");
   expect(host.querySelector('[aria-label^="Actor memory"]')?.getAttribute("title")).toContain(
     "shared pages",
