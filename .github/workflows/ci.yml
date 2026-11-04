@@ -229,7 +229,8 @@ jobs:
 
   rust-linux:
     needs: web
-    runs-on: ubuntu-latest
+    # Keep the tested Linux artifact compatible with supported older glibc.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
