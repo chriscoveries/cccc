@@ -231,7 +231,18 @@ pub(crate) async fn launch(
             std::sync::Arc::clone(&detached_daemon),
         ))
     });
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    let plain_watchdog = if let Some(controller) = plain_stop.clone() {
+        // Register before the Web banner can be printed: the spawned task may
+        // not have been polled when a user interrupts immediately on startup.
+        let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        Some(tokio::spawn(crate::shutdown::watch_for_interrupt(
+            controller, owned_home, interrupt,
+        )))
+    } else {
+        None
+    };
+    #[cfg(not(any(unix, windows)))]
     let plain_watchdog = plain_stop.clone().map(|controller| {
         tokio::spawn(crate::shutdown::watch_for_interrupt(controller, owned_home))
     });

@@ -210,8 +210,14 @@ enum ForceExitReason {
 pub(crate) async fn watch_for_interrupt(
     controller: Controller,
     _home: Option<HomeLayout>,
+    #[cfg(unix)] mut interrupt: tokio::signal::unix::Signal,
     #[cfg(windows)] _detached_daemon: crate::detached_daemon_owner::SharedOwnedDetachedDaemon,
 ) {
+    #[cfg(unix)]
+    if interrupt.recv().await.is_none() {
+        return;
+    }
+    #[cfg(not(unix))]
     if tokio::signal::ctrl_c().await.is_err() {
         return;
     }
@@ -222,6 +228,9 @@ pub(crate) async fn watch_for_interrupt(
 
     let reason = force_exit_reason(
         async {
+            #[cfg(unix)]
+            let _ = interrupt.recv().await;
+            #[cfg(not(unix))]
             let _ = tokio::signal::ctrl_c().await;
         },
         tokio::time::sleep(FORCE_EXIT_TIMEOUT),
