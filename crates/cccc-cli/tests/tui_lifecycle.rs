@@ -11,6 +11,57 @@ use std::time::{Duration, Instant, SystemTime};
 
 const WAIT: Duration = Duration::from_secs(45);
 
+// Failure-only ConPTY diagnostics. Counts and reader state are safe to print;
+// terminal output may contain private text and must never enter CI logs.
+#[derive(Clone, Copy, Debug, Default)]
+struct ReaderProgress {
+    calls: u64,
+    bytes: u64,
+    first_read_ms: Option<u128>,
+    last_read_ms: Option<u128>,
+    eof: bool,
+    error: Option<std::io::ErrorKind>,
+}
+
+fn terminal_capture_summary(output: &[u8], progress: ReaderProgress) -> String {
+    let escapes = output.iter().filter(|&&byte| byte == 0x1b).count();
+    let printable = output
+        .iter()
+        .filter(|&&byte| (0x20..=0x7e).contains(&byte))
+        .count();
+    format!(
+        "\\n--- terminal capture: buffered_bytes={}, reader_bytes={}, reads={}, printable_ascii={}, escape_bytes={}, first_read_ms={:?}, last_read_ms={:?}, eof={}, error={:?}",
+        output.len(),
+        progress.bytes,
+        progress.calls,
+        printable,
+        escapes,
+        progress.first_read_ms,
+        progress.last_read_ms,
+        progress.eof,
+        progress.error
+    )
+}
+
+#[test]
+fn terminal_capture_summary_never_includes_terminal_content() {
+    let raw = b"\\x1b[31msecret-content\\x1b[0m";
+    let summary = terminal_capture_summary(
+        raw,
+        ReaderProgress {
+            calls: 1,
+            bytes: raw.len() as u64,
+            first_read_ms: Some(1),
+            last_read_ms: Some(2),
+            ..ReaderProgress::default()
+        },
+    );
+    assert!(summary.contains(&format!("buffered_bytes={}", raw.len())));
+    assert!(summary.contains("reads=1"));
+    assert!(summary.contains("escape_bytes=2"));
+    assert!(!summary.contains("secret-content"));
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     home: PathBuf,
@@ -123,16 +174,36 @@ impl Fixture {
         let writer = pair.master.take_writer().expect("terminal writer");
         let output = Arc::new(Mutex::new(Vec::new()));
         let capture = Arc::clone(&output);
+        let reader_progress = Arc::new(Mutex::new(ReaderProgress::default()));
+        let progress = Arc::clone(&reader_progress);
+        let reader_started = Instant::now();
         std::thread::spawn(move || {
             let mut buffer = [0; 8192];
-            while let Ok(count) = reader.read(&mut buffer) {
-                if count == 0 {
-                    break;
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => {
+                        progress.lock().expect("reader progress").eof = true;
+                        break;
+                    }
+                    Ok(count) => {
+                        capture
+                            .lock()
+                            .expect("output")
+                            .extend_from_slice(&buffer[..count]);
+                        let elapsed = reader_started.elapsed().as_millis();
+                        let mut state = progress.lock().expect("reader progress");
+                        state.calls += 1;
+                        state.bytes += count as u64;
+                        if state.first_read_ms.is_none() {
+                            state.first_read_ms = Some(elapsed);
+                        }
+                        state.last_read_ms = Some(elapsed);
+                    }
+                    Err(error) => {
+                        progress.lock().expect("reader progress").error = Some(error.kind());
+                        break;
+                    }
                 }
-                capture
-                    .lock()
-                    .expect("output")
-                    .extend_from_slice(&buffer[..count]);
             }
         });
         Terminal {
@@ -140,6 +211,7 @@ impl Fixture {
             master: pair.master,
             writer,
             output,
+            reader_progress,
             original_modes,
             home: self.home.clone(),
             launched,
@@ -170,12 +242,19 @@ struct Terminal {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     output: Arc<Mutex<Vec<u8>>>,
+    reader_progress: Arc<Mutex<ReaderProgress>>,
     original_modes: String,
     home: PathBuf,
     launched: SystemTime,
 }
 
 impl Terminal {
+    fn pty_capture_summary(&self) -> String {
+        let output = self.output.lock().expect("output");
+        let progress = *self.reader_progress.lock().expect("reader progress");
+        terminal_capture_summary(&output, progress)
+    }
+
     fn text(&self) -> String {
         String::from_utf8_lossy(&self.output.lock().expect("output")).into_owned()
     }
@@ -292,7 +371,8 @@ impl Terminal {
             );
             assert!(
                 Instant::now() < deadline,
-                "CCCC did not display {text:?}: {visible}{}",
+                "CCCC did not display {text:?}: {visible}{}{}",
+                self.pty_capture_summary(),
                 self.startup_state()
             );
             std::thread::sleep(Duration::from_millis(20));
