@@ -232,6 +232,7 @@ export function getActorDisplayWorkingState(
 
   if (
     !isRunning ||
+    backendState === "unknown" ||
     effectiveRunner === "headless" ||
     stateSource === "managed_session" ||
     stateSource === "app_server"

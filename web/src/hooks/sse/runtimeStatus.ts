@@ -43,14 +43,15 @@ function deriveLifecycleState(
 ): string {
   const fallbackLifecycle = String(fallback?.lifecycle_state || "active");
   if (runningActors.length === 0 || fallbackLifecycle === "paused") return fallbackLifecycle;
-  return runningActors.some((actor) => {
-    const state = String(actor.effective_working_state || "")
-      .trim()
-      .toLowerCase();
-    return state === "working" || state === "waiting" || state === "stuck";
-  })
-    ? "active"
-    : "idle";
+  const states = runningActors.map((actor) =>
+    String(actor.effective_working_state || "").trim().toLowerCase(),
+  );
+  if (states.some((state) => state === "working" || state === "waiting" || state === "stuck"))
+    return "active";
+  // An untracked running actor is not evidence that its group is idle.
+  // Keep the group lifecycle in its supported running state.
+  if (states.includes("unknown")) return "active";
+  return "idle";
 }
 
 export function computeGroupRuntimeFromActorActivityUpdates(

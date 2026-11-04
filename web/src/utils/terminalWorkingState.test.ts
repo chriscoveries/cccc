@@ -2,12 +2,21 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   filterTerminalWorkingBannerChunk,
+  getActorDisplayWorkingState,
   getTerminalSignalFromChunk,
   isTerminalPromptVisible,
   stripInactiveTerminalWorkingBanners,
 } from "./terminalWorkingState";
+import capturedActivity from "../hooks/__fixtures__/working-state-capture.json";
 
 describe("terminal working state", () => {
+  it("does not promote an untracked captured runner from terminal output alone", () => {
+    const actor = { ...capturedActivity[0]!, effective_working_state: "unknown" };
+    for (const kind of ["idle_prompt", "working_output"] as const) {
+      expect(getActorDisplayWorkingState(actor, { kind, updatedAt: 1000 }, 1000)).toBe("unknown");
+    }
+  });
+
   it("detects a prompt when a terminal status line follows it", () => {
     expect(
       isTerminalPromptVisible(

@@ -1,0 +1,18 @@
+[
+  {
+    "running": true,
+    "runner_effective": "pty",
+    "effective_working_state": "waiting",
+    "effective_working_reason": "pty_running_state_unknown",
+    "effective_working_updated_at": null,
+    "id": "terminal"
+  },
+  {
+    "running": true,
+    "runner_effective": "headless",
+    "effective_working_state": "idle",
+    "effective_working_reason": "headless_running",
+    "effective_working_updated_at": null,
+    "id": "worker"
+  }
+]
