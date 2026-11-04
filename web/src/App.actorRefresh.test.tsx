@@ -124,12 +124,7 @@ import App from "./App";
 const GROUP_A = "g_reconcile_alpha";
 const GROUP_B = "g_reconcile_beta";
 type ActorKind = "native" | "managed";
-type RequestRecord = {
-  method: string;
-  pathname: string;
-  at: number;
-  resourceObservation: boolean;
-};
+type RequestRecord = { method: string; pathname: string; at: number; resourceObservation: boolean };
 let host: HTMLDivElement;
 let root: Root;
 let requests: RequestRecord[];
