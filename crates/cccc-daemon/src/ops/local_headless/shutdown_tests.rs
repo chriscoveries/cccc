@@ -5,6 +5,98 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[test]
+fn shutdown_reader_close_does_not_claim_provider_exit() {
+    // Run with a private supervisor registry, as in the other shutdown test.
+    const CHILD: &str = "CCCC_TEST_READER_CLOSE_SHUTDOWN";
+    if std::env::var_os(CHILD).is_none() {
+        let result = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "ops::local_headless::supervisor::shutdown_tests::shutdown_reader_close_does_not_claim_provider_exit",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("isolated supervisor");
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+
+    use cccc_contracts::{Actor, ActorRuntime, RuntimeMode};
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+
+    let temp = tempfile::tempdir().expect("fixture home");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    home.initialize().expect("initialize home");
+    let store = cccc_core::GroupStore::new(home.clone()).expect("store");
+    let group = store.create("reader shutdown", "").expect("group");
+    let mut group = cccc_core::group_scope::attach(
+        &store,
+        &group.group_id,
+        cccc_core::scope::detect(temp.path()).expect("scope"),
+    )
+    .expect("attach scope");
+    let executable = temp.path().join("kiro-cli");
+    std::fs::write(
+        &executable,
+        include_str!("../codex_voice_analyst/native_acp/v3_fixture.py"),
+    )
+    .expect("write fake ACP child");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+        .expect("fixture permissions");
+    let mut actor = Actor::new("worker");
+    actor.runtime = ActorRuntime::Kiro;
+    actor.runtime_mode = RuntimeMode::Acp;
+    actor.command = vec![executable.to_string_lossy().into_owned()];
+    actor.env = BTreeMap::from([
+        (
+            "HOME".into(),
+            temp.path().join("provider").to_string_lossy().into_owned(),
+        ),
+        (
+            "CODEX_HOME".into(),
+            temp.path().join("codex").to_string_lossy().into_owned(),
+        ),
+        ("ACP_FIXTURE_CLI".into(), "/bin/true".into()),
+    ]);
+    group.actors.push(actor.clone());
+    store.save(&group).expect("save actor");
+    super::super::start(&home, &group, &actor).expect("start managed ACP child");
+    let item = lookup(&(group.group_id.clone(), actor.id.clone())).expect("managed session");
+    assert!(item.running(), "the provider is alive before teardown");
+
+    // Close a reader's event channel as daemon teardown begins. The owned
+    // provider is real process state; dropping the sender is the test control.
+    let (sender, receiver) = tokio::sync::broadcast::channel(1);
+    super::super::managed_reader::spawn(Arc::clone(&item), receiver).expect("reader");
+    drop(sender);
+    let path = store.ledger_path(&group.group_id).expect("ledger path");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let stop = loop {
+        let events = cccc_core::ledger::read_all(&path).unwrap_or_default();
+        if let Some(event) = events.into_iter().find(|event| event.kind == "actor.stop") {
+            break Some(event);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    stop_all().expect("finish daemon shutdown");
+    let stop = stop.expect("reader stop recorded");
+    assert_eq!(stop.data["source"], "managed_reader");
+    assert_eq!(stop.data["reason"], "reader_closed");
+    assert!(stop.data["exit_code"].is_null());
+}
+
 #[allow(clippy::await_holding_lock)] // Deliberately simulate an in-progress graceful stop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_requests_all_jobs_and_confirms_stops_concurrently() {
