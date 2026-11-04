@@ -2,10 +2,10 @@
 //! pin only the rotating active file, and open immutable archives on demand.
 //! Decoding runs outside the writer lock; caches retain no descriptors.
 use super::{
-    acquire_reader_lock, decode_event_line, is_gzip, ledger_group_id, source_paths, trim_ascii,
+    acquire_reader_lock, decode_event_line, is_compressed, is_zstd, ledger_group_id, source_paths,
+    source_reader, trim_ascii, validate_zstd,
 };
 use cccc_contracts::Event;
-use flate2::read::GzDecoder;
 use std::fs::{File, Metadata};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::ops::ControlFlow;
@@ -162,12 +162,26 @@ impl Snapshot {
         let mut file = self.file(source)?;
         // Cloned descriptors share their offset; each snapshot is used serially.
         file.seek(SeekFrom::Start(0))?;
-        if is_gzip(&token.path) {
+        if is_compressed(&token.path) {
             #[cfg(test)]
             GZIP_READERS.with(|count| count.set(count.get() + 1));
-            let mut decoded = GzDecoder::new(file.take(token.len));
-            io::copy(&mut decoded.by_ref().take(offset), &mut io::sink())?;
-            Ok(Box::new(BufReader::new(decoded)))
+            if is_zstd(&token.path) {
+                // Validate the entire frame even when the caller asks for an
+                // early page. A corrupt suffix must not become a clean read.
+                validate_zstd(&mut file, &token.path)?;
+                if Source::from_file(&token.path, &file)? != *token {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "ledger archive changed during validation",
+                    ));
+                }
+                file.seek(SeekFrom::Start(0))?;
+            }
+            let mut decoded = source_reader(file.take(token.len), &token.path)?;
+            if io::copy(&mut decoded.by_ref().take(offset), &mut io::sink())? != offset {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            Ok(decoded)
         } else {
             file.seek(SeekFrom::Start(offset))?;
             Ok(Box::new(BufReader::new(
@@ -265,7 +279,7 @@ impl Snapshot {
                 offset = end;
                 line.clear();
             }
-            ends.push(if is_gzip(&token.path) {
+            ends.push(if is_compressed(&token.path) {
                 u64::MAX
             } else {
                 offset
@@ -289,7 +303,7 @@ impl Snapshot {
                 end += 1;
             }
             let mut position = ordered[start].1.offset;
-            let mut compressed = if is_gzip(&token.path) {
+            let mut compressed = if is_compressed(&token.path) {
                 Some(self.reader(source, position)?)
             } else {
                 None

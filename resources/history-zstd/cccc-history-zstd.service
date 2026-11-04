@@ -1,0 +1,17 @@
+[Unit]
+Description=Verify and archive sealed CCCC history sidecars
+
+[Service]
+Type=exec
+User=cccc
+Group=cccc
+UMask=0077
+Nice=19
+IOSchedulingClass=idle
+CPUQuota=100%
+MemoryMax=1G
+RuntimeMaxSec=30min
+NoNewPrivileges=yes
+ExecStart=/usr/local/lib/cccc-history-zstd/venv/bin/python -I /usr/local/libexec/cccc-history-zstd --config /etc/cccc/history-zstd.json
+
+# This service is intentionally not enabled by the repository.
