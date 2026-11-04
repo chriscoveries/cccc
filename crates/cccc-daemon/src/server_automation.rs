@@ -34,10 +34,12 @@ impl AutomationScheduler {
         }
         self.task.take();
         let include_unread = self.take_unread_due();
+        let wake_due = crate::ops::mail_wake::take_signal(&home) || include_unread;
         self.task = Some(tokio::spawn(run(
             home,
             locks,
             include_unread,
+            wake_due,
             Arc::clone(&self.cancelled),
         )));
     }
@@ -68,6 +70,7 @@ async fn run(
     home: HomeLayout,
     locks: DispatchLocks,
     include_unread: bool,
+    wake_due: bool,
     cancelled: Arc<AtomicBool>,
 ) {
     if cancelled.load(Ordering::Acquire) {
@@ -83,7 +86,23 @@ async fn run(
         .collect::<BTreeSet<_>>();
     group_ids.extend(crate::ops::automation_runtime::pending_delivery_group_ids());
     group_ids.extend(exited.keys().cloned());
-    run_groups(home, locks, include_unread, group_ids, exited, cancelled).await;
+    run_groups(
+        home.clone(),
+        locks.clone(),
+        include_unread,
+        group_ids,
+        exited,
+        Arc::clone(&cancelled),
+    )
+    .await;
+    if wake_due && !cancelled.load(Ordering::Acquire) {
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::ops::mail_wake::run(&home, &locks) {
+                tracing::debug!(%error, "Mail wake pass held");
+            }
+        })
+        .await;
+    }
 }
 
 async fn run_groups(

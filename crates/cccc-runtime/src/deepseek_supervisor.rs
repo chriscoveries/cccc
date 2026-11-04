@@ -180,6 +180,19 @@ impl DeepSeekSupervisor {
         })
     }
 
+    /// Wake attribution requires a successful process observation; an error
+    /// cannot be treated as evidence that the owner is still alive.
+    pub fn confirm_running(&mut self) -> std::io::Result<bool> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(false);
+        };
+        let Some(tree) = self.process_tree.as_ref() else {
+            return Ok(false);
+        };
+        tree.try_wait(|| child.try_wait())
+            .map(|exit| exit.is_none())
+    }
+
     pub fn append_stderr(&mut self, bytes: &[u8]) {
         if let Ok(mut tail) = self.stderr_tail.lock() {
             tail.extend_from_slice(bytes);

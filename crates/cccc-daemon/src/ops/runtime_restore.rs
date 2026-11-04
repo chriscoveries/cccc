@@ -56,7 +56,11 @@ fn restore_running_serialized(home: &HomeLayout, locks: &DispatchLocks) -> Resul
     Ok(())
 }
 
-fn restore_group(home: &HomeLayout, store: &GroupStore, group_id: &str) -> Result<(), OpError> {
+pub(super) fn restore_group(
+    home: &HomeLayout,
+    store: &GroupStore,
+    group_id: &str,
+) -> Result<(), OpError> {
     let Ok(mut group) = store.load(group_id) else {
         return Ok(());
     };
@@ -81,6 +85,11 @@ fn restore_group(home: &HomeLayout, store: &GroupStore, group_id: &str) -> Resul
             }
         };
         if !should_restore_actor(group.state, &actor) {
+            continue;
+        }
+        if super::mail_wake::restore_blocked(home, &group.group_id, &actor) {
+            tracing::warn!(group_id = %group.group_id, actor_id = %actor.id,
+                "automatic restore held for unresolved Mail wake ownership");
             continue;
         }
         if deepseek_restore_blocked(home, &group, &actor) {
@@ -141,7 +150,11 @@ fn record_respawn_event(store: &GroupStore, group: &cccc_core::GroupDoc, actor_i
     }
 }
 
-fn deepseek_restore_blocked(home: &HomeLayout, group: &cccc_core::GroupDoc, actor: &Actor) -> bool {
+pub(super) fn deepseek_restore_blocked(
+    home: &HomeLayout,
+    group: &cccc_core::GroupDoc,
+    actor: &Actor,
+) -> bool {
     actor.runtime == cccc_contracts::ActorRuntime::Deepseek
         && crate::ops::deepseek_runtime::manual_restart_required(home, group, actor)
 }

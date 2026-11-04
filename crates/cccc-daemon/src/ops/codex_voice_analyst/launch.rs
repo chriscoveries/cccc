@@ -432,6 +432,26 @@ impl AnalystSession {
                 .all(|process| process.running())
     }
 
+    /// Strict owner observation for wake attribution: missing or unqueryable
+    /// child handles cannot be interpreted as a running managed process.
+    pub(crate) fn confirm_owned_process_running(&self) -> io::Result<bool> {
+        if !self.protocol.running() {
+            return Ok(false);
+        }
+        let Some(process) = self.process.as_ref() else {
+            return Ok(false);
+        };
+        if process.exit_status()?.is_some() {
+            return Ok(false);
+        }
+        for process in &self.auxiliary_processes {
+            if process.exit_status()?.is_some() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) fn process_id(&self) -> Option<u32> {
         self.process.as_ref().and_then(|process| process.id())
     }

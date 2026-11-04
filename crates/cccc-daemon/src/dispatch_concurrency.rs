@@ -128,6 +128,26 @@ impl DispatchLocks {
         }
     }
 
+    /// Keep the group registry stable while a census takes one Group at a time.
+    /// The callback must never wait for another Group while holding a Group
+    /// permit, and must not acquire the global permit a second time.
+    pub(crate) fn with_stable_census_blocking<T>(&self, operation: impl FnOnce(&Self) -> T) -> T {
+        let _global = self.global.blocking_read();
+        operation(self)
+    }
+
+    /// Only valid inside `with_stable_census_blocking`; the global permit is
+    /// already held, so a queued global writer cannot deadlock a second read.
+    pub(crate) fn with_census_group_blocking<T>(
+        &self,
+        group_id: &str,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let group = self.group(group_id);
+        let _group = group.blocking_write();
+        operation()
+    }
+
     pub(crate) fn with_group_write_blocking<T>(
         &self,
         group_id: &str,

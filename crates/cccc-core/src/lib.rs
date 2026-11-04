@@ -66,6 +66,7 @@ pub mod voice_notifications;
 pub mod voice_recording_lease;
 pub mod voice_secretary;
 pub mod voice_secretary_settings;
+pub mod wake_origin;
 pub mod web_bootstrap;
 pub mod web_login_grants;
 pub mod web_model_connectors;

@@ -1,4 +1,4 @@
-use super::{running, start, stop};
+use super::{running, start, start_for_wake, stop};
 use crate::dispatch::OpError;
 use crate::ops::{actor_profile_runtime, actor_runtime, actor_secrets};
 use cccc_contracts::{Actor, ActorRuntime};
@@ -15,15 +15,29 @@ pub fn apply(
         "actor.stop" => stop(&group.group_id, &actor.id),
         "actor.restart" | "actor.new_session" => {
             stop(&group.group_id, &actor.id);
-            start_actor(home, group, actor)?;
+            start_actor(home, group, actor, None)?;
         }
-        _ if !running(&group.group_id, &actor.id) => start_actor(home, group, actor)?,
+        _ if !running(&group.group_id, &actor.id) => start_actor(home, group, actor, None)?,
         _ => {}
     }
     Ok(())
 }
 
-fn start_actor(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<(), OpError> {
+pub(in crate::ops) fn apply_wake(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    origin: &cccc_core::deepseek_restart_gate::WakeOrigin,
+) -> Result<(), OpError> {
+    start_actor(home, group, actor, Some(origin))
+}
+
+fn start_actor(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    origin: Option<&cccc_core::deepseek_restart_gate::WakeOrigin>,
+) -> Result<(), OpError> {
     let mut actor = resolve_launch_actor(home, group, actor)?;
     actor.normalize_runtime_constraints();
     if actor.command.is_empty() {
@@ -40,7 +54,11 @@ fn start_actor(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<(),
     std::fs::create_dir_all(session_root).map_err(OpError::io)?;
     preflight(&actor)?;
     let cwd = actor_runtime::working_directory(group, &actor)?;
-    start(home, group, &actor, &cwd).map_err(OpError::io)
+    match origin {
+        Some(origin) => start_for_wake(home, group, &actor, &cwd, origin),
+        None => start(home, group, &actor, &cwd),
+    }
+    .map_err(OpError::io)
 }
 
 fn resolve_launch_actor(

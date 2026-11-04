@@ -10,6 +10,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[test]
+fn failed_stop_keeps_the_actual_owner_registered() {
+    let captured: cccc_contracts::Event = serde_json::from_str(include_str!(
+        "../../cccc-daemon/src/ops/mail_wake/fixtures/exit.json"
+    ))
+    .expect("captured process-exit envelope");
+    assert_eq!(captured.kind, "actor.stop");
+    let _guard = test_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let group = "wake-stop-control";
+    let actor = "receiver";
+    start(spec(&temp, group, actor, "exec sleep 30")).expect("local launcher control");
+    // Labeled pre-cleanup error exercises the real registry boundary, not a
+    // claim that an operating-system failure was observed in the capture.
+    let failed = super::stop_with(group, actor, |_| {
+        Err(std::io::Error::other("labeled stop failure").into())
+    });
+    assert!(failed.is_err());
+    assert!(lookup(group, actor).is_ok());
+    assert!(status(group, actor).expect("still registered").running);
+    stop(group, actor).expect("cleanup control");
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn stop_can_finish_while_terminal_input_is_backpressured() {
     let _guard = test_guard();

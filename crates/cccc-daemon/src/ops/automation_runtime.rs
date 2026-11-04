@@ -161,6 +161,19 @@ fn notify_idle_mail_recipients_with(
     }
 }
 
+/// Deliver the wake-specific cue through the existing notice claim path.
+pub(super) fn notify_confirmed_mail_wake(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+) -> std::io::Result<()> {
+    let result = cccc_core::automation::notify_wake_mail(home, group_id, actor_id)?;
+    let failure = result.unread_failure.as_ref().map(ToString::to_string);
+    // A partial append may already have committed notices that need dispatch.
+    apply(home, result, &AtomicBool::new(false));
+    failure.map_or(Ok(()), |error| Err(std::io::Error::other(error)))
+}
+
 fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
     if let Some(error) = &result.unread_failure {
         // An unread discovery or write failure must not discard earlier notices.

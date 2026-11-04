@@ -92,7 +92,10 @@ pub(crate) async fn launch(
     web_mode: Option<cccc_web::WebMode>,
     terminal: bool,
 ) -> Result<()> {
-    home.initialize()?;
+    if let Err(error) = cccc_daemon::initialize_home(&home) {
+        eprintln!("[cccc] Mail wake bootstrap held: {error}");
+        home.initialize()?;
+    }
     let mut binding = crate::web_launch::resolve(&home, host_override.as_deref(), port_override)?;
     let client = DaemonClient::new(home.clone());
     let instance = claim_web_instance(&home, &client).await?;

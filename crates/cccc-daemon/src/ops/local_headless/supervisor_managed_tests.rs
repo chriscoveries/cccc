@@ -258,6 +258,97 @@ mod structured_admission {
     }
 
     #[test]
+    fn only_confirmed_stopped_managed_owner_can_be_retired_for_wake() {
+        let capture: Event = serde_json::from_str(include_str!("../mail_wake/fixtures/exit.json"))
+            .expect("captured process exit");
+        assert_eq!(capture.kind, "actor.stop");
+        let fixture = Fixture::new();
+        let id = &fixture.group.group_id;
+        assert!(!local_headless::retire_confirmed_stopped(id, "worker").expect("running held"));
+        // Labeled local launcher control: the real managed stop completes but
+        // intentionally leaves its registry entry, like a provider exit.
+        local_headless::supervisor::stop_without_retiring_for_control(id, "worker").expect("stop");
+        assert!(local_headless::owner_or_starting(id, "worker").expect("registered"));
+        assert!(local_headless::retire_confirmed_stopped(id, "worker").expect("retire"));
+        assert!(!local_headless::owner_or_starting(id, "worker").expect("retired"));
+    }
+
+    #[test]
+    fn managed_wake_origin_binds_actual_owner_and_not_operator_replacement() {
+        let event: Event = serde_json::from_str(include_str!("../mail_wake/fixtures/mail.json"))
+            .expect("captured Mail envelope");
+        let mut fixture = Fixture::new();
+        local_headless::stop(&fixture.group.group_id, "worker").expect("stop control");
+        fixture.group.actors[0].generation = "generation-control".into();
+        let actor = fixture.group.actors[0].clone();
+        GroupStore::new(fixture.home.clone())
+            .expect("store")
+            .save(&fixture.group)
+            .expect("save generation control");
+        let origin = cccc_core::wake_origin::WakeOrigin {
+            attempt_id: "attempt-one".into(),
+            actor_generation: actor.generation.clone(),
+            policy_fingerprint: "a".repeat(64),
+            source_event_id: event.id,
+        };
+        // Existing ACP fixture is a labeled launcher control; the source Mail
+        // is retained capture. This does not claim a provider trace.
+        local_headless::start_for_wake(&fixture.home, &fixture.group, &actor, &origin)
+            .expect("wake launch");
+        let confirmed = |wanted: &cccc_core::wake_origin::WakeOrigin| {
+            local_headless::with_confirmed_wake(
+                &fixture.home,
+                &fixture.group,
+                &actor,
+                wanted,
+                || Ok(()),
+            )
+            .expect("owner observation")
+            .is_some()
+        };
+        assert!(confirmed(&origin));
+        let failed: std::io::Result<Option<()>> = local_headless::with_confirmed_wake(
+            &fixture.home,
+            &fixture.group,
+            &actor,
+            &origin,
+            || Err(std::io::Error::other("result write failed")),
+        );
+        assert!(failed.is_err());
+        assert!(confirmed(&origin));
+        let owner_path = GroupStore::new(fixture.home.clone())
+            .expect("store")
+            .state_dir(&fixture.group.group_id)
+            .expect("state")
+            .join("headless/owners/worker.json");
+        let saved = std::fs::read(&owner_path).expect("owner record");
+        std::fs::write(&owner_path, b"{").expect("corrupt owner control");
+        assert!(
+            local_headless::with_confirmed_wake(
+                &fixture.home,
+                &fixture.group,
+                &actor,
+                &origin,
+                || Ok(()),
+            )
+            .is_err()
+        );
+        std::fs::write(&owner_path, saved).expect("restore owner control");
+        assert!(confirmed(&origin));
+        let mut other = origin.clone();
+        other.attempt_id = "attempt-two".into();
+        assert!(!confirmed(&other));
+        assert!(
+            local_headless::start_for_wake(&fixture.home, &fixture.group, &actor, &other).is_err()
+        );
+        assert!(confirmed(&origin));
+        local_headless::stop(&fixture.group.group_id, &actor.id).expect("stop wake owner");
+        assert!(!confirmed(&origin)); // labeled absent-registry/restart control
+        local_headless::start(&fixture.home, &fixture.group, &actor).expect("operator start");
+        assert!(!confirmed(&origin));
+    }
+
+    #[test]
     fn rejected_actor_admission_projects_a_safe_diagnostic_without_claiming_a_turn() {
         let fixture = Fixture::new();
         let event = fixture.send("REJECT_BEFORE_RECEIPT");
