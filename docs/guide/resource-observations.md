@@ -24,9 +24,9 @@ CPU is measured across two snapshots as a percentage of one core; it may exceed
 snapshot totals its live processes' own CPU ticks together with the ticks of
 the children they have already waited for, so a child that starts and exits
 between two snapshots is counted once through its reaper rather than missed,
-while live descendants are never counted twice. If a member process leaves the
-tree without a surviving relative accounting for its work, the value is
-unavailable rather than a misleading partial number; equality of the two
+while live descendants are never counted twice. If a previously observed
+member leaves the tree, the interval is unavailable because aggregate waited
+ticks cannot identify which process supplied them. Equality of the two
 process sets alone is never treated as proof that nothing ran in between. Linux
 process information can change during collection, so the displayed tree is an
 observation, not a billing or ownership record.

@@ -227,24 +227,21 @@ pub(super) mod linux {
                 if seconds < 1.0 {
                     return None;
                 }
-                // A member that vanished without a surviving relative
-                // inheriting its waited-for accounting left this process
-                // tree; that work cannot be attributed, so the value is
-                // unavailable rather than partial.
-                let mut vanished = 0u64;
-                let mut inherited = 0u64;
-                for (identity, &(own, waited)) in &old.tree {
-                    match current.get(identity) {
-                        Some(&(_, waited_now)) => {
-                            inherited = inherited.checked_add(waited_now.checked_sub(waited)?)?;
-                        }
-                        None => {
-                            vanished = vanished.checked_add(own)?.checked_add(waited)?;
-                        }
-                    }
-                }
-                if inherited < vanished {
+                // Aggregate waited ticks cannot identify which child supplied
+                // them. A departed member could have escaped while an
+                // unrelated child was reaped, so refuse that interval even
+                // when aggregate totals appear to cover the missing work.
+                if old
+                    .tree
+                    .keys()
+                    .any(|identity| !current.contains_key(identity))
+                {
                     return None;
+                }
+                for (identity, &(own, waited)) in &old.tree {
+                    let &(current_own, current_waited) = current.get(identity)?;
+                    current_own.checked_sub(own)?;
+                    current_waited.checked_sub(waited)?;
                 }
                 let before = old.tree.values().try_fold(0u64, |sum, (own, waited)| {
                     sum.checked_add(*own)?.checked_add(*waited)
@@ -271,6 +268,22 @@ pub(super) mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::io::{BufRead, Write};
+
+        fn live_interval() -> std::sync::MutexGuard<'static, ()> {
+            static GUARD: Mutex<()> = Mutex::new(());
+            let guard = GUARD.lock().unwrap_or_else(|error| error.into_inner());
+            let root = std::process::id();
+            if let Some(started) = std::fs::read_to_string(format!("/proc/{root}/stat"))
+                .ok()
+                .and_then(|text| parse_process_stat(&text))
+                .map(|stat| stat.started_ticks)
+                && let Ok(mut cache) = previous().lock()
+            {
+                cache.remove(&(root, started));
+            }
+            guard
+        }
 
         #[test]
         fn captured_cpu_interval_uses_observed_ticks_and_elapsed_time() {
@@ -344,6 +357,7 @@ pub(super) mod linux {
             // The captured pair above is the control: equal identity sets and
             // no short-lived child. This test adds a real one that starts,
             // burns CPU and is reaped entirely between the endpoints.
+            let _guard = live_interval();
             let root = std::process::id();
             let first = Snapshot::capture().expect("first real capture");
             let (rss, initial) = first.actor(root).expect("own tree");
@@ -390,6 +404,113 @@ pub(super) mod linux {
                 accounted + 5.0 >= observed as f64,
                 "the interval accounted {accounted} ticks for an observed child of {observed}"
             );
+        }
+
+        #[test]
+        fn unrelated_reap_does_not_cover_an_orphaned_member() {
+            use std::process::{Child, Command, Stdio};
+
+            struct Children {
+                parent: Child,
+                orphan: u32,
+                started: u64,
+            }
+            impl Drop for Children {
+                fn drop(&mut self) {
+                    let current = std::fs::read_to_string(format!("/proc/{}/stat", self.orphan))
+                        .ok()
+                        .and_then(|text| parse_process_stat(&text));
+                    if current.is_some_and(|stat| stat.started_ticks == self.started) {
+                        let _ = nix::sys::signal::kill(
+                            nix::unistd::Pid::from_raw(self.orphan as i32),
+                            nix::sys::signal::Signal::SIGKILL,
+                        );
+                    }
+                    let _ = self.parent.kill();
+                    let _ = self.parent.wait();
+                }
+            }
+
+            let _guard = live_interval();
+            let root = std::process::id();
+            let mut parent = Command::new("/bin/sh")
+                .args(["-c", "sleep 30 & echo $!; read release"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("start parent");
+            let mut line = String::new();
+            std::io::BufReader::new(parent.stdout.take().expect("stdout"))
+                .read_line(&mut line)
+                .expect("child pid");
+            let orphan: u32 = line.trim().parse().expect("child pid number");
+            let first = Snapshot::capture().expect("first real capture");
+            let parent_id = parent.id();
+            let child = first.processes.get(&orphan).expect("observed child");
+            assert_eq!(child.parent, parent_id);
+            let mut children = Children {
+                parent,
+                orphan,
+                started: child.started_ticks,
+            };
+            assert!(first.actor(root).expect("first tree").1.is_none());
+            children
+                .parent
+                .stdin
+                .take()
+                .expect("stdin")
+                .write_all(b"\n")
+                .expect("release parent");
+            children.parent.wait().expect("reap parent");
+
+            let mut burner = Command::new("/bin/sh")
+                .args(["-c", "while :; do :; done"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("unrelated burner");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut ticks = 0;
+            while ticks < 3 && Instant::now() < deadline {
+                ticks = std::fs::read_to_string(format!("/proc/{}/stat", burner.id()))
+                    .ok()
+                    .and_then(|text| parse_process_stat(&text))
+                    .map_or(0, |stat| stat.user_ticks + stat.system_ticks);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            burner.kill().expect("stop burner");
+            burner.wait().expect("reap burner");
+            assert!(ticks >= 3, "the unrelated child consumed CPU");
+            std::thread::sleep(Duration::from_millis(1300).saturating_sub(first.at.elapsed()));
+            let second = Snapshot::capture().expect("second real capture");
+            assert_ne!(
+                second
+                    .processes
+                    .get(&orphan)
+                    .expect("orphan remains")
+                    .parent,
+                parent_id
+            );
+            let before = first.processes.get(&root).expect("first root");
+            let after = second.processes.get(&root).expect("second root");
+            let inherited = (after.child_user_ticks + after.child_system_ticks)
+                .saturating_sub(before.child_user_ticks + before.child_system_ticks);
+            let departed = [parent_id, orphan]
+                .iter()
+                .map(|pid| {
+                    let stat = first.processes.get(pid).expect("first member");
+                    stat.user_ticks
+                        + stat.system_ticks
+                        + stat.child_user_ticks
+                        + stat.child_system_ticks
+                })
+                .sum::<u64>();
+            assert!(
+                inherited >= departed,
+                "aggregate guard would accept this interval"
+            );
+            assert!(second.actor(root).expect("second tree").1.is_none());
         }
 
         #[test]
