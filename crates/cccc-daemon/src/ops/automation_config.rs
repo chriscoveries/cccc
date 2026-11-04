@@ -513,9 +513,9 @@ fn caller_role(group: &GroupDoc, by: &str) -> Result<Option<ActorRole>, OpError>
         .ok_or_else(|| OpError::new("permission_denied", format!("unknown actor: {by}")))
 }
 
-/// What a saved change did, for its ledger event: the version step, which
-/// parts of the ruleset changed, and the rule ids now saved. Rule bodies and
-/// snippet text stay in the group document.
+/// What a saved change did, for its ledger event: the version step and which
+/// parts of the ruleset changed. Rule IDs, bodies and snippet text stay in the
+/// group document.
 fn change_data(before: &Map<String, Value>, after: &Map<String, Value>) -> Value {
     let version =
         |doc: &Map<String, Value>| doc.get("version").and_then(Value::as_u64).unwrap_or(1);
@@ -533,21 +533,10 @@ fn change_data(before: &Map<String, Value>, after: &Map<String, Value>) -> Value
         .into_iter()
         .filter(|key| part(before, key) != part(after, key))
         .collect::<Vec<_>>();
-    let rule_ids = after
-        .get("rules")
-        .and_then(Value::as_array)
-        .map(|rules| {
-            rules
-                .iter()
-                .filter_map(|rule| rule.get("id").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
     json!({
         "previous_version": version(before),
         "version": version(after),
         "changed": changed,
-        "rule_ids": rule_ids,
     })
 }
 
