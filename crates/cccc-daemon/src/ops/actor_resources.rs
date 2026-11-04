@@ -47,35 +47,6 @@ pub(super) fn host_memory() -> Option<(u64, u64)> {
         .and_then(|data| parse_memory(&data))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_captured_process_and_memory() {
-        let stat = parse_process_stat(include_str!("actor_resources_fixtures/proc-stat.txt"))
-            .expect("captured Linux process stat");
-        assert_eq!(stat.parent, 1_770_953);
-        assert_eq!(stat.user_ticks, 2);
-        assert_eq!(stat.system_ticks, 0);
-        assert_eq!(stat.started_ticks, 376_655_417);
-        assert_eq!(stat.rss_pages, 2_976);
-        let (total, available) = parse_memory(include_str!("actor_resources_fixtures/meminfo.txt"))
-            .expect("captured Linux memory summary");
-        assert_eq!(total, 32_089_156 * 1024);
-        assert_eq!(available, 16_869_080 * 1024);
-    }
-
-    #[test]
-    fn truncated_captures_remain_unavailable() {
-        // Truncations of the captured records, not new process observations.
-        let stat = include_str!("actor_resources_fixtures/proc-stat.txt");
-        assert!(parse_process_stat(stat.split_once(')').expect("captured comm").0).is_none());
-        let memory = include_str!("actor_resources_fixtures/meminfo.txt");
-        assert!(parse_memory(memory.lines().next().expect("captured first line")).is_none());
-    }
-}
-
 #[cfg(target_os = "linux")]
 pub(super) mod linux {
     use super::{ProcessStat, parse_process_stat};
@@ -102,75 +73,6 @@ pub(super) mod linux {
         page_bytes: u64,
         ticks_per_second: u64,
         at: Instant,
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn captured_cpu_interval_uses_observed_ticks_and_elapsed_time() {
-            let first = include_str!("actor_resources_fixtures/cpu-first.txt");
-            let second = include_str!("actor_resources_fixtures/cpu-second.txt");
-            let pid: u32 = first
-                .split_ascii_whitespace()
-                .next()
-                .expect("pid")
-                .parse()
-                .expect("captured pid");
-            let initial = parse_process_stat(first).expect("first sample");
-            let later = parse_process_stat(second).expect("second sample");
-            assert_eq!(initial.started_ticks, later.started_ticks);
-            let elapsed_ns: u64 = include_str!("actor_resources_fixtures/cpu-elapsed-ns.txt")
-                .trim()
-                .parse()
-                .expect("captured elapsed time");
-            let at = Instant::now();
-            let a = Snapshot::new(HashMap::from([(pid, initial)]), 4096, 100, at);
-            let b = Snapshot::new(
-                HashMap::from([(pid, later)]),
-                4096,
-                100,
-                at + Duration::from_nanos(elapsed_ns),
-            );
-            assert!(a.actor(pid).expect("first tree").1.is_none());
-            let observed = b.actor(pid).expect("second tree").1.expect("CPU interval");
-            let delta =
-                later.user_ticks + later.system_ticks - initial.user_ticks - initial.system_ticks;
-            let expected = 100.0 * delta as f64 / 100.0 / (elapsed_ns as f64 / 1_000_000_000.0);
-            assert!((observed - expected).abs() < 1e-9);
-            assert!(observed > 0.0);
-        }
-
-        #[test]
-        fn captured_parent_and_child_are_counted_once() {
-            let parent = include_str!("actor_resources_fixtures/tree-parent.txt");
-            let child = include_str!("actor_resources_fixtures/tree-child.txt");
-            let parent_pid: u32 = parent
-                .split_ascii_whitespace()
-                .next()
-                .expect("pid")
-                .parse()
-                .expect("captured pid");
-            let child_pid: u32 = child
-                .split_ascii_whitespace()
-                .next()
-                .expect("pid")
-                .parse()
-                .expect("captured pid");
-            let parent_stat = parse_process_stat(parent).expect("captured parent");
-            let child_stat = parse_process_stat(child).expect("captured child");
-            assert_eq!(child_stat.parent, parent_pid);
-            let snapshot = Snapshot::new(
-                HashMap::from([(parent_pid, parent_stat), (child_pid, child_stat)]),
-                4096,
-                100,
-                Instant::now(),
-            );
-            let (rss, cpu) = snapshot.actor(parent_pid).expect("captured tree");
-            assert_eq!(rss, (3104 + 2528) * 4096);
-            assert!(cpu.is_none());
-        }
     }
 
     impl Snapshot {
@@ -320,5 +222,103 @@ pub(super) mod linux {
             }
             Some((rss, cpu))
         }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn captured_cpu_interval_uses_observed_ticks_and_elapsed_time() {
+            let first = include_str!("actor_resources_fixtures/cpu-first.txt");
+            let second = include_str!("actor_resources_fixtures/cpu-second.txt");
+            let pid: u32 = first
+                .split_ascii_whitespace()
+                .next()
+                .expect("pid")
+                .parse()
+                .expect("captured pid");
+            let initial = parse_process_stat(first).expect("first sample");
+            let later = parse_process_stat(second).expect("second sample");
+            assert_eq!(initial.started_ticks, later.started_ticks);
+            let elapsed_ns: u64 = include_str!("actor_resources_fixtures/cpu-elapsed-ns.txt")
+                .trim()
+                .parse()
+                .expect("captured elapsed time");
+            let at = Instant::now();
+            let a = Snapshot::new(HashMap::from([(pid, initial)]), 4096, 100, at);
+            let b = Snapshot::new(
+                HashMap::from([(pid, later)]),
+                4096,
+                100,
+                at + Duration::from_nanos(elapsed_ns),
+            );
+            assert!(a.actor(pid).expect("first tree").1.is_none());
+            let observed = b.actor(pid).expect("second tree").1.expect("CPU interval");
+            let delta =
+                later.user_ticks + later.system_ticks - initial.user_ticks - initial.system_ticks;
+            let expected = 100.0 * delta as f64 / 100.0 / (elapsed_ns as f64 / 1_000_000_000.0);
+            assert!((observed - expected).abs() < 1e-9);
+            assert!(observed > 0.0);
+        }
+
+        #[test]
+        fn captured_parent_and_child_are_counted_once() {
+            let parent = include_str!("actor_resources_fixtures/tree-parent.txt");
+            let child = include_str!("actor_resources_fixtures/tree-child.txt");
+            let parent_pid: u32 = parent
+                .split_ascii_whitespace()
+                .next()
+                .expect("pid")
+                .parse()
+                .expect("captured pid");
+            let child_pid: u32 = child
+                .split_ascii_whitespace()
+                .next()
+                .expect("pid")
+                .parse()
+                .expect("captured pid");
+            let parent_stat = parse_process_stat(parent).expect("captured parent");
+            let child_stat = parse_process_stat(child).expect("captured child");
+            assert_eq!(child_stat.parent, parent_pid);
+            let snapshot = Snapshot::new(
+                HashMap::from([(parent_pid, parent_stat), (child_pid, child_stat)]),
+                4096,
+                100,
+                Instant::now(),
+            );
+            let (rss, cpu) = snapshot.actor(parent_pid).expect("captured tree");
+            assert_eq!(rss, (3104 + 2528) * 4096);
+            assert!(cpu.is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_captured_process_and_memory() {
+        let stat = parse_process_stat(include_str!("actor_resources_fixtures/proc-stat.txt"))
+            .expect("captured Linux process stat");
+        assert_eq!(stat.parent, 1_770_953);
+        assert_eq!(stat.user_ticks, 2);
+        assert_eq!(stat.system_ticks, 0);
+        assert_eq!(stat.started_ticks, 376_655_417);
+        assert_eq!(stat.rss_pages, 2_976);
+        let (total, available) = parse_memory(include_str!("actor_resources_fixtures/meminfo.txt"))
+            .expect("captured Linux memory summary");
+        assert_eq!(total, 32_089_156 * 1024);
+        assert_eq!(available, 16_869_080 * 1024);
+    }
+
+    #[test]
+    fn truncated_captures_remain_unavailable() {
+        // Truncations of the captured records, not new process observations.
+        let stat = include_str!("actor_resources_fixtures/proc-stat.txt");
+        assert!(parse_process_stat(stat.split_once(')').expect("captured comm").0).is_none());
+        let memory = include_str!("actor_resources_fixtures/meminfo.txt");
+        assert!(parse_memory(memory.lines().next().expect("captured first line")).is_none());
     }
 }
