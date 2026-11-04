@@ -79,6 +79,43 @@ pub(super) mod linux {
         PREVIOUS.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
+    /// One full-host scan (or one recorded failure of it) shared between
+    /// every client that arrives inside the same window.
+    struct Shared<T> {
+        attempted: Instant,
+        result: Option<Arc<T>>,
+    }
+
+    /// Serve the recent result, including a recorded unavailability, to every
+    /// client inside the window; the first client after the window performs
+    /// the scan itself.
+    fn shared_with<T>(
+        shared: &mut Option<Shared<T>>,
+        now: Instant,
+        scan: impl FnOnce() -> Option<T>,
+    ) -> Option<Arc<T>> {
+        if let Some(recent) = shared
+            && now.saturating_duration_since(recent.attempted) < CAPTURE_INTERVAL
+        {
+            return recent.result.clone();
+        }
+        let result = scan().map(Arc::new);
+        *shared = Some(Shared {
+            attempted: now,
+            result: result.clone(),
+        });
+        result
+    }
+
+    /// The scan every resource request is served from: one full-host read
+    /// per window, however many clients ask, and a failure stays unavailable
+    /// for the same window instead of being retried per request.
+    pub(crate) fn capture_shared() -> Option<Arc<Snapshot>> {
+        static SHARED: OnceLock<Mutex<Option<Shared<Snapshot>>>> = OnceLock::new();
+        let mut shared = SHARED.get_or_init(|| Mutex::new(None)).lock().ok()?;
+        shared_with(&mut shared, Instant::now(), Snapshot::capture)
+    }
+
     pub(crate) struct Snapshot {
         processes: HashMap<u32, ProcessStat>,
         children: HashMap<u32, Vec<u32>>,
