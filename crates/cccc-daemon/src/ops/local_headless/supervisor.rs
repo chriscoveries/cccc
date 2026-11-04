@@ -518,7 +518,6 @@ pub async fn kill_all_requests() {
     while tasks.join_next().await.is_some() {}
 }
 
-#[must_use]
 pub(in crate::ops) fn confirmed_running(group_id: &str, actor_id: &str) -> io::Result<bool> {
     let key = (group_id.to_owned(), actor_id.to_owned());
     let _start = StartGuard::acquire(&key)?;

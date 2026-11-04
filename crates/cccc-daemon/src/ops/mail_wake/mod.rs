@@ -2670,7 +2670,7 @@ mod tests {
             &home,
             &group.group_id,
             &actor.id,
-            &std::collections::BTreeMap::from([("CONTROL".into(), "changed".into())]),
+            std::collections::BTreeMap::from([("CONTROL".into(), "changed".into())]),
         )
         .expect("private environment control");
         assert_ne!(
@@ -2681,7 +2681,7 @@ mod tests {
             &home,
             &group.group_id,
             &actor.id,
-            &std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
         )
         .expect("restore environment control");
         assert_eq!(
