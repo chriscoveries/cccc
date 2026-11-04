@@ -44,7 +44,9 @@ function deriveLifecycleState(
   const fallbackLifecycle = String(fallback?.lifecycle_state || "active");
   if (runningActors.length === 0 || fallbackLifecycle === "paused") return fallbackLifecycle;
   const states = runningActors.map((actor) =>
-    String(actor.effective_working_state || "").trim().toLowerCase(),
+    String(actor.effective_working_state || "")
+      .trim()
+      .toLowerCase(),
   );
   if (states.some((state) => state === "working" || state === "waiting" || state === "stuck"))
     return "active";

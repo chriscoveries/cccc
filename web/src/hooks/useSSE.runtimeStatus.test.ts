@@ -75,9 +75,9 @@ describe("SSE actor activity runtime projection", () => {
   it("preserves authoritative working and paused states with an unknown actor", () => {
     const unknown = { ...capturedActivity[0]!, effective_working_state: "unknown" };
     const working = { ...capturedActivity[1]!, effective_working_state: "working" };
-    expect(computeGroupRuntimeFromActorActivityUpdates([], [unknown, working]).lifecycle_state).toBe(
-      "active",
-    );
+    expect(
+      computeGroupRuntimeFromActorActivityUpdates([], [unknown, working]).lifecycle_state,
+    ).toBe("active");
     expect(
       computeGroupRuntimeFromActorActivityUpdates([], [unknown], { lifecycle_state: "paused" })
         .lifecycle_state,

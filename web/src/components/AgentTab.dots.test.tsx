@@ -220,14 +220,14 @@ it("keeps distinct LCD status shapes and their accessible Actor labels", async (
 
 it("exposes the captured headless fallback as an unknown working state", async () => {
   const captured = capturedActivity[1]!;
-  await render(true, {
-    ...captured,
-    runtime: "custom",
-    enabled: true,
-    effective_working_state: "unknown",
-  }, "g_capture");
-  expect(host.querySelector('[data-terminal-title-bar] [role="img"]')?.getAttribute("aria-label"))
-    .toBe("workingStateUnknown");
+  await render(
+    true,
+    { ...captured, runtime: "custom", enabled: true, effective_working_state: "unknown" },
+    "g_capture",
+  );
+  expect(
+    host.querySelector('[data-terminal-title-bar] [role="img"]')?.getAttribute("aria-label"),
+  ).toBe("workingStateUnknown");
 });
 
 it.each([false, true])(
