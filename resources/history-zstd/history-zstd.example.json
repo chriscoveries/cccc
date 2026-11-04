@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "service": "cccc-history-zstd.service",
+  "source_root": "/var/lib/example/groups",
+  "archive_root": "/var/lib/example-retention",
+  "limits": {
+    "max_input_bytes": 536870912,
+    "max_output_bytes": 805306368,
+    "max_runtime_seconds": 1800,
+    "max_memory_bytes": 1073741824,
+    "min_free_bytes": 1073741824
+  },
+  "candidates": []
+}

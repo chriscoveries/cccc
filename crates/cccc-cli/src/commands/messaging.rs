@@ -255,11 +255,12 @@ pub async fn ledger(client: &DaemonClient, home: &HomeLayout, args: LedgerArgs) 
             by,
             reason,
             force,
+            zstd,
         } => {
             call(
                 client,
                 "ledger_compact",
-                json!({"group_id":group(home,group_id)?,"by":by,"reason":reason,"force":force}),
+                json!({"group_id":group(home,group_id)?,"by":by,"reason":reason,"force":force,"zstd":zstd}),
             )
             .await?
         }
