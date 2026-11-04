@@ -88,11 +88,15 @@ fn start_managed_agent(
     group: &GroupDoc,
     actor: &Actor,
     key: Key,
+    wake: Option<&cccc_core::wake_origin::WakeOrigin>,
 ) -> io::Result<()> {
     let cwd = working_directory(group, actor)?;
     match launch_managed(home, group, actor, &cwd) {
-        Ok(app) => attach_managed(home, group, actor, key, cwd, app),
+        Ok(app) => attach_managed_with_wake(home, group, actor, key, cwd, app, wake),
         Err(refusal) if super::workspace_trust::refused(actor, &refusal) => {
+            if wake.is_some() {
+                return Err(refusal);
+            }
             super::workspace_trust::prompt(home, group, actor, key, cwd, refusal)
         }
         Err(error) => Err(error),
@@ -140,7 +144,26 @@ pub(super) fn attach_managed(
     cwd: std::path::PathBuf,
     app: AnalystSession,
 ) -> io::Result<()> {
+    attach_managed_with_wake(home, group, actor, key, cwd, app, None)
+}
+
+fn attach_managed_with_wake(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    key: Key,
+    cwd: std::path::PathBuf,
+    app: AnalystSession,
+    wake: Option<&cccc_core::wake_origin::WakeOrigin>,
+) -> io::Result<()> {
     let app = Arc::new(app);
+    let wake_owner = wake.map(|origin| super::WakeOwner {
+        group_id: group.group_id.clone(),
+        actor_id: actor.id.clone(),
+        actor_created_at: actor.created_at.clone(),
+        owner_generation: app.generation().to_owned(),
+        origin: origin.clone(),
+    });
     let workspace = super::super::actor_runtime::LaunchWorkspace::capture(group, actor, &cwd);
     let scope = workspace.clone().for_actor(actor);
     let prompt =
@@ -168,6 +191,7 @@ pub(super) fn attach_managed(
         stop_lock: Mutex::new(()),
         startup_prompt: Mutex::new(Some(prompt)),
         active_turn: Mutex::new(None),
+        wake_owner,
     });
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
@@ -213,6 +237,17 @@ pub(super) fn attach_managed(
     {
         return Err(cleanup_failed_start(&item, error));
     }
+    if let Some(owner) = &item.wake_owner {
+        owner.origin.validate()?;
+        let path = wake_owner_path(home, &group.group_id, &actor.id)?;
+        // The actual registered owner writes its association. On an
+        // ambiguous write, retain the owner and let the global attempt hold.
+        cccc_core::fs::write_json(&path, owner)?;
+        let recorded: super::WakeOwner = cccc_core::fs::read_json(&path)?;
+        if &recorded != owner {
+            return Err(io::Error::other("managed wake owner record mismatch"));
+        }
+    }
     super::output::emit(&item, "headless.session.started", Map::new());
     Ok(())
 }
@@ -228,15 +263,53 @@ fn cleanup_failed_start(item: &Session, primary: io::Error) -> io::Error {
 }
 
 pub fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Result<()> {
-    start_session(home, group, actor)
+    start_session(home, group, actor, None)
 }
 
-fn start_session(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Result<()> {
+pub(in crate::ops) fn start_for_wake(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    origin: &cccc_core::wake_origin::WakeOrigin,
+) -> io::Result<()> {
+    if origin.actor_generation != cccc_core::actors::generation_identity(actor) {
+        return Err(io::Error::other("managed wake actor generation changed"));
+    }
+    origin.validate()?;
+    start_session(home, group, actor, Some(origin))
+}
+
+fn start_session(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    wake: Option<&cccc_core::wake_origin::WakeOrigin>,
+) -> io::Result<()> {
     if !supports(actor) {
         return Ok(());
     }
     let key = (group.group_id.clone(), actor.id.clone());
     let _start = StartGuard::acquire(&key)?;
+    if wake.is_some() {
+        if sessions()
+            .read()
+            .map_err(|_| poisoned())?
+            .contains_key(&key)
+            || super::workspace_trust_recovery::registered(&key)?
+            || super::confirmation_terminal::owns(&key.0, &key.1)?
+        {
+            return Err(io::Error::other("managed launch owner already exists"));
+        }
+        match cccc_runtime::status(&key.0, &key.1) {
+            Ok(status) if status.running => {
+                return Err(io::Error::other("terminal owner already exists"));
+            }
+            Ok(_) | Err(cccc_runtime::RuntimeError::NotFound(_, _)) => {}
+            Err(error) => return Err(io::Error::other(error)),
+        }
+        super::confirmation_pause::ensure_allowed(&key)?;
+        return start_managed_agent(home, group, actor, key, wake);
+    }
     if lookup(&key).is_some_and(|item| item.running()) {
         return Ok(());
     }
@@ -248,7 +321,55 @@ fn start_session(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Resu
     }
     stop_locked(&key)?;
 
-    start_managed_agent(home, group, actor, key)
+    start_managed_agent(home, group, actor, key, None)
+}
+
+fn wake_owner_path(home: &HomeLayout, group: &str, actor: &str) -> io::Result<std::path::PathBuf> {
+    let actor = cccc_core::actors::validate_actor_id(actor)?;
+    Ok(cccc_core::GroupStore::new(home.clone())?
+        .state_dir(group)?
+        .join("headless")
+        .join("owners")
+        .join(format!("{actor}.json")))
+}
+
+pub(in crate::ops) fn with_confirmed_wake<T>(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    origin: &cccc_core::wake_origin::WakeOrigin,
+    confirmed: impl FnOnce() -> io::Result<T>,
+) -> io::Result<Option<T>> {
+    if origin.actor_generation != cccc_core::actors::generation_identity(actor) {
+        return Ok(None);
+    }
+    let key = (group.group_id.clone(), actor.id.clone());
+    let _start = StartGuard::acquire(&key)?;
+    let item = sessions()
+        .read()
+        .map_err(|_| poisoned())?
+        .get(&key)
+        .cloned();
+    let Some(item) = item else { return Ok(None) };
+    let _stop = item.stop_lock.lock().map_err(|_| poisoned())?;
+    let Some(owner) = item.wake_owner.as_ref() else {
+        return Ok(None);
+    };
+    if owner.origin != *origin
+        || owner.actor_created_at != actor.created_at
+        || owner.owner_generation != item.managed.generation()
+        || item.managed.process_id().is_none()
+        || !item.managed.confirm_owned_process_running()?
+        || !item.running()
+    {
+        return Ok(None);
+    }
+    let recorded: super::WakeOwner =
+        cccc_core::fs::read_json(&wake_owner_path(home, &key.0, &key.1)?)?;
+    if &recorded != owner {
+        return Ok(None);
+    }
+    confirmed().map(Some)
 }
 
 pub fn stop(group_id: &str, actor_id: &str) -> io::Result<()> {
@@ -397,7 +518,21 @@ pub async fn kill_all_requests() {
     while tasks.join_next().await.is_some() {}
 }
 
-#[must_use]
+pub(in crate::ops) fn confirmed_running(group_id: &str, actor_id: &str) -> io::Result<bool> {
+    let key = (group_id.to_owned(), actor_id.to_owned());
+    let _start = StartGuard::acquire(&key)?;
+    let item = sessions()
+        .read()
+        .map_err(|_| poisoned())?
+        .get(&key)
+        .cloned();
+    let Some(item) = item else { return Ok(false) };
+    let _stop = item.stop_lock.lock().map_err(|_| poisoned())?;
+    Ok(item.managed.process_id().is_some()
+        && item.managed.confirm_owned_process_running()?
+        && item.running())
+}
+
 pub fn running(group_id: &str, actor_id: &str) -> bool {
     registered_running(group_id, actor_id).unwrap_or(false)
 }
@@ -612,6 +747,56 @@ fn render_turn(event: &Event) -> Option<(String, String)> {
             )
         },
     )
+}
+
+#[cfg(test)]
+pub(super) fn stop_without_retiring_for_control(group_id: &str, actor_id: &str) -> io::Result<()> {
+    let key = (group_id.to_owned(), actor_id.to_owned());
+    let item = lookup(&key).ok_or_else(|| io::Error::other("managed owner missing"))?;
+    item.stop()?;
+    Ok(())
+}
+
+/// Retire only an owner whose normal stop path already completed. A failed
+/// stop or a protected prompt remains registered and blocks automatic wake.
+pub(in crate::ops) fn retire_confirmed_stopped(group_id: &str, actor_id: &str) -> io::Result<bool> {
+    let key = (group_id.to_owned(), actor_id.to_owned());
+    let _start = StartGuard::acquire(&key)?;
+    if super::workspace_trust_recovery::registered(&key)?
+        || super::confirmation_terminal::owns(group_id, actor_id)?
+    {
+        return Ok(false);
+    }
+    let item = sessions()
+        .read()
+        .map_err(|_| poisoned())?
+        .get(&key)
+        .cloned();
+    let Some(item) = item else { return Ok(true) };
+    let _stop = item.stop_lock.lock().map_err(|_| poisoned())?;
+    if !item.stopped.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+    let mut items = sessions().write().map_err(|_| poisoned())?;
+    if items
+        .get(&key)
+        .is_some_and(|current| Arc::ptr_eq(current, &item))
+    {
+        items.remove(&key);
+    }
+    Ok(!items.contains_key(&key))
+}
+
+/// True for any registered or starting managed owner, including an exited
+/// owner awaiting teardown. Poisoned registries are unknown, never absent.
+pub(crate) fn owner_or_starting(group_id: &str, actor_id: &str) -> io::Result<bool> {
+    let key = (group_id.to_owned(), actor_id.to_owned());
+    let starting = starts().0.lock().map_err(|_| poisoned())?.contains(&key);
+    let registered = sessions()
+        .read()
+        .map_err(|_| poisoned())?
+        .contains_key(&key);
+    Ok(starting || registered)
 }
 
 fn lookup(key: &Key) -> Option<Arc<Session>> {

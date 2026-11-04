@@ -422,6 +422,8 @@
       "opencodeReconnect": "元のローカルバックエンドと CCCC プラグイン設定で OpenCode セッションを再開してください。別のセッションには固有の CCCC 接続元があり、対象のグループへの接続が必要です。"
     }
   },
+  "wakeOnMail": "宛先に指定された Mail で起動",
+  "wakeOnMailHelp": "有効なエージェントのプロセスが停止している場合に起動します。手動で停止すると無効になります。全体宛ての Mail では起動しません。",
   "workingDirectory": "作業ディレクトリ",
   "followGroupDirectory": "グループに従う",
   "fixedDirectory": "固定ディレクトリ",

@@ -66,7 +66,10 @@ impl DetachedDaemon {
         home: &HomeLayout,
         supervised: bool,
     ) -> Result<Option<(Child, Option<cccc_runtime::OwnedProcessTree>)>> {
-        home.initialize()?;
+        if let Err(error) = crate::ops::mail_wake::bootstrap(home) {
+            tracing::warn!(%error, "Mail wake bootstrap held");
+            home.initialize()?;
+        }
         if ping(home).await {
             return Ok(None);
         }

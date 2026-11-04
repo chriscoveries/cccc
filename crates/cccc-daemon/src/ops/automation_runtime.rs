@@ -161,6 +161,41 @@ fn notify_idle_mail_recipients_with(
     }
 }
 
+/// Deliver the wake-specific cue through the existing notice claim path.
+pub(super) fn notify_confirmed_mail_wake(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    source_event_id: &str,
+) -> std::io::Result<bool> {
+    let result = cccc_core::automation::notify_wake_mail(home, group_id, actor_id)?;
+    let failure = result.unread_failure.as_ref().map(ToString::to_string);
+    // A partial append may already have committed notices that need dispatch.
+    apply(home, result, &AtomicBool::new(false));
+    if let Some(error) = failure {
+        return Err(std::io::Error::other(error));
+    }
+    // The reducer can suppress a duplicate after a crash between appending the
+    // notice and clearing the cue. Only the durable ledger can confirm both the
+    // newly appended and the previously committed case.
+    let store = GroupStore::new(home.clone())?;
+    cccc_core::ledger::contains_validated(&store.ledger_path(group_id)?, |event| {
+        event.kind == "system.notify"
+            && event.data.get("kind").and_then(serde_json::Value::as_str) == Some("mail_notice")
+            && event
+                .data
+                .get("target_actor_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(actor_id)
+            && event
+                .data
+                .get("context")
+                .and_then(|context| context.get("source_event_ids"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(source_event_id)))
+    })
+}
+
 fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
     if let Some(error) = &result.unread_failure {
         // An unread discovery or write failure must not discard earlier notices.

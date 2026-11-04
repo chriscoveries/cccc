@@ -343,6 +343,7 @@ export type Actor = {
   avatar_url?: string | null;
   has_custom_avatar?: boolean;
   enabled?: boolean;
+  wake_on_mail?: boolean;
   running?: boolean; // Actual process running status
   idle_seconds?: number | null; // Legacy idle duration, independent of terminal output activity.
   effective_working_state?: "stopped" | "idle" | "working" | "waiting" | "stuck" | string;

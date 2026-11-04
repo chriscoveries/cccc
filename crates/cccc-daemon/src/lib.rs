@@ -26,6 +26,11 @@ pub use process::{DetachedDaemon, StartOutcome};
 pub use server::{run, run_with_diagnostics};
 pub use server_lifecycle::stop_every_runtime;
 
+/// Prepare a Home before the Web or daemon host starts accepting work.
+pub fn initialize_home(home: &cccc_core::HomeLayout) -> std::io::Result<()> {
+    ops::mail_wake::bootstrap(home)
+}
+
 /// Best-effort provider stop requests for managed Actor sessions registered in
 /// this process (Claude Agent View). This does not address a detached daemon
 /// or Voice Analyst, and never waits for provider job disappearance.

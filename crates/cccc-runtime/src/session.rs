@@ -67,6 +67,8 @@ pub struct SessionStatus {
 
 pub struct Session {
     status: SessionStatus,
+    /// Private daemon attribution; never forwarded to the child or status API.
+    pub(crate) wake_owner: Option<String>,
     master: Option<Box<dyn MasterPty + Send>>,
     child: Box<dyn Child + Send + Sync>,
     process_tree: OwnedProcessTree,
@@ -172,6 +174,7 @@ impl Session {
             Arc::clone(&input_gate),
         )?;
         Ok(Self {
+            wake_owner: None,
             status: SessionStatus {
                 group_id: spec.group_id,
                 actor_id: spec.actor_id,
@@ -206,6 +209,22 @@ impl Session {
             let _ = self.process_tree.terminate();
         }
         self.status.clone()
+    }
+
+    /// Wake admission must not interpret an unqueryable process as running.
+    pub(crate) fn wake_owner_running(&mut self) -> Result<bool, RuntimeError> {
+        if !self.status.running {
+            return Ok(false);
+        }
+        match self.process_tree.try_wait(|| self.child.try_wait())? {
+            None => Ok(true),
+            Some(exit) => {
+                self.status.running = false;
+                self.status.exit_code = Some(exit.exit_code());
+                self.status.exit_detail = Some(exit.to_string());
+                Ok(false)
+            }
+        }
     }
 
     pub fn stop(&mut self) -> Result<SessionStatus, RuntimeError> {

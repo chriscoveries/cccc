@@ -522,6 +522,11 @@ fn send_with_audience_policy(
     if kind == "chat.message"
         && event.data.get("message_mode").and_then(Value::as_str) == Some("mail")
     {
+        if let Err(error) = super::mail_wake::note_committed(home, &group, &event) {
+            // The committed Mail remains accepted; the unread tick repairs
+            // missed nominations when activation is available.
+            tracing::debug!(%error, group_id = %group.group_id, "Mail wake nomination held");
+        }
         super::automation_runtime::notify_idle_mail_recipients(home, &group, &event);
     } else {
         let _ = actor_delivery::dispatch(home, &group, &event);

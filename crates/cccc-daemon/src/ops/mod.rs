@@ -51,6 +51,7 @@ mod im;
 mod isolated_test;
 pub(crate) mod local_headless;
 pub(crate) mod local_sessions;
+pub(crate) mod mail_wake;
 mod maintenance;
 mod membership;
 mod owned_process_recovery;
@@ -106,6 +107,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         group_scopes::resolve_operation,
         group_space::resolve_operation,
         actors::resolve_operation,
+        mail_wake::resolve_operation,
         local_sessions::resolve_operation,
         automation_config::resolve_operation,
         assistants::resolve_operation,

@@ -21,6 +21,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             actor_id,
             title,
             model_label,
+            wake_on_mail,
             runtime,
             runtime_mode,
             command,
@@ -37,7 +38,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
                 "actor_add",
                 json!({
                     "group_id":group(home,group_id)?,"actor_id":actor_id,"title":title,
-                    "model_label":model_label,"runtime":runtime,"runtime_mode":runtime_mode,"command":command,"env":env(raw_env)?,
+                    "model_label":model_label,"wake_on_mail":wake_on_mail,"runtime":runtime,"runtime_mode":runtime_mode,"command":command,"env":env(raw_env)?,
                     "default_scope_key":scope,"submit":submit,"by":by
                 }),
             )
@@ -59,6 +60,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             env: raw_env,
             submit,
             enabled,
+            wake_on_mail,
             by,
         } => {
             let mut patch = Map::new();
@@ -76,6 +78,9 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             if let Some(enabled) = enabled {
                 patch.insert("enabled".into(), Value::Bool(enabled));
             }
+            if let Some(wake_on_mail) = wake_on_mail {
+                patch.insert("wake_on_mail".into(), Value::Bool(wake_on_mail));
+            }
             if let Some(command) = command {
                 patch.insert("command".into(), json!(parse_command(&command)?));
             }
@@ -88,6 +93,9 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
                 json!({"group_id":group(home,group_id)?,"actor_id":actor_id,"patch":patch,"by":by}),
             )
             .await?
+        }
+        ActorAction::WakeRecover => {
+            call(client, "mail_wake_initialize", json!({"by":"user"})).await?
         }
         ActorAction::Secrets {
             actor_id,

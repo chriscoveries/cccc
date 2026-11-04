@@ -131,7 +131,7 @@ fn load(
 ) -> Result<BTreeMap<String, String>, OpError> {
     migrate_legacy(home, group_id)?;
     let path = path(home, group_id, actor_id)?;
-    if path.exists() {
+    if path.try_exists().map_err(OpError::io)? {
         read_json(&path).map_err(OpError::io)
     } else {
         Ok(BTreeMap::new())

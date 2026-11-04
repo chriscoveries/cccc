@@ -91,6 +91,12 @@ fn create(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group_store = store(home)?;
     let previous_active = active::get(home).map_err(OpError::io)?;
     let group = group_store.create(&title, &topic).map_err(OpError::io)?;
+    if let Err(error) = super::mail_wake::initialize_created_group(home, &group) {
+        // Group creation is independent of automatic Mail wake. The wake
+        // initializer invalidates readiness and the missing namespace holds
+        // the complete wake census until explicit recovery.
+        tracing::warn!(%error, group_id = %group.group_id, "Mail wake group initialization held");
+    }
     if let Err(error) = append_group_event(
         home,
         &group,

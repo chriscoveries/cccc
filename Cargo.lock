@@ -649,6 +649,7 @@ dependencies = [
  "chrono",
  "fs2",
  "futures-util",
+ "hmac",
  "mime_guess",
  "nix 0.28.0",
  "percent-encoding",

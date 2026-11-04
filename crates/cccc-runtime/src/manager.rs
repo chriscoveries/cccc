@@ -27,6 +27,58 @@ pub fn start_with_history(
     start_inner(spec, Some(history))
 }
 
+/// Associate private wake metadata with the Session that actually spawned.
+/// A persistence error leaves that Session owned and the outcome unresolved.
+pub fn start_with_history_for_wake(
+    spec: LaunchSpec,
+    history: HistoryConfig,
+    owner_digest: &str,
+    persist: impl FnOnce() -> std::io::Result<()>,
+) -> Result<SessionStatus, RuntimeError> {
+    if owner_digest.len() != 64 || !owner_digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(std::io::Error::other("invalid PTY wake owner digest").into());
+    }
+    let key = (spec.group_id.clone(), spec.actor_id.clone());
+    remove_exited_before_start(&key)?;
+    let history_cursor_floor = match completed_history(&key.0, &key.1)? {
+        Some(history) => history.end_cursor()?,
+        None => 0,
+    };
+    let mut session = Session::start_with_history(spec, Some(history), history_cursor_floor)?;
+    session.wake_owner = Some(owner_digest.to_owned());
+    let status = session.status();
+    let mut registry = sessions().write().map_err(|_| RuntimeError::Poisoned)?;
+    if registry.contains_key(&key) {
+        drop(registry);
+        session.stop()?;
+        return Err(RuntimeError::AlreadyRunning(key.0, key.1));
+    }
+    discard_completed(&key)?;
+    registry.insert(key, Arc::new(Mutex::new(session)));
+    // The registry is still locked: a replacement cannot take this owner
+    // before its durable association is recorded or reported unknown.
+    persist()?;
+    Ok(status)
+}
+
+/// Observe an exact registered PTY owner while retaining its lifecycle locks.
+pub fn with_confirmed_wake<T>(
+    group_id: &str,
+    actor_id: &str,
+    owner_digest: &str,
+    confirmed: impl FnOnce() -> std::io::Result<T>,
+) -> Result<Option<T>, RuntimeError> {
+    let registry = sessions().read().map_err(|_| RuntimeError::Poisoned)?;
+    let Some(session) = registry.get(&(group_id.to_owned(), actor_id.to_owned())) else {
+        return Ok(None);
+    };
+    let mut session = session.lock().map_err(|_| RuntimeError::Poisoned)?;
+    if session.wake_owner.as_deref() != Some(owner_digest) || !session.wake_owner_running()? {
+        return Ok(None);
+    }
+    confirmed().map(Some).map_err(RuntimeError::from)
+}
+
 fn start_inner(
     spec: LaunchSpec,
     history: Option<HistoryConfig>,
@@ -106,18 +158,46 @@ pub fn status(group_id: &str, actor_id: &str) -> Result<SessionStatus, RuntimeEr
     with_session(group_id, actor_id, |session| Ok(session.status()))
 }
 
+/// A process observation that propagates OS and registry errors.
+pub fn confirmed_running(group_id: &str, actor_id: &str) -> Result<bool, RuntimeError> {
+    let registry = sessions().read().map_err(|_| RuntimeError::Poisoned)?;
+    let Some(session) = registry.get(&(group_id.to_owned(), actor_id.to_owned())) else {
+        return Ok(false);
+    };
+    let mut session = session.lock().map_err(|_| RuntimeError::Poisoned)?;
+    session.wake_owner_running()
+}
+
 pub fn stop(group_id: &str, actor_id: &str) -> Result<SessionStatus, RuntimeError> {
+    stop_with(group_id, actor_id, Session::stop)
+}
+
+fn stop_with(
+    group_id: &str,
+    actor_id: &str,
+    stop_owner: impl FnOnce(&mut Session) -> Result<SessionStatus, RuntimeError>,
+) -> Result<SessionStatus, RuntimeError> {
     let key = (group_id.to_owned(), actor_id.to_owned());
     let session = sessions()
-        .write()
+        .read()
         .map_err(|_| RuntimeError::Poisoned)?
-        .remove(&key)
+        .get(&key)
+        .cloned()
         .ok_or_else(|| RuntimeError::NotFound(group_id.into(), actor_id.into()))?;
-    let mut session = session.lock().map_err(|_| RuntimeError::Poisoned)?;
-    let status = session.stop()?;
-    let history = session.history_handle();
-    drop(session);
-    remember_history(key, history)?;
+    let mut owner = session.lock().map_err(|_| RuntimeError::Poisoned)?;
+    // Keep the actual owner registered if stopping it fails. Otherwise a
+    // failed cleanup can look like an absent, wakeable process.
+    let status = stop_owner(&mut owner)?;
+    let history = owner.history_handle();
+    drop(owner);
+    let mut registry = sessions().write().map_err(|_| RuntimeError::Poisoned)?;
+    if registry
+        .get(&key)
+        .is_some_and(|current| Arc::ptr_eq(current, &session))
+    {
+        registry.remove(&key);
+        remember_history(key, history)?;
+    }
     Ok(status)
 }
 

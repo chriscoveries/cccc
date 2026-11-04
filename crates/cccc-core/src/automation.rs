@@ -226,6 +226,48 @@ pub fn notify_idle_mail(
     Ok(result)
 }
 
+/// After a confirmed automatic Mail wake, issue one coalesced initial cue via
+/// the ordinary notice reducer, including when timed notices are disabled.
+/// The caller must revalidate the source's current unread generation first.
+pub fn notify_wake_mail(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+) -> io::Result<TickResult> {
+    let store = GroupStore::new(home.clone())?;
+    let group = store.load(group_id)?;
+    let mut result = TickResult::default();
+    if !group.running || !matches!(group.state, GroupState::Active | GroupState::Idle) {
+        return Ok(result);
+    }
+    let eligible = actors::visible(&group)
+        .filter(|actor| actor.id == actor_id && actor.enabled && actor.wake_on_mail)
+        .collect::<Vec<_>>();
+    if eligible.len() != 1 {
+        return Ok(result);
+    }
+    let idle = HashSet::from([actor_id.to_owned()]);
+    let notices = inbox::projection::due(
+        home,
+        &group,
+        &eligible,
+        MailDelays {
+            busy: 1,
+            idle: 1,
+            idle_actor_ids: &idle,
+            now: true,
+        },
+        0,
+    )?;
+    issue_notices(
+        &store.ledger_path(group_id)?,
+        notices,
+        &mut result,
+        &mut ledger::append,
+    );
+    Ok(result)
+}
+
 fn tick_group_inner(
     home: &HomeLayout,
     group_id: &str,

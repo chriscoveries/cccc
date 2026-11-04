@@ -127,6 +127,7 @@ export async function updateActor(
     profileOwner?: string;
     profileAction?: "convert_to_custom";
     enabled?: boolean;
+    wakeOnMail?: boolean;
     capabilityAutoload?: string[];
     capabilityHidden?: string[];
     defaultScopeKey?: string;
@@ -143,6 +144,7 @@ export async function updateActor(
   if (opts?.profileOwner !== undefined) body.profile_owner = String(opts.profileOwner || "");
   if (opts?.profileAction) body.profile_action = opts.profileAction;
   if (typeof opts?.enabled === "boolean") body.enabled = opts.enabled;
+  if (typeof opts?.wakeOnMail === "boolean") body.wake_on_mail = opts.wakeOnMail;
   if (Array.isArray(opts?.capabilityAutoload)) body.capability_autoload = opts.capabilityAutoload;
   if (Array.isArray(opts?.capabilityHidden)) body.capability_hidden = opts.capabilityHidden;
   if (opts?.defaultScopeKey !== undefined) body.default_scope_key = opts.defaultScopeKey;
