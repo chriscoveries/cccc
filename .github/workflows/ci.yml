@@ -283,7 +283,7 @@ jobs:
           # The stage UI proof serves this binary over HTTP, so the SPA shell
           # must be compiled in rather than assumed: drop the cached asset
           # crate so its embed expands against the downloaded bundle.
-          cargo clean --package cccc-web
+          cargo clean --package cccc-pair-web
           cargo build --package cccc --bin cccc --locked
           # --workspace reuses the test build above; the live probes exist only
           # in cccc-pair-daemon.
