@@ -13,7 +13,16 @@ export function ResourceProvider({ groupId, children }: { groupId: string; child
     if (!groupId) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let active = true;
+    let inFlight = false;
+    const schedule = () => {
+      // A client-only per-tab timer is not a cross-client bound, and a
+      // hidden tab stops requesting entirely until it is visible again.
+      if (active && !document.hidden) timer = setTimeout(() => void refresh(), 10_000);
+    };
     const refresh = async () => {
+      if (!active || inFlight || document.hidden) return;
+      inFlight = true;
       try {
         const response = await fetchActors(
           groupId,
@@ -21,7 +30,7 @@ export function ResourceProvider({ groupId, children }: { groupId: string; child
           { signal: controller.signal },
           { includeResources: true, includeInternal: true },
         );
-        if (!controller.signal.aborted) {
+        if (active && !controller.signal.aborted) {
           if (response.ok) {
             const actors = Object.fromEntries(
               response.result.actors.map((actor) => [actor.id, actor.resources]),
@@ -32,15 +41,26 @@ export function ResourceProvider({ groupId, children }: { groupId: string; child
           }
         }
       } catch {
-        if (!controller.signal.aborted) setValue({ actors: {} });
+        if (active && !controller.signal.aborted) setValue({ actors: {} });
       } finally {
-        if (!controller.signal.aborted) timer = setTimeout(refresh, 10_000);
+        inFlight = false;
+        if (timer) clearTimeout(timer);
+        schedule();
       }
     };
+    const onVisibility = () => {
+      if (active && !document.hidden) {
+        if (timer) clearTimeout(timer);
+        void refresh();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     void refresh();
     return () => {
+      active = false;
       controller.abort();
       if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [groupId]);
   return (

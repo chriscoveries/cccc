@@ -11,9 +11,41 @@ let host: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
 afterEach(async () => {
   await act(async () => root?.unmount());
+  root = undefined!;
   host?.remove();
   vi.resetAllMocks();
+  vi.useRealTimers();
+  Object.defineProperty(document, "hidden", { configurable: true, value: false });
 });
+
+function mockOk() {
+  vi.mocked(fetchActors).mockResolvedValue({
+    ok: true,
+    result: { actors: [], host_memory: { total_bytes: 2, available_bytes: 1 } },
+  });
+}
+
+function setHidden(hidden: boolean) {
+  Object.defineProperty(document, "hidden", { configurable: true, value: hidden });
+}
+
+async function renderProvider(groupId: string) {
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <ResourceProvider groupId={groupId}>
+        <HostResourcesBadge />
+        <ActorResourcesBadge actorId="capture" />
+      </ResourceProvider>,
+    );
+  });
+}
+
+async function tick(ms: number) {
+  await act(async () => vi.advanceTimersByTimeAsync(ms));
+}
 
 it("renders and clears the captured process and host readings", async () => {
   // Values derive from the adjacent captured /proc stat, meminfo and CPU pair;
@@ -53,4 +85,93 @@ it("renders and clears the captured process and host readings", async () => {
     );
   });
   expect(host.textContent).toBe("");
+});
+
+it("cancels the polling loop when the group unmounts", async () => {
+  vi.useFakeTimers();
+  mockOk();
+  await renderProvider("capture");
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(1);
+  await tick(10_000);
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(2);
+  await act(async () => root.unmount());
+  root = undefined!;
+  await tick(60_000);
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(2);
+});
+
+it("stops polling while the tab is hidden and resumes on visibility", async () => {
+  vi.useFakeTimers();
+  mockOk();
+  setHidden(false);
+  await renderProvider("capture");
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(1);
+  setHidden(true);
+  await tick(30_000);
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(1);
+  setHidden(false);
+  await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(2);
+  await tick(10_000);
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(3);
+});
+
+it("makes no request while mounted hidden and fetches once visible", async () => {
+  vi.useFakeTimers();
+  mockOk();
+  setHidden(true);
+  await renderProvider("capture");
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(0);
+  await tick(30_000);
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(0);
+  setHidden(false);
+  await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(1);
+});
+
+it("does not start a second request while one is in flight", async () => {
+  vi.useFakeTimers();
+  let release!: (value: Awaited<ReturnType<typeof fetchActors>>) => void;
+  vi.mocked(fetchActors).mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  setHidden(false);
+  await renderProvider("capture");
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(1);
+  setHidden(true);
+  await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+  setHidden(false);
+  await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    release({
+      ok: true,
+      result: { actors: [], host_memory: { total_bytes: 2, available_bytes: 1 } },
+    }),
+  );
+  await tick(10_000);
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(2);
+});
+
+it("stops the previous group's loop when the group changes", async () => {
+  vi.useFakeTimers();
+  mockOk();
+  await renderProvider("alpha");
+  expect(vi.mocked(fetchActors).mock.calls[0]?.[0]).toBe("alpha");
+  await act(async () => {
+    root.render(
+      <ResourceProvider groupId="beta">
+        <HostResourcesBadge />
+        <ActorResourcesBadge actorId="capture" />
+      </ResourceProvider>,
+    );
+  });
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(fetchActors).mock.calls[1]?.[0]).toBe("beta");
+  await tick(10_000);
+  expect(vi.mocked(fetchActors)).toHaveBeenCalledTimes(3);
+  expect(vi.mocked(fetchActors).mock.calls[2]?.[0]).toBe("beta");
 });
