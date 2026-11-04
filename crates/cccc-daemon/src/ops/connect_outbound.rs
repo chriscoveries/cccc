@@ -611,6 +611,7 @@ pub(super) fn reply(
 /// its connection before any receipt was pending never reached the target, so
 /// it was not refused and a plain resend is the action.
 fn failure_next_step(cancellation: bool, state: &str, reason: &str) -> &'static str {
+    let _ = reason; // red reference: the old wording ignores the reason
     if cancellation {
         "The reply request may still be active on the target. This does not stop an Actor or retract delivered work."
     } else if state != "failed" {
