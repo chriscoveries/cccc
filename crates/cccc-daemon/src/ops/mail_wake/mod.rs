@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use cccc_contracts::{Actor, DaemonRequest, Event, GroupState};
 use cccc_core::{GroupDoc, GroupStore, HomeLayout, actors, mail_pending};
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 use self::budget::Budget;
@@ -674,32 +675,30 @@ fn direct_mail_for(event: &Event, actor: &Actor) -> bool {
 }
 
 fn policy_fingerprint(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> io::Result<String> {
-    // The salt stays in this process: fingerprints never disclose low-entropy
-    // private environment values. After restart old attempts conservatively
-    // hold, because these owner registries cannot prove reattachment yet.
-    static SALT: OnceLock<[u8; 32]> = OnceLock::new();
-    let salt = SALT.get_or_init(|| {
-        let mut salt = [0; 32];
-        salt[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-        salt[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-        salt
-    });
+    // The private key is generated once with the activation and is never
+    // reconstructed when the budget is missing or malformed.
+    let activation = active_header(home)?;
+    let budget = Budget::load(&global_path(home), Instant::now())?;
+    if budget.activation_id() != activation.activation_id {
+        return Err(io::Error::other("Mail wake activation mismatch"));
+    }
     let environment = super::actor_secrets::effective_values(home, &group.group_id, actor)
         .map_err(|error| io::Error::other(error.message))?;
-    struct HashWriter(Sha256);
+    struct HashWriter(Hmac<Sha256>);
     impl io::Write for HashWriter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.update(bytes);
+            Mac::update(&mut self.0, bytes);
             Ok(bytes.len())
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
-    let mut writer = HashWriter(Sha256::new());
-    serde_json::to_writer(&mut writer, &(salt.as_slice(), group, actor, environment))
-        .map_err(io::Error::other)?;
-    Ok(format!("{:x}", writer.0.finalize()))
+    let mac = <Hmac<Sha256> as Mac>::new_from_slice(budget.policy_key())
+        .map_err(|_| io::Error::other("invalid Mail wake policy key"))?;
+    let mut writer = HashWriter(mac);
+    serde_json::to_writer(&mut writer, &(group, actor, environment)).map_err(io::Error::other)?;
+    Ok(format!("{:x}", writer.0.finalize().into_bytes()))
 }
 
 fn eligible_group(group: &GroupDoc) -> bool {
@@ -852,6 +851,11 @@ fn group_candidates(home: &HomeLayout, group_id: &str) -> io::Result<Vec<Candida
                     .iter()
                     .any(|(_, event)| event.id == pending.source_event_id)
         }) {
+            // A settled cue is a durable owner-bound obligation. A changed
+            // policy or missing source holds it instead of erasing it.
+            if budget.cue_pending(&actor.id) {
+                continue;
+            }
             budget.clear_pending(&actor.id)?;
         }
         if let Some((time, event)) = available.first() {
@@ -894,7 +898,7 @@ fn repair_cues(home: &HomeLayout, group_id: &str) -> io::Result<()> {
     for stored in actors::visible(&group).filter(|actor| eligible_actor(actor)) {
         let actor = super::actor_profile_runtime::resolve(home, stored)
             .map_err(|error| io::Error::other(error.message))?;
-        let pending = {
+        let (pending, attempt) = {
             let mut guard = homes()
                 .lock()
                 .map_err(|_| io::Error::other("Mail wake state lock poisoned"))?;
@@ -903,10 +907,16 @@ fn repair_cues(home: &HomeLayout, group_id: &str) -> io::Result<()> {
             if !budget.cue_pending(&actor.id) {
                 continue;
             }
-            budget.pending(&actor.id).cloned()
+            (
+                budget.pending(&actor.id).cloned(),
+                budget.settled_attempt(&actor.id).cloned(),
+            )
         };
         let Some(pending) = pending else {
             return Err(io::Error::other("wake cue lacks source"));
+        };
+        let Some(attempt) = attempt else {
+            return Err(io::Error::other("wake cue lacks settled owner binding"));
         };
         if pending.generation != actors::generation_identity(&actor)
             || pending.policy_fingerprint != policy_fingerprint(home, &group, &actor)?
@@ -920,17 +930,19 @@ fn repair_cues(home: &HomeLayout, group_id: &str) -> io::Result<()> {
             std::slice::from_ref(&pending.source_event_id),
         )?;
         if !awaited.contains(&pending.source_event_id) {
-            let mut guard = homes()
-                .lock()
-                .map_err(|_| io::Error::other("Mail wake state lock poisoned"))?;
-            let state = home_state(home, &mut guard)?;
-            group_budget(home, state, group_id)?.clear_pending(&actor.id)?;
             continue;
         }
-        if !confirmed_running(&group, &actor) {
+        if with_confirmed_owner(home, &group, &actor, &attempt, || Ok(()))?.is_none() {
             continue;
         }
-        super::automation_runtime::notify_confirmed_mail_wake(home, group_id, &actor.id)?;
+        if !super::automation_runtime::notify_confirmed_mail_wake(
+            home,
+            group_id,
+            &actor.id,
+            &pending.source_event_id,
+        )? {
+            continue;
+        }
         let mut guard = homes()
             .lock()
             .map_err(|_| io::Error::other("Mail wake state lock poisoned"))?;
@@ -1194,11 +1206,18 @@ fn admit(home: &HomeLayout, candidate: &Candidate) -> io::Result<Admission> {
         ));
     }
     // This can remain pending if the existing notice path reports uncertainty.
-    if let Err(error) =
-        super::automation_runtime::notify_confirmed_mail_wake(home, &group.group_id, &actor.id)
-    {
-        tracing::warn!(%error, "Mail wake cue remains pending");
-        return Ok(Admission::Started);
+    match super::automation_runtime::notify_confirmed_mail_wake(
+        home,
+        &group.group_id,
+        &actor.id,
+        &attempt.source_event_id,
+    ) {
+        Ok(true) => {}
+        Ok(false) => return Ok(Admission::Started),
+        Err(error) => {
+            tracing::warn!(%error, "Mail wake cue remains pending");
+            return Ok(Admission::Started);
+        }
     }
     let mut guard = homes()
         .lock()
@@ -1289,6 +1308,181 @@ pub(crate) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn restart_cue_control(confirmed: bool, test_name: &str) {
+        const CHILD: &str = "CCCC_MAIL_WAKE_RESTART_CONTROL";
+        if std::env::var_os(CHILD).is_some() {
+            let home = HomeLayout::from_path(
+                std::env::var_os("CCCC_MAIL_WAKE_CONTROL_HOME").expect("control home"),
+            )
+            .expect("home");
+            let group_id = std::env::var("CCCC_MAIL_WAKE_CONTROL_GROUP").expect("group");
+            recover_on_start(&home).expect("restart recovery");
+            let store = GroupStore::new(home.clone()).expect("store");
+            let group = store.load(&group_id).expect("group");
+            let actor = group.actors[0].clone();
+            let attempt = {
+                let mut guard = homes().lock().expect("homes");
+                let state = home_state(&home, &mut guard).expect("state");
+                let budget = group_budget(&home, state, &group_id).expect("budget");
+                assert!(budget.cue_pending(&actor.id));
+                budget.settled_attempt(&actor.id).expect("settled").clone()
+            };
+            assert_eq!(
+                policy_fingerprint(&home, &group, &actor).expect("restart fingerprint"),
+                attempt.policy_fingerprint
+            );
+            // Rebuild the unread census in a genuinely separate process. A
+            // process-local key would erase the persisted cue here.
+            assert!(
+                group_candidates(&home, &group_id)
+                    .expect("census")
+                    .is_empty()
+            );
+            if confirmed {
+                // Labeled local control: install an actual matching owner in
+                // this process. This is not a claim of live owner reattachment.
+                struct Cleanup(String, String);
+                impl Drop for Cleanup {
+                    fn drop(&mut self) {
+                        let _ = cccc_runtime::stop(&self.0, &self.1);
+                    }
+                }
+                let _cleanup = Cleanup(group_id.clone(), actor.id.clone());
+                super::super::actor_runtime::start_pty_wake(
+                    &home,
+                    &group,
+                    &actor,
+                    &wake_origin(&attempt),
+                )
+                .expect("matching owner control");
+                repair_cues(&home, &group_id).expect("repair cue");
+                let events =
+                    cccc_core::ledger::read_all(&store.ledger_path(&group_id).expect("ledger"))
+                        .expect("events");
+                assert!(events.iter().any(|event| {
+                    event.kind == "system.notify"
+                        && event.data.get("kind") == Some(&json!("mail_notice"))
+                        && event.data.get("target_actor_id") == Some(&json!(actor.id))
+                }));
+            } else {
+                // No owner registry is carried into this process; neither a
+                // missing owner nor a replacement is authority to relaunch.
+                let _ = repair_cues(&home, &group_id);
+                let _ = run(
+                    &home,
+                    &crate::dispatch_concurrency::DispatchLocks::default(),
+                );
+                assert!(cccc_runtime::status(&group_id, &actor.id).is_err());
+            }
+            let mut guard = homes().lock().expect("homes");
+            let state = home_state(&home, &mut guard).expect("state");
+            let budget = group_budget(&home, state, &group_id).expect("budget");
+            assert_eq!(budget.cue_pending(&actor.id), !confirmed);
+            if !confirmed {
+                assert_eq!(budget.settled_attempt(&actor.id), Some(&attempt));
+            }
+            return;
+        }
+
+        let mut event: Event = serde_json::from_str(include_str!("fixtures/mail.json"))
+            .expect("captured Mail envelope");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let created = store.create("restart-control", "").expect("group");
+        let mut group = cccc_core::group_scope::attach(
+            &store,
+            &created.group_id,
+            cccc_core::scope::detect(temp.path()).expect("scope"),
+        )
+        .expect("attach");
+        let mut actor = Actor::new("receiver");
+        actor.runtime = cccc_contracts::ActorRuntime::Custom;
+        actor.command = vec!["sh".into(), "-c".into(), "exec sleep 30".into()];
+        actor.generation = "generation-control".into();
+        actor.wake_on_mail = true;
+        group.actors.push(actor);
+        group.running = true;
+        group.state = GroupState::Active;
+        store.save(&group).expect("group");
+        let group = store.load(&group.group_id).expect("reload");
+        let actor = group.actors[0].clone();
+        event.group_id = group.group_id.clone(); // labeled captured-event routing
+        cccc_core::ledger::append(&store.ledger_path(&group.group_id).expect("ledger"), &event)
+            .expect("captured Mail");
+        activate_control(&home);
+        GroupBudget::load(&home, &group.group_id, Instant::now(), true).expect("group setup");
+        recover_existing(&home).expect("readiness");
+        let fingerprint = policy_fingerprint(&home, &group, &actor).expect("fingerprint");
+        let attempt = budget::Attempt {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            group_id: group.group_id.clone(),
+            actor_id: actor.id.clone(),
+            generation: actors::generation_identity(&actor),
+            policy_fingerprint: fingerprint.clone(),
+            source_event_id: event.id.clone(),
+        };
+        {
+            let now = Instant::now();
+            let mut guard = homes().lock().expect("homes");
+            let state = home_state(&home, &mut guard).expect("state");
+            let budget = group_budget(&home, state, &group.group_id).expect("group budget");
+            budget
+                .note(
+                    &actor.id,
+                    Pending {
+                        source_event_id: event.id.clone(),
+                        source_ts: event.ts.clone(),
+                        generation: attempt.generation.clone(),
+                        policy_fingerprint: fingerprint,
+                    },
+                )
+                .expect("pending");
+            let prepared = budget
+                .prepare(&attempt, now)
+                .expect("prepare")
+                .expect("admitted");
+            assert!(
+                state
+                    .global
+                    .reserve(attempt.clone(), now)
+                    .expect("global debit")
+            );
+            let budget = group_budget(&home, state, &group.group_id).expect("group budget");
+            budget.commit(prepared).expect("group debit");
+            // Labeled durable settled-cue control, before notice delivery.
+            budget.settle(&attempt, true).expect("settle group");
+            state.global.settle(&attempt).expect("settle global");
+        }
+        let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", test_name, "--nocapture"])
+            .env(CHILD, "1")
+            .env("CCCC_MAIL_WAKE_CONTROL_HOME", home.root())
+            .env("CCCC_MAIL_WAKE_CONTROL_GROUP", &group.group_id)
+            .status()
+            .expect("fresh process");
+        assert!(child.success(), "fresh-process control failed: {child}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_cue_repairs_only_with_confirmed_owner() {
+        restart_cue_control(
+            true,
+            "ops::mail_wake::tests::restart_cue_repairs_only_with_confirmed_owner",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_cue_holds_when_owner_unproven() {
+        restart_cue_control(
+            false,
+            "ops::mail_wake::tests::restart_cue_holds_when_owner_unproven",
+        );
+    }
 
     #[cfg(unix)]
     fn activate_control(home: &HomeLayout) {

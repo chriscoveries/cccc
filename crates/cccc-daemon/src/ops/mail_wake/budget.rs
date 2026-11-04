@@ -57,6 +57,7 @@ impl Attempt {
 struct Record {
     version: u8,
     activation_id: String,
+    policy_key: [u8; 32],
     last_observed_at: String,
     /// Wall-clock strings are informational only and never refill a budget.
     debits: Vec<String>,
@@ -68,6 +69,7 @@ impl Record {
         if self.version != VERSION
             || self.activation_id.is_empty()
             || self.activation_id.len() > 128
+            || self.policy_key.iter().all(|byte| *byte == 0)
             || chrono::DateTime::parse_from_rfc3339(&self.last_observed_at).is_err()
             || self.debits.len() > LIMIT
             || self
@@ -114,19 +116,27 @@ impl Budget {
             .parent()
             .ok_or_else(|| io::Error::other("budget path has no parent"))?;
         std::fs::create_dir_all(parent)?;
+        let mut policy_key = [0; 32];
+        policy_key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        policy_key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
         let record = Record {
             version: VERSION,
             activation_id: activation_id.to_owned(),
+            policy_key,
             last_observed_at: cccc_contracts::utc_now(),
             debits: Vec::new(),
             in_flight: None,
         };
         let mut bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
         bytes.push(b'\n');
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
         #[cfg(unix)]
@@ -148,6 +158,13 @@ impl Budget {
         now: Instant,
         last_wall: chrono::DateTime<chrono::FixedOffset>,
     ) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if std::fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
+                return Err(io::Error::other("Mail wake budget is not private"));
+            }
+        }
         let record: Record = cccc_core::fs::read_json(path)?;
         record.validate()?;
         let recorded = chrono::DateTime::parse_from_rfc3339(&record.last_observed_at)
@@ -167,6 +184,10 @@ impl Budget {
 
     pub fn activation_id(&self) -> &str {
         &self.record.activation_id
+    }
+
+    pub fn policy_key(&self) -> &[u8; 32] {
+        &self.record.policy_key
     }
 
     pub fn is_pristine(&self) -> bool {
@@ -285,12 +306,32 @@ mod tests {
         let record = Record {
             version: VERSION,
             activation_id: "activation-control".into(),
+            policy_key: [1; 32],
             last_observed_at: cccc_contracts::utc_now(),
             debits: Vec::new(),
             in_flight: None,
         };
         cccc_core::fs::write_json(path, &record).expect("activation control");
         Budget::load(path, now).expect("budget")
+    }
+
+    #[test]
+    fn missing_or_invalid_policy_key_never_creates_a_new_budget() {
+        let _source = captured_attempt("attempt-one");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("budget.json");
+        let _budget = activated(&path, Instant::now());
+        let mut value: serde_json::Value = cccc_core::fs::read_json(&path).expect("budget");
+        value.as_object_mut().expect("object").remove("policy_key");
+        cccc_core::fs::write_json(&path, &value).expect("labeled missing key");
+        assert!(Budget::load(&path, Instant::now()).is_err());
+        value["policy_key"] = serde_json::json!(vec![0u8; 32]);
+        cccc_core::fs::write_json(&path, &value).expect("labeled invalid key");
+        assert!(Budget::load(&path, Instant::now()).is_err());
+        assert_eq!(
+            cccc_core::fs::read_json::<serde_json::Value>(&path).expect("unchanged"),
+            value
+        );
     }
 
     #[test]

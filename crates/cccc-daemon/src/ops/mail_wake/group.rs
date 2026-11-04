@@ -348,7 +348,9 @@ impl GroupBudget {
     pub fn retain_current(&mut self, current: &BTreeMap<String, String>) -> io::Result<()> {
         let mut next = self.state.clone();
         for (id, actor) in &next.actors {
-            if current.get(id) != Some(&actor.generation) && actor.in_flight.is_some() {
+            if current.get(id) != Some(&actor.generation)
+                && (actor.in_flight.is_some() || actor.cue_pending)
+            {
                 return Err(io::Error::other(
                     "obsolete actor generation remains unresolved",
                 ));
@@ -386,7 +388,7 @@ impl GroupBudget {
         if let Some(previous) = next.actors.get(actor_id)
             && previous.generation != pending.generation
         {
-            if previous.in_flight.is_some() {
+            if previous.in_flight.is_some() || previous.cue_pending {
                 return Err(io::Error::other(
                     "prior actor generation remains unresolved",
                 ));
@@ -502,6 +504,10 @@ impl GroupBudget {
             .is_some_and(|actor| actor.cue_pending)
     }
 
+    pub fn settled_attempt(&self, actor_id: &str) -> Option<&Attempt> {
+        self.state.actors.get(actor_id)?.settled_attempt.as_ref()
+    }
+
     /// Explicit successful operator start or off-to-on opt-in may rearm a
     /// failed generation. This does not clear an unresolved start or debits.
     pub fn rearm(&mut self, actor_id: &str, generation: &str) -> io::Result<()> {
@@ -528,7 +534,7 @@ impl GroupBudget {
         if let Some(previous) = next.actors.get(&attempt.actor_id)
             && previous.generation != attempt.generation
         {
-            if previous.in_flight.is_some() {
+            if previous.in_flight.is_some() || previous.cue_pending {
                 return Ok(None);
             }
             // A new registration does not inherit an old actor's failure latch.
