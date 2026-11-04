@@ -422,6 +422,8 @@
       "opencodeReconnect": "Resume the original OpenCode session with its local backend and CCCC plugin. A different session has its own CCCC source and must be connected to its intended Group."
     }
   },
+  "wakeOnMail": "Wake on addressed Mail",
+  "wakeOnMailHelp": "Starts this enabled actor when its process is stopped. Manual Stop disables it. Broadcast Mail does not start actors.",
   "workingDirectory": "Working directory",
   "followGroupDirectory": "Follow Group",
   "fixedDirectory": "Fixed directory",

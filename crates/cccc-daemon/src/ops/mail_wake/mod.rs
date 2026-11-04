@@ -205,6 +205,7 @@ fn activate_fresh(
         }
         current.mail_wake_activation = Some(header);
         current.updated_at = cccc_contracts::utc_now();
+        current.seal_mail_wake()?;
         let mut bytes = serde_json::to_vec_pretty(&current).map_err(io::Error::other)?;
         bytes.push(b'\n');
         strict_publish(&home.registry_path(), &bytes, fault)
@@ -281,8 +282,9 @@ fn strict_publish(
     temp.as_file().sync_all()?;
     fault(path, PublishStage::Rename)?;
     temp.persist(path).map_err(|error| error.error)?;
-    fault(path, PublishStage::DirectorySync)?;
-    std::fs::File::open(parent)?.sync_all()
+    fault(path, PublishStage::DirectorySync)
+        .and_then(|()| std::fs::File::open(parent)?.sync_all())
+        .map_err(|error| io::Error::other(format!("published; durability unknown: {error}")))
 }
 
 fn sync_ancestors(
@@ -1296,7 +1298,6 @@ mod tests {
         assert_eq!(event.kind, "chat.message");
         // Labeled control, never a production first-use authorization.
         cccc_core::Registry::load(home).expect("registry setup");
-        Budget::initialize(&global_path(home)).expect("limiter setup");
         cccc_core::Registry::mutate_existing(home, |registry| {
             let identity = home_identity(home)?;
             let implementation = implementation_digest()?;
@@ -1311,6 +1312,7 @@ mod tests {
             Ok(())
         })
         .expect("activation control");
+        Budget::initialize(&global_path(home)).expect("limiter setup");
     }
 
     #[cfg(unix)]
@@ -1396,6 +1398,127 @@ mod tests {
         assert_eq!(active_header(&home).expect("same active candidate"), header);
         assert_eq!(std::fs::read(&registry_path).expect("same bytes"), visible);
         assert!(home_state(&home, &mut homes().lock().expect("homes")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_active_pre_rename_failure_is_unpublished_and_removes_temp() {
+        let capture: Event = serde_json::from_str(include_str!("fixtures/mail.json"))
+            .expect("captured Mail envelope");
+        assert_eq!(capture.kind, "chat.message");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("fresh")).expect("home");
+        let registry_path = home.registry_path();
+        let mut before_error = None;
+        let mut fault = |path: &std::path::Path, stage: PublishStage| {
+            if path == registry_path && stage == PublishStage::Rename {
+                before_error = Some(
+                    std::fs::read_dir(home.root())?
+                        .map(|entry| entry.map(|entry| entry.file_name()))
+                        .collect::<io::Result<std::collections::BTreeSet<_>>>()?,
+                );
+                return Err(io::Error::other("labeled pre-rename failure"));
+            }
+            Ok(())
+        };
+        bootstrap_with(&home, &mut fault).expect("home bootstrap remains available");
+        let during = before_error.expect("fault was reached");
+        let after = std::fs::read_dir(home.root())
+            .expect("home entries")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            during.difference(&after).count(),
+            1,
+            "temporary entry removed"
+        );
+        assert!(after.difference(&during).next().is_none());
+        let registry = cccc_core::Registry::load_existing(&home).expect("intact preparation");
+        assert_eq!(
+            registry.mail_wake_activation.expect("header").phase,
+            cccc_core::registry::MailWakePhase::Preparing
+        );
+        assert!(active_header(&home).is_err());
+        assert!(recover_existing(&home).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_active_post_rename_failure_reports_published_unknown() {
+        let capture: Event = serde_json::from_str(include_str!("fixtures/mail.json"))
+            .expect("captured Mail envelope");
+        assert_eq!(capture.kind, "chat.message");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("fresh")).expect("home");
+        let fresh = home
+            .try_create_fresh()
+            .expect("create")
+            .expect("fresh capability");
+        home.initialize().expect("home");
+        cccc_core::Registry::load(&home).expect("new registry");
+        let registry_path = home.registry_path();
+        let mut injected = false;
+        let mut fault = |path: &std::path::Path, stage: PublishStage| {
+            if path == registry_path && stage == PublishStage::DirectorySync {
+                injected = true;
+                return Err(io::Error::other("labeled sync failure"));
+            }
+            Ok(())
+        };
+        let error = activate_fresh(&home, &fresh, &mut fault).expect_err("unknown durability");
+        assert!(injected);
+        assert!(error.to_string().contains("published; durability unknown"));
+        let visible = std::fs::read(&registry_path).expect("published bytes");
+        let header = active_header(&home).expect("checksummed ACTIVE candidate");
+        assert!(home_state(&home, &mut homes().lock().expect("homes")).is_err());
+        recover_existing(&home).expect("explicit strict recovery");
+        assert_eq!(active_header(&home).expect("same header"), header);
+        assert_eq!(std::fs::read(&registry_path).expect("same bytes"), visible);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn torn_or_checksum_mismatched_registry_is_unknown_not_reinitialized() {
+        let capture: Event = serde_json::from_str(include_str!("fixtures/mail.json"))
+            .expect("captured Mail envelope");
+        assert_eq!(capture.kind, "chat.message");
+        for damage in ["checksum", "truncated", "stripped"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let home = HomeLayout::from_path(temp.path().join("fresh")).expect("home");
+            bootstrap(&home).expect("fresh activation");
+            recover_existing(&home).expect("initial readiness");
+            let path = home.registry_path();
+            let original = std::fs::read(&path).expect("registry");
+            let damaged = if damage == "truncated" {
+                original[..original.len() / 2].to_vec()
+            } else {
+                let mut doc: serde_json::Value =
+                    serde_json::from_slice(&original).expect("registry JSON");
+                if damage == "stripped" {
+                    let object = doc.as_object_mut().expect("registry object");
+                    object.remove("mail_wake_activation");
+                    object.remove("mail_wake_registry_sha256");
+                } else {
+                    doc["updated_at"] = json!("labeled integrity mutation");
+                }
+                serde_json::to_vec(&doc).expect("damaged registry JSON")
+            };
+            std::fs::write(&path, &damaged).expect("labeled torn bytes");
+            assert!(cccc_core::Registry::load_existing(&home).is_err());
+            assert!(cccc_core::Registry::load(&home).is_err());
+            assert!(recover_existing(&home).is_err());
+            assert!(home_state(&home, &mut homes().lock().expect("homes")).is_err());
+            assert_eq!(
+                std::fs::read(&path).expect("damaged bytes retained"),
+                damaged
+            );
+            // Labeled restoration of the retained valid source. Recovery
+            // re-derives integrity from that source; it never invents the
+            // missing registry payload from damaged bytes.
+            std::fs::write(&path, &original).expect("restore trusted source control");
+            recover_existing(&home).expect("rederive from restored valid source");
+            assert_eq!(std::fs::read(&path).expect("restored bytes"), original);
+        }
     }
 
     #[cfg(unix)]
@@ -1757,7 +1880,8 @@ mod tests {
         assert!(active_header(&home).is_ok());
         std::fs::remove_file(home.registry_path()).expect("labeled registry loss");
         assert!(active_header(&home).is_err());
-        cccc_core::Registry::load(&home).expect("labeled normal auto-creation");
+        assert!(cccc_core::Registry::load(&home).is_err());
+        assert!(!home.registry_path().exists());
         assert!(active_header(&home).is_err());
         bootstrap(&home).expect("reopen");
         assert!(active_header(&home).is_err());

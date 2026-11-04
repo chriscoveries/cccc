@@ -422,6 +422,8 @@
       "opencodeReconnect": "在原来的本地后端和 CCCC 插件配置下恢复 OpenCode 会话。不同会话有独立的 CCCC 来源，需要接入对应的工作组。"
     }
   },
+  "wakeOnMail": "收到直接指定的邮件时唤醒",
+  "wakeOnMailHelp": "当此已启用的代理进程停止时启动它。手动停止会禁用代理。广播邮件不会启动代理。",
   "workingDirectory": "工作目录",
   "followGroupDirectory": "跟随工作组",
   "fixedDirectory": "固定目录",
