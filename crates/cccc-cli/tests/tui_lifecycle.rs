@@ -30,7 +30,7 @@ fn terminal_capture_summary(output: &[u8], progress: ReaderProgress) -> String {
         .filter(|&&byte| (0x20..=0x7e).contains(&byte))
         .count();
     format!(
-        "\\n--- terminal capture: buffered_bytes={}, reader_bytes={}, reads={}, printable_ascii={}, escape_bytes={}, first_read_ms={:?}, last_read_ms={:?}, eof={}, error={:?}",
+        "\n--- terminal capture: buffered_bytes={}, reader_bytes={}, reads={}, printable_ascii={}, escape_bytes={}, first_read_ms={:?}, last_read_ms={:?}, eof={}, error={:?}",
         output.len(),
         progress.bytes,
         progress.calls,
@@ -45,7 +45,7 @@ fn terminal_capture_summary(output: &[u8], progress: ReaderProgress) -> String {
 
 #[test]
 fn terminal_capture_summary_never_includes_terminal_content() {
-    let raw = b"\\x1b[31msecret-content\\x1b[0m";
+    let raw = b"\x1b[31msecret-content\x1b[0m";
     let summary = terminal_capture_summary(
         raw,
         ReaderProgress {
