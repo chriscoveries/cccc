@@ -408,6 +408,18 @@ pub(crate) fn registered_running(group_id: &str, actor_id: &str) -> Option<bool>
     lookup(&(group_id.to_owned(), actor_id.to_owned())).map(|item| item.running())
 }
 
+/// The owned provider PID, separate from an optional attached viewer PID.
+/// The outer option distinguishes an absent session from an unknown process.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub(crate) fn observed_process(group_id: &str, actor_id: &str) -> Option<Option<u32>> {
+    let item = lookup(&(group_id.to_owned(), actor_id.to_owned()))?;
+    Some(if item.running() {
+        item.managed.process_id()
+    } else {
+        None
+    })
+}
+
 pub(crate) fn registered_workspace(
     group_id: &str,
     actor_id: &str,

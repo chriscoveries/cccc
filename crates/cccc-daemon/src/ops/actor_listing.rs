@@ -14,6 +14,10 @@ pub(super) fn list(
 ) -> Result<Vec<Value>, OpError> {
     let include_internal = bool_arg(request, "include_internal");
     let include_unread = bool_arg(request, "include_unread");
+    #[cfg(target_os = "linux")]
+    let resource_snapshot = bool_arg(request, "include_resources")
+        .then(super::actor_resources::linux::capture_shared)
+        .flatten();
     let actor_ids = group
         .actors
         .iter()
@@ -42,6 +46,24 @@ pub(super) fn list(
                     &actor.id,
                 ));
                 object.insert("running".into(), Value::Bool(status.running));
+                #[cfg(target_os = "linux")]
+                if status.running
+                    && let Some(snapshot) = resource_snapshot.as_ref()
+                {
+                    // Managed sessions may report their viewer PID as status;
+                    // observe the owned provider instead, or remain unknown.
+                    let root = observed_root(
+                        snapshot,
+                        super::local_headless::observed_process(&group.group_id, &actor.id),
+                        status.pid,
+                    );
+                    if let Some((rss, cpu)) = root.and_then(|pid| snapshot.actor(pid)) {
+                        object.insert(
+                            "resources".into(),
+                            json!({"rss_bytes":rss, "cpu_percent":cpu}),
+                        );
+                    }
+                }
                 let actual = super::local_headless::structured_state(&group.group_id, &actor.id);
                 let retained_pty = cccc_runtime::status(&group.group_id, &actor.id)
                     .is_ok_and(|status| status.running);
@@ -161,6 +183,22 @@ fn bool_arg(request: &DaemonRequest, name: &str) -> bool {
         Value::String(value) => matches!(value.to_lowercase().as_str(), "1" | "true" | "yes"),
         _ => false,
     })
+}
+
+/// The process identity to observe for a running actor: the managed owner
+/// when the session has one, otherwise a known viewer. A managed session
+/// without an owned process stays unavailable rather than substituting the
+/// viewer, and only identities present unchanged in the snapshot qualify.
+#[cfg(target_os = "linux")]
+fn observed_root(
+    snapshot: &super::actor_resources::linux::Snapshot,
+    managed: Option<Option<u32>>,
+    viewer: Option<u32>,
+) -> Option<u32> {
+    match managed {
+        Some(owner) => owner.filter(|&pid| snapshot.same_identity(pid)),
+        None => viewer.filter(|&pid| snapshot.same_identity(pid)),
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -308,5 +346,35 @@ mod tests {
         assert_eq!(listed(&group), expected(1, "actor_default"));
         std::fs::remove_dir(&roots[1]).expect("remove the selected workspace");
         assert_eq!(listed(&group), json!({}));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_managed_session_without_an_owned_process_is_never_the_viewer() {
+        use super::super::actor_resources::linux::Snapshot;
+        let snapshot = Snapshot::capture().expect("real /proc capture");
+        let viewer = std::process::id();
+        // A real, known viewer identity must not stand in for the missing
+        // managed owner: without an owned process the value stays unknown.
+        assert_eq!(observed_root(&snapshot, Some(None), Some(viewer)), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stale_or_absent_identity_is_never_observed() {
+        use super::super::actor_resources::linux::Snapshot;
+        let snapshot = Snapshot::capture().expect("real /proc capture");
+        let mut child = std::process::Command::new("/bin/true")
+            .spawn()
+            .expect("real process");
+        let stale = child.id();
+        child.wait().expect("reap the real process");
+        assert_eq!(observed_root(&snapshot, None, Some(stale)), None);
+        assert_eq!(observed_root(&snapshot, None, None), None);
+        // A live identity recorded by the same capture is observed as-is.
+        assert_eq!(
+            observed_root(&snapshot, None, Some(std::process::id())),
+            Some(std::process::id())
+        );
     }
 }

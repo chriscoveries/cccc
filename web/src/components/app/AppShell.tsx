@@ -1,3 +1,4 @@
+import { ResourceProvider } from "../../features/resources/ResourceProvider";
 import { requestWorkspaceNavigation } from "../../stores/workspaceNavigation";
 import { WorkspaceNavigationDialog } from "../workspace/WorkspaceNavigationDialog";
 import { useCallback, useState, type CSSProperties } from "react";
@@ -123,7 +124,15 @@ type AppShellProps = {
   onTouchEnd: (event: React.TouchEvent) => void;
 };
 
-export function AppShell({
+export function AppShell(props: AppShellProps) {
+  return (
+    <ResourceProvider groupId={props.remoteWorkspace ? "" : props.selectedGroupId}>
+      <AppShellContent {...props} />
+    </ResourceProvider>
+  );
+}
+
+function AppShellContent({
   codexVoice,
   connectEmbedded = false,
   connect,

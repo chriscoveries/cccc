@@ -1,3 +1,4 @@
+import { HostResourcesBadge } from "../../features/resources/ResourceProvider";
 import { useUIStore } from "../../stores/useUIStore";
 import { type Ref } from "react";
 import { useTranslation } from "react-i18next";
@@ -147,7 +148,7 @@ export function AppHeader({
   );
   return (
     <header
-      className={`@container/group-header absolute inset-x-0 top-0 z-20 flex h-[48px] shrink-0 items-center px-[12px] glass-header transition-transform duration-150 motion-reduce:transition-none md:relative md:inset-auto md:h-11 md:px-3 ${mobileReadingHidden ? "pointer-events-none -translate-y-full" : ""}`}
+      className={`@container/group-header absolute inset-x-0 top-0 z-20 flex h-[68px] shrink-0 items-start px-[12px] glass-header transition-transform duration-150 motion-reduce:transition-none md:relative md:inset-auto md:h-11 md:items-center md:px-3 ${mobileReadingHidden ? "pointer-events-none -translate-y-full" : ""}`}
       inert={mobileReadingHidden || undefined}
       aria-hidden={mobileReadingHidden || undefined}
       data-mobile-reading-hidden={mobileReadingHidden || undefined}
@@ -161,7 +162,7 @@ export function AppHeader({
       }
     >
       <div
-        className="@container/group-work-header flex min-w-0 flex-1 items-center gap-1 pr-1 md:gap-2 md:pr-3"
+        className="@container/group-work-header flex h-[48px] min-w-0 flex-1 items-center gap-1 pr-1 md:h-full md:gap-2 md:pr-3"
         data-group-header-work
       >
         <div
@@ -275,9 +276,12 @@ export function AppHeader({
         )}
       </div>
       <div
-        className="flex shrink-0 items-center justify-end gap-1 md:gap-2 md:min-w-[max(7.5rem,calc(var(--group-side-panel-width,0px)-1rem+4px))]"
+        className="flex h-[48px] shrink-0 items-center justify-end gap-1 md:h-full md:gap-2 md:min-w-[max(7.5rem,calc(var(--group-side-panel-width,0px)-1rem+4px))]"
         data-group-header-resources
       >
+        <span className="hidden md:inline-flex">
+          <HostResourcesBadge />
+        </span>
         <div
           ref={sidePanelControlsRef}
           className="flex shrink-0 items-center gap-0.5"
@@ -311,6 +315,12 @@ export function AppHeader({
             </IconButton>
           </>
         )}
+      </div>
+      <div
+        className="absolute inset-x-3 top-[48px] flex h-5 items-center justify-end md:hidden"
+        data-group-header-mobile-resources
+      >
+        <HostResourcesBadge />
       </div>
     </header>
   );

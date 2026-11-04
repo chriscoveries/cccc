@@ -280,7 +280,11 @@ jobs:
           CCCC_KILO_MANAGED_LIVE: "1"
           CCCC_KILO_MODEL_SYNC_LIVE: "1"
         run: |
-          cargo build --package cccc --bin cccc --locked
+          # The stage UI proof serves this binary over HTTP, so the SPA shell
+          # must be compiled in rather than assumed: drop the cached asset
+          # crate so its embed expands against the downloaded bundle.
+          cargo clean --package cccc-pair-web
+          cargo build --package cccc --bin cccc --locked --features cccc-web/embedded-debug
           # --workspace reuses the test build above; the live probes exist only
           # in cccc-pair-daemon.
           cargo test --workspace --lib --locked -- --list > offline-native-tests.txt
@@ -291,6 +295,14 @@ jobs:
             live_claude_empty_session_resumes_without_a_prompt -- --test-threads=1
           cargo test --workspace --lib --locked \
             live_kilo -- --test-threads=1
+      - name: Verify the embedded Web shell in the candidate
+        run: grep -aq 'id="root"' target/debug/cccc
+      - name: Upload Linux candidate for stage UI proof
+        uses: actions/upload-artifact@v7
+        with:
+          name: actor-resources-linux
+          path: target/debug/cccc
+          if-no-files-found: error
 
   ci-required:
     if: always()

@@ -115,6 +115,10 @@ async fn a_reaped_viewer_detaches_without_stopping_the_provider_job() {
         (group.group_id.clone(), "claude-1".into()),
         Arc::clone(&item),
     );
+    // The fixture has a real viewer but no owned provider process. The
+    // resource observer must not substitute the viewer for an unknown owner.
+    assert!(attached.pid.is_some());
+    assert_eq!(observed_process(&group.group_id, "claude-1"), Some(None));
 
     // The `claude attach` viewer exits and the runtime reaper reconciles it.
     let exited = cccc_runtime::stop(&group.group_id, "claude-1").expect("viewer exit");

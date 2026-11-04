@@ -1,0 +1,3 @@
+A Linux /proc/self/stat record from the capturing Python process and its host /proc/meminfo MemTotal and MemAvailable fields. The stat records retain only fields through RSS; they contain no address fields, command line, or environment. Kernel counters are point-in-time observations; availability and process lifetime races remain possible.
+The tree samples are the capturing interpreter and its actual temporary child, read once before that child exited. The captured system reported 4096-byte pages and 100 clock ticks per second.
+The CPU pair is a single real interpreter sampled across a measured 1.2-second busy interval; cpu-elapsed-ns is the observed monotonic interval.

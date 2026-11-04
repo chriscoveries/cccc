@@ -344,6 +344,7 @@ export type Actor = {
   has_custom_avatar?: boolean;
   enabled?: boolean;
   running?: boolean; // Actual process running status
+  resources?: { rss_bytes: number; cpu_percent: number | null };
   idle_seconds?: number | null; // Legacy idle duration, independent of terminal output activity.
   effective_working_state?: "stopped" | "idle" | "working" | "waiting" | "stuck" | string;
   effective_working_reason?: string;

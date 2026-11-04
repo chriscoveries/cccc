@@ -24,6 +24,8 @@ pub(crate) use events::{
     append as append_event, append_with_dedupe as append_event_with_dedupe,
     contains_dedupe as contains_event_dedupe,
 };
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub(crate) use supervisor::observed_process;
 pub(crate) use supervisor::{
     cancel_turn, respond_interaction, respond_permission, structured_state,
 };
