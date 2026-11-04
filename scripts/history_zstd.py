@@ -276,7 +276,7 @@ def source_recheck_path(config, candidate, held_dir, held_source):
         os.close(new_dir)
 
 
-def run_bounded(argv, deadline, *, stdin=None, stdout=None, pass_fds=(), output_limit=None):
+def run_bounded(argv, deadline, *, stdin=None, stdout=None, output_limit=None):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError('runtime limit reached')
@@ -284,12 +284,14 @@ def run_bounded(argv, deadline, *, stdin=None, stdout=None, pass_fds=(), output_
         if output_limit is not None:
             resource.setrlimit(resource.RLIMIT_FSIZE, (output_limit, output_limit))
     return subprocess.run(LOW_PRIORITY + argv, stdin=stdin, stdout=stdout, stderr=subprocess.DEVNULL,
-                          pass_fds=pass_fds, timeout=remaining, check=True, preexec_fn=restrict)
+                          timeout=remaining, check=True, preexec_fn=restrict)
 
 
 def decoded_digest(fd, deadline, limit):
-    proc = subprocess.Popen(LOW_PRIORITY + [ZSTD, '-d', '-c', '-q', '--', f'/proc/self/fd/{fd}'],
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=(fd,))
+    # Pass the already-open file as stdin. The /proc fd path is a symlink and
+    # zstd may refuse it; reopening a pathname would also lose the binding.
+    proc = subprocess.Popen(LOW_PRIORITY + [ZSTD, '-d', '-c', '-q'], stdin=fd,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     digest, total = hashlib.sha256(), 0
     try:
         with selectors.DefaultSelector() as selector:
@@ -360,7 +362,7 @@ def publish(config, candidate, root_fd, runtime, memory, deadline):
         os.ftruncate(archive, written)
         os.fsync(archive)
         os.lseek(archive, 0, os.SEEK_SET)
-        run_bounded([ZSTD, '-t', '-q', '--', f'/proc/self/fd/{archive}'], deadline, pass_fds=(archive,))
+        run_bounded([ZSTD, '-t', '-q'], deadline, stdin=archive)
         os.lseek(archive, 0, os.SEEK_SET)
         if decoded_digest(archive, deadline, candidate.size) != (candidate.size, candidate.sha256):
             raise ValueError('archive contents differ from source')
@@ -434,7 +436,7 @@ def verify_existing(config, candidate, root_fd, name, deadline):
         if file_digest(archive, config.limits.max_output_bytes) != (receipt.archive_size, receipt.archive_sha256):
             raise ValueError('archive checksum differs')
         os.lseek(archive, 0, os.SEEK_SET)
-        run_bounded([ZSTD, '-t', '-q', '--', f'/proc/self/fd/{archive}'], deadline, pass_fds=(archive,))
+        run_bounded([ZSTD, '-t', '-q'], deadline, stdin=archive)
         os.lseek(archive, 0, os.SEEK_SET)
         if decoded_digest(archive, deadline, candidate.size) != (candidate.size, candidate.sha256):
             raise ValueError('archive content differs')
