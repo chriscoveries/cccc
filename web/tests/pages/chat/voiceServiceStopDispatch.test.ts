@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   isMeaningfulVoiceDispatchText,
+  isVoiceDictationText,
   voiceServiceStopDispatchKind,
 } from "../../../src/pages/chat/voice-secretary/voiceServiceStopDispatch";
 
@@ -30,7 +31,7 @@ describe("voice service stop dispatch", () => {
     ).toBe("prompt");
   });
 
-  it("does not duplicate prompt or instruction dispatches with pending requests", () => {
+  it("keeps a later prompt editable while a refinement is pending", () => {
     expect(
       voiceServiceStopDispatchKind({
         mode: "prompt",
@@ -42,15 +43,41 @@ describe("voice service stop dispatch", () => {
       voiceServiceStopDispatchKind({
         mode: "instruction",
         transcriptText: "summarize the document",
-        pendingAskRequestId: "voice-ask-1",
       }),
-    ).toBe("");
+    ).toBe("instruction");
   });
 
   it("keeps document mode on the document flush path", () => {
     expect(
       voiceServiceStopDispatchKind({ mode: "document", transcriptText: "meeting notes" }),
     ).toBe("");
+  });
+
+  it("keeps every short answer for direct dictation", () => {
+    for (const answer of [
+      "好。",
+      "对",
+      "嗯",
+      "哦",
+      "OK.",
+      "I.",
+      "No.",
+      "はい",
+      "네",
+      "да",
+      "à",
+      "é",
+      "Sí",
+      "3",
+      "+",
+      "×",
+      "😊",
+    ]) {
+      expect(isVoiceDictationText(answer), answer).toBe(true);
+    }
+    for (const blank of ["", "   ", "。", "...", "?!", "、"]) {
+      expect(isVoiceDictationText(blank), blank).toBe(false);
+    }
   });
 
   it("does not dispatch prompt or instruction for ASR noise", () => {
@@ -62,11 +89,7 @@ describe("voice service stop dispatch", () => {
       }),
     ).toBe("");
     expect(
-      voiceServiceStopDispatchKind({
-        mode: "instruction",
-        transcriptText: "The. Yeah.",
-        pendingAskRequestId: "",
-      }),
+      voiceServiceStopDispatchKind({ mode: "instruction", transcriptText: "The. Yeah." }),
     ).toBe("");
   });
 });

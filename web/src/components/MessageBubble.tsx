@@ -12,7 +12,6 @@ import {
   MessageAttachment,
   PresentationMessageRef,
   TaskMessageRef,
-  VoiceDocumentMessageRef,
 } from "../types";
 import { formatFullTime, formatMessageTimestamp } from "../utils/time";
 import { classNames } from "../utils/classNames";
@@ -24,12 +23,7 @@ import { getVoiceDocumentMessageRefs } from "../utils/voiceDocumentRefs";
 import { getTaskMessageRefs } from "../utils/taskRefs";
 import { isRedundantWecomImagePlaceholder } from "../utils/messageAttachments";
 import { getMessageInsight } from "../utils/messagePerspective";
-import {
-  getDelegationDisplayText,
-  getDelegationSourceOutboundStatus,
-  isDelegationSourceOutbound,
-} from "./messageBubbleDelegation";
-import { MessageAttachments } from "./messageBubble/MessageAttachments";
+import { getDelegationDisplayText, isDelegationSourceOutbound } from "./messageBubbleDelegation";
 import { MessageActions } from "./messageBubble/MessageActions";
 import {
   QUICK_REPLY_EMOJI,
@@ -51,10 +45,10 @@ import { ActorAvatar } from "./ActorAvatar";
 import { formatEventLine, mayContainMarkdown } from "./messageBubble/helpers";
 import { AgentStateTooltip } from "./messageBubble/AgentStateTooltip";
 import { MessageContent } from "./messageBubble/MessageContent";
+import { MessageBubbleBody } from "./messageBubble/MessageBubbleBody";
+import { useMessageMentionTokens } from "./messageBubble/useMessageMentionTokens";
 import { buildMessageCopyText } from "./messageBubble/messageCopyText";
 import { MessageRoutingMetadata } from "./messageBubble/MessageRoutingMetadata";
-import { MessageReplyQuote } from "./messageBubble/MessageReplyQuote";
-import { MessageReferenceSections } from "./messageBubble/MessageReferenceSections";
 import { PendingReplySlot } from "./messageBubble/PendingReplySlot";
 import { PendingReplyStoreContext } from "../features/pendingReplies/store";
 import { useMessagePinned } from "../features/pins/pinStore";
@@ -76,110 +70,6 @@ function buildSenderAvatarUrl(groupId: string, senderAvatarPath?: string): strin
   if (!blobName) return "";
   return withAuthToken(
     `/api/v1/groups/${encodeURIComponent(gid)}/blobs/${encodeURIComponent(blobName)}`,
-  );
-}
-
-function MessageBubbleBody({
-  event,
-  isUserMessage,
-  isDark,
-  quoteText,
-  replyToEventId,
-  presentationRefs,
-  voiceDocumentRefs,
-  taskRefs,
-  taskById,
-  bodyText,
-  insight,
-  shouldRenderMarkdown,
-  blobAttachments,
-  blobGroupId,
-  stableMessageAttachmentKey,
-  onOpenPresentationRef,
-  onOpenTaskRef,
-  onOpenReplyTarget,
-}: {
-  event: LedgerEvent;
-  isUserMessage: boolean;
-  isDark: boolean;
-  quoteText?: string;
-  replyToEventId?: string;
-  presentationRefs: PresentationMessageRef[];
-  voiceDocumentRefs: VoiceDocumentMessageRef[];
-  taskRefs: TaskMessageRef[];
-  taskById: Map<string, Task>;
-  bodyText: string;
-  insight: string;
-  shouldRenderMarkdown: boolean;
-  blobAttachments: Array<{
-    kind: string;
-    path: string;
-    title: string;
-    bytes: number;
-    mime_type: string;
-    local_preview_url: string;
-  }>;
-  blobGroupId: string;
-  stableMessageAttachmentKey: string;
-  onOpenPresentationRef?: (ref: PresentationMessageRef, event: LedgerEvent) => void;
-  onOpenTaskRef?: (ref: TaskMessageRef, event: LedgerEvent) => void;
-  onOpenReplyTarget?: (replyToEventId: string) => void;
-}) {
-  const { t } = useTranslation("chat");
-  const supportingSectionClass = classNames(
-    "mt-3 border-t pt-3",
-    "border-[var(--glass-border-subtle)]",
-  );
-  return (
-    <>
-      {quoteText && (
-        <MessageReplyQuote
-          key={replyToEventId || quoteText}
-          text={quoteText}
-          replyToEventId={replyToEventId}
-          onOpenReplyTarget={onOpenReplyTarget}
-        />
-      )}
-
-      <MessageReferenceSections
-        event={event}
-        presentationRefs={presentationRefs}
-        voiceDocumentRefs={voiceDocumentRefs}
-        taskRefs={taskRefs}
-        taskById={taskById}
-        sectionClassName={supportingSectionClass}
-        onOpenPresentationRef={onOpenPresentationRef}
-        onOpenTaskRef={onOpenTaskRef}
-      />
-
-      <MessageContent
-        fallbackText={bodyText}
-        shouldRenderMarkdown={shouldRenderMarkdown}
-        isDark={isDark}
-      />
-
-      {/* Attachments are part of the message: they follow its text with no rule between
-          them, and the sender's insight about the whole message follows them. */}
-      <MessageAttachments
-        attachments={blobAttachments}
-        blobGroupId={blobGroupId}
-        isUserMessage={isUserMessage}
-        isDark={isDark}
-        attachmentKeyPrefix={stableMessageAttachmentKey}
-        downloadTitle={(name) => t("download", { name })}
-      />
-
-      {insight ? (
-        <div className={supportingSectionClass} data-message-insight>
-          <div className="mb-1.5 text-xs font-semibold uppercase text-[var(--color-text-tertiary)]">
-            {t("senderPerspective")}
-          </div>
-          <div className="max-w-full break-words whitespace-pre-wrap text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
-            {insight}
-          </div>
-        </div>
-      ) : null}
-    </>
   );
 }
 
@@ -263,6 +153,7 @@ export const MessageBubble = memo(
         : undefined;
     const pinned = useMessagePinned(groupId, pinnableId);
     const messageText = useMemo(() => formatEventLine(ev), [ev]);
+    const mentionTokens = useMessageMentionTokens(actors, ev.data);
     const pendingStore = useContext(PendingReplyStoreContext);
     const liveStatuses = useContext(LivePendingStatusContext);
     const liveEntry = ev.id && liveStatuses ? liveStatuses[ev.id] : undefined;
@@ -415,7 +306,7 @@ export const MessageBubble = memo(
         if (replyView.state === "answered" || replyView.state === "withdrawn")
           return recordedQuestionText(replyView.question, t("pendingReply.recommended"));
       }
-      if (delegationSourceOutbound) return getDelegationSourceOutboundStatus(displayMessageText);
+      if (delegationSourceOutbound) return t("delegationOutboundStatus");
       const receipt = isUserMessage
         ? localizedAnswerReceipt(ev.data, displayMessageText, {
             selected: (optionId) => t("answerReceiptSelected", { id: optionId }),
@@ -720,6 +611,14 @@ export const MessageBubble = memo(
       <>
         <MessageBubbleBody
           event={ev}
+          messageContent={
+            <MessageContent
+              fallbackText={bubbleBodyText}
+              shouldRenderMarkdown={shouldRenderMarkdown}
+              isDark={isDark}
+              mentionTokens={mentionTokens}
+            />
+          }
           isUserMessage={isUserMessage}
           isDark={isDark}
           quoteText={quoteText}
@@ -728,9 +627,7 @@ export const MessageBubble = memo(
           voiceDocumentRefs={voiceDocumentRefs}
           taskRefs={taskRefs}
           taskById={taskById}
-          bodyText={bubbleBodyText}
           insight={insight}
-          shouldRenderMarkdown={shouldRenderMarkdown}
           blobAttachments={blobAttachments}
           blobGroupId={blobGroupId}
           stableMessageAttachmentKey={stableMessageAttachmentKey}

@@ -6,6 +6,278 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 
 ## [Unreleased]
 
+### Added
+
+- Agents are told when their instruction files change. After `AGENTS.md`, `AGENTS.override.md`,
+  `CLAUDE.md`, `CLAUDE.local.md` or `.claude/CLAUDE.md` in an agent's workspace or a directory
+  above it changes, appears or is removed, the next CCCC message that has room for it carries one
+  line asking the agent to check the current project instructions, naming the files where the
+  message carries its full text. This covers agents CCCC starts, connected native sessions and Web
+  Model agents. The line names paths only, and CCCC reloads nothing itself. Changes made before
+  CCCC began watching a session, or while the daemon was stopped, are not reported.
+- The `cccc` MCP server reports a version difference from the daemon address file, naming both
+  versions and whether to reconnect the MCP server or restart CCCC. When the versions match, it can
+  also report different source fingerprints so you can check which build should run. The same
+  difference is reported at most once every six hours. A native agent reading a message by exact ID
+  can also see a notice when its client did not report an identity; that alone does not prove its
+  MCP server is old. Reconnect existing MCP servers after upgrading even if no warning appeared.
+- A managed Claude agent whose startup confirmation closed before CCCC connected now says why it
+  is stopped. The Web shows **Confirmation closed**, with a note that CCCC will not retry on its own
+  while it keeps running, messages to the agent wait, and **Launch** tries again; the terminal
+  interface shows `confirm retry`. Actor rows and lifecycle results report this as
+  `runtime_confirmation_paused`. The pause itself is unchanged: an explicit retry or a CCCC
+  restart clears it.
+- Mail can now tell its sender when a named recipient cannot act on it yet. The result of a new
+  local Mail may list, as `mail_recipient_advisories`, explicitly addressed agents that are
+  disabled, in a paused or stopped Group, or reported by the daemon as not running, with a note that
+  writing Mail starts no agent and resumes no Group, and that Send, or delivering this Mail, can
+  request delivery to an enabled agent in an active Group. The check only reads state; Mail itself
+  is unchanged. A result without the list does not mean every recipient will read the Mail:
+  broadcasts, whether a native session or Web Model is running, cross-Group and Connect Mail, and
+  retries are not checked.
+
+### Changed
+
+- Chinese and Japanese interface text now uses the names from the published READMEs. Chinese says
+  语音秘书 instead of 小秘书, and 领班 where the English foreman remained. Japanese calls the
+  foreman and peers フォアマン and ピア instead of the English names or リーダー, and says 音声秘書
+  instead of Voice Secretary and グループを起動 instead of グループを開始. A runtime confirmation
+  message says "agent" instead of "Actor".
+- Dictation added to the message box continues the text instead of starting a new paragraph.
+  Chinese and Japanese text joins without a space, nothing is inserted next to full-width
+  punctuation or before a comma or full stop, and Latin words get one space. Whatever the draft
+  already ends with, such as a line break or trailing spaces, stays as typed. A polished draft
+  of several lines, such as a numbered list, starts on a new line.
+- When a dictation is polished after recording, the voice secretary is told the text is the
+  user's own words to tidy, not a request to answer or carry out. It is asked to keep numbers as
+  dictated, write spoken enumerations as a numbered list, and return text that already reads well
+  unchanged.
+- Voice secretary recording with the local or external speech recognizer now needs the browser's
+  AudioWorklet support; a page without it says so instead of starting those recognizers. Browser
+  speech recognition does not use it and is unaffected.
+- After you stop a recording, the panel shows that it is being finalized. With the local or
+  external recognizer, stopping releases the microphone at once. If the browser then does not
+  confirm the last captured audio, the page says the result may be incomplete, and for a
+  recording outside a document it leaves any recognized text in the message box for review
+  instead of sending it on. Browser speech recognition is asked to stop. When a manually stopped
+  browser recognition cycle returns no result, or a local or external non-document recording
+  returns an empty result, the page can say that no text was recognized.
+- While a recording outside a document waits for its final transcript, **Stop waiting** appears
+  after 20 seconds. It ends the wait and keeps any recognized text in the message box of the Group
+  where the recording started; audio not yet recognized may be lost. Document recordings do not
+  offer it.
+- When a recording with the local or external recognizer cannot start because the microphone you
+  selected is no longer available, the error offers **Use system default microphone**. Choosing it
+  changes the microphone choice for voice features in that browser; recording starts again only
+  when you start it.
+- While the local or external recognizer is recording, if audio frames stop arriving or all samples
+  are zero for about six seconds, a hint suggests checking the selected microphone and its mute
+  setting. This is a hint rather than a diagnosis; background noise can keep it from appearing.
+- The page asks the browser to warn before a reload or close while a message or slash command is
+  being sent, or a Voice Secretary recording is starting, recording or being finalized. Switching
+  away from a Connect remote workspace asks for confirmation after that workspace reports the work.
+  Browsers may suppress the warning; the warning itself does not save any content.
+- A voice model download that stops partway now continues instead of starting over. A dropped or
+  stalled connection is asked for the rest of the file, and what arrived is kept for the next
+  install. Continuing needs a server that supports range requests, as GitHub release downloads do;
+  every file is still checked against its SHA-256, and against its size when the model definition
+  lists one. A kept file is deleted when it fails that check or when the model is removed, and
+  cleanup deletes kept files that the model definition no longer lists or that nothing has added to
+  for seven days. A server file whose stated size differs from the model definition now fails the
+  install before anything is downloaded.
+- When CCCC pauses the automatic starts of a managed Claude agent because its confirmation closed,
+  an agent or automation that tries to start it is now told that starts are paused and that the
+  user can launch the agent again.
+- Chet's errors for Claude's workspace trust and bypass-mode disclaimer now both say whether a
+  manual retry should set `CLAUDE_CONFIG_DIR` to the settings directory they name or leave it unset.
+- `@` and `#` suggestions now open at the cursor, including after common punctuation or Chinese,
+  Japanese or Korean text, and choosing one keeps the text after the cursor. Chosen references are
+  highlighted in the composer, and messages highlight references to the Group's agents, in the
+  colour of each agent's name, and to the Groups they refer to; unrecognized names, common email
+  addresses, links and code are not highlighted.
+- Agents can read or reply to a message by the short ID that delivery headers print, such as
+  `56712672` from `(reply:56712672)`. A short ID resolves to the one message the agent can read
+  whose ID starts with it; when several match, the error lists them, and messages the agent cannot
+  read never match. CCCC records and compares the full ID, so a retry with the full ID, or with a
+  short ID that still names that one message, is the same reply. Full IDs work as before.
+- `cccc_file_send` takes a list of up to 10 paths and sends them as one message with one caption,
+  so a set of screenshots arrives as one message instead of one per file. Every path is checked
+  first; if any is outside the workspace or missing, nothing is sent. A single path works as
+  before.
+- The terminal interface now shows a managed agent waiting for its startup confirmation as
+  `confirm Web`, and the Members heading counts the agents marked `confirm Web` or `confirm retry`,
+  apart from messages waiting for your reply. Web Model agents show `access on` or `access paused`,
+  since CCCC access being on does not show whether a browser is connected.
+- **Waiting for you** no longer reopens empty. When it would open with nothing to show and its
+  count is known to be zero, for example when you come back to the Group after answering, the chat
+  shows **All** and keeps it, so a request that arrives later shows its count on the tab without
+  switching the view. Requests answered or withdrawn while you are in the view stay listed until
+  you leave, with any unsent answer, and a count or page that cannot be confirmed keeps the filter.
+  After you send from **Waiting for you**, its count is checked again at once, and a notice that
+  your message is hidden by the filters closes once the view shows it.
+
+### Fixed
+
+- The Runtime Dock no longer calls a native session **Stopped** when CCCC only cannot deliver
+  to it; it shows the same receive status as the agent's tab. A Codex member that
+  cannot receive now says that CCCC reaches Codex only through the shared app-server and asks you
+  to check that the session is open in a Codex connected to it. When the `cccc` MCP server
+  identifies that Codex session on a tool call, the tool result can include a notice telling the
+  agent that messages may not reach it unless it looks, so it can ask the user to check. While that
+  state stays the same, each MCP server repeats this at most once every six hours.
+- Switching away from a Connect remote workspace now asks before discarding an unsent message
+  draft or attachment, once that workspace has reported it. Drafts in other Groups on the same
+  remote page count too; an empty or whitespace-only draft does not.
+- Sending again after a send whose result was unknown, for example when the connection dropped
+  before the response arrived, no longer creates a duplicate message, including a message to another
+  Group. If the restored message is sent again without any change, the Web reuses the first
+  attempt's client ID, so the daemon returns the message it already accepted. Editing it, even back
+  to the same text, or replacing an attachment makes it a new message. The retry is remembered only
+  in the open page; reloading the page starts over.
+- A send that fails no longer overwrites a draft you started while it was in flight. If the composer
+  is still empty, the failed message comes back as before. Otherwise it waits under **N sends to
+  restore** with its destination, recipients, reply target, references and attachments, until you
+  restore it into the empty composer or discard it. Slash commands follow the same rule, and a
+  command that finishes after you switched Groups no longer clears the draft you started there. A
+  failed send may still have arrived, or a command may already have run, so the list says to check
+  the conversation before sending again.
+- The **N sends to restore** list appears in every Group, and in place of the composer when no Group
+  is open, so a send that fails after you switched Groups is not left behind. Its content shows only
+  in its own Group; elsewhere the list names that Group, and **Open** goes there. The error for such
+  a send names its Group as well. A send whose Group is no longer available cannot be viewed or
+  restored unless that Group becomes available again; it stays listed until you discard it. Waiting
+  sends live only in the open page: while any wait, the page asks the browser to warn before a
+  reload or close, and switching away from a Connect remote workspace asks first once that
+  workspace has reported them.
+- A draft addressed to another Group now keeps that destination and its recipients when you switch
+  Groups and come back. A send naming a recipient who is no longer available stays in the composer
+  with a request to check the recipients; it used to go without that recipient, or to the Group's
+  default recipients when none was left. The recipients row shows such a recipient as unavailable
+  until you remove it, and choosing other recipients does not drop it. A reply to a message from an
+  agent that is no longer in the Group is addressed to that agent, shown as unavailable, so you
+  choose who receives it.
+- Images read with `cccc_file`, directly or through `cccc_code_exec`, now reach the model in Codex.
+  Codex gives the model only `structuredContent` when a tool result has it, so the image was dropped.
+  For Codex's MCP client (`codex-mcp-client`, checked with Codex CLI 0.166.0), a tool result that
+  contains an image now leaves out `structuredContent` and keeps the same metadata as text; structured
+  error results are left as they are. Other clients receive results as before; Codex hosts that
+  identify themselves differently are not covered.
+- A Connect remote workspace no longer closes when one of its periodic access checks, including the
+  administrator sign-in check, fails with a network error or a server error (HTTP 5xx), for example
+  from a reverse proxy or tunnel. It keeps the page that is already shown, with any unsent work, and
+  checks again at the usual interval. Until the workspace is ready, the frame says it is connecting
+  instead of staying blank.
+- A Connect remote workspace also stays open when its access proof expires, for example after the
+  computer slept, when the account directory is briefly unavailable, or when the target's Web
+  service restarts. The page is kept as it was, hidden behind a notice with the time of the last
+  connection attempt. Meanwhile it pauses new requests and live updates and disconnects its agent
+  terminals and browser views. The entry keeps trying and shows the page again once both instances
+  confirm the same account, administrator access on each side and a fresh access proof. **Close
+  this page** asks first when the page has reported unsent work. A change of account, or of the
+  target's device or address, or revoked administrator access on the entry still closes the page,
+  as does the target refusing access during recovery. A change that was being saved when the
+  connection dropped may already have been made; recovery does not automatically resend it. Both
+  instances need this version; with an older one the page closes as before.
+- A Connect remote page that needs to reload, from its update notice, its error screen or after
+  part of its code failed to load, now asks the entry to open it again, and the entry asks first
+  when the page has unsent work. Reloading inside the frame ended the connection. An entry older
+  than this version ignores the request, so reload the entry's page instead.
+- A dialog that fails to open, for example because its code could not be loaded, now shows an
+  error screen over the page with **Try again** and **Refresh**. The whole page used to go blank.
+- A Connect delivery whose window ended, or whose connection was disconnected, before the target
+  received it no longer tells the sender that the target did not accept it. The notice now says the
+  message did not arrive and can be sent again, after reconnecting when the connection was
+  disconnected. A delivery the target may have received keeps its warning to check first. Thanks to
+  [@chriscoveries](https://github.com/chriscoveries) for [#188](https://github.com/ChesterRa/cccc/pull/188).
+- A DeepSeek turn whose provider keeps sending valid ACP updates or permission requests is no
+  longer cut off after 300 seconds and sent again from the start. The timeout now counts only
+  silence: each validated update and each answered permission request restarts it, so a turn still
+  times out when the provider sends neither for 300 seconds.
+  Thanks to [@chriscoveries](https://github.com/chriscoveries) for [#184](https://github.com/ChesterRa/cccc/pull/184).
+- A notification an agent sends with the MCP `cccc_notify` tool without `target_actor_id` now
+  reaches its recipients. The tool stored the calling agent's own ID in the notification, where
+  routing reads it as the target, and an agent never receives its own notification, so such a
+  notification reached no one. The caller is now only the author, and an ordinary notification with
+  neither a target nor recipients is a broadcast to the Group, as the event standard says; one that
+  targets its sender still reaches no one. The tool refuses an `im_visibility` other than
+  `internal`, and the daemon refuses a `target_actor_id` or `to` it cannot read instead of treating
+  it as no target. Notifications from a native session or Web model no longer copy the binding CCCC
+  checked the call against into the Group's history. Thanks to
+  [@chriscoveries](https://github.com/chriscoveries) for finding and diagnosing this in
+  [#186](https://github.com/ChesterRa/cccc/pull/186).
+- Commands a Web model runs with `cccc_exec_command` now have the common pagers turned off by
+  default, so `git log` and similar commands no longer wait in a pager for a key press. On Unix the
+  session sets `PAGER`, `GIT_PAGER`, `GH_PAGER` and `MANPAGER` to `cat`, overriding inherited
+  values; on Windows only `GIT_PAGER` and `GH_PAGER`, leaving `PAGER` and `MANPAGER` inherited. A
+  pager set in the call's `env` still applies. The tool description now says the command runs in a
+  PTY.
+- `cccc_code_exec` no longer advises rerunning a cell that failed, had its output cut short, was
+  terminated or can no longer be found. Earlier calls in the cell may already have taken effect, so
+  the advice is to check their outcomes before repeating any of them.
+- Voice dictation into the composer keeps short answers the recognizer returns, such as 好, 嗯,
+  OK, yes or no, instead of discarding them as noise. The local and cloud recognizers still filter
+  out blank or punctuation-only text. For polish or Ask, words blocked by the speech-noise filter,
+  such as 好 or OK, are placed in the message box with a notice instead of being discarded.
+- When NotebookLM refuses a source refresh, rename or delete, or an artifact listing, with a status
+  CCCC recognizes, the operation now fails with that reason instead of reporting success or an empty
+  list. A status CCCC cannot read is reported as a changed response format rather than success.
+  Recognized refusals that are rate limits, timeouts or authentication failures are reported as
+  such, and waiting for an artifact rides out up to three brief listing failures in a row.
+- A recognized refusal of an artifact generation is reported as such. When NotebookLM answers a
+  generation with no result or a null artifact ID, CCCC says the artifact type may be unavailable to
+  the notebook or account and asks you to check the artifact list before retrying, instead of
+  reporting a changed response format.
+- A NotebookLM query whose response holds only stream bookkeeping and an end-of-stream frame, with
+  no answer or heartbeat frame, the form NotebookLM is reported to use when the chat quota runs out,
+  now fails as rate limited and says the quota may be exhausted, instead of reporting a changed
+  response format. Among the chunks NotebookLM marks as answers, the one marked final is used rather
+  than a longer earlier draft; without a final mark the previous choice applies. An answer payload
+  or answer row that is not a list is reported as a format change instead of an empty answer.
+- When adding a NotebookLM URL, Drive or file source has an unclear result, CCCC no longer reports a
+  source that existed before the request as the one it created, and a recognized refusal is no
+  longer turned into success because a new source with the same name or address appeared. These
+  cases now report the refusal or an unresolved outcome to check in the notebook.
+- NotebookLM artifacts scheduled for later show as `scheduled` instead of `unknown`; source types
+  follow NotebookLM's current codes, so Drive files, native Sheets and PowerPoint files are named
+  correctly; notebooks you own and have shared are reported as yours; and an artifact download
+  refused with HTTP 401 or 403 asks you to sign in again instead of reporting an upstream error.
+- Downloading a local speech model no longer fails after an hour on a slow connection that keeps
+  receiving data. A download is now treated as stalled when no data has arrived for 60 seconds,
+  and the error says so.
+- Transcript pieces merged during recording no longer get a space after full-width punctuation,
+  as in "好的。 然后".
+- Recognized speech from a recording outside a document is kept when the recording does not
+  finish normally. When the connection fails, the final transcript fails or is incomplete, a
+  polish or Ask request fails or its result is not confirmed, or you cancel a polish or it comes
+  back unchanged, any words the recognizer has returned are placed in the message box of the Group
+  where the recording started, with a notice saying what happened. If the page leaves the Group
+  view while recording, that text is saved to the same message box.
+- For document recordings, text that has not reached the document yet is kept the same way: with
+  browser speech recognition, pieces not yet sent; with the local recognizer, a part whose save
+  was still in progress. Other text from a local-recognizer document recording is left to the
+  server, which tries to finish the document after a disconnect.
+- With the local or external recognizer, an Ask dictated while an earlier Ask is still pending in
+  the same Group is submitted as its own request, as with browser recognition, instead of being
+  dropped.
+- If you dictate another polish while a previous one is pending, the new words stay in the message
+  box for review rather than being merged into that request or discarded.
+- Document recordings with the local recognizer no longer write the same text twice when a slow
+  save overlaps the next checkpoint. A save that fails is not retried; its text is placed in the
+  message box, and later text is still written to the document.
+- The errors for local speech models that are not ready and for missing external recognizer
+  credentials now give the full settings path, **Settings → This instance → Voice → Voice
+  Secretary**. A Group's settings have no Voice tab, so the shorter path could not be followed
+  from there.
+- The status shown for a delegation sent from a Group was always in Chinese; it now follows the
+  interface language.
+- The update time shown when you hover over an agent's state was labelled in English in every
+  interface language; it is now translated.
+- `cccc_file_send` ignored `idempotency_key` for sends on this instance, including to another
+  Group, so retrying with the same key posted the files again. The key now identifies the send,
+  and a retry returns the first message, also after a source file was removed.
+- Ctrl+Enter (Cmd+Enter on macOS) did not send a message ending in an `@` or `#` mention that matched
+  no suggestion, such as `see #34`; it now sends.
+
 ## [0.4.47]
 
 ### Added

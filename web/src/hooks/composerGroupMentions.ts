@@ -31,8 +31,17 @@ function groupCandidateTokens(group: GroupMeta): string[] {
   );
 }
 
-function isTokenBoundary(ch: string): boolean {
-  return !ch || /\s|[,，。.!?;；:：]/.test(ch);
+export function isComposerMentionBoundary(ch: string): boolean {
+  return !ch || (/[\s\p{P}]/u.test(ch) && !/[/\\@#_-]/u.test(ch));
+}
+
+export function isComposerMentionStartBoundary(ch: string): boolean {
+  return (
+    isComposerMentionBoundary(ch) ||
+    /[\p{Script=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script=Hangul}]/u.test(
+      ch,
+    )
+  );
 }
 
 export function createComposerGroupMentionToken({
@@ -100,8 +109,8 @@ function keepLiveMentionTokens<T extends { start: number; end: number; token: st
     if (start < 0 || end <= start || end > source.length) return false;
     return (
       source.slice(start, end) === token.token &&
-      isTokenBoundary(source[start - 1] || "") &&
-      isTokenBoundary(source[end] || "")
+      isComposerMentionStartBoundary(source[start - 1] || "") &&
+      isComposerMentionBoundary(source[end] || "")
     );
   });
   return live.length === input.length ? input : live;

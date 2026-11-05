@@ -33,6 +33,7 @@ import { useNotificationPromptOffer } from "../../features/pushNotifications/use
 import { classNames } from "../../utils/classNames";
 import { buttonVariants } from "../../components/ui/button-variants";
 import { ChatComposer } from "./ChatComposer";
+import { ComposerFailedSends } from "./ComposerFailedSends";
 import { ChatFilterTabs } from "./ChatFilterTabs";
 import { usePinnedIds } from "../../features/pins/pinStore";
 import { GroupWorkArea, type RuntimeActorRenderer } from "./GroupWorkArea";
@@ -229,6 +230,7 @@ export function ChatTab({
 }: ChatTabProps) {
   const shortTouchViewport = useShortTouchViewport();
   const [composerInputFocused, setComposerInputFocused] = useState(false);
+  const [mentionTriggerIndex, setMentionTriggerIndex] = useState<number | null>(null);
   const [inlineReplyEditor, setInlineReplyEditor] = useState<string | null>(null);
   const updateInlineReplyFocus = useCallback((editorId: string, focused: boolean) => {
     setInlineReplyEditor((current) => (focused ? editorId : current === editorId ? null : current));
@@ -320,6 +322,7 @@ export function ChatTab({
     setQuotedVoiceDocumentRef,
     clearQuotedVoiceDocumentRef,
     toTokens,
+    unavailableRecipients,
     toggleRecipient,
     clearRecipients,
     messageMode,
@@ -360,6 +363,7 @@ export function ChatTab({
     mentionFilter,
     mentionKind,
     mentionActorScope,
+    mentionTriggerIndex,
     composerRef,
     fileInputRef,
     chatAtBottomRef,
@@ -1364,6 +1368,7 @@ export function ChatTab({
                       onQuoteVoiceDocumentRef={handleQuoteVoiceDocumentReference}
                       onClearQuotedVoiceDocumentRef={clearQuotedVoiceDocumentRef}
                       toTokens={toTokens}
+                      unavailableRecipients={unavailableRecipients}
                       onToggleRecipient={toggleRecipient}
                       onClearRecipients={clearRecipients}
                       composerFiles={composerFiles}
@@ -1391,9 +1396,18 @@ export function ChatTab({
                       setMentionKind={setMentionKind}
                       setMentionActorScope={setMentionActorScope}
                       setMentionTargetGroupId={setMentionTargetGroupId}
+                      setMentionTriggerIndex={setMentionTriggerIndex}
                       slashCommands={slashCommands}
                     />
-                  ) : null}
+                  ) : (
+                    // With no Group open there is no composer, but sends waiting to be restored
+                    // still need a place to be seen and discarded.
+                    <div className="flex-shrink-0 px-2 pb-2 sm:px-4">
+                      <div className="chat-reading-width">
+                        <ComposerFailedSends groupId="" isDark={isDark} />
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
             </section>

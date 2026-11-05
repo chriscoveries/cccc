@@ -63,6 +63,7 @@ The daemon writes a JSON object with the following fields:
   "port": 0,
   "pid": 12345,
   "version": "0.4.x",
+  "source_id": "<selected-source-fingerprint>",
   "ts": "2026-01-13T12:34:56Z"
 }
 ```
@@ -72,6 +73,9 @@ Rules:
 - `transport` MUST be `"unix"` or `"tcp"`.
 - If `transport == "unix"`, `path` MUST be a non-empty filesystem path.
 - If `transport == "tcp"`, `host` MUST be a connectable host (typically `127.0.0.1`) and `port` MUST be a positive integer.
+- `source_id` is optional diagnostic metadata: the daemon build's fingerprint
+  of selected CCCC source inputs. It does not identify the executable bytes,
+  cached tool declarations, or the process that handled a particular request.
 - Clients MUST treat unknown fields as ignorable metadata (but SHOULD preserve them if re-writing).
 
 ### 3.2 Daemon Runtime Files (Non-normative)
@@ -2688,9 +2692,10 @@ tests and local development may add a local overlay at
 `CCCC_HOME/config/voice-models.json`. An overlay path that exists but cannot be
 read, including a dangling link, fails the catalog instead of falling back to
 the built-in manifest. Each artifact entry must include a fixed URL and
-`sha256`. Each install downloads and verifies every artifact into
-staging storage, unpacks archives there and deletes each one unless the model
-definition requires that file, renames the result to a
+`sha256`. Each install downloads every artifact into the model's resume
+storage, named by its expected `sha256`, verifies its SHA-256 (and its size
+when `size_bytes` is listed), moves it into staging storage, unpacks archives there and deletes each one unless the
+model definition requires that file, renames the result to a
 new version directory, and then switches to it with one atomic write of the
 model's install state. Until that write the installed version stays current: an
 update that fails before it keeps that version's files and records the failure
@@ -2712,6 +2717,21 @@ install fails with the same code instead of replacing it. A model ID starts with
 a lowercase letter or digit, so a model directory cannot be `.`, `..` or one of
 the cache's own entries, and does not end with `.`, which Windows drops from a
 directory name.
+
+A partial download is kept in resume storage across requests and installs. A
+dropped or stalled request is retried from the bytes kept, until three requests
+in a row bring nothing or 20 requests for that artifact have failed. Bytes are
+added only from a `206` response whose single-range `Content-Range` starts at
+the bytes kept. When the file's total size is known, from `size_bytes` or the
+response, a `206` that covers less than the rest is followed by a request for
+what remains and does not count as a failure. A `200` response replaces what was
+kept, and a `206` that starts elsewhere or a `416` drops it and asks for the
+whole file. The combined file is installed only if its SHA-256 matches the
+artifact's `sha256`. A response whose stated total size differs
+from the artifact's `size_bytes` fails the install before anything is written.
+A kept file that fails verification, or that cannot be written, is deleted. Cleanup
+deletes kept files that the model definition no longer names or that nothing has
+added to for seven days, and removing a model deletes them.
 
 Args:
 ```ts
@@ -3472,8 +3492,7 @@ Args:
       owner_actor_id?: string | null
       to?: string[]
       trigger:
-        | { kind: "interval"; every_seconds: number }
-        | { kind: "cron"; cron: string; timezone?: string }
+        | { kind: "interval"; every_seconds: number; max_runs?: number } | { kind: "cron"; cron: string; timezone?: string; max_runs?: number } // after max_runs fired runs the rule completes and disables like a fired one-time `at` rule
         | { kind: "at"; at: string } // RFC3339
       action?:
         | {
@@ -3706,6 +3725,22 @@ is running without a ready managed session. It is a live projection, not Actor
 configuration, consent, provider readiness or task-delivery acceptance. A false
 value alone MUST NOT be interpreted as approval. Reads MUST NOT start a Runtime.
 
+Actor rows may also include `runtime_confirmation_paused: boolean`. When true,
+the effective Runtime is a managed Claude session whose automatic retries are
+paused in this daemon process after a confirmation ended before connection.
+This is a live observation, not Actor configuration or a statement that the
+user declined. Explicit user `actor_start`, `actor_restart`, `actor_new_session`,
+`group_start`, or `actor_update` with `enabled=true` can clear the pause, subject
+to the operation's running-state conditions. `actor_update` can clear it while
+the Group is stopped without starting the Actor; the operations retain their
+normal lifecycle behavior. Daemon restart also clears this
+in-memory state. A false value does not imply approval or
+provider readiness. An absent field means the observation is unavailable (or
+the daemon predates it), not that retries are enabled. Runtime/Profile changes
+are considered when evaluating the observation; reads do not start work.
+The `actor` returned by `actor_update`, `actor_start`, `actor_stop`,
+`actor_restart` and `actor_new_session` carries the same projection.
+
 Each row's `effective_scope` is the `group_show.effective_scope` projection
 evaluated for that row's Actor rather than the caller, with the same shape and
 `{}` when unavailable. For a running managed owner, `path` is its immutable
@@ -3831,6 +3866,10 @@ Result:
 ```ts
 { actor: Record<string, unknown>; event: CCCSEventV1; runtime_confirmation_required: boolean }
 ```
+
+The returned `actor` carries the same live confirmation projections as
+`actor_list`. `runtime_confirmation_paused` is read-only response metadata and
+MUST NOT be applied as Actor configuration by `actor_update`.
 
 #### `actor_remove`
 
@@ -3963,12 +4002,13 @@ Notes:
 - Daemon also applies role defaults and the actor's `capability_autoload` before launch. These are durable desired capability bindings, so they remain applied when the subsequent runtime launch fails.
 - A daemon-launched runtime process MUST resolve an explicit existing attached scope from the actor default or group active scope. It MUST return `missing_project_root`, `scope_not_attached`, or `invalid_project_root` as applicable and MUST NOT fall back to the daemon working directory. An explicitly external structured executor may omit a local process only when its product capability and documentation say so.
 - Unmanaged native PTY Actors, including Antigravity in its default TUI mode, retain the shared best-effort input-mode wait and automatic submission path. Startup context MUST accompany the first task in one submission; starting an idle Actor MUST NOT submit a model prompt. Antigravity delivery does not depend on terminal display text or a per-process Web confirmation. Native login/trust setup must be completed before delivery; paste mode alone does not prove that setup is complete. PTY handoff evidence is not a provider receipt. Custom terminal programs retain their separate preamble submission contract.
+- Instruction-file notice. For each Actor it delivers to, the daemon keeps a content digest of every regular file named `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md` or `.claude/CLAUDE.md` in the session's workspace and each directory above it, one record per Actor generation, session and canonical workspace. It records before launch for daemon-launched PTY and headless sessions; when a native session joins a Group; when a Web member's effective workspace changes; at daemon start for registered running sessions; and otherwise at the first delivery. After a recorded file changed, appeared or was removed, the next delivery that has room for it MUST carry one line asking the agent to check the current project instructions. A delivery that carries the message text names the changed paths (relative to the workspace when inside it); the Claude Monitor notice uses a short form, which names a single file with a short path and otherwise only gives the number of changed files. The line MUST NOT include file contents or claim an instruction precedence. A known local transport limit (the Claude Monitor budget, Codex's command-line limit) MUST NOT reject a message because of the line: where it does not fit, the delivery goes without it and the change stays pending. Providers' own input limits are outside this guarantee. A change counts as notified only when the delivery carrying it is accepted at that transport's existing confirmation point (PTY submission, headless, native or Web acceptance, a Dots or Grok claim after its outer state commit); a rejected, ambiguous or unconfirmed delivery leaves it pending, and history reads MUST NOT consume it. Acceptance does not prove the model read the line. A target that is not a regular file counts as absent and is skipped once identified as such, before it is opened. If a candidate regular file cannot be read for another reason, that delivery carries no line and the record does not advance. Records live in daemon memory, so a daemon restart clears them and changes made while the daemon was stopped are not reported. A Web member is tracked per member and workspace; a new provider conversation does not reset its record.
 - Antigravity TUI Actor startup and native CLI setup MUST use native `agy mcp add` and verify the effective CCCC MCP configuration before launch. A conflicting project `.agents/mcp_config.json` entry or malformed configuration MUST fail without being overwritten. Global setup MUST preserve unrelated servers and serialize updates across instances. Its `cccc mcp` entry MUST resolve via the owning Actor launcher on PATH and inherit instance/Actor identity rather than pinning it in shared configuration. The complete startup prompt remains attached to the first task; a bounded, cancellable settling interval before the first payload addresses the observed early paste-mode initialization window. Later deliveries MAY include a conditional bootstrap reminder. Neither pacing nor that reminder changes PTY handoff evidence into a provider receipt.
 - Antigravity TUI preparation also disables the native `showFeedbackSurvey` user preference, because its rating overlay can consume terminal input. Other preferences and user-owned symlinks MUST be preserved; invalid settings MUST fail explicitly without being replaced. This user-wide change also applies to standalone AGY sessions and MUST be documented as such. It does not add a UI-text readiness detector, a survey-dismissal keystroke, or automatic replay of accepted input.
 - The `kimi` runtime in default mode targets the current Kimi Code native TUI. Native Actor startup and CLI setup MUST share MCP configuration at `KIMI_CODE_HOME/mcp.json` (defaulting to the user's `.kimi-code/mcp.json`), preserve unrelated servers, and reject malformed documents without overwriting them. A project `.kimi-code/mcp.json` entry for `cccc` takes precedence; a conflicting project entry MUST fail setup without modification, unless it is the user-level configuration file itself. CCCC MUST NOT infer the active client from legacy directories or invoke the removed `kimi mcp add` command. MCP setup MUST NOT write provider trust records. Native input-mode signals do not establish first-use initialization readiness; users must finish startup dialogs before PTY delivery. Kimi's explicit session arguments are preserved, but CCCC does not claim managed session-ID capture or automatic resume for the native TUI mode. Explicit ACP mode uses the separate controlled receipt and session MCP contract above.
 - A `deepseek` actor has no native terminal surface and MUST use CCCC's structured ACP surface. The daemon MUST install and resolve CCCC's pinned ACP composition from `CCCC_HOME/runtimes/deepseek/<release>` and MUST NOT modify the user's `DSH_HOME`, home-level npm project, or attached project.
 - The managed DeepSeek root manifest and lockfile MUST declare exactly `dsh-acp`, `dsh-mcp-client`, `dsh-acp-demo`, and `dsh-llm-deepseek` as direct dependencies. Every installed `@deepseek-ai/dsh*` package MUST remain on the release declared by `crates/cccc-contracts/src/deepseek.rs`; checking only direct package manifests is insufficient.
-- Each DeepSeek actor MUST set `CCCC_DEEPSEEK_SESSION_ROOT` to `groups/<group_id>/state/deepseek/<actor_id>/sessions` under the active `CCCC_HOME`. A provider turn MUST reach a successful terminal response within the shared bounded timeout before its source cursor advances; timeout cancellation MUST be durably projected as a failed turn, or the unconfirmed supervisor MUST be stopped. Output and failed-terminal idempotency keys MUST include the provider-attempt identity so a retry cannot be hidden by partial output from an earlier failed attempt; the successful terminal remains idempotent by source event. Crash recovery MUST query that durable per-source completion marker directly (or through its persistent index) and MUST NOT stop recognizing completed turns merely because the append-only headless event log crossed a size or line-count threshold. A permanent credential or context-window failure MUST persist a manual-restart gate before automatic delivery can run again. The gate MUST be bound to both the actor creation identity and the failed provider launch generation, MUST survive daemon restart, and MUST be cleared only after a lifecycle start/restart operation successfully initializes a replacement provider process; daemon restore and message-triggered auto-wake MUST NOT clear it. A late failure from a replaced generation MUST NOT close the replacement actor's gate.
+- Each DeepSeek actor MUST set `CCCC_DEEPSEEK_SESSION_ROOT` to `groups/<group_id>/state/deepseek/<actor_id>/sessions` under the active `CCCC_HOME`. A provider turn MUST reach a successful terminal response before its source cursor advances. The shared bounded timeout is a silence window: it restarts after each validated ACP `session/update` is recorded and after each `session/request_permission` is answered and recorded, so the turn times out when neither is recorded within that window. Timeout cancellation MUST be durably projected as a failed turn, or the unconfirmed supervisor MUST be stopped. Output and failed-terminal idempotency keys MUST include the provider-attempt identity so a retry cannot be hidden by partial output from an earlier failed attempt; the successful terminal remains idempotent by source event. Crash recovery MUST query that durable per-source completion marker directly (or through its persistent index) and MUST NOT stop recognizing completed turns merely because the append-only headless event log crossed a size or line-count threshold. A permanent credential or context-window failure MUST persist a manual-restart gate before automatic delivery can run again. The gate MUST be bound to both the actor creation identity and the failed provider launch generation, MUST survive daemon restart, and MUST be cleared only after a lifecycle start/restart operation successfully initializes a replacement provider process; daemon restore and message-triggered auto-wake MUST NOT clear it. A late failure from a replaced generation MUST NOT close the replacement actor's gate.
 - The managed `dsh-llm-deepseek` profile MUST set `maxTokens` to the shared `DEEPSEEK_MAX_OUTPUT_TOKENS` contract value (currently 65,536), preserving input/tool headroom instead of inheriting the upstream 256k output reservation. Credential absence and provider context-window overflow are permanent for the current runtime session: both MUST be normalized to stable, secret-free failed-turn errors and MUST stop automatic retries until a lifecycle start/restart successfully initializes the actor again.
 
 #### Voice notification state (trusted local user)
@@ -4379,7 +4419,7 @@ The Claude adapter uses an ephemeral receiver lease; Codex hands deliveries to i
 - `local_session_receiver_ack` (resource-owned): same owner args plus `{ handoff_id, state: "accepted"|"failed"|"ambiguous", reason?: string }`. Confirms only an offered handoff still owned by that receiver and conversation revision. An old acknowledgement MUST NOT confirm newer work.
 - `local_session_receiver_detach` (resource-owned): same owner args; clears only that owner and settles its pending physical handoffs. Old cleanup MUST NOT detach a replacement receiver.
 
-Every native message MUST carry its receiving Group ID, Actor ID, current role, and attached scope context in the model-visible text, even when the longer bootstrap is cached. Structured handoff fields alone are insufficient when an adapter forwards only `text`; one source can serve multiple Groups in alternating order. Codex receives the initial complete Preamble and subsequent concise receiving-context headers. Claude Monitor notifications MUST keep their routing identifiers, receiving role/scope key and an exact `message_history` read instruction inside the visible prefix. The complete JSON stdout record is bounded to 480 bytes, including escaping and its newline, based on the observed 500-character truncation in Claude Code 2.1.310; this is an adapter budget, not a guaranteed vendor limit. Full content and the Preamble remain available through the authorized exact read. The notification is a preview and MUST NOT truncate or duplicate the canonical ledger message.
+Every native message MUST carry its receiving Group ID, Actor ID, current role, and attached scope context in the model-visible text, even when the longer bootstrap is cached. Structured handoff fields alone are insufficient when an adapter forwards only `text`; one source can serve multiple Groups in alternating order. Codex receives the initial complete Preamble and subsequent concise receiving-context headers. Claude Monitor notifications MUST keep their routing identifiers, receiving role/scope key and an exact `message_history` read instruction inside the visible prefix. An instruction-file notice line, when pending, goes after that prefix and before the preview; when it does not fit the budget it is left out and stays pending. The complete JSON stdout record is bounded to 480 bytes, including escaping and its newline, based on the observed 500-character truncation in Claude Code 2.1.310; this is an adapter budget, not a guaranteed vendor limit. Full content and the Preamble remain available through the authorized exact read. The notification is a preview and MUST NOT truncate or duplicate the canonical ledger message.
 
 Receipts use existing `runtime.delivery` events with `transport=local_session`. Accepted means transport acceptance, not model execution/read/reply. Known rejection is failed; unknown submission is ambiguous and MUST NOT automatically replay. A failed attempt known to have stopped before native submission carries `retryable=true` and remains pending across access/Group pause and resume. Native rejection or an older failed receipt without this evidence stays out of automatic recovery. Accepted, ambiguous and withdrawn receipts MUST NOT replay, regardless of the flag. A missing acknowledgement is bounded to 30 seconds, after which later messages can proceed. Ordinary native delivery MUST keep offline work pending without a durable claim, claiming only when the receive channel is available and the adapter handoff is ready. A definitely unsubmitted unavailable attempt releases its claim with explicit retryable evidence. After a crash, remaining unsettled claims are still ambiguous; moving the claim boundary MUST NOT authorize replay of earlier ambiguous receipts. Other targets remain independent. Native callbacks and receiver polling MUST NOT start synthetic model work.
 
@@ -4823,6 +4863,11 @@ Result:
 {
   event: CCCSEventV1 // kind="chat.message"
   message_mode: "send" | "request_reply" | "mail"
+  mail_recipient_advisories?: {  // new local Mail only; see below
+    actor_id: string
+    reasons: ("disabled" | "group_paused" | "group_stopped" | "not_running")[]
+  }[]
+  mail_advisory?: string         // fixed note, present with mail_recipient_advisories
 }
 ```
 
@@ -4865,6 +4910,20 @@ the message, blobs, delivery claims, or other side effects are written.
 The immediate response confirms ledger acceptance and echoes the canonical mode;
 it is not transport evidence. Per-recipient delivery truth is reported only by
 daemon-authored `runtime.delivery` events and the corresponding status queries.
+
+After a new local `mail` is appended, its result MAY name the explicitly
+addressed recipients that cannot act on it yet, as read at that moment, in
+`mail_recipient_advisories`. Reasons are `disabled`, `group_paused` and
+`group_stopped`; when none applies, `not_running` means the daemon's status
+check reported a recipient whose process CCCC manages as not running.
+`mail_advisory` then states that writing Mail does not start an Actor or resume
+a Group, and that Send, or `message_deliver` for this Mail, can request delivery
+to an enabled Actor in an active Group. The check only reads state; it starts, resumes and delivers
+nothing. A result without these fields does not mean that every recipient will
+read the Mail. These are never reported: Mail to a broadcast selector, whether a
+native session, a Web Model or another runtime without a CCCC-managed process
+is running, cross-Group and Connect Mail, and a replay by `client_id`. A local
+Mail `reply` reports the same way.
 
 Every daemon-rendered `chat.message` handed to an actor runtime MUST expose the
 current ledger identity before the message body:
@@ -5036,6 +5095,13 @@ destination copy is missing, it completes that copy rather than returning a
 premature duplicate. The receipt is the `send_cross_group` receipt, whose
 `event`/`dst_event` belongs to the destination Group and `source_event`/`src_event`
 is the source audit record. Without `dst_group_id`, the result below is unchanged.
+The MCP `cccc_file_send` tool takes one `path` or a list of up to 10 and sends
+them as `paths` in one request. The tool checks only each path's form: relative
+to the caller's effective workspace, without `..`, and not a stored blob. For a
+new send, the daemon resolves each path, links included, and rejects a file
+outside that workspace before storing anything; any path that fails either
+check sends nothing. An accepted retry returns its receipt without rereading
+the files.
 
 Result:
 ```ts
@@ -5077,6 +5143,13 @@ Args:
   require_peer_insight?: boolean // profile gate; default false
 }
 ```
+
+When `by` is one of the Group's Actors, a `reply_to` that matches no event
+exactly resolves as a short ID with the same rules as an exact read in
+`message_history`, including `event_id_ambiguous`. The daemon replaces it with
+the full ID before any idempotency check, routing decision or ledger write, so
+`reply_to`, `dst_reply_to` and a retry's comparison always use full IDs. Other
+callers must pass the full ID.
 
 `reply`, `send_files`, `send_cross_group` and `connect_send` reject a non-null
 `question` with `invalid_question` and a non-null `answer` with `invalid_args`
@@ -5673,6 +5746,7 @@ Args:
   before_event_id?: string
   event_id?: string // exact visible message/notice; exclusive with filters/pagination
   limit?: number
+  _cccc_mcp_identity?: { version: string; source_id: string } // diagnostic only
 }
 ```
 
@@ -5689,9 +5763,25 @@ With `event_id`, return exactly that visible `chat.message` or targeted
 `system.notify` from the Actor's current generation, with complete rendered
 `delivery_text`. Native Actors also receive their current Preamble in that text.
 Use the same visibility rules as delivery; unknown, invisible and prior-generation
-IDs all return `event_not_found`. Exact reads cannot be combined with `mode`,
+IDs all return `event_not_found`. An `event_id` of 8 to 31 lowercase hexadecimal
+characters that matches no event exactly is a short ID, such as the
+`(reply:<id>)` hint: it resolves to the one event the Actor can read in its
+current generation whose ID starts with it. When several such events match, the
+read fails with `event_id_ambiguous`, naming only those events; events the
+Actor cannot read never match. Exact reads cannot be combined with `mode`,
 `query`, `before_event_id` or `limit`. They remain non-consuming and do not
 acknowledge execution, create a delivery or replay a handoff.
+
+For a successful exact read by a native Actor of its own message, the daemon
+MAY prepend a diagnostic when the client does not report `_cccc_mcp_identity`.
+Missing metadata does not prove that the caller is an MCP server or that its
+tools are old. To limit repetition, this diagnostic is suppressed in memory for
+six hours per Group, Actor generation and native session revision; a lost
+response can consume that interval. This state is not persisted, grants no
+authority and does not change the ledger or Mail cursor. A native MCP sends its
+own version and selected-source fingerprint, replacing a tool caller's value;
+both are self-reported diagnostics, never authentication. The warning does not
+cover agents that never make an exact history read.
 
 The MCP `cccc_message_history` tool presents an exact read as
 `{ delivery_text, message }`, where `message` is the single returned event. From
@@ -6304,6 +6394,15 @@ Args:
 `im_visibility="public"`; actor-targeted notifications are never eligible for
 external IM delivery. Producers must opt in explicitly instead of relying on
 `to`, `actor_id`, or `target_actor_id` inference.
+
+The caller is the event's `by`, and recipients follow the routing rules in
+CCCS §7.1. `target_actor_id` (and a legacy `actor_id`) must be a string or
+null, and `to` a list of strings or null; the operation rejects other types with
+`invalid_args` instead of reading them as no target, which would be a
+broadcast. Port authority such as `_cccc_native_binding` is checked before
+dispatch and is not stored in the event. The MCP `cccc_notify` tool's `actor_id`
+names the caller; the port resolves it into `by` and does not forward it. The
+tool sends internal notifications only and refuses any other `im_visibility`.
 
 Result:
 ```ts

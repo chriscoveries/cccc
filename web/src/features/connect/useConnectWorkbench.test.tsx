@@ -21,6 +21,7 @@ describe("Connect entry access lifecycle", () => {
       connect: {
         instance_id: "a",
         directory: {
+          account_id: "owner",
           expires_at: new Date(Date.now() + 120000).toISOString(),
           instances: [{ instance_id: "a" }, { instance_id: "b", device_id: "device-b" }],
         },
@@ -162,6 +163,7 @@ describe("Connect entry access lifecycle", () => {
     expect(state.instances).toHaveLength(1);
     expect(state.available).toBe(false);
     expect(state.activeInstance).toBeNull();
+    expect(state.retainedInstance?.instance_id).toBe("b");
     expect(state.selected?.groupId).toBe("group-b");
     mocks.access.mockResolvedValue(false);
     await act(async () => vi.advanceTimersByTimeAsync(15000));
@@ -169,6 +171,57 @@ describe("Connect entry access lifecycle", () => {
     expect(state.listings).toEqual({});
     expect(state.selected).toBeNull();
     expect(state.accountLabel).toBeNull();
+  });
+  it("expires the current directory without another poll and retains the selected workspace", async () => {
+    const response = snapshot();
+    response.result.connect.directory.expires_at = new Date(Date.now() + 5000).toISOString();
+    mocks.request.mockResolvedValue(response);
+    await act(async () => root.render(<Probe />));
+    await act(async () => state.select("b", "group-b"));
+    expect(state.available).toBe(true);
+    await act(async () => vi.advanceTimersByTimeAsync(5001));
+    expect(state.available).toBe(false);
+    expect(state.activeInstance).toBeNull();
+    expect(state.retainedInstance?.instance_id).toBe("b");
+    expect(state.selected?.groupId).toBe("group-b");
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+  });
+  it("replaces the expiry timer when the directory is renewed", async () => {
+    mocks.request.mockImplementation(async () => {
+      const response = snapshot();
+      response.result.connect.directory.expires_at = new Date(Date.now() + 20000).toISOString();
+      return response;
+    });
+    await act(async () => root.render(<Probe />));
+    await act(async () => vi.advanceTimersByTimeAsync(15000));
+    expect(mocks.request).toHaveBeenCalledTimes(2);
+    mocks.access.mockResolvedValue(null);
+    await act(async () => vi.advanceTimersByTimeAsync(6000));
+    expect(state.available).toBe(true);
+    await act(async () => vi.advanceTimersByTimeAsync(14001));
+    expect(state.available).toBe(false);
+  });
+  it("rechecks expiry when a throttled tab becomes visible", async () => {
+    const response = snapshot();
+    response.result.connect.directory.expires_at = new Date(Date.now() + 5000).toISOString();
+    mocks.request.mockResolvedValue(response);
+    await act(async () => root.render(<Probe />));
+    vi.setSystemTime(Date.now() + 5001);
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+    expect(state.available).toBe(false);
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+  });
+  it("retires the retained workspace when the account changes on the same origin", async () => {
+    await act(async () => root.render(<Probe />));
+    await act(async () => state.select("b", "group-b"));
+    mocks.request.mockImplementation(async () => {
+      const result = snapshot();
+      result.result.connect.directory.account_id = "another-owner";
+      return result;
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(15000));
+    expect(state.selected).toBeNull();
+    expect(state.retainedInstance).toBeNull();
   });
   it("does not mistake an unavailable entry check for a revoked session", async () => {
     await act(async () => root.render(<Probe />));

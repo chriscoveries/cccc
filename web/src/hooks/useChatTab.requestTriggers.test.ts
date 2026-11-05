@@ -4,6 +4,7 @@ import * as api from "../services/api";
 import {
   buildComposerSendRecipientTokens,
   shouldRestoreComposerAfterFailedSend,
+  unavailableComposerRecipients,
 } from "./chat/chatComposerState";
 import { dispatchPreparedMessage } from "./chat/chatMessageSend";
 
@@ -15,6 +16,39 @@ vi.mock("../services/api", () => ({
 
 describe("useChatTab request triggers", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("uses the same unavailable targets for display and send across routing modes", () => {
+    const base = {
+      toText: "remote-agent, local-only, missing, missing",
+      isCrossGroup: false,
+      replyTarget: null,
+      validRecipientSet: new Set(["remote-agent", "local-only"]),
+      crossGroupValidRecipientSet: new Set(["remote-agent"]),
+    };
+    expect(unavailableComposerRecipients(base)).toEqual(["missing"]);
+    expect(unavailableComposerRecipients({ ...base, isCrossGroup: true })).toEqual([
+      "local-only",
+      "missing",
+    ]);
+    expect(
+      unavailableComposerRecipients({
+        ...base,
+        replyTarget: { eventId: "e", by: "user", text: "", remoteDstGroupId: "g-remote" },
+      }),
+    ).toEqual(["local-only", "missing"]);
+    expect(
+      unavailableComposerRecipients({
+        ...base,
+        replyTarget: {
+          eventId: "e",
+          by: "user",
+          text: "",
+          remoteDstGroupId: "g-remote",
+          remoteDstTo: ["remote-agent"],
+        },
+      }),
+    ).toEqual([]);
+  });
 
   it("keeps cross-group sends aligned with the composer recipient snapshot", async () => {
     const crossTo = buildComposerSendRecipientTokens({
@@ -48,6 +82,7 @@ describe("useChatTab request triggers", () => {
       ["remote-agent"],
       "send",
       undefined,
+      { clientId: "local_1" },
     );
   });
 
@@ -110,6 +145,9 @@ describe("useChatTab request triggers", () => {
 
     expect(result.successfulSendCount).toBe(1);
     expect(result.response.ok).toBe(false);
+    expect(
+      vi.mocked(api.sendCrossGroupMessage).mock.calls.map((call) => call[6]?.clientId),
+    ).toEqual(["local_1:cross:0", "local_1:cross:1"]);
     expect(shouldRestoreComposerAfterFailedSend(result.successfulSendCount)).toBe(false);
     expect(shouldRestoreComposerAfterFailedSend(0)).toBe(true);
   });
