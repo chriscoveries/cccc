@@ -207,6 +207,9 @@ fn apply(home: &HomeLayout, result: TickResult, cancelled: &AtomicBool) {
             complete_rule(home, &event.group_id, rule_id, fired_at, true);
         }
     }
+    for done in &result.completed {
+        complete_rule(home, &done.group_id, &done.rule_id, done.fired_at, true);
+    }
     for event in result.notifications {
         if cancelled.load(Ordering::Acquire) {
             return;
@@ -690,6 +693,156 @@ mod tests {
                 Ok(())
             })
             .expect("automation rule");
+    }
+
+    /// Direct write of one interval rule carrying an optional run limit, with its recipient.
+    fn set_interval_rule(store: &GroupStore, group_id: &str, max_runs: u64) {
+        store
+            .mutate(group_id, |group| {
+                actors::add(group, Actor::new("peer"))?;
+                group.automation = json!({
+                    "version":1,
+                    "rules":[{
+                        "id":"repeat","enabled":true,"scope":"group","to":["peer"],
+                        "trigger":{"kind":"interval","every_seconds":60,"max_runs":max_runs},
+                        "action":{"kind":"notify","message":"run"}
+                    }]
+                })
+                .as_object()
+                .cloned()
+                .expect("automation");
+                Ok(())
+            })
+            .expect("automation rule");
+    }
+
+    /// Backdate the last fire so the next tick is due, without waiting out the window.
+    fn rewind_last_fired(store: &GroupStore, group_id: &str) {
+        let path = store
+            .state_dir(group_id)
+            .expect("state dir")
+            .join("automation.json");
+        let mut state: serde_json::Value = cccc_core::fs::read_json(&path).expect("state");
+        state["rules"]["repeat"]["last_fired_at"] =
+            json!((chrono::Utc::now() - chrono::TimeDelta::seconds(120)).to_rfc3339());
+        cccc_core::fs::write_json(&path, &state).expect("rewind");
+    }
+
+    fn automation_state(store: &GroupStore, group_id: &str) -> serde_json::Value {
+        cccc_core::fs::read_json(
+            &store
+                .state_dir(group_id)
+                .expect("dir")
+                .join("automation.json"),
+        )
+        .expect("automation state")
+    }
+
+    #[test]
+    fn a_limited_rule_completes_after_n_runs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("limited repeats", "").expect("group");
+        set_interval_rule(&store, &group.group_id, 2);
+
+        tick_group(&home, &group.group_id, false, &AtomicBool::new(false)); // primes, no run
+        rewind_last_fired(&store, &group.group_id);
+        tick_group(&home, &group.group_id, false, &AtomicBool::new(false));
+        let updated = store.load(&group.group_id).expect("group");
+        assert_eq!(updated.automation["rules"][0]["enabled"], true);
+        assert_eq!(
+            automation_state(&store, &group.group_id)["rules"]["repeat"]["fired_count"],
+            1
+        );
+
+        rewind_last_fired(&store, &group.group_id);
+        tick_group(&home, &group.group_id, false, &AtomicBool::new(false));
+        let updated = store.load(&group.group_id).expect("group");
+        assert_eq!(updated.automation["rules"][0]["enabled"], false);
+        assert_eq!(
+            automation_state(&store, &group.group_id)["rules"]["repeat"]["fired_count"],
+            2
+        );
+    }
+
+    #[test]
+    fn edit_and_disable_keep_the_run_count() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("limited repeats edited", "").expect("group");
+        set_interval_rule(&store, &group.group_id, 3);
+
+        tick_group(&home, &group.group_id, false, &AtomicBool::new(false));
+        rewind_last_fired(&store, &group.group_id);
+        tick_group(&home, &group.group_id, false, &AtomicBool::new(false));
+        assert_eq!(
+            automation_state(&store, &group.group_id)["rules"]["repeat"]["fired_count"],
+            1
+        );
+
+        let edits = json!({
+            "group_id": &group.group_id,
+            "by": "user",
+            "actions": [
+                {"type":"update_rule","rule":{
+                    "id":"repeat","enabled":true,"scope":"group","to":["peer"],
+                    "trigger":{"kind":"interval","every_seconds":60,"max_runs":3},
+                    "action":{"kind":"notify","message":"edited run"}
+                }},
+                {"type":"set_rule_enabled","rule_id":"repeat","enabled":false},
+                {"type":"set_rule_enabled","rule_id":"repeat","enabled":true}
+            ]
+        });
+        assert!(call(&home, "group_automation_manage", edits));
+        assert_eq!(
+            automation_state(&store, &group.group_id)["rules"]["repeat"]["fired_count"],
+            1
+        );
+    }
+
+    #[test]
+    fn delete_drops_the_run_count() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("limited repeats deleted", "").expect("group");
+        set_interval_rule(&store, &group.group_id, 2);
+
+        tick_group(&home, &group.group_id, false, &AtomicBool::new(false));
+        rewind_last_fired(&store, &group.group_id);
+        tick_group(&home, &group.group_id, false, &AtomicBool::new(false));
+        assert_eq!(
+            automation_state(&store, &group.group_id)["rules"]["repeat"]["fired_count"],
+            1
+        );
+
+        let delete = json!({"group_id": &group.group_id, "by": "user",
+            "actions": [{"type":"delete_rule","rule_id":"repeat"}]});
+        assert!(call(&home, "group_automation_manage", delete));
+        assert!(
+            automation_state(&store, &group.group_id)["rules"]
+                .get("repeat")
+                .is_none()
+        );
+
+        let recreate = json!({"group_id": &group.group_id, "by": "user",
+        "actions": [{"type":"create_rule","rule":{
+            "id":"repeat","enabled":true,"scope":"group","to":["peer"],
+            "trigger":{"kind":"interval","every_seconds":60,"max_runs":2},
+            "action":{"kind":"notify","message":"run"}
+        }}]});
+        assert!(call(&home, "group_automation_manage", recreate));
+        tick_group(&home, &group.group_id, false, &AtomicBool::new(false));
+        rewind_last_fired(&store, &group.group_id);
+        tick_group(&home, &group.group_id, false, &AtomicBool::new(false));
+        let updated = store.load(&group.group_id).expect("group");
+        assert_eq!(updated.automation["rules"][0]["enabled"], true);
+        assert_eq!(
+            automation_state(&store, &group.group_id)["rules"]["repeat"]["fired_count"],
+            1
+        );
     }
 }
 

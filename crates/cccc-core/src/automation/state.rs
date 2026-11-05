@@ -13,6 +13,9 @@ pub(super) struct RuntimeState {
     pub last_rule: BTreeMap<String, i64>,
     #[serde(default)]
     pub last_nudge: BTreeMap<String, i64>,
+    /// Runs counted toward a rule's optional `trigger.max_runs`.
+    #[serde(default)]
+    pub fired_count: BTreeMap<String, u64>,
 }
 
 pub(super) fn load(store: &GroupStore, group_id: &str) -> io::Result<RuntimeState> {
@@ -32,6 +35,9 @@ pub(super) fn load(store: &GroupStore, group_id: &str) -> io::Result<RuntimeStat
                     .and_then(parse_timestamp)
                 {
                     state.last_rule.insert(rule_id.clone(), timestamp);
+                }
+                if let Some(count) = entry.get("fired_count").and_then(Value::as_u64) {
+                    state.fired_count.insert(rule_id.clone(), count);
                 }
             }
         }
@@ -97,6 +103,9 @@ pub(super) fn save(store: &GroupStore, group_id: &str, state: &RuntimeState) -> 
     for (rule_id, timestamp) in &state.last_rule {
         let entry = object(rules.entry(rule_id.clone()).or_insert_with(|| json!({})));
         entry.insert("last_fired_at".into(), json!(format_timestamp(*timestamp)));
+        if let Some(count) = state.fired_count.get(rule_id) {
+            entry.insert("fired_count".into(), json!(count));
+        }
     }
     let actors = object(root.entry("actors").or_insert_with(|| json!({})));
     for (key, timestamp) in &state.last_nudge {

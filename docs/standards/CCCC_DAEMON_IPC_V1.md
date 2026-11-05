@@ -3492,8 +3492,7 @@ Args:
       owner_actor_id?: string | null
       to?: string[]
       trigger:
-        | { kind: "interval"; every_seconds: number }
-        | { kind: "cron"; cron: string; timezone?: string }
+        | { kind: "interval"; every_seconds: number; max_runs?: number } | { kind: "cron"; cron: string; timezone?: string; max_runs?: number } // after max_runs fired runs the rule completes and disables like a fired one-time `at` rule
         | { kind: "at"; at: string } // RFC3339
       action?:
         | {

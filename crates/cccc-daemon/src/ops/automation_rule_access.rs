@@ -258,7 +258,11 @@ fn validate_trigger(value: &mut Value, stored_cron: Option<&str>) -> Result<Stri
     let kind = required_text(trigger, "kind")?.to_owned();
     match kind.as_str() {
         "interval" => {
-            reject_unknown(trigger, &["kind", "every_seconds"], "interval trigger")?;
+            reject_unknown(
+                trigger,
+                &["kind", "every_seconds", "max_runs"],
+                "interval trigger",
+            )?;
             if trigger
                 .get("every_seconds")
                 .and_then(Value::as_i64)
@@ -266,9 +270,15 @@ fn validate_trigger(value: &mut Value, stored_cron: Option<&str>) -> Result<Stri
             {
                 return Err(invalid("interval every_seconds must be an integer >= 1"));
             }
+            validate_max_runs(trigger)?;
         }
         "cron" => {
-            reject_unknown(trigger, &["kind", "cron", "timezone"], "cron trigger")?;
+            reject_unknown(
+                trigger,
+                &["kind", "cron", "timezone", "max_runs"],
+                "cron trigger",
+            )?;
+            validate_max_runs(trigger)?;
             let expression = required_text(trigger, "cron")?;
             if stored_cron.map(str::trim) != Some(expression)
                 && let Some(error) = cccc_core::automation::cron_expression_error(expression)
@@ -292,6 +302,15 @@ fn validate_trigger(value: &mut Value, stored_cron: Option<&str>) -> Result<Stri
         _ => return Err(invalid(format!("unsupported trigger kind: {kind}"))),
     }
     Ok(kind)
+}
+
+/// An optional run limit on interval and cron triggers: absent means unlimited.
+fn validate_max_runs(trigger: &Map<String, Value>) -> Result<(), OpError> {
+    match trigger.get("max_runs") {
+        None => Ok(()),
+        Some(value) if value.as_u64().is_some_and(|max| max >= 1) => Ok(()),
+        _ => Err(invalid("trigger max_runs must be an integer >= 1")),
+    }
 }
 
 fn validate_action(value: &mut Value) -> Result<String, OpError> {

@@ -35,10 +35,21 @@ pub enum ScheduledAction {
     },
 }
 
+/// A rule that fired its last allowed run (`trigger.max_runs`).
+#[derive(Debug)]
+pub struct CompletedRule {
+    pub group_id: String,
+    pub rule_id: String,
+    pub fired_at: i64,
+}
+
 #[derive(Debug, Default)]
 pub struct TickResult {
     pub notifications: Vec<Event>,
     pub actions: Vec<ScheduledAction>,
+    /// Rules that reached `trigger.max_runs`; the caller completes each
+    /// exactly like a fired one-time `at` rule.
+    pub completed: Vec<CompletedRule>,
     /// Failure while discovering or appending Mail/reply notices. Retained
     /// alongside committed notifications and prepared rule actions so callers
     /// can still apply those results. Unwritten notices remain due for a later pass.
@@ -59,6 +70,7 @@ pub fn tick_scheduled(home: &HomeLayout, include_unread: bool) -> io::Result<Tic
         };
         result.notifications.extend(group_result.notifications);
         result.actions.extend(group_result.actions);
+        result.completed.extend(group_result.completed);
         if result.unread_failure.is_none() {
             result.unread_failure = group_result.unread_failure;
         }
@@ -354,6 +366,20 @@ fn tick_rules(
         }
         if completed {
             state.last_rule.insert(id.into(), now.timestamp());
+            if let Some(max_runs) = trigger
+                .and_then(|trigger| trigger.get("max_runs"))
+                .and_then(Value::as_u64)
+            {
+                let count = state.fired_count.entry(id.into()).or_default();
+                *count += 1;
+                if *count >= max_runs {
+                    result.completed.push(CompletedRule {
+                        group_id: group.group_id.clone(),
+                        rule_id: id.into(),
+                        fired_at: now.timestamp(),
+                    });
+                }
+            }
         }
     }
     Ok(())
