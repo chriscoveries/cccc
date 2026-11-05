@@ -699,3 +699,7 @@ mod mail_notice_repeat_tests;
 #[cfg(all(test, unix))]
 #[path = "automation_mail_tests.rs"]
 mod automation_mail_tests;
+
+#[cfg(test)]
+#[path = "automation_repeat_tests.rs"]
+mod repeat_tests;
