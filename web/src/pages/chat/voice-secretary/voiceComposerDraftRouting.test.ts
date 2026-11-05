@@ -114,7 +114,7 @@ describe("voice composer draft routing", () => {
     expect(
       routeVoiceTextToComposerGroup({ groupId: "new-group", text: "voice", mode: "append" }),
     ).toBe("active");
-    expect(useComposerStore.getState().composerText).toBe("new group draft\n\nvoice");
+    expect(useComposerStore.getState().composerText).toBe("new group draft voice");
   });
 
   it("preserves the visible composer and writes speech to the recording group draft", () => {
@@ -125,8 +125,79 @@ describe("voice composer draft routing", () => {
     expect(useComposerStore.getState().drafts["old-group"]?.composerText).toBe("voice");
   });
 
+  it.each([
+    { mode: "append" as const, text: "voice", expected: "original voice" },
+    { mode: "replace" as const, text: "original", expected: "original" },
+  ])(
+    "preserves the background draft's destination but retires its retry identity on $mode",
+    ({ mode, text, expected }) => {
+      const attachment = new File(["attachment"], "example.txt");
+      const replyTarget = {
+        eventId: "event-1",
+        by: "peer-1",
+        text: "question",
+        remoteDstGroupId: "destination",
+        remoteDstTo: ["peer-2"],
+      };
+      useComposerStore.setState({ activeGroupId: "old-group", composerText: "" });
+      const store = useComposerStore.getState();
+      store.enqueueFailedSend({
+        id: "send-1",
+        originGroupId: "old-group",
+        destGroupId: "destination",
+        retryKey: "original-request",
+        composerText: "original",
+        composerFiles: [attachment],
+        toText: "peer-2",
+        replyTarget,
+        quotedPresentationRef: null,
+        quotedVoiceDocumentRef: null,
+        messageMode: "send",
+      });
+      expect(store.restoreFailedSend("old-group", "send-1")).toBe(true);
+      store.switchGroup("old-group", "new-group");
+      expect(useComposerStore.getState().drafts["old-group"].retryCandidate?.id).toBe("send-1");
+
+      expect(routeVoiceTextToComposerGroup({ groupId: "old-group", text, mode })).toBe("draft");
+      const draft = useComposerStore.getState().drafts["old-group"];
+      expect(draft.composerText).toBe(expected);
+      expect(draft.destGroupId).toBe("destination");
+      expect(draft.replyTarget).toEqual(replyTarget);
+      expect(draft.toText).toBe("peer-2");
+      expect(draft.composerFiles).toEqual([attachment]);
+      expect(draft.composerFiles[0]).toBe(attachment);
+      expect(draft.retryCandidate).toBeNull();
+      expect(useComposerStore.getState().composerText).toBe("");
+
+      store.switchGroup("new-group", "old-group");
+      const restored = useComposerStore.getState();
+      expect(restored.destGroupId).toBe("destination");
+      expect(restored.retryCandidate).toBeNull();
+    },
+  );
+
   it("supports replacement without duplicating shared merge logic", () => {
     expect(mergeVoiceComposerDraftText("old", "new", "replace")).toBe("new");
+  });
+
+  it.each([
+    ["好的。", "然后发布", "好的。然后发布"],
+    ["先跑测试", "再提交", "先跑测试再提交"],
+    ["了解です", "次に進みます", "了解です次に進みます"],
+    ["Run the tests", "then commit", "Run the tests then commit"],
+    ["发布 CCCC", "v0.4.48", "发布 CCCC v0.4.48"],
+    ["draft  ", "voice", "draft  voice"],
+    ["- item\t", "voice", "- item\tvoice"],
+    ["first line\n", "voice", "first line\nvoice"],
+    ["Hello", ", world", "Hello, world"],
+    ["  ", "voice", "  voice"],
+    ["\n", "voice", "\nvoice"],
+    ["", "voice", "voice"],
+    ["Please check:", "1. totals\n2. coupons", "Please check:\n1. totals\n2. coupons"],
+    ["Notes\n", "1. totals\n2. coupons", "Notes\n1. totals\n2. coupons"],
+    ["Notes\n  ", "1. totals\n2. coupons", "Notes\n  1. totals\n2. coupons"],
+  ])("appends %j and %j", (current, transcript, expected) => {
+    expect(mergeVoiceComposerDraftText(current, transcript, "append")).toBe(expected);
   });
 
   it("preserves selected remote identities when speech finishes after switching groups", () => {
@@ -149,7 +220,8 @@ describe("voice composer draft routing", () => {
 
     store.switchGroup("new-group", "old-group");
     const restored = useComposerStore.getState();
-    expect(restored.composerText).toBe(`${mentionedText}\n\nvoice`);
+    // The user ended the draft with a line break, so the speech starts on that line.
+    expect(restored.composerText).toBe(`${mentionedText}  \nvoice`);
     expect(restored.composerGroupMentionTokens).toEqual([groupToken]);
     expect(restored.composerAgentMentionTokens).toEqual([agentToken]);
     expect(

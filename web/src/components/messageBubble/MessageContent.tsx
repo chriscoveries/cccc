@@ -1,7 +1,17 @@
 import { classNames } from "../../utils/classNames";
+import type { MessageMentionToken } from "../../utils/mentionHighlight";
 import { LazyMarkdownRenderer } from "../LazyMarkdownRenderer";
+import { MessageMentionText } from "./MessageMentionText";
 
-function PlainMessageText({ text, className }: { text: string; className?: string }) {
+function PlainMessageText({
+  text,
+  className,
+  mentionTokens,
+}: {
+  text: string;
+  className?: string;
+  mentionTokens: readonly MessageMentionToken[];
+}) {
   return (
     <div
       className={classNames(
@@ -9,7 +19,7 @@ function PlainMessageText({ text, className }: { text: string; className?: strin
         className,
       )}
     >
-      {text}
+      <MessageMentionText text={text} mentionTokens={mentionTokens} />
     </div>
   );
 }
@@ -18,10 +28,16 @@ export function MessageContent(props: {
   fallbackText: string;
   shouldRenderMarkdown: boolean;
   isDark: boolean;
+  mentionTokens: readonly MessageMentionToken[];
 }) {
-  if (!props.shouldRenderMarkdown) {
-    return <PlainMessageText text={props.fallbackText} className="max-w-full" />;
-  }
+  const plainText = (
+    <PlainMessageText
+      text={props.fallbackText}
+      className="max-w-full"
+      mentionTokens={props.mentionTokens}
+    />
+  );
+  if (!props.shouldRenderMarkdown) return plainText;
   return (
     <LazyMarkdownRenderer
       content={props.fallbackText}
@@ -29,7 +45,8 @@ export function MessageContent(props: {
       invertText={false}
       enableMermaid
       className="max-w-full break-words text-[var(--color-text-primary)] [overflow-wrap:anywhere]"
-      fallback={<PlainMessageText text={props.fallbackText} className="max-w-full" />}
+      mentionTokens={props.mentionTokens}
+      fallback={plainText}
     />
   );
 }

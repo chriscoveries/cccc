@@ -75,6 +75,19 @@ pub(super) fn deliver_with_timeout(
         payload.push_str("\n\n[cccc] ");
         payload.push_str(cccc_core::system_prompt::NEW_MESSAGE_MODE_GUIDANCE);
     }
+    let instruction_notice = holder.workspace.clone().for_actor(actor).and_then(|scope| {
+        crate::ops::instruction_files::check(
+            home,
+            &group.group_id,
+            actor,
+            &format!("deepseek:{}", holder.generation),
+            &scope.path,
+        )
+    });
+    if let Some(notice) = &instruction_notice {
+        payload.push_str("\n\n");
+        payload.push_str(&notice.delivery_line());
+    }
     if !holder.running.load(Ordering::Acquire) {
         return TurnDelivery::Incomplete;
     }
@@ -92,7 +105,8 @@ pub(super) fn deliver_with_timeout(
         Ok(id) if id > 0 => id,
         _ => return TurnDelivery::Incomplete,
     };
-    let turn_deadline = Instant::now() + turn_timeout;
+    // The deadline is a silence window: provider progress below moves it.
+    let mut turn_deadline = Instant::now() + turn_timeout;
     macro_rules! fail {
         ($terminal_seen:expr) => {{
             fail_sent_request(
@@ -231,6 +245,7 @@ pub(super) fn deliver_with_timeout(
             {
                 fail!(false);
             }
+            turn_deadline = Instant::now() + turn_timeout;
             continue;
         }
         if frame.get("method") == Some(&Value::String("session/request_permission".into())) {
@@ -264,11 +279,18 @@ pub(super) fn deliver_with_timeout(
             {
                 fail!(false);
             }
+            turn_deadline = Instant::now() + turn_timeout;
             continue;
         }
         if frame.get("id") == Some(&json!(request_id)) {
             let projection = projection!();
-            return persist_terminal(&holder, &mut supervisor, &projection, &frame);
+            let outcome = persist_terminal(&holder, &mut supervisor, &projection, &frame);
+            if outcome == TurnDelivery::Completed
+                && let Some(notice) = instruction_notice
+            {
+                notice.delivered();
+            }
+            return outcome;
         }
         // A response for an unknown id is rejected by the strict parser. A
         // notification with an unknown method is ignored only after protocol

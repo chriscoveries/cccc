@@ -55,6 +55,11 @@ pub(crate) async fn call_with_context(
     add_runtime_context(home, &mut arguments);
     arguments.remove("_cccc_web_binding");
     arguments.remove("_cccc_native_binding");
+    apply_mcp_identity(
+        name,
+        &mut arguments,
+        context.is_some_and(|context| context.native_binding.is_some()),
+    );
     if name == "cccc_message_send"
         && context.is_some_and(|context| context.native_binding.is_some())
     {
@@ -108,9 +113,11 @@ pub(crate) async fn call_with_context(
             return group_help(client, arguments).await;
         }
         "cccc_bootstrap" => {
-            return Ok(tool_result(
-                crate::bootstrap::build(home, client, arguments).await?,
-            ));
+            let mut payload = crate::bootstrap::build(home, client, arguments).await?;
+            if context.is_none_or(|context| context.native_binding.is_some()) {
+                payload["mcp_server"] = current_mcp_identity();
+            }
+            return Ok(tool_result(payload));
         }
         "cccc_runtime_list" => json!({"runtimes": cccc_runtime::detect_runtimes()
             .into_iter()
@@ -860,6 +867,27 @@ fn is_repo_tool(name: &str) -> bool {
     )
 }
 
+fn current_mcp_identity() -> Value {
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "source_id": cccc_core::build_info::current()["source_id"],
+    })
+}
+
+/// Diagnostic metadata describes this request's native MCP, not Actor authority.
+fn apply_mcp_identity(name: &str, arguments: &mut Map<String, Value>, native: bool) {
+    arguments.remove("_cccc_mcp_identity");
+    if native
+        && name == "cccc_message_history"
+        && arguments
+            .get("event_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+    {
+        arguments.insert("_cccc_mcp_identity".into(), current_mcp_identity());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -869,6 +897,25 @@ mod tests {
     };
     use crate::RequestContext;
     use serde_json::json;
+
+    #[test]
+    fn exact_native_history_identifies_this_server_not_the_supplied_value() {
+        let mut args = json!({"event_id":"event", "_cccc_mcp_identity":{"version":"forged"}})
+            .as_object()
+            .expect("arguments")
+            .clone();
+        super::apply_mcp_identity("cccc_message_history", &mut args, true);
+        assert_eq!(args["_cccc_mcp_identity"], super::current_mcp_identity());
+
+        super::apply_mcp_identity("cccc_message_history", &mut args, false);
+        assert!(!args.contains_key("_cccc_mcp_identity"));
+        args.remove("event_id");
+        super::apply_mcp_identity("cccc_message_history", &mut args, true);
+        assert!(!args.contains_key("_cccc_mcp_identity"));
+        args.insert("event_id".into(), json!("event"));
+        super::apply_mcp_identity("cccc_task", &mut args, true);
+        assert!(!args.contains_key("_cccc_mcp_identity"));
+    }
 
     #[test]
     fn an_explicit_empty_runtime_group_never_inherits_the_active_group() {
@@ -1041,6 +1088,106 @@ mod tests {
         );
         assert_eq!(called["structuredContent"]["tool_called"], true);
         assert_eq!(called["structuredContent"]["tool_name"], "cccc_memory");
+
+        daemon_task.abort();
+    }
+
+    #[tokio::test]
+    async fn bound_notifications_reach_their_recipients_and_never_widen_a_target() {
+        if crate::lib_tests::isolate_embedded_daemon_test(concat!(
+            module_path!(),
+            "::",
+            "bound_notifications_reach_their_recipients_and_never_widen_a_target"
+        )) {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = cccc_core::GroupStore::new(home.clone()).expect("groups");
+        let mut group = store.create("notify routing", "").expect("group");
+        for id in ["lead", "peer", "other"] {
+            cccc_core::actors::add(&mut group, cccc_contracts::Actor::new(id)).expect("actor");
+        }
+        store.save(&group).expect("save group");
+        let daemon_home = home.clone();
+        let daemon_task = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
+        let client = cccc_client::DaemonClient::new(home.clone());
+        for _ in 0..100 {
+            if client
+                .call(&cccc_contracts::DaemonRequest {
+                    v: 1,
+                    op: "group_list".into(),
+                    args: serde_json::Map::new(),
+                })
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let context = Some(RequestContext {
+            native_binding: None,
+            binding: None,
+            group_id: &group.group_id,
+            actor_id: "lead",
+        });
+        for (route, recipients) in [
+            // No target is a broadcast to everyone but the sender.
+            (json!({}), vec!["peer", "other"]),
+            (json!({"target_actor_id":"peer"}), vec!["peer"]),
+            // A target naming the sender reaches no one rather than everyone.
+            (json!({"target_actor_id":"lead"}), vec![]),
+            // The caller's identity must not override the recipients it names.
+            (json!({"to":["peer"]}), vec!["peer"]),
+        ] {
+            let mut args = route.as_object().cloned().expect("route");
+            args.insert("title".into(), json!("Build finished"));
+            let result =
+                super::call_with_context(&home, &client, "cccc_notify", args, context, false)
+                    .await
+                    .expect("notify");
+            let event: cccc_contracts::Event =
+                serde_json::from_value(result["structuredContent"]["event"].clone())
+                    .expect("stored notification");
+            assert_eq!(event.kind, "system.notify", "{route}");
+            assert_eq!(event.by, "lead", "{route}");
+            assert!(!event.data.contains_key("actor_id"), "{route}");
+            let reached: Vec<_> = ["lead", "peer", "other"]
+                .into_iter()
+                .filter(|actor| cccc_core::inbox::is_for_actor(&group, &event, actor))
+                .collect();
+            assert_eq!(reached, recipients, "{route}");
+        }
+
+        // Delivery bookkeeping may still be appended, so count notifications.
+        let ledger = store.ledger_path(&group.group_id).expect("ledger path");
+        let notifications = || {
+            cccc_core::ledger::read_all(&ledger)
+                .expect("ledger")
+                .iter()
+                .filter(|event| event.kind == "system.notify")
+                .count()
+        };
+        let before = notifications();
+        for refused in [
+            // The tool promises an internal notification.
+            json!({"im_visibility":"public"}),
+            // Routing cannot read these, and would treat them as no target.
+            json!({"target_actor_id":["peer"]}),
+            json!({"to":[7]}),
+        ] {
+            let mut args = refused.as_object().cloned().expect("refused");
+            args.insert("title".into(), json!("Build finished"));
+            assert!(
+                super::call_with_context(&home, &client, "cccc_notify", args, context, false)
+                    .await
+                    .is_err(),
+                "{refused}"
+            );
+        }
+        assert_eq!(notifications(), before);
 
         daemon_task.abort();
     }

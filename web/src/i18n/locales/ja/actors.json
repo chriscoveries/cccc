@@ -10,6 +10,7 @@
   "custom": "カスタム",
   "noAgentStateYet": "エージェント状態はまだありません",
   "agentState": "エージェント状態",
+  "agentStateUpdated": "更新： {{time}}",
   "taskShort": "タスク {{id}}",
   "blockersShort": "ブロック {{count}}",
   "nextShort": "次: {{value}}",
@@ -24,6 +25,8 @@
   "runtimeConfirmationOpenTerminal": "確認用ターミナルを開く",
   "runtimeConfirmationPending": "ターミナルでの確認を待っています",
   "runtimeConfirmationHint": "このターミナルで Claude の確認に答え、ターミナルは開いたままにしてください。承認すると CCCC が接続を試みます。拒否または終了した場合は「起動」で再試行してください。",
+  "runtimeConfirmationPaused": "確認が閉じられました",
+  "runtimeConfirmationPausedHint": "CCCC が接続する前に Claude の確認が閉じられました。今回の CCCC の実行中は自動で再試行せず、このエージェントへのメッセージは待機します。「起動」で再試行してください。",
   "runtimeResumeFailedDescription": "自動再開を停止しています。保存済みの会話と未配信メッセージは保持されます。原因を修正して起動または再起動で再試行するか、新しいセッションを選んで開始してください。",
   "lastTerminalOutput": "最後のターミナル出力",
   "launchAgent": "エージェントを起動",
@@ -83,9 +86,9 @@
   "foremanExists": "（追加済み）",
   "foremanAlreadyConfigured": "フォアマンは設定済みです",
   "peerRole": "ピア",
-  "needForemanFirst": "（先に Foreman が必要）",
-  "foremanLeads": "Foreman がチームを率います。Peer は作業エージェントです。",
-  "firstAgentForeman": "最初のエージェントは Foreman（チームリーダー）にしてください。",
+  "needForemanFirst": "（先にフォアマンが必要）",
+  "foremanLeads": "フォアマンがチームを率います。ピアは作業エージェントです。",
+  "firstAgentForeman": "最初のエージェントはフォアマン（チームリーダー）にしてください。",
   "autoloadCapabilities": "自動ロード capabilities",
   "autoloadCapabilitiesHint": "1 行につき 1 capability_id（カンマ区切りも可）。エージェント起動時に自動有効化されます。",
   "advancedOptions": "詳細オプション",
@@ -231,7 +234,7 @@
   "rolePresetCatalog": {
     "coordinator": {
       "name": "コーディネーター",
-      "summary": "明確な owner、低ノイズなルーティング、きれいな handoff で複数エージェントの作業を前に進めるが、第二の foreman のようには振る舞わない。",
+      "summary": "明確な owner、低ノイズなルーティング、きれいな handoff で複数エージェントの作業を前に進めるが、第二のフォアマンのようには振る舞わない。",
       "useWhen": "作業が漂い始め、owner が曖昧で handoff が乱れているが、主なニーズが最終判断ではなく調整であるときに使います。"
     },
     "planner": {
@@ -394,6 +397,7 @@
       "hints": {
         "connected": "元のアプリを使用してください。必要に応じて CCCC 連携を再読み込みしてください。",
         "disconnected": "元のアプリを確認し、CCCC 連携を再読み込みしてください。プロセスは動作中の可能性があります。",
+        "disconnectedCodex": "CCCC は共有 app-server 経由でのみ Codex にメッセージを届けます。このセッションが共有 app-server に接続した Codex で開かれているか確認し、そうでなければそこで再開してください（daemon_auto_start が無効なら有効にしてください）。その後「状態を更新」を選んでください。",
         "host_exited": "元のプロセスは終了しました。以下のコマンドでセッションを再開できます。",
         "session_ended": "元のアプリがセッションを終了しました。履歴を確認してから再開してください。",
         "integration_disabled": "元のホストで CCCC 連携を有効にし、アプリで再読み込みしてください。",
@@ -411,6 +415,7 @@
       "refreshingConnection": "既存の受信連携を確認中…",
       "refreshConnected": "受信チャネルを利用できます。",
       "refreshUnavailable": "受信チャネルを利用できません。元のアプリを確認し、CCCC 連携を再読み込みしてください。",
+      "refreshUnavailableCodex": "受信チャネルを利用できません。このセッションが共有 app-server に接続した Codex で開かれているか確認し、必要ならそこで再開してから、もう一度更新してください。",
       "refreshFailed": "受信チャネルを確認できませんでした。表示されている情報は現在読み取れるセッション記録です。",
       "runWarning": "CCCC ホストの {{shell}} で元の設定を使って実行してください。再開すると待機中の処理が実行され、モデル利用枠を消費する場合があります。",
       "codexReconnect": "同じ Codex スレッドを再開すると、このエージェントに再接続できます。別のスレッドは新しいエージェントとして参加します。",

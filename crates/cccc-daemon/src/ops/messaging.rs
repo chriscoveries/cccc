@@ -452,10 +452,17 @@ fn send_with_audience_policy(
     {
         return duplicate_send(event);
     }
+    // Captured port authority is checked before dispatch and is never event
+    // content, for notifications as for chat.
     let mut data: Map<String, Value> = request
         .args
         .iter()
-        .filter(|(key, _)| !matches!(key.as_str(), "group_id" | "by"))
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "group_id" | "by" | "_cccc_native_binding" | "_cccc_web_binding"
+            )
+        })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     match data.remove("answer") {
@@ -505,6 +512,26 @@ fn send_with_audience_policy(
                 "system notifications do not support generic acknowledgement",
             ));
         }
+        // Routing ignores a target or recipient list it cannot read, and a
+        // notification without either is a broadcast; refuse those instead.
+        for key in ["target_actor_id", "actor_id"] {
+            if !matches!(data.get(key), None | Some(Value::Null | Value::String(_))) {
+                return Err(OpError::new(
+                    "invalid_args",
+                    format!("{key} must be an Actor ID"),
+                ));
+            }
+        }
+        match data.get("to") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(items)) if items.iter().all(Value::is_string) => {}
+            Some(_) => {
+                return Err(OpError::new(
+                    "invalid_args",
+                    "to must be a list of Actor IDs or selectors",
+                ));
+            }
+        }
         match data.get("im_visibility") {
             None | Some(Value::Null) => {
                 data.insert("im_visibility".into(), json!("internal"));
@@ -519,10 +546,12 @@ fn send_with_audience_policy(
         }
     }
     let event = append(home, &group.group_id, kind, &by, data)?;
+    let mut advisories = Vec::new();
     if kind == "chat.message"
         && event.data.get("message_mode").and_then(Value::as_str) == Some("mail")
     {
         super::automation_runtime::notify_idle_mail_recipients(home, &group, &event);
+        advisories = super::mail_advisory::advisories(home, &group, &event);
     } else {
         let _ = actor_delivery::dispatch(home, &group, &event);
     }
@@ -532,7 +561,12 @@ fn send_with_audience_policy(
             .get("message_mode")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        object(json!({"event": event, "message_mode": message_mode}))
+        let mut result = json!({"event": event, "message_mode": message_mode});
+        if !advisories.is_empty() {
+            result["mail_recipient_advisories"] = json!(advisories);
+            result["mail_advisory"] = json!(super::mail_advisory::NOTE);
+        }
+        object(result)
     } else {
         object(json!({"event": event}))
     }
@@ -596,6 +630,8 @@ fn preflight_upload_reply(home: &HomeLayout, request: &DaemonRequest) -> OpResul
             "reply message_mode must be send or mail",
         ));
     }
+    let resolved = super::event_prefix::with_full_reply_target(home, request)?;
+    let request = resolved.as_ref().unwrap_or(request);
     let reply_to = required_arg(request, "reply_to")?;
     let group = load(home, request)?;
     let authority_by = string_arg(request, "by").unwrap_or_else(|| "user".into());
@@ -739,6 +775,9 @@ fn reply(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             "reply message_mode must be send or mail",
         ));
     }
+    // Idempotency, routing and both ledgers compare and record full IDs only.
+    let resolved = super::event_prefix::with_full_reply_target(home, request)?;
+    let request = resolved.as_ref().unwrap_or(request);
     let reply_to = required_arg(request, "reply_to")?;
     let group = load(home, request)?;
     let authority_by = string_arg(request, "by").unwrap_or_else(|| "user".into());
@@ -862,7 +901,11 @@ pub(crate) fn reply_crosses_groups(home: &HomeLayout, request: &DaemonRequest) -
     let Some(reply_to) = request.args.get("reply_to").and_then(Value::as_str) else {
         return false;
     };
-    let Ok(event) = find_event(home, group_id, reply_to) else {
+    // Choose the permit from the same parent the handler will resolve.
+    let full = super::event_prefix::full_reply_target(home, request)
+        .ok()
+        .flatten();
+    let Ok(event) = find_event(home, group_id, full.as_deref().unwrap_or(reply_to)) else {
         return false;
     };
     if event.data.contains_key("connect_message") {

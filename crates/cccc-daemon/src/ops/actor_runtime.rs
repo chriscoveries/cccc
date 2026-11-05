@@ -17,7 +17,8 @@ mod untrusted_workspace_tests;
 mod workspace;
 pub(crate) use attributed_reap::reap_group;
 pub(super) use confirmation::{
-    AUTOMATIC_LIFECYCLE, actor_response, restore_runtime, user_confirmation_retry,
+    AUTOMATIC_LIFECYCLE, actor_response, confirmation_pause_applies, restore_runtime,
+    user_confirmation_retry,
 };
 #[cfg(test)]
 pub(super) use confirmation::{confirmation_required, require_restored_managed_actor};
@@ -136,6 +137,7 @@ pub(super) fn apply_resolved(
         return Ok(None);
     }
     if is_structured(actor) {
+        super::runtime_state::record_web_instruction_baseline(home, group, actor);
         return Ok(None);
     }
     start(home, group, actor).map(Some)
@@ -220,7 +222,10 @@ fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionSt
     let command = cccc_runtime::resolve_command_executable(&command, &env);
     let history =
         terminal_history::config(home, &group.group_id, &actor.id).map_err(OpError::io)?;
-    cccc_runtime::start_with_history(
+    // Read before the launch: a change made while the runtime starts is then
+    // reported instead of being taken as what it loaded.
+    let instructions = super::instruction_files::Snapshot::read(&cwd);
+    let status = cccc_runtime::start_with_history(
         LaunchSpec {
             group_id: group.group_id.clone(),
             actor_id: actor.id.clone(),
@@ -233,7 +238,23 @@ fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionSt
         },
         history,
     )
-    .map_err(runtime_error)
+    .map_err(runtime_error)?;
+    if let Some(snapshot) = instructions {
+        super::instruction_files::record(
+            home,
+            &group.group_id,
+            &actor,
+            &pty_instruction_session(&status),
+            snapshot,
+        );
+    }
+    Ok(status)
+}
+
+/// The instruction-file session of a PTY launch; the delivery worker uses the
+/// same key.
+pub(super) fn pty_instruction_session(status: &SessionStatus) -> String {
+    format!("pty:{}", status.started_at)
 }
 
 pub(super) fn stop(group: &GroupDoc, actor_id: &str) -> Result<Option<SessionStatus>, OpError> {

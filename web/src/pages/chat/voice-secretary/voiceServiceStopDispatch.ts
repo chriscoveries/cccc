@@ -58,16 +58,23 @@ export function isMeaningfulVoiceDispatchText(value: string): boolean {
   return hasMeaningfulCjkText(text) || hasMeaningfulLatinText(text);
 }
 
+/**
+ * Whether direct dictation keeps a transcript. It goes into the composer, where the user
+ * reviews it, so anything but whitespace and punctuation counts: short answers such as 好, 嗯,
+ * OK or I, symbols and emoji are kept, and only blank or punctuation-only results are dropped.
+ */
+export function isVoiceDictationText(value: string): boolean {
+  return /[^\s\p{P}]/u.test(cleanVoiceDispatchText(value));
+}
+
 export function voiceServiceStopDispatchKind(params: {
   mode: VoiceSecretaryCaptureMode;
   transcriptText: string;
   pendingPromptRequestId?: string;
-  pendingAskRequestId?: string;
 }): VoiceServiceStopDispatchKind {
   if (!isMeaningfulVoiceDispatchText(params.transcriptText)) return "";
   if (params.mode === "prompt" && !String(params.pendingPromptRequestId || "").trim())
     return "prompt";
-  if (params.mode === "instruction" && !String(params.pendingAskRequestId || "").trim())
-    return "instruction";
+  if (params.mode === "instruction") return "instruction";
   return "";
 }

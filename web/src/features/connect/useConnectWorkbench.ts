@@ -28,12 +28,14 @@ export function useConnectWorkbench(
   refreshEntryAccess: () => Promise<boolean | null>,
 ) {
   const binding = useRef("");
+  const accountId = useRef("");
   const [lastDirectory, setLastDirectory] = useState<ConnectSnapshot["directory"]>(null);
   const [groupConnections, setGroupConnections] = useState<GroupConnectionSummary | null>(null);
   const [accountLabel, setAccountLabel] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [checkedAt, setCheckedAt] = useState(0);
   const [snapshot, setSnapshot] = useState<ConnectSnapshot | null>(null);
+  const [, recheckDirectoryExpiry] = useState(0);
   const [listings, setListings] = useState<Record<string, RemoteListing>>({});
   const [selected, setSelected] = useState<RemoteSelection | null>(null);
   const [collapsedInstances, setCollapsedInstances] = useState<string[]>([]);
@@ -43,6 +45,7 @@ export function useConnectWorkbench(
     const controller = new AbortController();
     const clear = () => {
       binding.current = "";
+      accountId.current = "";
       setLastDirectory(null);
       setSnapshot(null);
       setListings({});
@@ -82,8 +85,14 @@ export function useConnectWorkbench(
               "membership_authorization_pending",
               "connect_directory_expired",
             ].includes(next?.error_code || "");
-          const sameBinding = !rejected && Boolean(nextBinding) && binding.current === nextBinding;
+          const nextAccount = next?.directory?.account_id || "";
+          const accountChanged = Boolean(
+            nextAccount && accountId.current && nextAccount !== accountId.current,
+          );
+          const sameBinding =
+            !rejected && !accountChanged && Boolean(nextBinding) && binding.current === nextBinding;
           binding.current = nextBinding;
+          accountId.current = nextAccount || (sameBinding ? accountId.current : "");
           if (!sameBinding) {
             setSelected(null);
             setLastDirectory(null);
@@ -122,6 +131,30 @@ export function useConnectWorkbench(
     };
   }, [enabled, refreshEntryAccess]);
 
+  // Time passing alone does not trigger a render. Recheck when the current
+  // directory expires, and on return from a throttled background tab.
+  const directoryExpiresAt = snapshot?.directory?.expires_at;
+  useEffect(() => {
+    const expiry = Date.parse(directoryExpiresAt || "");
+    if (!enabled || !Number.isFinite(expiry)) return;
+    let timer: number | undefined;
+    const check = () => {
+      window.clearTimeout(timer);
+      const remaining = expiry - Date.now();
+      if (remaining <= 0) recheckDirectoryExpiry((previous) => previous + 1);
+      else timer = window.setTimeout(check, remaining);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") check();
+    };
+    check();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [enabled, directoryExpiresAt]);
+
   const directory =
     enabled && snapshot?.directory && Date.parse(snapshot.directory.expires_at) > Date.now()
       ? snapshot.directory
@@ -134,6 +167,11 @@ export function useConnectWorkbench(
     directory && selected
       ? instances.find((entry) => entry.instance_id === selected.instanceId) || null
       : null;
+  // A stale directory is not authority to operate the frame. Retain only its
+  // identity so the mounted document can wait, hidden, for fresh authority.
+  const retainedInstance = selected
+    ? instances.find((entry) => entry.instance_id === selected.instanceId) || null
+    : null;
   const selectionRef = useRef(selected);
   selectionRef.current = selected;
   const select = useCallback((instanceId: string, groupId = "", action?: "connections") => {
@@ -182,6 +220,8 @@ export function useConnectWorkbench(
     accountLabel: enabled ? accountLabel : null,
     failed,
     available: Boolean(directory),
+    activeAccountId: directory?.account_id || null,
+    activeDirectoryExpiresAt: directory?.expires_at || null,
     checkedAt,
     instances,
     listings: enabled ? listings : {},
@@ -194,6 +234,7 @@ export function useConnectWorkbench(
       ),
     selected: enabled ? selected : null,
     activeInstance,
+    retainedInstance,
     ownInstance: directory?.instances.find((entry) => entry.instance_id === snapshot?.instance_id),
     select,
     reflectSelection,
