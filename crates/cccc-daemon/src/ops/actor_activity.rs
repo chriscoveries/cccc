@@ -34,6 +34,9 @@ impl Publisher {
     }
 
     fn publish_group(&mut self, store: &GroupStore, group: &GroupDoc) {
+        if let Err(error) = super::turn_usage::flush(store.home(), &group.group_id) {
+            tracing::warn!(%error, "failed to retry pending turn usage");
+        }
         let mut payloads = Vec::new();
         let mut snapshot = BTreeMap::new();
         for actor in &group.actors {
