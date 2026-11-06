@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vite-plus/test";
 import { InboxModal } from "./InboxModal";
+import { capturedActors, capturedSenderEvents } from "../senderEvents.fixture";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -58,6 +59,35 @@ it("labels the inbox once and enables mark-read only when messages are available
 
     await render([message], "inbox-mark-read");
     expect(markRead().disabled).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+it("names senders from the actor list and keeps its fallback for user, unknown, special and empty ids", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const messages = capturedSenderEvents.filter((ev) => ev.kind === "chat.message");
+  try {
+    await act(async () =>
+      root.render(
+        <InboxModal
+          isOpen
+          isDark={false}
+          actorId="reviewer"
+          actors={capturedActors}
+          messages={messages}
+          busy=""
+          onClose={() => {}}
+          onMarkAllRead={() => {}}
+        />,
+      ),
+    );
+    const labels = [...host.querySelectorAll("[data-inbox-sender]")].map((el) => el.textContent);
+    expect(labels).toEqual(["Review lead", "bare", "user", "ghost", "svc:chet", "@all", "—"]);
   } finally {
     await act(async () => root.unmount());
     host.remove();
