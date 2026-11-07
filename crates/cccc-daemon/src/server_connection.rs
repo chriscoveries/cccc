@@ -100,6 +100,15 @@ async fn response(
     shutdown: &watch::Sender<bool>,
     dispatch_locks: &DispatchLocks,
 ) -> DaemonResponse {
+    if request.op == "ledger_compact"
+        && request
+            .args
+            .get("zstd")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return compact_zstd_response(home, request, dispatch_locks).await;
+    }
     let should_shutdown = request.op == "shutdown";
     let permit = dispatch_locks.acquire_for(home, &request).await;
     let home = home.clone();
@@ -114,6 +123,108 @@ async fn response(
         shutdown.send(true).ok();
     }
     response
+}
+
+async fn compact_zstd_response(
+    home: &HomeLayout,
+    request: DaemonRequest,
+    locks: &DispatchLocks,
+) -> DaemonResponse {
+    compact_zstd_response_with(home, request, locks, |binding, locks| {
+        let (group_id, active, segment, group, group_identity, segment_identity) = binding;
+        let mut guard = |work: &mut dyn FnMut() -> std::io::Result<()>| {
+            locks.with_group_write_blocking(&group_id, work)
+        };
+        cccc_core::ledger_archive::compress_sealed_coordinated(
+            &active,
+            std::path::Path::new(&segment),
+            &group,
+            &group_identity,
+            &segment_identity,
+            &mut guard,
+        )
+    })
+    .await
+}
+
+type ZstdBinding = (
+    String,
+    std::path::PathBuf,
+    String,
+    std::path::PathBuf,
+    same_file::Handle,
+    same_file::Handle,
+);
+
+async fn compact_zstd_response_with<F>(
+    home: &HomeLayout,
+    mut request: DaemonRequest,
+    locks: &DispatchLocks,
+    worker: F,
+) -> DaemonResponse
+where
+    F: FnOnce(ZstdBinding, DispatchLocks) -> std::io::Result<()> + Send + 'static,
+{
+    // Run the normal operation and its binding checks under the existing
+    // Group permit. Capture identities before dropping that permit.
+    let permit = locks.acquire_for(home, &request).await;
+    let owned_home = home.clone();
+    let result = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+        let _permit = permit;
+        cccc_core::ledger_archive::zstd_preflight()?;
+        request
+            .args
+            .insert("zstd".into(), serde_json::Value::Bool(false));
+        let response = dispatch(&owned_home, &request);
+        if !response.ok {
+            return Ok((response, None));
+        }
+        let Some(segment) = response
+            .result
+            .get("segment")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
+            return Ok((response, None));
+        };
+        let group_id = request
+            .args
+            .get("group_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| std::io::Error::other("group id absent after compaction"))?;
+        let store = cccc_core::GroupStore::new(owned_home)?;
+        let group = store.group_dir(group_id)?;
+        let active = store.ledger_path(group_id)?;
+        let group_identity = same_file::Handle::from_path(&group)?;
+        let segment_identity = same_file::Handle::from_path(&segment)?;
+        Ok((
+            response,
+            Some((
+                group_id.to_owned(),
+                active,
+                segment,
+                group,
+                group_identity,
+                segment_identity,
+            )),
+        ))
+    })
+    .await;
+    let (response, binding) = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => return DaemonResponse::failure("io_error", error.to_string()),
+        Err(error) => return DaemonResponse::failure("dispatch_failed", error.to_string()),
+    };
+    let Some(binding) = binding else {
+        return response;
+    };
+    let locks = locks.clone();
+    let result = tokio::task::spawn_blocking(move || worker(binding, locks)).await;
+    match result {
+        Ok(Ok(())) => response,
+        Ok(Err(error)) => DaemonResponse::failure("io_error", error.to_string()),
+        Err(error) => DaemonResponse::failure("dispatch_failed", error.to_string()),
+    }
 }
 
 async fn write_response<W>(write: &mut W, response: &DaemonResponse) -> Result<()>
@@ -183,6 +294,61 @@ mod tests {
         drop(reader);
         client.shutdown().await.expect("shutdown");
         assert!(task.await.expect("join").is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn sealed_compression_does_not_hold_the_group_dispatch_permit() {
+        // Real, privacy-redacted captured events; the gated worker below is a
+        // labeled scheduling control, not a compression or provenance test.
+        const CAPTURE: &[u8] =
+            include_bytes!("../../cccc-core/tests/fixtures/ledger-zstd-redacted.jsonl");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("sealed capture", "").expect("group");
+        let active = store.ledger_path(&group.group_id).expect("active ledger");
+        std::fs::write(&active, CAPTURE).expect("captured ledger");
+        let request = serde_json::from_value(json!({"v":1,"op":"ledger_compact","args":{
+            "group_id":group.group_id.clone(),"by":"user","zstd":true
+        }}))
+        .expect("request");
+        let locks = DispatchLocks::default();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (worker_home, worker_locks) = (home.clone(), locks.clone());
+        let task = tokio::spawn(async move {
+            super::compact_zstd_response_with(
+                &worker_home,
+                request,
+                &worker_locks,
+                move |_binding, _locks| {
+                    let _ = started_tx.send(());
+                    release_rx.recv().map_err(std::io::Error::other)?;
+                    Ok(())
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), started_rx)
+            .await
+            .expect("worker started")
+            .expect("signal");
+        let permit =
+            tokio::time::timeout(Duration::from_secs(2), locks.group_write(&group.group_id))
+                .await
+                .expect("group writes remain available");
+        let event: Event = serde_json::from_slice(
+            CAPTURE
+                .split(|byte| *byte == b'\n')
+                .next()
+                .expect("captured line"),
+        )
+        .expect("captured event");
+        ledger::append(&active, &event).expect("append while worker is paused");
+        drop(permit);
+        release_tx.send(()).expect("release worker");
+        assert!(task.await.expect("worker task").ok);
     }
 
     #[tokio::test]

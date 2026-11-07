@@ -54,6 +54,9 @@ weixin-agent = "0.2.0"
 fs2 = "0.4"
 fs_at = "0.2.1"
 flate2 = "1.1"
+libc = "=0.2.186"
+# Sealed ledger segments use a streaming, single-threaded zstd codec.
+zstd = { version = "=0.13.3", default-features = false }
 futures-util = "0.3"
 globset = "0.4"
 http-body-util = "0.1"

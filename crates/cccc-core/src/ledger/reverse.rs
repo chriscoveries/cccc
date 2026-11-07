@@ -1,6 +1,6 @@
 use super::{
-    acquire_reader_lock, decode_event_line, is_gzip, ledger_group_id, read_source, source_paths,
-    trim_ascii,
+    acquire_reader_lock, decode_event_line, is_compressed, ledger_group_id, read_source,
+    source_paths, trim_ascii,
 };
 use cccc_contracts::Event;
 use fs2::FileExt;
@@ -35,7 +35,7 @@ pub(super) fn visit_source_newest_first(
     group_id: &str,
     visit: &mut impl FnMut(Event) -> ControlFlow<()>,
 ) -> io::Result<ControlFlow<()>> {
-    if is_gzip(path) {
+    if is_compressed(path) {
         // Compressed segments only decode forward; rotation bounds each one.
         for event in read_source(path, group_id)?.into_iter().rev() {
             if visit(event).is_break() {

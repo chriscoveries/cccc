@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily sealed CCCC history sidecar job
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+Unit=cccc-history-zstd.service
+
+[Install]
+WantedBy=timers.target
