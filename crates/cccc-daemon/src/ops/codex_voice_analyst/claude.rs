@@ -278,7 +278,7 @@ async fn launch_inner(
         let rollback = kill_and_confirm(&endpoint, &job.short).await;
         return Err(with_optional_cleanup_error(error, rollback.err()));
     }
-    if let Some(adopted) = adopting {
+    if adopting.is_some() {
         let deadline = tokio::time::Instant::now() + ADOPTION_STATE_TIMEOUT;
         loop {
             read_resumed_conversation(&prepared.config_dir, &mut job).await;
@@ -1325,7 +1325,6 @@ async fn transcript_file_identity(file: &tokio::fs::File) -> io::Result<same_fil
 struct TranscriptFollower {
     state_path: PathBuf,
     config_dir: PathBuf,
-    session_id: String,
     /// The conversation file this job writes: the job's own id, or the conversation it adopted.
     transcript_id: String,
     path: Option<PathBuf>,
@@ -1349,8 +1348,7 @@ impl TranscriptFollower {
         Self {
             state_path,
             config_dir,
-            transcript_id: session_id.clone(),
-            session_id,
+            transcript_id: session_id,
             path: None,
             identity: None,
             offset: 0,
@@ -2456,6 +2454,7 @@ mod tests {
             "generation-12345678",
             SessionPurpose::Actor,
             re_adopt.then_some(session_id),
+            None,
         )
         .await
         .expect("launch Agent View");
