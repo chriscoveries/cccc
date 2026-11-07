@@ -4,7 +4,7 @@ use cccc_core::HomeLayout;
 use cccc_core::ledger_archive;
 use serde_json::json;
 
-use crate::dispatch::{OpResult, object, required_arg, string_arg};
+use crate::dispatch::{OpResult, bool_arg, object, required_arg, string_arg};
 
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
@@ -29,6 +29,12 @@ fn compact(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group_id = required_arg(request, "group_id")?;
     super::context::load_group(home, &group_id)?;
     let reason = string_arg(request, "reason").unwrap_or_else(|| "manual".into());
+    if bool_arg(request, "zstd", false) {
+        return Err(crate::dispatch::OpError::new(
+            "unsupported",
+            "zstd compaction requires the coordinated daemon connection",
+        ));
+    }
     let segment =
         ledger_archive::compact(home, &group_id, &reason).map_err(crate::dispatch::OpError::io)?;
     object(json!({"compacted": segment.is_some(), "segment": segment}))

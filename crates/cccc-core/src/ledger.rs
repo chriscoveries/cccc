@@ -2,7 +2,8 @@ use cccc_contracts::Event;
 use flate2::read::GzDecoder;
 use fs2::FileExt;
 use serde_json::Value;
-use std::collections::{BTreeMap, VecDeque};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::ops::ControlFlow;
@@ -296,15 +297,7 @@ pub(crate) fn visit_validated(
     mut visit: impl FnMut(Event) -> io::Result<()>,
 ) -> io::Result<()> {
     for source in source_paths(path)? {
-        if is_gzip(&source) {
-            visit_validated_source(
-                BufReader::new(GzDecoder::new(File::open(&source)?)),
-                &source,
-                &mut visit,
-            )?;
-        } else {
-            visit_validated_source(BufReader::new(File::open(&source)?), &source, &mut visit)?;
-        }
+        visit_validated_source(open_source_reader(&source)?, &source, &mut visit)?;
     }
     Ok(())
 }
@@ -362,16 +355,35 @@ fn source_paths(path: &Path) -> io::Result<Vec<PathBuf>> {
         .map(|group| group.join("state/ledger/segments"));
     if let Some(segments) = segments.filter(|dir| dir.is_dir()) {
         let mut selected = BTreeMap::<PathBuf, PathBuf>::new();
-        for candidate in std::fs::read_dir(segments)?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|candidate| is_ledger_segment(candidate))
-        {
+        let mut uncommitted = BTreeSet::new();
+        for entry in std::fs::read_dir(segments)? {
+            let candidate = entry?.path();
+            if !is_ledger_segment(&candidate) {
+                continue;
+            }
+            if !std::fs::symlink_metadata(&candidate)?.file_type().is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ledger segment is not a regular file",
+                ));
+            }
             let logical = logical_segment_path(&candidate);
-            let replace = !selected.contains_key(&logical) || is_gzip(&candidate);
+            if is_zstd(&candidate) && zstd_binding(&candidate)?.is_none() {
+                uncommitted.insert(logical);
+                continue;
+            }
+            let replace = selected
+                .get(&logical)
+                .is_none_or(|current| compression_rank(&candidate) > compression_rank(current));
             if replace {
                 selected.insert(logical, candidate);
             }
+        }
+        if uncommitted.iter().any(|path| !selected.contains_key(path)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "uncommitted zstd segment has no readable source",
+            ));
         }
         paths.extend(selected.into_values());
     }
@@ -396,18 +408,14 @@ pub(crate) fn revisions(path: &Path) -> io::Result<Vec<SourceRevision>> {
 }
 
 fn read_source(path: &Path, group_id: &str) -> io::Result<Vec<Event>> {
-    if is_gzip(path) {
-        return read_events(
-            BufReader::new(GzDecoder::new(File::open(path)?)),
-            path,
-            group_id,
-        );
+    if is_compressed(path) {
+        return read_events(open_source_reader(path)?, path, group_id);
     }
     read_source_from(path, 0, group_id).map(|(events, _)| events)
 }
 
 fn read_source_from(path: &Path, offset: u64, group_id: &str) -> io::Result<(Vec<Event>, u64)> {
-    if is_gzip(path) {
+    if is_compressed(path) {
         return if offset == 0 {
             read_source(path, group_id)
                 .and_then(|events| std::fs::metadata(path).map(|metadata| (events, metadata.len())))
@@ -505,15 +513,171 @@ fn is_ledger_segment(path: &Path) -> bool {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    name.ends_with(".jsonl") || name.ends_with(".jsonl.gz")
+    name.ends_with(".jsonl") || name.ends_with(".jsonl.gz") || name.ends_with(".jsonl.zst")
 }
 
 fn is_gzip(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension == "gz")
 }
 
+fn is_zstd(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "zst")
+}
+
+fn is_compressed(path: &Path) -> bool {
+    is_gzip(path) || is_zstd(path)
+}
+
+fn compression_rank(path: &Path) -> u8 {
+    if is_zstd(path) {
+        2
+    } else if is_gzip(path) {
+        1
+    } else {
+        0
+    }
+}
+
+pub(crate) fn source_reader<R: Read + 'static>(
+    reader: R,
+    path: &Path,
+) -> io::Result<Box<dyn BufRead>> {
+    if is_zstd(path) {
+        let mut decoder = zstd::stream::read::Decoder::new(reader)?;
+        decoder.window_log_max(27)?;
+        Ok(Box::new(BufReader::new(decoder)))
+    } else if is_gzip(path) {
+        Ok(Box::new(BufReader::new(GzDecoder::new(reader))))
+    } else {
+        Ok(Box::new(BufReader::new(reader)))
+    }
+}
+
+/// A zstd segment becomes visible only after the manifest binds both hashes.
+/// A missing binding is an interrupted publication, not a committed archive.
+pub(crate) fn zstd_binding(path: &Path) -> io::Result<Option<(String, String)>> {
+    let segments = path
+        .parent()
+        .ok_or_else(|| io::Error::other("segment parent absent"))?;
+    let manifest = segments
+        .parent()
+        .ok_or_else(|| io::Error::other("ledger state absent"))?
+        .join("manifest.json");
+    let metadata = match std::fs::symlink_metadata(&manifest) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ledger manifest is not a regular file",
+        ));
+    }
+    let file = match File::open(manifest) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(io::Error::other("ledger manifest exceeds size limit"));
+    }
+    let manifest: Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let records = manifest
+        .get("segments")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("ledger manifest segments missing"))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("invalid segment name"))?;
+    let relative = format!("state/ledger/segments/{name}");
+    let mut matching = records
+        .iter()
+        .filter(|row| row.get("path").and_then(Value::as_str) == Some(relative.as_str()));
+    let Some(record) = matching.next() else {
+        return Ok(None);
+    };
+    if matching.next().is_some() || record.get("compressed").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(io::Error::other("ambiguous zstd manifest binding"));
+    }
+    let valid_sha = |field: &str| -> io::Result<String> {
+        let value = record
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| io::Error::other("zstd manifest digest absent"))?;
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(io::Error::other("invalid zstd manifest digest"));
+        }
+        Ok(value.to_owned())
+    };
+    Ok(Some((
+        valid_sha("archive_sha256")?,
+        valid_sha("source_sha256")?,
+    )))
+}
+
+pub(crate) fn validate_zstd(file: &mut File, path: &Path) -> io::Result<()> {
+    const MAX_ARCHIVE: u64 = 768 * 1024 * 1024;
+    const MAX_SOURCE: u64 = 512 * 1024 * 1024;
+    let (archive_sha, source_sha) =
+        zstd_binding(path)?.ok_or_else(|| io::Error::other("zstd archive is not committed"))?;
+    let meta = file.metadata()?;
+    if meta.len() > MAX_ARCHIVE {
+        return Err(io::Error::other("zstd archive exceeds size limit"));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut archive_hash = Sha256::new();
+    let archive_size = io::copy(&mut (&mut *file).take(MAX_ARCHIVE + 1), &mut archive_hash)?;
+    if archive_size != meta.len() || format!("{:x}", archive_hash.finalize()) != archive_sha {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zstd archive digest mismatch",
+        ));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut decoded = zstd::stream::read::Decoder::new(file.try_clone()?.take(meta.len()))?;
+    decoded.window_log_max(27)?;
+    let mut source_hash = Sha256::new();
+    let size = io::copy(&mut decoded.by_ref().take(MAX_SOURCE + 1), &mut source_hash)?;
+    if size > MAX_SOURCE || format!("{:x}", source_hash.finalize()) != source_sha {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zstd content digest mismatch",
+        ));
+    }
+    let after = file.metadata()?;
+    if !std::fs::symlink_metadata(path)?.file_type().is_file()
+        || after.len() != meta.len()
+        || after.modified().ok() != meta.modified().ok()
+        || same_file::Handle::from_file(file.try_clone()?)? != same_file::Handle::from_path(path)?
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "zstd archive changed during validation",
+        ));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    Ok(())
+}
+
+pub(crate) fn open_source_reader(path: &Path) -> io::Result<Box<dyn BufRead>> {
+    let mut file = File::open(path)?;
+    if is_zstd(path) {
+        validate_zstd(&mut file, path)?;
+    }
+    source_reader(file, path)
+}
+
 fn logical_segment_path(path: &Path) -> PathBuf {
-    if !is_gzip(path) {
+    if !is_compressed(path) {
         return path.to_path_buf();
     }
     path.with_extension("")
@@ -668,8 +832,8 @@ fn read_source_reverse(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    if is_gzip(path) {
-        return read_gzip_tail(path, limit, kind, group_id, stop_at);
+    if is_compressed(path) {
+        return read_compressed_tail(path, limit, kind, group_id, stop_at);
     }
 
     let mut events = Vec::with_capacity(limit.min(1024));
@@ -688,14 +852,14 @@ fn read_source_reverse(
     Ok(events)
 }
 
-fn read_gzip_tail(
+fn read_compressed_tail(
     path: &Path,
     limit: usize,
     kind: Option<&str>,
     group_id: &str,
     stop_at: Option<&str>,
 ) -> io::Result<Vec<Event>> {
-    let mut reader = BufReader::new(GzDecoder::new(File::open(path)?));
+    let mut reader = open_source_reader(path)?;
     let mut retained = VecDeque::with_capacity(limit.min(1024));
     let mut reached_cursor = stop_at.is_none();
     let mut line = Vec::new();
@@ -725,7 +889,7 @@ fn read_gzip_tail(
     if !reached_cursor {
         // This compressed segment is entirely after the cursor. Decode it once
         // more for delivery; the first pass retained no historical prefix.
-        return read_gzip_tail(path, limit, kind, group_id, None);
+        return read_compressed_tail(path, limit, kind, group_id, None);
     }
     Ok(retained.into_iter().rev().collect())
 }
@@ -753,6 +917,103 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
+
+    #[test]
+    fn zstd_segment_reads_the_captured_history_once_and_rejects_truncation() {
+        const CAPTURE: &[u8] = include_bytes!("../tests/fixtures/ledger-zstd-redacted.jsonl");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let group = temp.path().join("g_example");
+        let segments = group.join("state/ledger/segments");
+        std::fs::create_dir_all(&segments).expect("segments");
+        let plain = segments.join("ledger.20261103T000000Z.000001.jsonl");
+        let compressed = plain.with_extension("jsonl.zst");
+        std::fs::write(&plain, CAPTURE).expect("plain source");
+        let mut gzip = GzEncoder::new(
+            File::create(plain.with_extension("jsonl.gz")).expect("gzip source"),
+            Compression::default(),
+        );
+        gzip.write_all(CAPTURE).expect("gzip capture");
+        gzip.finish().expect("finish gzip");
+        let mut writer = zstd::stream::write::Encoder::new(
+            File::create(&compressed).expect("compressed source"),
+            11,
+        )
+        .expect("encoder");
+        writer.include_checksum(true).expect("checksum");
+        writer.write_all(CAPTURE).expect("capture");
+        writer.finish().expect("finish");
+        let active = group.join("ledger.jsonl");
+        std::fs::write(&active, b"").expect("active");
+        let expected: Vec<Event> = CAPTURE
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("captured event"))
+            .collect();
+        // Labeled interrupted-publication control: before the manifest commit,
+        // the orphan is not selected and the retained source remains readable.
+        assert_eq!(
+            read_all_uncached(&active).expect("uncommitted copy"),
+            expected
+        );
+        let archive_sha = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(&compressed).expect("archive bytes"))
+        );
+        let source_sha = format!("{:x}", Sha256::digest(CAPTURE));
+        let manifest = serde_json::json!({"segments": [{
+            "path": "state/ledger/segments/ledger.20261103T000000Z.000001.jsonl.zst",
+            "compressed": true, "archive_sha256": archive_sha, "source_sha256": source_sha
+        }]});
+        std::fs::write(
+            group.join("state/ledger/manifest.json"),
+            serde_json::to_vec(&manifest).expect("manifest"),
+        )
+        .expect("manifest capture binding");
+        assert_eq!(read_all_uncached(&active).expect("history"), expected);
+        assert_eq!(
+            tail(&active, 5).expect("tail"),
+            expected[expected.len() - 5..]
+        );
+        assert_eq!(
+            events_after(&active, &expected[5].id, 4).expect("cursor"),
+            expected[6..10]
+        );
+        let chats: Vec<_> = expected
+            .iter()
+            .filter(|event| event.kind == "chat.message")
+            .cloned()
+            .collect();
+        let (page, has_more) = tail_filtered(&active, 3, Some("chat")).expect("filtered page");
+        assert!(has_more);
+        assert_eq!(page, chats[chats.len() - 3..]);
+        let mut observed = Vec::new();
+        snapshot::Snapshot::open(&active)
+            .expect("snapshot")
+            .visit(&[], |event, _| {
+                observed.push(event);
+                ControlFlow::Continue(())
+            })
+            .expect("snapshot history");
+        assert_eq!(observed, expected);
+        let mut reversed = Vec::new();
+        visit_newest_first(&active, |event| {
+            reversed.push(event);
+            ControlFlow::Continue(())
+        })
+        .expect("reverse history");
+        assert_eq!(reversed, expected.iter().rev().cloned().collect::<Vec<_>>());
+        let mut damaged = std::fs::read(&compressed).expect("compressed bytes");
+        damaged.truncate(damaged.len() / 2); // Labeled corruption control.
+        std::fs::write(&compressed, damaged).expect("truncate");
+        assert!(read_all_uncached(&active).is_err());
+        assert!(
+            snapshot::Snapshot::open(&active)
+                .expect("capture damaged source")
+                .visit(&[], |_, _| ControlFlow::Break(()))
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&plain).expect("retained source"), CAPTURE);
+    }
 
     #[test]
     fn appends_and_reads_events() {
