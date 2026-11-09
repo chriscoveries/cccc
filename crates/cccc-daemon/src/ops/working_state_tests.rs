@@ -453,3 +453,38 @@ fn headless_actor_with_no_record_is_not_reported_idle() {
     assert_eq!(state["effective_working_reason"], "headless_state_unknown");
     assert!(state["effective_working_updated_at"].is_null());
 }
+
+#[test]
+fn the_headless_snapshot_never_waits_on_the_group_lock_a_writer_holds() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path()).expect("home");
+    home.initialize().expect("initialize");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("Headless lock", "").expect("group");
+    let mut actor = Actor::new("hs-actor");
+    actor.runtime = ActorRuntime::Deepseek;
+    cccc_core::integration_state::group_update(
+        &store,
+        &group.group_id,
+        "runtime_states",
+        |value| {
+            *value = serde_json::json!({
+                "hs-actor": {"active_turn_id": "turn-9", "updated_at": "2026-11-09T12:00:00Z"}
+            });
+            Ok(())
+        },
+    )
+    .expect("seed turn record");
+    // A runner mutating its record holds the group lock for the whole write;
+    // hold it here so the snapshot proves it does not wait on that lock.
+    let lock_path = store
+        .group_dir(&group.group_id)
+        .expect("group dir")
+        .join("group.yaml.lock");
+    std::fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("lock dir");
+    let lock_file = std::fs::File::create(&lock_path).expect("lock file");
+    fs2::FileExt::lock_exclusive(&lock_file).expect("exclusive lock");
+    let state = fields(&home, &actor, &group.group_id, true, "headless");
+    fs2::FileExt::unlock(&lock_file).expect("unlock");
+    assert_eq!(state["effective_working_state"], "working");
+}
