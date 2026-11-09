@@ -4,6 +4,7 @@ use axum::{Json, Router};
 use cccc_contracts::utc_now;
 use cccc_core::GroupStore;
 use cccc_core::im_state;
+use cccc_core::json::ensure_object;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::io;
@@ -104,7 +105,7 @@ async fn set(
         if invalidated {
             state.im_workers.invalidate_start(&group_id);
         }
-        let state = object(value);
+        let state = ensure_object(value, "object initialized");
         if invalidated {
             state.insert("adapter_available".into(), Value::Bool(false));
             state.insert("pid".into(), Value::Null);
@@ -225,7 +226,7 @@ async fn set_running(
         if adapter_commits_start_state(value["config"]["platform"].as_str()) {
             return Ok(());
         }
-        let state = object(value);
+        let state = ensure_object(value, "object initialized");
         state.insert("enabled".into(), Value::Bool(false));
         state.insert("running".into(), Value::Bool(false));
         state.insert("pid".into(), Value::Null);
@@ -253,7 +254,7 @@ fn prepare_stop(
         if unset {
             *value = json!({});
         } else {
-            let state = object(value);
+            let state = ensure_object(value, "object initialized");
             state.insert("enabled".into(), Value::Bool(false));
             state.insert("running".into(), Value::Bool(false));
             state.insert("adapter_available".into(), Value::Bool(false));
@@ -272,7 +273,7 @@ fn finish_start(state: &AppState, group_id: &str, result: Result<(), String>) ->
             if adapter_commits_start_state(value["config"]["platform"].as_str()) {
                 return Ok(());
             }
-            let state = object(value);
+            let state = ensure_object(value, "object initialized");
             state.insert("enabled".into(), Value::Bool(true));
             state.insert("running".into(), Value::Bool(false));
             state.insert("pid".into(), Value::Null);
@@ -287,7 +288,7 @@ fn finish_start(state: &AppState, group_id: &str, result: Result<(), String>) ->
         if adapter_commits_start_state(value["config"]["platform"].as_str()) {
             return Ok(());
         }
-        let state = object(value);
+        let state = ensure_object(value, "object initialized");
         state.insert("enabled".into(), Value::Bool(true));
         state.insert("running".into(), Value::Bool(true));
         state.insert("pid".into(), json!(std::process::id()));
@@ -313,7 +314,7 @@ fn reconcile_runtime_state(
         return Ok(());
     }
     update(state, group_id, |stored| {
-        mark_worker_stopped(object(stored));
+        mark_worker_stopped(ensure_object(stored, "object initialized"));
         Ok(())
     })?;
     *value = load(state, group_id)?;
@@ -411,7 +412,7 @@ async fn pending(
     ensure_access(&principal, &query.group_id)?;
     let now = chrono_now() as f64;
     let pending = update(&state, &query.group_id, |value| {
-        let items = array_mut(object(value), "pending");
+        let items = array_mut(ensure_object(value, "object initialized"), "pending");
         items.retain(|item| item["expires_at"].as_f64().unwrap_or(0.0) > now);
         for item in items.iter_mut() {
             item["expires_in_seconds"] =
@@ -431,7 +432,7 @@ async fn bind(
     let key = required(&body, "key")?;
     ensure_access(&principal, &group_id)?;
     let bound = update(&state, &group_id, |value| {
-        let state = object(value);
+        let state = ensure_object(value, "object initialized");
         let pending = array_mut(state, "pending");
         let index = pending
             .iter()
@@ -455,7 +456,7 @@ async fn reject(
     let key = required(&body, "key")?;
     ensure_access(&principal, &group_id)?;
     let rejected = update(&state, &group_id, |value| {
-        let items = array_mut(object(value), "pending");
+        let items = array_mut(ensure_object(value, "object initialized"), "pending");
         let before = items.len();
         items.retain(|item| item["key"] != key);
         Ok(items.len() != before)
@@ -471,7 +472,7 @@ async fn revoke(
     ensure_access(&principal, &query.group_id)?;
     let (revoked, unsubscribed) = update(&state, &query.group_id, |value| {
         Ok(super::im_authorization::revoke(
-            object(value),
+            ensure_object(value, "object initialized"),
             &query.chat_id,
             &query.thread_id,
         ))
@@ -489,7 +490,7 @@ async fn verbose(
     ensure_access(&principal, &query.group_id)?;
     let changed = update(&state, &query.group_id, |value| {
         super::im_authorization::set_verbose(
-            object(value),
+            ensure_object(value, "object initialized"),
             &query.chat_id,
             &query.thread_id,
             query.verbose,
@@ -548,12 +549,6 @@ fn ensure_access(principal: &Principal, group_id: &str) -> Result<(), ApiError> 
         .ok_or_else(|| ApiError::forbidden("group access denied"))
 }
 
-fn object(value: &mut Value) -> &mut Map<String, Value> {
-    if !value.is_object() {
-        *value = json!({});
-    }
-    value.as_object_mut().expect("object initialized")
-}
 
 fn array_mut<'a>(state: &'a mut Map<String, Value>, key: &str) -> &'a mut Vec<Value> {
     let value = state.entry(key).or_insert_with(|| json!([]));

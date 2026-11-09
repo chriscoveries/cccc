@@ -1,3 +1,4 @@
+use crate::json::ensure_object;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
@@ -119,31 +120,31 @@ pub(super) fn save(store: &GroupStore, group_id: &str, state: &RuntimeState) -> 
     } else {
         json!({})
     };
-    let root = object(&mut doc);
+    let root = ensure_object(&mut doc, "automation object initialized");
     root.insert("v".into(), json!(5));
     root.insert("updated_at".into(), json!(utc_now()));
-    let rules = object(root.entry("rules").or_insert_with(|| json!({})));
+    let rules = ensure_object(root.entry("rules").or_insert_with(|| json!({})), "automation object initialized");
     for (rule_id, timestamp) in &state.last_rule {
-        let entry = object(rules.entry(rule_id.clone()).or_insert_with(|| json!({})));
+        let entry = ensure_object(rules.entry(rule_id.clone()).or_insert_with(|| json!({})), "automation object initialized");
         entry.insert("last_fired_at".into(), json!(format_timestamp(*timestamp)));
     }
     for (rule_id, count) in &state.fired_count {
-        let entry = object(rules.entry(rule_id.clone()).or_insert_with(|| json!({})));
+        let entry = ensure_object(rules.entry(rule_id.clone()).or_insert_with(|| json!({})), "automation object initialized");
         entry.insert("fired_count".into(), json!(count));
     }
     for (rule_id, run) in &state.last_run {
-        let entry = object(rules.entry(rule_id.clone()).or_insert_with(|| json!({})));
+        let entry = ensure_object(rules.entry(rule_id.clone()).or_insert_with(|| json!({})), "automation object initialized");
         entry.insert("last_run_at".into(), json!(format_timestamp(run.at)));
         entry.insert("last_run_kind".into(), json!(run.kind));
     }
-    let actors = object(root.entry("actors").or_insert_with(|| json!({})));
+    let actors = ensure_object(root.entry("actors").or_insert_with(|| json!({})), "automation object initialized");
     for (key, timestamp) in &state.last_nudge {
         let Some((actor_id, event_id)) = key.split_once(':') else {
             continue;
         };
-        let actor = object(actors.entry(actor_id).or_insert_with(|| json!({})));
-        let items = object(actor.entry("nudge_items").or_insert_with(|| json!({})));
-        let item = object(items.entry(event_id).or_insert_with(|| json!({})));
+        let actor = ensure_object(actors.entry(actor_id).or_insert_with(|| json!({})), "automation object initialized");
+        let items = ensure_object(actor.entry("nudge_items").or_insert_with(|| json!({})), "automation object initialized");
+        let item = ensure_object(items.entry(event_id).or_insert_with(|| json!({})), "automation object initialized");
         item.insert("last_nudged_at".into(), json!(format_timestamp(*timestamp)));
         item.entry("count").or_insert_with(|| json!(1));
     }
@@ -221,7 +222,7 @@ pub(super) fn reconcile_rules(
         }
     }
     if changed {
-        object(&mut doc).insert("updated_at".into(), json!(utc_now()));
+        ensure_object(&mut doc, "automation object initialized").insert("updated_at".into(), json!(utc_now()));
         write_json(&path, &doc)?;
     }
     Ok(())
@@ -247,14 +248,6 @@ fn trigger_text<'a>(rule: &'a Value, key: &str) -> &'a str {
         .unwrap_or("")
 }
 
-fn object(value: &mut Value) -> &mut Map<String, Value> {
-    if !value.is_object() {
-        *value = json!({});
-    }
-    value
-        .as_object_mut()
-        .expect("automation object initialized")
-}
 
 fn parse_timestamp(value: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(value)

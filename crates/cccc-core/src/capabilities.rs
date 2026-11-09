@@ -947,10 +947,7 @@ fn read_document_object(path: &std::path::Path) -> io::Result<Value> {
 }
 
 fn ensure_object(value: &mut Value) -> &mut Map<String, Value> {
-    if !value.is_object() {
-        *value = json!({});
-    }
-    value.as_object_mut().expect("object initialized")
+    crate::json::ensure_object(value, "object initialized")
 }
 
 fn set_array_member(value: &mut Value, id: &str, present: bool) {

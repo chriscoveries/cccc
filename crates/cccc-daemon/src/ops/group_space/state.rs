@@ -1,5 +1,6 @@
 use super::*;
 use cccc_core::fs::{read_json, with_exclusive_lock, write_json};
+use cccc_core::json::ensure_object;
 use std::path::PathBuf;
 
 pub(super) fn load(home: &HomeLayout, group_id: &str) -> Result<Value, OpError> {
@@ -13,7 +14,7 @@ pub(super) fn load(home: &HomeLayout, group_id: &str) -> Result<Value, OpError> 
         .unwrap_or_else(|| json!({}));
     for lane in ["memory", "work"] {
         if bindings.get(lane).is_none() {
-            object(&mut bindings)
+            ensure_object(&mut bindings, "space object initialized")
                 .insert(lane.into(), default_binding(group_id, "notebooklm", lane));
         }
     }
@@ -85,10 +86,10 @@ fn put_group_bindings(doc: &mut Value, group_id: &str, mut lanes: Value) {
         .or_insert_with(|| json!(utc_now()));
     doc["updated_at"] = json!(utc_now());
     for lane in ["memory", "work"] {
-        let binding = object(&mut lanes)
+        let binding = ensure_object(&mut lanes, "space object initialized")
             .entry(lane)
             .or_insert_with(|| default_binding(group_id, "notebooklm", lane));
-        let binding = object(binding);
+        let binding = ensure_object(binding, "space object initialized");
         binding.remove("id");
         binding.insert("group_id".into(), json!(group_id));
         binding.insert("provider".into(), json!("notebooklm"));
@@ -113,7 +114,7 @@ fn put_group_bindings(doc: &mut Value, group_id: &str, mut lanes: Value) {
     }
     let bindings = object_field(doc, "bindings");
     let group = bindings.entry(group_id).or_insert_with(|| json!({}));
-    object(group).insert("notebooklm".into(), lanes);
+    ensure_object(group, "space object initialized").insert("notebooklm".into(), lanes);
 }
 
 fn save_jobs(home: &HomeLayout, group_id: &str, state: &Value) -> Result<(), OpError> {
@@ -258,7 +259,7 @@ fn merge_legacy_jobs(home: &HomeLayout, group_id: &str, legacy: &Value) -> Resul
                 continue;
             }
             let mut job = job.clone();
-            object(&mut job).remove("id");
+            ensure_object(&mut job, "space object initialized").remove("id");
             job["job_id"] = json!(id);
             job["group_id"] = json!(group_id);
             normalize_job(&mut job);
@@ -323,15 +324,9 @@ fn read_doc_io(path: &std::path::Path) -> io::Result<Value> {
     }
 }
 
-fn object(value: &mut Value) -> &mut Map<String, Value> {
-    if !value.is_object() {
-        *value = json!({});
-    }
-    value.as_object_mut().expect("space object initialized")
-}
 
 pub(super) fn root(value: &mut Value) -> &mut Map<String, Value> {
-    let root = object(value);
+    let root = ensure_object(value, "space object initialized");
     for key in ["bindings", "sources", "artifacts", "jobs"] {
         root.entry(key).or_insert_with(|| {
             if key == "bindings" {
@@ -345,8 +340,8 @@ pub(super) fn root(value: &mut Value) -> &mut Map<String, Value> {
 }
 
 fn object_field<'a>(value: &'a mut Value, key: &str) -> &'a mut Map<String, Value> {
-    let root = object(value);
-    object(root.entry(key).or_insert_with(|| json!({})))
+    let root = ensure_object(value, "space object initialized");
+    ensure_object(root.entry(key).or_insert_with(|| json!({}, "space object initialized")))
 }
 
 fn default_binding(group_id: &str, provider: &str, lane: &str) -> Value {
@@ -362,7 +357,7 @@ fn default_binding(group_id: &str, provider: &str, lane: &str) -> Value {
 }
 
 fn normalize_job(job: &mut Value) {
-    let root = object(job);
+    let root = ensure_object(job, "space object initialized");
     root.insert("provider".into(), json!("notebooklm"));
     root.entry("lane").or_insert_with(|| json!("work"));
     root.entry("remote_space_id").or_insert_with(|| json!(""));
@@ -577,7 +572,7 @@ pub(super) fn record_provider_health(
 }
 
 fn normalize_provider(record: &mut Value, provider: &str) {
-    let root = object(record);
+    let root = ensure_object(record, "space object initialized");
     root.insert("provider".into(), json!(provider));
     root.entry("enabled").or_insert_with(|| json!(false));
     root.entry("real_enabled").or_insert_with(|| json!(false));
