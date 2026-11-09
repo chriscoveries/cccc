@@ -341,7 +341,7 @@ pub(super) fn root(value: &mut Value) -> &mut Map<String, Value> {
 
 fn object_field<'a>(value: &'a mut Value, key: &str) -> &'a mut Map<String, Value> {
     let root = ensure_object(value, "space object initialized");
-    ensure_object(root.entry(key).or_insert_with(|| json!({}, "space object initialized")))
+    ensure_object(root.entry(key).or_insert_with(|| json!({})), "space object initialized")
 }
 
 fn default_binding(group_id: &str, provider: &str, lane: &str) -> Value {
