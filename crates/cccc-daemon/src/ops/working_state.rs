@@ -105,7 +105,36 @@ pub(super) fn fields(
             ),
         }
     } else if runner_effective == "headless" {
-        ("idle".to_owned(), "headless_running".to_owned(), None, None)
+        // The runner's own turn record: a working turn while it runs, the time
+        // the last turn ended after it. No runner lock is taken and the ledger
+        // is never rescanned — `actor_state` reads the small per-actor record
+        // the runner updates on its turn events. No record is not "idle": the
+        // state cannot be known, so the reason says so.
+        match super::runtime_state::actor_state(home, group_id, &actor.id) {
+            Ok(runtime) if !runtime.is_null() => (
+                if runtime["active_turn_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+                {
+                    "working"
+                } else {
+                    "idle"
+                }
+                .to_owned(),
+                "headless_turn_record".to_owned(),
+                runtime["updated_at"].as_str().map(str::to_owned),
+                runtime["active_task_id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned),
+            ),
+            _ => (
+                "waiting".to_owned(),
+                "headless_state_unknown".to_owned(),
+                None,
+                None,
+            ),
+        }
     } else {
         (
             "waiting".to_owned(),

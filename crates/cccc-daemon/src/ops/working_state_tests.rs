@@ -373,3 +373,83 @@ mod terminal_output {
         assert!(state["pty_last_output_at"].is_string(), "{state:?}");
     }
 }
+
+#[test]
+fn headless_actor_reports_working_while_its_turn_runs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path()).expect("home");
+    home.initialize().expect("initialize");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("Headless turn", "").expect("group");
+    let mut actor = Actor::new("hs-actor");
+    actor.runtime = ActorRuntime::Deepseek;
+    // The runner's own record: a live turn plus the last write time.
+    cccc_core::integration_state::group_update(
+        &store,
+        &group.group_id,
+        "runtime_states",
+        |value| {
+            *value = serde_json::json!({
+                "hs-actor": {
+                    "active_turn_id": "turn-1",
+                    "updated_at": "2026-11-09T12:00:00Z"
+                }
+            });
+            Ok(())
+        },
+    )
+    .expect("seed turn record");
+    let state = fields(&home, &actor, &group.group_id, true, "headless");
+    assert_eq!(state["effective_working_state"], "working");
+    assert_eq!(state["effective_working_reason"], "headless_turn_record");
+    assert_eq!(
+        state["effective_working_updated_at"],
+        "2026-11-09T12:00:00Z"
+    );
+}
+
+#[test]
+fn headless_actor_reports_idle_with_the_last_turn_end() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path()).expect("home");
+    home.initialize().expect("initialize");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("Headless idle", "").expect("group");
+    let mut actor = Actor::new("hs-actor");
+    actor.runtime = ActorRuntime::Deepseek;
+    cccc_core::integration_state::group_update(
+        &store,
+        &group.group_id,
+        "runtime_states",
+        |value| {
+            *value = serde_json::json!({
+                "hs-actor": {"updated_at": "2026-11-09T12:30:00Z"}
+            });
+            Ok(())
+        },
+    )
+    .expect("seed idle record");
+    let state = fields(&home, &actor, &group.group_id, true, "headless");
+    assert_eq!(state["effective_working_state"], "idle");
+    assert_eq!(state["effective_working_reason"], "headless_turn_record");
+    assert_eq!(
+        state["effective_working_updated_at"],
+        "2026-11-09T12:30:00Z"
+    );
+}
+
+#[test]
+fn headless_actor_with_no_record_is_not_reported_idle() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path()).expect("home");
+    home.initialize().expect("initialize");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("Headless unknown", "").expect("group");
+    let mut actor = Actor::new("hs-actor");
+    actor.runtime = ActorRuntime::Deepseek;
+    // No runtime_states record: state cannot be known, and the reason says so.
+    let state = fields(&home, &actor, &group.group_id, true, "headless");
+    assert_eq!(state["effective_working_state"], "waiting");
+    assert_eq!(state["effective_working_reason"], "headless_state_unknown");
+    assert!(state["effective_working_updated_at"].is_null());
+}
