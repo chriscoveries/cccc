@@ -123,33 +123,33 @@ pub(super) fn save(store: &GroupStore, group_id: &str, state: &RuntimeState) -> 
     let root = ensure_object(&mut doc, "automation object initialized");
     root.insert("v".into(), json!(5));
     root.insert("updated_at".into(), json!(utc_now()));
-    ensure_object(
+    let rules = ensure_object(
         root.entry("rules").or_insert_with(|| json!({})),
         "automation object initialized",
     );
     for (rule_id, timestamp) in &state.last_rule {
-        ensure_object(
+        let entry = ensure_object(
             rules.entry(rule_id.clone()).or_insert_with(|| json!({})),
             "automation object initialized",
         );
         entry.insert("last_fired_at".into(), json!(format_timestamp(*timestamp)));
     }
     for (rule_id, count) in &state.fired_count {
-        ensure_object(
+        let entry = ensure_object(
             rules.entry(rule_id.clone()).or_insert_with(|| json!({})),
             "automation object initialized",
         );
         entry.insert("fired_count".into(), json!(count));
     }
     for (rule_id, run) in &state.last_run {
-        ensure_object(
+        let entry = ensure_object(
             rules.entry(rule_id.clone()).or_insert_with(|| json!({})),
             "automation object initialized",
         );
         entry.insert("last_run_at".into(), json!(format_timestamp(run.at)));
         entry.insert("last_run_kind".into(), json!(run.kind));
     }
-    ensure_object(
+    let actors = ensure_object(
         root.entry("actors").or_insert_with(|| json!({})),
         "automation object initialized",
     );
@@ -157,15 +157,15 @@ pub(super) fn save(store: &GroupStore, group_id: &str, state: &RuntimeState) -> 
         let Some((actor_id, event_id)) = key.split_once(':') else {
             continue;
         };
-        ensure_object(
+        let actor = ensure_object(
             actors.entry(actor_id).or_insert_with(|| json!({})),
             "automation object initialized",
         );
-        ensure_object(
+        let items = ensure_object(
             actor.entry("nudge_items").or_insert_with(|| json!({})),
             "automation object initialized",
         );
-        ensure_object(
+        let item = ensure_object(
             items.entry(event_id).or_insert_with(|| json!({})),
             "automation object initialized",
         );
