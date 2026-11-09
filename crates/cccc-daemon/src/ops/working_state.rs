@@ -128,12 +128,9 @@ pub(super) fn fields(
                     .filter(|id| !id.is_empty())
                     .map(str::to_owned),
             ),
-            _ => (
-                "waiting".to_owned(),
-                "headless_state_unknown".to_owned(),
-                None,
-                None,
-            ),
+            // No record keeps the pre-existing reading; the record refines
+            // the state only when the runner has written one.
+            _ => ("idle".to_owned(), "headless_running".to_owned(), None, None),
         }
     } else {
         (

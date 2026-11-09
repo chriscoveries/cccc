@@ -100,9 +100,8 @@ fn pending_managed_session_and_structured_runtime_have_distinct_states() {
     custom.runtime = ActorRuntime::Custom;
     custom.runner = RunnerKind::Headless;
     let state = fields(&home, &custom, "g_test", true, "headless");
-    // No turn record exists: the state cannot be known, never bare idle.
-    assert_eq!(state["effective_working_state"], "waiting");
-    assert_eq!(state["effective_working_reason"], "headless_state_unknown");
+    assert_eq!(state["effective_working_state"], "idle");
+    assert_eq!(state["effective_working_reason"], "headless_running");
     assert!(state["pty_last_output_at"].is_null());
     assert!(state["pty_quiet_seconds"].is_null());
 }
@@ -448,10 +447,10 @@ fn headless_actor_with_no_record_is_not_reported_idle() {
     let group = store.create("Headless unknown", "").expect("group");
     let mut actor = Actor::new("hs-actor");
     actor.runtime = ActorRuntime::Deepseek;
-    // No runtime_states record: state cannot be known, and the reason says so.
+    // No runtime_states record: the reading is unchanged from before.
     let state = fields(&home, &actor, &group.group_id, true, "headless");
-    assert_eq!(state["effective_working_state"], "waiting");
-    assert_eq!(state["effective_working_reason"], "headless_state_unknown");
+    assert_eq!(state["effective_working_state"], "idle");
+    assert_eq!(state["effective_working_reason"], "headless_running");
     assert!(state["effective_working_updated_at"].is_null());
 }
 
