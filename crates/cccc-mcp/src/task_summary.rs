@@ -4,6 +4,7 @@
 //! number of tasks shown, not with their history. Rows are summaries and must not be written
 //! back as a task.
 
+use cccc_core::json::trimmed_to;
 use serde_json::{Map, Value, json};
 
 /// Characters kept from a title; longer titles end in `...`.
@@ -24,7 +25,10 @@ pub(crate) fn summary_row(task: &Map<String, Value>) -> Value {
         }
     }
     if let Some(title) = text(task, "title") {
-        row.insert("title".into(), Value::String(trim(&title, TITLE_CHARS)));
+        row.insert(
+            "title".into(),
+            Value::String(trimmed_to(&title, TITLE_CHARS)),
+        );
     }
     for key in [
         "assignee",
@@ -183,27 +187,10 @@ fn text(task: &Map<String, Value>, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn trim(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_owned();
-    }
-    format!(
-        "{}...",
-        value
-            .chars()
-            .take(max_chars - 3)
-            .collect::<String>()
-            .trim_end()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn object(value: Value) -> Map<String, Value> {
-        value.as_object().cloned().expect("object")
-    }
+    use crate::test_support::object;
 
     fn board() -> Map<String, Value> {
         object(json!({"tasks": [
