@@ -88,11 +88,14 @@ impl Operation {
         if let Some(binding) = request.args.get("_cccc_web_binding") {
             let stage = binding["grok_stage"]
                 .as_str()
-                .or_else(|| binding["dots_stage"].as_str());
+                .or_else(|| binding["dots_stage"].as_str())
+                .or_else(|| binding["hark_stage"].as_str());
             let allowed = match stage {
                 Some("claim") => {
                     if binding["transport"] == "grok_webhook" {
                         request.op == "grok_work_claim"
+                    } else if binding["transport"] == "hark_pull" {
+                        request.op == "hark_work_claim"
                     } else {
                         request.op == "dots_work_claim"
                     }

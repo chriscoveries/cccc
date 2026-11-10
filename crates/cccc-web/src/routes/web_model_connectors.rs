@@ -153,7 +153,10 @@ async fn run_connector_mcp(
     }
     let mut bound_route = None;
     let mut response = if let Some(response) =
-        super::web_model_dots::handle(state, connector, &request).await
+        super::hark::handle(state, connector, &request).await
+    {
+        response
+    } else if let Some(response) = super::web_model_dots::handle(state, connector, &request).await
     {
         response
     } else if let Some(response) = session::handle(state, connector, &request).await {
@@ -161,12 +164,14 @@ async fn run_connector_mcp(
     } else if method == "tools/call" {
         match store::resolve(state, connector, &request) {
             Ok(binding) => {
-                if connector["provider"] == "grok_web" || binding["transport"] == "mcp_events" {
+                if connector["provider"] == "grok_web" || binding["transport"] == "mcp_events" || binding["transport"] == "hark_pull" {
                     if let Some(arguments) = request["params"]["arguments"].as_object_mut() {
                         arguments.remove("actor_token");
                     }
                 }
-                let response = if binding["transport"] == "mcp_events"
+                let response = if binding["transport"] == "hark_pull" && tool_name == "cccc_runtime_wait_next_turn" {
+                    super::hark::claim(state, &request, &binding).await
+                } else if binding["transport"] == "mcp_events"
                     && tool_name == "cccc_runtime_wait_next_turn"
                 {
                     super::web_model_dots::claim(state, &request, &binding).await
@@ -193,7 +198,9 @@ async fn run_connector_mcp(
         cccc_mcp::handle_request_for_actor(&state.home, &request, "", "").await
     };
     if method == "tools/list" {
-        if connector["provider"] == "grok_web" {
+        if connector["kind"] == "hark_connector" {
+            super::hark::extend_catalog(&mut response);
+        } else if connector["provider"] == "grok_web" {
             session::extend_grok_catalog(&mut response);
         } else {
             session::extend_catalog(&mut response);

@@ -28,10 +28,10 @@ pub(super) fn find_authorized(
         .find(|item| item["connector_id"] == connector_id)
         .ok_or_else(|| ApiError::not_found("web-model connector not found"))?;
     if item["revoked"].as_bool().unwrap_or(false) {
-        return Err(ApiError::forbidden("web-model connector is revoked"));
+        return Err(ApiError::forbidden(if item["kind"] == "hark_connector" { "hark_connector_revoked" } else { "web-model connector is revoked" }));
     }
     if secret.is_some_and(|secret| !web_model_connectors::secret_matches(&item, secret)) {
-        return Err(ApiError::forbidden("invalid web-model connector secret"));
+        return Err(ApiError::forbidden(if item["kind"] == "hark_connector" { "hark_credential_invalid" } else { "invalid web-model connector secret" }));
     }
     Ok(item)
 }
@@ -46,7 +46,7 @@ pub(super) fn for_actor(state: &AppState, group_id: &str, actor_id: &str) -> Opt
     let connector = load(state)
         .ok()?
         .into_iter()
-        .find(|c| c["provider"] == provider)?;
+        .find(|c| c["provider"] == provider && (provider != "hark" || (c["group_id"] == group_id && c["actor_id"] == actor_id)))?;
     let mut binding = web_model_connectors::binding_for_actor(
         &connector,
         group_id,
@@ -63,7 +63,16 @@ pub(super) fn resolve(
     connector: &Value,
     request: &Value,
 ) -> Result<Value, ApiError> {
-    let mut binding = if connector["provider"] == "grok_web" {
+    let mut binding = if connector["kind"] == "hark_connector" {
+        let supplied = request["params"]["arguments"].get("actor_token");
+        if supplied.is_some_and(|v| !v.is_string() || v == "") {
+            return Err(ApiError::forbidden("hark_execution_token_invalid"));
+        }
+        web_model_connectors::hark::resolve(connector,
+            supplied.and_then(Value::as_str).unwrap_or_default(),
+            request["params"]["name"].as_str().unwrap_or_default())
+            .ok_or_else(|| ApiError::forbidden("hark_execution_token_invalid: claim using the connector credential; business calls need the current execution actor_token"))?
+    } else if connector["provider"] == "grok_web" {
         let token = request["params"]["arguments"]["actor_token"]
             .as_str()
             .unwrap_or_default();
@@ -128,7 +137,7 @@ pub(super) fn resolve(
             "paired_actor_runtime_changed: The paired Actor's runtime changed; review its connection settings",
         ));
     }
-    if !actor.enabled {
+    if !actor.enabled && !(connector["kind"] == "hark_connector" && binding["hark_stage"] == "claim") {
         return Err(ApiError::forbidden(
             "paired_actor_stopped: CCCC access is paused. Pairing is retained; resume access in CCCC to receive work. Do not pair again",
         ));

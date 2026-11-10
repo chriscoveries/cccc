@@ -39,6 +39,7 @@ mod diagnostics;
 pub(crate) mod dots_events;
 mod event_prefix;
 mod grok_webhook;
+mod hark_pull;
 mod group_activity;
 mod group_copy;
 mod group_create_rollback;
@@ -131,6 +132,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         runtime_state::resolve_operation,
         dots_events::resolve_operation,
         grok_webhook::resolve_operation,
+        hark_pull::resolve_operation,
         maintenance::resolve_operation,
         owned_process_recovery::resolve_operation,
         im::resolve_operation,

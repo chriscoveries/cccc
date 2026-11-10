@@ -665,3 +665,44 @@ export function getWebModelBrowserSurfaceWebSocketUrl(groupId: string, actorId: 
 export async function bindGrokBot(groupId: string, actorId: string, url: string) {
   return changeGrokWebhook(groupId, actorId, { action: "bind", url });
 }
+
+export type HarkActorState = {
+  group_id: string;
+  actor_id: string;
+  enabled: boolean;
+  configured: boolean;
+  phase: string;
+  pending_count: number;
+  active_turn_id?: string | null;
+  active_event_ids?: string[];
+  last_poll_at?: string | null;
+  last_poll_status?: string | null;
+  reason_code?: string | null;
+  last_claim_at?: string | null;
+  error_code?: string | null;
+  connector?: WebModelConnector;
+  secret?: string;
+};
+
+export function fetchHarkActorState(groupId: string, actorId: string) {
+  const params = new URLSearchParams({ group_id: groupId, actor_id: actorId });
+  return apiJson<HarkActorState>(`/api/v1/web-model/hark?${params.toString()}`);
+}
+
+export function updateHarkActorConnection(
+  groupId: string,
+  actorId: string,
+  action: "create" | "rotate" | "revoke" | "resolve",
+  turnId?: string,
+  eventIds?: string[],
+) {
+  return apiJson<HarkActorState>("/api/v1/web-model/hark", {
+    method: "POST",
+    body: JSON.stringify({
+      group_id: groupId,
+      actor_id: actorId,
+      action,
+      ...(turnId ? { turn_id: turnId, event_ids: eventIds } : {}),
+    }),
+  });
+}

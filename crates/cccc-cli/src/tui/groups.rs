@@ -332,6 +332,7 @@ fn runtime_label(runtime: &str) -> String {
         ActorRuntime::WebModel => "ChatGPT Web",
         ActorRuntime::ChatgptDots => "ChatGPT Dots",
         ActorRuntime::GrokWebModel => "Grok Web",
+        ActorRuntime::Hark => "Hark",
         ActorRuntime::Custom => "Custom",
     }
     .to_owned()

@@ -14,6 +14,7 @@ mod diagnostics;
 mod file_response;
 mod filesystem;
 mod grok_webhook;
+mod hark;
 mod group_copy;
 mod group_prompt_notify;
 mod group_prompts;
@@ -113,6 +114,7 @@ pub fn router() -> Router<AppState> {
         .merge(web_model_connectors::routes())
         .merge(web_model_dots::routes())
         .merge(grok_webhook::routes())
+        .merge(hark::routes())
         .merge(web_model_browser::routes())
         .merge(web_model_pairing::routes())
         .merge(web_model_shared_browser::routes())

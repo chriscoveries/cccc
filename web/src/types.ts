@@ -1623,6 +1623,7 @@ export const SUPPORTED_RUNTIMES = [
   "pi",
   "web_model",
   "chatgpt_dots",
+  "hark",
   "grok_web_model",
   "custom",
 ] as const;
@@ -1631,7 +1632,10 @@ export type SupportedRuntime = (typeof SUPPORTED_RUNTIMES)[number];
 
 export function isWebModelRuntime(runtime: string | undefined): boolean {
   return (
-    runtime === "chatgpt_dots" || runtime === "grok_web_model" || isBrowserWebModelRuntime(runtime)
+    runtime === "hark" ||
+    runtime === "chatgpt_dots" ||
+    runtime === "grok_web_model" ||
+    isBrowserWebModelRuntime(runtime)
   );
 }
 
@@ -1671,6 +1675,7 @@ export const RUNTIME_INFO: Record<string, { label: string; desc: string }> = {
     label: "ChatGPT Web Model",
     desc: "ChatGPT browser delivery + remote MCP connector",
   },
+  hark: { label: "Hark (pull)", desc: "Scheduled pull + agent-bound remote MCP connector" },
   chatgpt_dots: {
     label: "ChatGPT Dots",
     desc: "ChatGPT event tasks + shared remote MCP connector",
