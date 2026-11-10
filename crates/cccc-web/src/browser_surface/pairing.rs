@@ -32,6 +32,11 @@ impl BrowserSurfaces {
         };
         let readiness = self.prompt_readiness(key).await?;
         if readiness["composer_chars"].as_u64().unwrap_or(0) > 0 {
+            // Check this before clearing: a pending upload belongs to the user
+            // even when the text happens to be our stale prompt.
+            if readiness["composer_has_attachments"] == true {
+                bail!("pairing_composer_occupied");
+            }
             // A draft left by an earlier pairing attempt is CCCC's own prompt:
             // its code is already spent, so keeping it only wedges every later
             // connect. Clear just that draft; any other text is a human's or
@@ -325,7 +330,7 @@ mod tests {
             "http://chatgpt.com/c/WEB:pending",
             "https://chatgpt.com.example/c/WEB:pending",
             "https://other.chatgpt.com/c/WEB:pending",
-            "https://user@chatgpt.com/c/WEB:pending",
+            "https://~@chatgpt.com/c/WEB:pending",
             "https://chatgpt.com:8443/c/WEB:pending",
             "about:blank",
         ] {
