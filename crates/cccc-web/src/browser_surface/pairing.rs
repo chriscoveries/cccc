@@ -32,7 +32,13 @@ impl BrowserSurfaces {
         };
         let readiness = self.prompt_readiness(key).await?;
         if readiness["composer_chars"].as_u64().unwrap_or(0) > 0 {
-            bail!("pairing_composer_occupied");
+            // A draft left by an earlier pairing attempt is CCCC's own prompt:
+            // its code is already spent, so keeping it only wedges every later
+            // connect. Clear just that draft; any other text is a human's or
+            // another delivery's and still refuses.
+            if !clear_stale_pairing_draft(&target.page).await? {
+                bail!("pairing_composer_occupied");
+            }
         }
         if readiness["ready"] != true || readiness["running"] == true {
             bail!("pairing_browser_not_ready");
@@ -134,6 +140,48 @@ fn pending_new_chat_url(raw: &str) -> bool {
             })
     })
 }
+
+/// Clear the composer only when its whole draft is CCCC's fixed pairing prompt
+/// for a `wm_pair_` code. The stale code is already spent, so removing it
+/// loses nothing; any other draft, including our prompt with appended text,
+/// still refuses with pairing_composer_occupied.
+async fn clear_stale_pairing_draft(page: &Page) -> Result<bool> {
+    let result = page
+        .evaluate(CLEAR_STALE_PAIRING_DRAFT_SCRIPT)
+        .await?
+        .into_value::<Value>()?;
+    Ok(result["cleared"] == true)
+}
+
+const CLEAR_STALE_PAIRING_DRAFT_SCRIPT: &str = r#"() => {
+  const el = document.querySelector('[data-cccc-web-model-composer="cccc-web-model-composer"]');
+  if (!el) return { cleared: false };
+  const read = node => String(('value' in node) ? node.value : (node.innerText || node.textContent || ''))
+    .replace(/\s+/g, ' ').trim();
+  const prefix = 'Connect this conversation to the Actor selected in CCCC. Send this temporary CCCC pairing code to cccc_pair through the same CCCC connector: {"code":"';
+  const suffix = '"}. This records a pending link; reply with the returned receipt exactly as plain text so CCCC can verify this window and activate the link. Subsequent CCCC tool calls will use that Actor\'s configured permissions. This setup does not read workspace files or run tasks; wait for the next task message. If ChatGPT requires my approval, ask me. If the call is blocked or fails, report the error.';
+  const text = read(el);
+  const start = text.indexOf(prefix);
+  const end = text.lastIndexOf(suffix);
+  const code = end >= prefix.length ? text.slice(prefix.length, end) : '';
+  const own = start === 0 && end >= prefix.length && end + suffix.length === text.length
+    && /^wm_pair_[a-f0-9]+$/.test(code);
+  if (!own) return { cleared: false };
+  if ('value' in el) {
+    el.value = '';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  } else {
+    el.focus();
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel.addRange(range);
+    document.execCommand('delete');
+  }
+  return { cleared: read(el).length === 0 };
+}"#;
 
 fn chatgpt_page_url(raw: &str) -> Option<reqwest::Url> {
     reqwest::Url::parse(raw).ok().filter(|url| {

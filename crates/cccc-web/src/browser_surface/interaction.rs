@@ -217,7 +217,7 @@ pub async fn serve_socket(
                 if matches!(message, Message::Close(_)) { break }
                 let Message::Text(text) = message else { continue };
                 let Ok(command) = serde_json::from_str::<Value>(&text) else { continue };
-                let command_id = command.get("id").and_then(Value::as_str).unwrap_or("");
+                let command_id = requested_command_id(&command);
                 let Some(result) = until_shutdown(
                     &mut shutdown,
                     surfaces.command(key, &command),
@@ -225,23 +225,8 @@ pub async fn serve_socket(
                     close_for_shutdown(&mut socket).await;
                     break;
                 };
-                match result {
-                    Ok(()) if !command_id.is_empty() => {
-                        let _ = socket.send(Message::Text(
-                            json!({"t":"command_result","id":command_id,"ok":true}).to_string().into(),
-                        )).await;
-                    }
-                    Ok(()) => {}
-                    Err(error) if !command_id.is_empty() => {
-                        let _ = socket.send(Message::Text(
-                            json!({"t":"command_result","id":command_id,"ok":false,"message":error.to_string()}).to_string().into(),
-                        )).await;
-                    }
-                    Err(error) => {
-                        let _ = socket.send(Message::Text(
-                            json!({"t":"error","message":error.to_string()}).to_string().into(),
-                        )).await;
-                    }
+                if let Some(reply) = socket_reply(command_id, result) {
+                    let _ = socket.send(Message::Text(reply.to_string().into())).await;
                 }
             }
         }
@@ -257,6 +242,28 @@ fn state_event(mut state: Value) -> Value {
 
 fn viewer_mode_uses_frames(mode: &str, vnc_available: bool) -> bool {
     mode.trim().eq_ignore_ascii_case("screencast") || !vnc_available
+}
+
+fn requested_command_id(command: &Value) -> Option<Value> {
+    let id = command.get("id")?;
+    // Any JSON id is echoed back verbatim; only a missing or empty string id
+    // means the caller wants no command_result.
+    if id.is_null() || id.as_str().is_some_and(str::is_empty) {
+        None
+    } else {
+        Some(id.clone())
+    }
+}
+
+fn socket_reply(id: Option<Value>, result: Result<()>) -> Option<Value> {
+    match (id, result) {
+        (Some(id), Ok(())) => Some(json!({"t":"command_result","id":id,"ok":true})),
+        (Some(id), Err(error)) => Some(json!({
+            "t":"command_result","id":id,"ok":false,"message":error.to_string()
+        })),
+        (None, Ok(())) => None,
+        (None, Err(error)) => Some(json!({"t":"error","message":error.to_string()})),
+    }
 }
 
 pub async fn serve_vnc_socket(
@@ -348,7 +355,11 @@ async fn press_key(page: &Page, key: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_override_viewport, state_event, until_shutdown, viewer_mode_uses_frames};
+    use super::{
+        requested_command_id, should_override_viewport, socket_reply, state_event, until_shutdown,
+        viewer_mode_uses_frames,
+    };
+    use anyhow::anyhow;
     use serde_json::json;
     use std::future::pending;
 
@@ -381,6 +392,32 @@ mod tests {
         assert!(!viewer_mode_uses_frames("auto", true));
         assert!(viewer_mode_uses_frames("screencast", true));
         assert!(viewer_mode_uses_frames("auto", false));
+    }
+
+    #[test]
+    fn socket_command_result_echoes_non_string_id() {
+        let reply = socket_reply(requested_command_id(&json!({"t":"ping","id":7})), Ok(()))
+            .expect("command result");
+        assert_eq!(reply, json!({"t":"command_result","id":7,"ok":true}));
+        assert!(reply["id"].is_number());
+
+        let reply = socket_reply(
+            requested_command_id(&json!({"t":"ping","id":"fixture-id"})),
+            Err(anyhow!("surface unavailable")),
+        )
+        .expect("command result");
+        assert_eq!(reply["t"], "command_result");
+        assert_eq!(reply["id"], "fixture-id");
+        assert_eq!(reply["message"], "surface unavailable");
+
+        assert!(requested_command_id(&json!({"t":"ping"})).is_none());
+        assert!(requested_command_id(&json!({"id":null})).is_none());
+        assert!(requested_command_id(&json!({"id":""})).is_none());
+        assert!(socket_reply(None, Ok(())).is_none());
+        assert_eq!(
+            socket_reply(None, Err(anyhow!("bad command"))).expect("error"),
+            json!({"t":"error","message":"bad command"})
+        );
     }
 
     #[tokio::test]
