@@ -546,10 +546,10 @@ mod tests {
             .expect_err("oversized send must fail");
         assert_eq!(error.code, "inbound_too_large");
         assert_eq!(error.details["to"], json!(["webby"]));
-        assert_eq!(error.details["max_inbound_chars"], json!(16_000));
+        assert_eq!(error.details["max_inbound_chars"], json!(32_000));
         assert_eq!(error.details["text_chars"], json!(16_001));
 
-        let mut fits = send_data(&"x".repeat(16_000));
+        let mut fits = send_data(&"x".repeat(32_000));
         normalize_chat_data(&group, "user", &mut fits, false)
             .expect("a send at the limit still passes");
 

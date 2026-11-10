@@ -196,7 +196,7 @@ impl ActorRuntime {
                 // Kept below the 24_000-char coalesced staged-prompt ceiling in
                 // web_model_delivery, leaving headroom for the bootstrap seed
                 // and batch markers.
-                max_inbound_chars: Some(16_000),
+                max_inbound_chars: Some(32_000),
                 max_reply_chars: Some(8_000),
             },
             Self::ChatgptDots | Self::GrokWebModel | Self::Hark => ActorCapabilities {
@@ -413,7 +413,7 @@ mod tests {
     fn web_model_capabilities_expose_its_transport_limits() {
         let capabilities = ActorRuntime::WebModel.capabilities();
         assert!(!capabilities.attachments_out);
-        assert_eq!(capabilities.max_inbound_chars, Some(16_000));
+        assert_eq!(capabilities.max_inbound_chars, Some(32_000));
         assert_eq!(capabilities.max_reply_chars, Some(8_000));
         for runtime in [
             ActorRuntime::ChatgptDots,

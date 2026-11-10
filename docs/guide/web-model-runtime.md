@@ -259,13 +259,13 @@ Each actor's `capabilities` in `cccc actor list` (and `cccc_group` info) reports
 what its runtime transport can carry:
 
 ```json
-{"attachments_out": false, "max_inbound_chars": 16000, "max_reply_chars": 8000}
+{"attachments_out": false, "max_inbound_chars": 32000, "max_reply_chars": 8000}
 ```
 
 - `attachments_out: false` — the web surface cannot attach a file to a reply.
   The agent shares content inline or points peers at workspace files readable
   through `cccc_file`. Other runtimes report `attachments_out: true`.
-- `max_inbound_chars: 16000` — the configured ceiling for one message's `text`
+- `max_inbound_chars: 32000` — the configured ceiling for one message's `text`
   addressed to a `web_model` actor. A send or reply above it is rejected before
   delivery with reason code `inbound_too_large` (details carry `to`,
   `max_inbound_chars`, `text_chars`); it is never silently truncated. This
