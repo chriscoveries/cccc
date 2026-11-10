@@ -47,21 +47,45 @@ pub(super) fn claim(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         {
             return Err(denied("dots_task_expired"));
         }
-        let dots = &c["dots"];
         let runtime = super::super::runtime_state::actor_state(home, &group.group_id, &actor.id)
             .map_err(|_| denied("dots_runtime_state_unavailable"))?;
         // Canonical ownership wins even if a crash left the private execution
         // projection absent or only part of the source admission committed.
-        if runtime["active_turn_id"]
+        // Expiry runs before the duplicate-wake check: no new wake is
+        // delivered while a turn is active, so the only wake a stale claim can
+        // carry is the expired turn's own — checking it first would shadow the
+        // expiry and keep the dead end.
+        let unfinished = runtime["active_turn_id"]
             .as_str()
             .is_some_and(|id| !id.is_empty())
-            || dots["execution"]["state"] == "active"
-            || (!captured_wake.is_null()
-                && (dots["execution"]["event_id"] == *captured_wake
-                    || dots["last_execution"]["event_id"] == *captured_wake))
-        {
-            return Ok(Ok(json!({"status":"turn_in_progress","turn":null})));
+            || c["dots"]["execution"]["state"] == "active";
+        if unfinished {
+            let elapsed = super::super::runtime_state::active_turn_elapsed_seconds(
+                &runtime,
+                &c["dots"]["execution"],
+                chrono::Utc::now(),
+            )
+            .or_else(|| turn_age_seconds(&runtime));
+            if elapsed.is_none_or(|elapsed| elapsed < TURN_LEASE_SECONDS) {
+                return Ok(Ok(json!({"status":"turn_in_progress","turn":null,
+                    "active_turn_id":runtime["active_turn_id"],
+                    "event_ids":runtime["active_event_ids"],
+                    "active_turn_elapsed_seconds":elapsed,
+                    "reason_code":"dots_turn_unfinished",
+                    "instructions":"An unfinished turn is visible in Dots status. It expires on its own once its lease elapses; the owner can also resolve it explicitly. Never replay it from a new claim."})));
+            }
+            expire_active_turn(home, &group, &actor, &runtime, c)?;
         }
+        // A wake whose event was already claimed or completed is a duplicate
+        // callback, never unfinished work.
+        if !captured_wake.is_null()
+            && (c["dots"]["execution"]["event_id"] == *captured_wake
+                || c["dots"]["last_execution"]["event_id"] == *captured_wake)
+        {
+            return Ok(Ok(json!({"status":"turn_in_progress","turn":null,
+                "reason_code":"dots_wake_already_claimed"})));
+        }
+        let dots = &c["dots"];
         let Some(event_id) = captured_wake.as_str() else {
             return Ok(Ok(json!({"status":"idle","turn":null})));
         };
@@ -268,4 +292,125 @@ pub(super) fn control(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         receipt,
         request,
     )
+}
+
+/// How long a claimed Dots turn may run before a claim expires it. Remote
+/// tasks are short; anything older is abandoned work, not a busy actor.
+const TURN_LEASE_SECONDS: u64 = 1800;
+
+/// Fallback clock when the private execution projection is absent or does not
+/// match the canonical turn: the runtime state stamp still bounds its age.
+fn turn_age_seconds(runtime: &Value) -> Option<u64> {
+    let updated = chrono::DateTime::parse_from_rfc3339(runtime["updated_at"].as_str()?).ok()?;
+    chrono::Utc::now()
+        .signed_duration_since(updated)
+        .to_std()
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+/// Expire an abandoned claimed turn so the actor can claim new work. This is
+/// the same durable resolution an explicit user `resolve` produces — a
+/// completion receipt, inputs marked ambiguous so nothing replays, canonical
+/// ownership cleared — except it triggers on the lease instead of a user
+/// action and returns the actor to work in the same claim.
+fn expire_active_turn(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    runtime: &Value,
+    c: &mut Value,
+) -> Result<(), io::Error> {
+    let turn_id = runtime["active_turn_id"].as_str().unwrap_or_default();
+    let event_ids: Vec<String> = runtime["active_event_ids"]
+        .as_array()
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut status = "expired".to_owned();
+    if !turn_id.is_empty() && !event_ids.is_empty() {
+        // A crash can leave a committed receipt without its projections; keep
+        // that durable outcome rather than recording an expiry on top of it.
+        let completion = match super::super::runtime_completion::committed(
+            home,
+            &group.group_id,
+            &actor.id,
+            turn_id,
+            &event_ids,
+        )
+        .map_err(|_| io::Error::other("dots_expire_failed"))?
+        {
+            Some(committed) => {
+                status = committed.status.clone();
+                committed
+            }
+            None => super::super::runtime_completion::Completion {
+                turn_id: turn_id.to_owned(),
+                event_ids: event_ids.clone(),
+                status: status.clone(),
+                delivery_id: format!("runtime:{turn_id}"),
+            },
+        };
+        for event_id in &completion.event_ids {
+            if let Some((state, transport)) = super::super::runtime_delivery::latest_state(
+                home,
+                &group.group_id,
+                &actor.id,
+                event_id,
+            )
+            .map_err(|_| io::Error::other("dots_expire_failed"))?
+                && state == "claimed"
+            {
+                super::super::runtime_delivery::append_state(
+                    home,
+                    &group.group_id,
+                    &actor.id,
+                    &actor.created_at,
+                    event_id,
+                    &transport,
+                    super::super::runtime_delivery::DeliveryOutcome::Ambiguous(
+                        "Dots turn expired before completion; its inputs must not be replayed",
+                    ),
+                )
+                .map_err(|_| io::Error::other("dots_expire_failed"))?;
+            }
+        }
+        super::super::runtime_completion::append(home, &group.group_id, &actor.id, &completion)
+            .map_err(|_| io::Error::other("dots_expire_failed"))?;
+        // This clears canonical ownership only; the private projection below is
+        // updated on the same connector snapshot the claim already holds.
+        let fresh = super::super::runtime_state::actor_state(home, &group.group_id, &actor.id)
+            .map_err(|_| io::Error::other("dots_expire_failed"))?;
+        if fresh["active_turn_id"].as_str() == Some(turn_id) {
+            super::super::runtime_state::set_runtime_status(
+                home,
+                group,
+                &actor.id,
+                "waiting",
+                "",
+                "",
+                &[],
+            )
+            .map_err(|_| io::Error::other("dots_expire_failed"))?;
+        }
+    }
+    let dots = &mut c["dots"];
+    let mut last = dots["execution"].clone();
+    if last.is_null() {
+        last = json!({"event_id":dots["wake"]["event_id"],"epoch":dots["epoch"],
+            "turn_id":turn_id,"event_ids":event_ids,"state":"interrupted"});
+    }
+    last["state"] = json!("completed");
+    last["status"] = json!(status);
+    last["completed_at"] = json!(cccc_contracts::utc_now());
+    last["epoch"] = dots["epoch"].clone();
+    dots["last_execution"] = last;
+    dots["execution"] = Value::Null;
+    // The pending wake belongs to new input, not the expired turn; it stays
+    // deliverable so this same claim can pick it up.
+    Ok(())
 }

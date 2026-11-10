@@ -1300,3 +1300,65 @@ fn a_dots_notification_does_not_store_the_captured_binding() {
         assert!(!event.to_string().contains(&session_key));
     }
 }
+
+#[test]
+fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
+    let f = Fixture::new();
+    f.start();
+    let event_id = f.source("abandoned task");
+    let wake = f.delivery();
+    let turn = f.claim(&f.captured(&wake, "cccc_runtime_wait_next_turn"))["turn"].clone();
+    // A fresh unfinished turn still reports in progress, now with a reason.
+    let busy = f.claim(&f.claim_capture());
+    assert_eq!(busy["status"], "turn_in_progress");
+    assert_eq!(busy["reason_code"], "dots_turn_unfinished");
+    assert!(busy["active_turn_elapsed_seconds"].is_u64());
+    // No new wake is delivered while the turn is active.
+    assert!(f.delivery().is_null());
+    // Age the claimed execution beyond the lease.
+    store::update_connector(&f.home, &f.connector_id, |connector| {
+        connector["dots"]["execution"]["claimed_at"] = json!("2000-01-01T00:00:00Z")
+    })
+    .expect("age fixture execution");
+    // The only wake the remote can carry is the expired turn's own. The claim
+    // expires the turn instead of returning turn_in_progress forever.
+    let expired = f.claim(&f.captured(&wake, "cccc_runtime_wait_next_turn"));
+    assert_eq!(expired["status"], "turn_in_progress");
+    assert_eq!(expired["reason_code"], "dots_wake_already_claimed");
+    let status = f.call("dots_events_status", json!({}));
+    assert_eq!(status["last_execution"]["status"], "expired");
+    assert_eq!(status["active_turn_id"], "");
+    assert!(status["active_turn_elapsed_seconds"].is_null());
+    // The expired turn's inputs are never replayed.
+    assert!(f.delivery().is_null());
+    let groups = GroupStore::new(f.home.clone()).expect("group store");
+    let group = groups.load(&f.group.group_id).expect("group");
+    assert!(
+        super::super::runtime_delivery::latest_state(&f.home, &group.group_id, "dot", &event_id)
+            .expect("delivery state")
+            .is_some_and(|(state, _)| state != "claimed")
+    );
+    // A zombie completion for the expired turn is rejected.
+    let zombie = f.captured(&wake, "cccc_runtime_complete_turn");
+    assert!(
+        !f.response(
+            "runtime_complete_turn",
+            json!({"by":"dot","turn_id":turn["turn_id"],"event_ids":turn["event_ids"],
+                "status":"done","_cccc_web_binding":zombie})
+        )
+        .ok
+    );
+    // The next input wakes and claims normally.
+    f.source("fresh task");
+    let next_wake = f.delivery();
+    assert!(next_wake.is_object());
+    let claimed = f.claim(&f.captured(&next_wake, "cccc_runtime_wait_next_turn"));
+    assert_eq!(claimed["status"], "work_available");
+    assert!(claimed["actor_token"].is_string());
+    let done = f.complete(
+        &claimed["turn"],
+        &f.captured(&next_wake, "cccc_runtime_complete_turn"),
+    );
+    assert_eq!(done["status"], "done");
+    assert_eq!(f.call("dots_events_status", json!({}))["phase"], "ready");
+}
