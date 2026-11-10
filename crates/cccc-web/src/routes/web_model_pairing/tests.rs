@@ -245,15 +245,11 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         ),
     )
     .await;
-    assert!(
-        state
-            .browser_surfaces
-            .pairing_page(&alpha_key)
-            .await
-            .expect_err("a stale prompt with appended text is not ours")
-            .to_string()
-            .contains("pairing_composer_occupied")
-    );
+    let error = match state.browser_surfaces.pairing_page(&alpha_key).await {
+        Ok(_) => panic!("a stale prompt with appended text is not ours"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("pairing_composer_occupied"));
     assert_eq!(
         page_value(&a, "document.querySelector('textarea').value").await,
         stale_with_note
