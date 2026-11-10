@@ -1013,25 +1013,47 @@ async fn wait_for_delivery_state(
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "delivery never reached {state}: {:?}",
+            "delivery {source_event_id} never reached {state} in {}: {:?}",
+            ledger_path.display(),
             latest.map(|event| event.data)
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
+#[tokio::test]
+async fn accepted_delivery_wait_tolerates_a_slow_receipt() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ledger_path = temp.path().join("ledger.jsonl");
+    let mut claimed = cccc_contracts::Event::new("runtime.delivery", "g_wait_receipt");
+    claimed.data =
+        json!({"actor_id":"peer1","source_event_id":"answer","state":"claimed","reason":""})
+            .as_object()
+            .expect("delivery data")
+            .clone();
+    ledger::append(&ledger_path, &claimed).expect("claim");
+    let writer_path = ledger_path.clone();
+    let writer = tokio::spawn(async move {
+        // A successful receipt can arrive past the old generic five-second
+        // deadline. The waiter must observe it, not retry or alter the claim.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let mut accepted = cccc_contracts::Event::new("runtime.delivery", "g_wait_receipt");
+        accepted.data = claimed.data;
+        accepted.data.insert("state".into(), json!("accepted"));
+        ledger::append(&writer_path, &accepted).expect("receipt");
+    });
+
+    wait_for_accepted_delivery(&ledger_path, "answer").await;
+    writer.await.expect("receipt writer");
+    assert_eq!(ledger::read_all(&ledger_path).expect("ledger").len(), 2);
+}
+
 async fn wait_for_accepted_delivery(ledger_path: &std::path::Path, source_event_id: &str) {
-    wait_until_async(|| async {
-        ledger::read_all(ledger_path).is_ok_and(|events| {
-            events.iter().any(|event| {
-                event.kind == "runtime.delivery"
-                    && event.data["source_event_id"] == source_event_id
-                    && event.data["actor_id"] == "peer1"
-                    && event.data["state"] == "accepted"
-            })
-        })
-    })
-    .await;
+    // A custom PTY's first delivery already spends 3.5 seconds pacing the
+    // preamble and payload. Use the delivery budget, not the five-second
+    // daemon-readiness budget, so a loaded CI runner can finish that handoff.
+    // This also reports the last durable state if delivery really stalls.
+    wait_for_delivery_state(ledger_path, source_event_id, "accepted").await;
 }
 
 async fn wait_until(mut condition: impl FnMut() -> bool) {
