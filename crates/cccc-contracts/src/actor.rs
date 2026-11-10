@@ -187,9 +187,12 @@ impl ActorRuntime {
     #[must_use]
     pub const fn runner(self) -> RunnerKind {
         match self {
-            Self::Deepseek | Self::Pi | Self::WebModel | Self::ChatgptDots | Self::GrokWebModel | Self::Hark => {
-                RunnerKind::Headless
-            }
+            Self::Deepseek
+            | Self::Pi
+            | Self::WebModel
+            | Self::ChatgptDots
+            | Self::GrokWebModel
+            | Self::Hark => RunnerKind::Headless,
             _ => RunnerKind::Pty,
         }
     }

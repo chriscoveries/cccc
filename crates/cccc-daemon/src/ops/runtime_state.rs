@@ -287,7 +287,10 @@ fn headless_status(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 fn headless_set_status(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let actor = actor(&group, &actor_id)?;
-    if matches!(actor.runtime, cccc_contracts::ActorRuntime::ChatgptDots | cccc_contracts::ActorRuntime::Hark) {
+    if matches!(
+        actor.runtime,
+        cccc_contracts::ActorRuntime::ChatgptDots | cccc_contracts::ActorRuntime::Hark
+    ) {
         return Err(OpError::new(
             "provider_managed_headless",
             "Native pull task status is owned by the daemon",
@@ -334,7 +337,10 @@ pub(super) fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpRe
     }
     let actor = actor(&group, &actor_id)?;
     if actor.runtime == cccc_contracts::ActorRuntime::Hark && request.op != "hark_work_claim" {
-        return Err(OpError::new("hark_connector_required", "Hark work requires its agent-bound pull connector"));
+        return Err(OpError::new(
+            "hark_connector_required",
+            "Hark work requires its agent-bound pull connector",
+        ));
     }
     if actor.runtime == cccc_contracts::ActorRuntime::ChatgptDots && request.op != "dots_work_claim"
     {
@@ -559,7 +565,10 @@ fn recover_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let actor = require_web_model_actor(&group, &actor_id)?;
     if actor.runtime == cccc_contracts::ActorRuntime::Hark {
-        return Err(OpError::new("hark_explicit_resolution_required", "Hark unfinished work requires explicit user resolution; it is not replayed"));
+        return Err(OpError::new(
+            "hark_explicit_resolution_required",
+            "Hark unfinished work requires explicit user resolution; it is not replayed",
+        ));
     }
     if actor.runtime == cccc_contracts::ActorRuntime::GrokWebModel {
         return Err(OpError::new(
@@ -858,7 +867,10 @@ fn record_browser_delivery(home: &HomeLayout, request: &DaemonRequest) -> OpResu
     let (group, actor_id) = group_actor(home, request)?;
     let actor = require_web_model_actor(&group, &actor_id)?;
     if actor.runtime == cccc_contracts::ActorRuntime::Hark {
-        return Err(OpError::new("hark_pull_required", "Hark has no browser delivery"));
+        return Err(OpError::new(
+            "hark_pull_required",
+            "Hark has no browser delivery",
+        ));
     }
     if actor.runtime == cccc_contracts::ActorRuntime::GrokWebModel {
         return Err(OpError::new(

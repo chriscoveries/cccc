@@ -61,7 +61,10 @@ pub fn apply(
         super::hark_pull::invalidate(home, group, actor_id)?;
     }
     if stored_actor.runtime.is_web_model()
-        && !matches!(stored_actor.runtime, ActorRuntime::ChatgptDots | ActorRuntime::Hark)
+        && !matches!(
+            stored_actor.runtime,
+            ActorRuntime::ChatgptDots | ActorRuntime::Hark
+        )
         && matches!(kind, "actor.stop" | "actor.restart" | "actor.new_session")
     {
         cccc_core::web_model_connectors::interrupt_automatic_pairings(

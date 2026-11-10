@@ -34,10 +34,18 @@ pub fn configure(
                 "group_id":group,"actor_id":actor,"generation":generation,"created_at":now,
                 "bindings":{},"pairings":{}})
         };
-        let secret = format!("harks_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let secret = format!(
+            "harks_{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
         c["secret_hash"] = json!(hash(&secret));
-        c["secret_preview"] = json!(format!("harks_…{}", &secret[secret.len()-4..]));
-        c["routing_key"] = json!(format!("{}{}",Uuid::new_v4().simple(),Uuid::new_v4().simple()));
+        c["secret_preview"] = json!(format!("harks_…{}", &secret[secret.len() - 4..]));
+        c["routing_key"] = json!(format!(
+            "{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        ));
         c["revoked"] = json!(false);
         c["updated_at"] = json!(now);
         c["bindings"] = json!({});
@@ -64,8 +72,13 @@ pub fn state<'a>(c: &'a Value, group: &str, actor: &str) -> &'a Value {
     }
 }
 
-pub fn change<T>(home: &HomeLayout, id: &str, group: &str, actor: &str,
-    change: impl FnOnce(&mut Value, &mut Value) -> io::Result<T>) -> io::Result<T> {
+pub fn change<T>(
+    home: &HomeLayout,
+    id: &str,
+    group: &str,
+    actor: &str,
+    change: impl FnOnce(&mut Value, &mut Value) -> io::Result<T>,
+) -> io::Result<T> {
     update(home, |root| {
         let c = current(root, id)?;
         if !is_hark(c) || c["group_id"] != group || c["actor_id"] != actor {
@@ -79,7 +92,12 @@ pub fn change<T>(home: &HomeLayout, id: &str, group: &str, actor: &str,
 }
 
 pub fn token(c: &Value, b: &Value, s: &Value, turn: &str) -> io::Result<String> {
-    let mac = binding_mac(c, b, "cccc-hark-execution-v1", &[s["epoch"].clone(), json!(turn)])?;
+    let mac = binding_mac(
+        c,
+        b,
+        "cccc-hark-execution-v1",
+        &[s["epoch"].clone(), json!(turn)],
+    )?;
     Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
 }
 
@@ -90,21 +108,46 @@ pub fn resolve(c: &Value, supplied: &str, tool: &str) -> Option<Value> {
     let group = c["group_id"].as_str()?;
     let actor = c["actor_id"].as_str()?;
     let mut b = binding_for_actor(c, group, actor, c["generation"].as_str()?)?;
-    if b["transport"] != "hark_pull" { return None; }
+    if b["transport"] != "hark_pull" {
+        return None;
+    }
     let s = state(c, group, actor);
     b["hark_epoch"] = s["epoch"].clone();
-    if supplied.is_empty() && matches!(tool, "cccc_runtime_wait_next_turn" | "cccc_connector_status") {
+    if supplied.is_empty()
+        && matches!(
+            tool,
+            "cccc_runtime_wait_next_turn" | "cccc_connector_status"
+        )
+    {
         b["hark_stage"] = json!("claim");
         return Some(b);
     }
-    if supplied.len() != 43 || tool == "cccc_runtime_wait_next_turn" { return None; }
+    if supplied.len() != 43 || tool == "cccc_runtime_wait_next_turn" {
+        return None;
+    }
     let bytes = URL_SAFE_NO_PAD.decode(supplied).ok()?;
-    for (stage, e) in [("execution", &s["execution"]), ("completion", &s["last_execution"])] {
-        if stage == "completion" && tool != "cccc_runtime_complete_turn" { continue; }
+    for (stage, e) in [
+        ("execution", &s["execution"]),
+        ("completion", &s["last_execution"]),
+    ] {
+        if stage == "completion" && tool != "cccc_runtime_complete_turn" {
+            continue;
+        }
         if (stage == "execution" && e["state"] != "active")
-            || (stage == "completion" && e["state"] != "completed") { continue; }
-        let Some(turn) = e["turn_id"].as_str().filter(|t| !t.is_empty()) else { continue; };
-        let mac = binding_mac(c, &b, "cccc-hark-execution-v1", &[s["epoch"].clone(),json!(turn)]).ok()?;
+            || (stage == "completion" && e["state"] != "completed")
+        {
+            continue;
+        }
+        let Some(turn) = e["turn_id"].as_str().filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let mac = binding_mac(
+            c,
+            &b,
+            "cccc-hark-execution-v1",
+            &[s["epoch"].clone(), json!(turn)],
+        )
+        .ok()?;
         if mac.verify_slice(&bytes).is_ok() {
             b["hark_stage"] = json!(stage);
             b["hark_turn_id"] = json!(turn);
@@ -115,14 +158,31 @@ pub fn resolve(c: &Value, supplied: &str, tool: &str) -> Option<Value> {
 }
 
 pub fn validate(c: &Value, b: &Value, group: &crate::GroupDoc) -> io::Result<()> {
-    if !is_hark(c) || c["revoked"] == true || c["group_id"] != b["group_id"] || c["actor_id"] != b["actor_id"] {
+    if !is_hark(c)
+        || c["revoked"] == true
+        || c["group_id"] != b["group_id"]
+        || c["actor_id"] != b["actor_id"]
+    {
         return Err(error("hark_binding_required"));
     }
-    let s = state(c, b["group_id"].as_str().unwrap_or(""), b["actor_id"].as_str().unwrap_or(""));
-    if s["epoch"] != b["hark_epoch"] || !s["epoch"].is_string() { return Err(error("hark_task_expired")); }
+    let s = state(
+        c,
+        b["group_id"].as_str().unwrap_or(""),
+        b["actor_id"].as_str().unwrap_or(""),
+    );
+    if s["epoch"] != b["hark_epoch"] || !s["epoch"].is_string() {
+        return Err(error("hark_task_expired"));
+    }
     // A stopped actor can observe stopped/unfinished status, never execute.
-    if b["hark_stage"] == "claim" { return Ok(()); }
-    if !group.running || matches!(group.state, cccc_contracts::GroupState::Paused | cccc_contracts::GroupState::Stopped) {
+    if b["hark_stage"] == "claim" {
+        return Ok(());
+    }
+    if !group.running
+        || matches!(
+            group.state,
+            cccc_contracts::GroupState::Paused | cccc_contracts::GroupState::Stopped
+        )
+    {
         return Err(error("hark_task_expired"));
     }
     let stage = b["hark_stage"].as_str().unwrap_or("");
@@ -131,22 +191,40 @@ pub fn validate(c: &Value, b: &Value, group: &crate::GroupDoc) -> io::Result<()>
         "completion" => &s["last_execution"],
         _ => return Err(error("hark_task_required")),
     };
-    let valid = e["turn_id"].is_string() && e["turn_id"] == b["hark_turn_id"]
+    let valid = e["turn_id"].is_string()
+        && e["turn_id"] == b["hark_turn_id"]
         && if stage == "execution" {
-            e["state"] == "active" && group.extra.get("runtime_states")
-                .and_then(|r| r.get(b["actor_id"].as_str().unwrap_or("")))
-                .is_some_and(|r| r["active_turn_id"] == e["turn_id"])
-        } else { e["state"] == "completed" };
-    if valid { Ok(()) } else { Err(error("hark_task_expired")) }
+            e["state"] == "active"
+                && group
+                    .extra
+                    .get("runtime_states")
+                    .and_then(|r| r.get(b["actor_id"].as_str().unwrap_or("")))
+                    .is_some_and(|r| r["active_turn_id"] == e["turn_id"])
+        } else {
+            e["state"] == "completed"
+        };
+    if valid {
+        Ok(())
+    } else {
+        Err(error("hark_task_expired"))
+    }
 }
 
 pub fn invalidate(home: &HomeLayout, group: &str, actor: &str) -> io::Result<()> {
-    if !store_path(home).exists() { return Ok(()); }
+    if !store_path(home).exists() {
+        return Ok(());
+    }
     update(home, |root| {
-        for c in root["connectors"].as_object_mut().expect("map").values_mut()
-            .filter(|c| is_hark(c) && c["group_id"] == group && c["actor_id"] == actor) {
+        for c in root["connectors"]
+            .as_object_mut()
+            .expect("map")
+            .values_mut()
+            .filter(|c| is_hark(c) && c["group_id"] == group && c["actor_id"] == actor)
+        {
             c["hark"]["epoch"] = json!(Uuid::new_v4().to_string());
-            if c["hark"]["execution"].is_object() { c["hark"]["execution"]["state"] = json!("interrupted"); }
+            if c["hark"]["execution"].is_object() {
+                c["hark"]["execution"]["state"] = json!("interrupted");
+            }
         }
         Ok(())
     })

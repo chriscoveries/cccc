@@ -28,10 +28,18 @@ pub(super) fn find_authorized(
         .find(|item| item["connector_id"] == connector_id)
         .ok_or_else(|| ApiError::not_found("web-model connector not found"))?;
     if item["revoked"].as_bool().unwrap_or(false) {
-        return Err(ApiError::forbidden(if item["kind"] == "hark_connector" { "hark_connector_revoked" } else { "web-model connector is revoked" }));
+        return Err(ApiError::forbidden(if item["kind"] == "hark_connector" {
+            "hark_connector_revoked"
+        } else {
+            "web-model connector is revoked"
+        }));
     }
     if secret.is_some_and(|secret| !web_model_connectors::secret_matches(&item, secret)) {
-        return Err(ApiError::forbidden(if item["kind"] == "hark_connector" { "hark_credential_invalid" } else { "invalid web-model connector secret" }));
+        return Err(ApiError::forbidden(if item["kind"] == "hark_connector" {
+            "hark_credential_invalid"
+        } else {
+            "invalid web-model connector secret"
+        }));
     }
     Ok(item)
 }
@@ -43,10 +51,10 @@ pub(super) fn for_actor(state: &AppState, group_id: &str, actor_id: &str) -> Opt
         .ok()?;
     let actor = group.actors.iter().find(|actor| actor.id == actor_id)?;
     let provider = actor.runtime.web_model_provider()?;
-    let connector = load(state)
-        .ok()?
-        .into_iter()
-        .find(|c| c["provider"] == provider && (provider != "hark" || (c["group_id"] == group_id && c["actor_id"] == actor_id)))?;
+    let connector = load(state).ok()?.into_iter().find(|c| {
+        c["provider"] == provider
+            && (provider != "hark" || (c["group_id"] == group_id && c["actor_id"] == actor_id))
+    })?;
     let mut binding = web_model_connectors::binding_for_actor(
         &connector,
         group_id,
@@ -137,7 +145,9 @@ pub(super) fn resolve(
             "paired_actor_runtime_changed: The paired Actor's runtime changed; review its connection settings",
         ));
     }
-    if !actor.enabled && !(connector["kind"] == "hark_connector" && binding["hark_stage"] == "claim") {
+    if !actor.enabled
+        && !(connector["kind"] == "hark_connector" && binding["hark_stage"] == "claim")
+    {
         return Err(ApiError::forbidden(
             "paired_actor_stopped: CCCC access is paused. Pairing is retained; resume access in CCCC to receive work. Do not pair again",
         ));

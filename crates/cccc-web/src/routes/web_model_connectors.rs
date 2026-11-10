@@ -152,24 +152,27 @@ async fn run_connector_mcp(
         return Ok(StatusCode::ACCEPTED.into_response());
     }
     let mut bound_route = None;
-    let mut response = if let Some(response) =
-        super::hark::handle(state, connector, &request).await
+    let mut response = if let Some(response) = super::hark::handle(state, connector, &request).await
     {
         response
-    } else if let Some(response) = super::web_model_dots::handle(state, connector, &request).await
-    {
+    } else if let Some(response) = super::web_model_dots::handle(state, connector, &request).await {
         response
     } else if let Some(response) = session::handle(state, connector, &request).await {
         response
     } else if method == "tools/call" {
         match store::resolve(state, connector, &request) {
             Ok(binding) => {
-                if connector["provider"] == "grok_web" || binding["transport"] == "mcp_events" || binding["transport"] == "hark_pull" {
+                if connector["provider"] == "grok_web"
+                    || binding["transport"] == "mcp_events"
+                    || binding["transport"] == "hark_pull"
+                {
                     if let Some(arguments) = request["params"]["arguments"].as_object_mut() {
                         arguments.remove("actor_token");
                     }
                 }
-                let response = if binding["transport"] == "hark_pull" && tool_name == "cccc_runtime_wait_next_turn" {
+                let response = if binding["transport"] == "hark_pull"
+                    && tool_name == "cccc_runtime_wait_next_turn"
+                {
                     super::hark::claim(state, &request, &binding).await
                 } else if binding["transport"] == "mcp_events"
                     && tool_name == "cccc_runtime_wait_next_turn"

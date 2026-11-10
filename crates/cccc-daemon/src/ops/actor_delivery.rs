@@ -721,7 +721,10 @@ fn web_model_delivery_transport(
             })
             .unwrap_or_default()
     };
-    if matches!(actor.runtime, ActorRuntime::GrokWebModel | ActorRuntime::Hark) {
+    if matches!(
+        actor.runtime,
+        ActorRuntime::GrokWebModel | ActorRuntime::Hark
+    ) {
         return "web_model_pull";
     }
 

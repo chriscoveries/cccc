@@ -57,18 +57,38 @@ pub fn web_model_tool_names() -> impl Iterator<Item = &'static str> {
 /// Hark is a manager/advisor lane, never a workspace executor. This list is
 /// also enforced at invocation (including nested capability calls).
 pub const HARK_TOOL_NAMES: &[&str] = &[
-    "cccc_help", "cccc_bootstrap", "cccc_inbox_read", "cccc_message_history",
-    "cccc_message_send", "cccc_message_reply", "cccc_message_deliver",
-    "cccc_reply_request_cancel", "cccc_context_get", "cccc_coordination", "cccc_task",
-    "cccc_agent_state", "cccc_capability_search", "cccc_capability_use",
-    "cccc_capability_state", "cccc_capability_enable", "cccc_tracked_send",
-    "cccc_runtime_wait_next_turn", "cccc_runtime_complete_turn",
+    "cccc_help",
+    "cccc_bootstrap",
+    "cccc_inbox_read",
+    "cccc_message_history",
+    "cccc_message_send",
+    "cccc_message_reply",
+    "cccc_message_deliver",
+    "cccc_reply_request_cancel",
+    "cccc_context_get",
+    "cccc_coordination",
+    "cccc_task",
+    "cccc_agent_state",
+    "cccc_capability_search",
+    "cccc_capability_use",
+    "cccc_capability_state",
+    "cccc_capability_enable",
+    "cccc_tracked_send",
+    "cccc_runtime_wait_next_turn",
+    "cccc_runtime_complete_turn",
 ];
 
 pub fn hark_tool_allowed(name: &str) -> bool {
-    HARK_TOOL_NAMES.contains(&name) || matches!(name,
-        "cccc_actor" | "cccc_group" | "cccc_actor_notes" | "cccc_runtime_list"
-        | "cccc_automation" | "cccc_context_sync")
+    HARK_TOOL_NAMES.contains(&name)
+        || matches!(
+            name,
+            "cccc_actor"
+                | "cccc_group"
+                | "cccc_actor_notes"
+                | "cccc_runtime_list"
+                | "cccc_automation"
+                | "cccc_context_sync"
+        )
 }
 
 /// Base exposure only. Enabled capability packs and administrative permissions
@@ -79,8 +99,12 @@ pub fn actor_base_tool_names(
 ) -> impl Iterator<Item = &'static str> {
     let core = if actor.is_some_and(|a| a.runtime.wire_name() == "hark") {
         HARK_TOOL_NAMES
-    } else { CORE_TOOL_NAMES };
-    let extra = if actor.is_some_and(|a| a.runtime.wire_name() != "hark") && actor.is_some_and(|a| a.runtime.is_web_model()) {
+    } else {
+        CORE_TOOL_NAMES
+    };
+    let extra = if actor.is_some_and(|a| a.runtime.wire_name() != "hark")
+        && actor.is_some_and(|a| a.runtime.is_web_model())
+    {
         WEB_MODEL_EXTRA_TOOL_NAMES
     } else {
         &[]

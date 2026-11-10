@@ -266,7 +266,8 @@ pub async fn handle_request_for_binding(
 ) -> Value {
     if binding["transport"] == "hark_pull"
         && (binding["hark_stage"] != "execution"
-            && !(binding["hark_stage"] == "completion" && request["params"]["name"] == "cccc_runtime_complete_turn"))
+            && !(binding["hark_stage"] == "completion"
+                && request["params"]["name"] == "cccc_runtime_complete_turn"))
     {
         return json!({"jsonrpc":"2.0","id":request["id"],"result":{"isError":true,"content":[{"type":"text","text":"hark_execution_token_required: use the current claim's execution credential"}]}});
     }

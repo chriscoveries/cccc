@@ -340,7 +340,9 @@ pub fn validate_binding(home: &HomeLayout, expected: &Value) -> io::Result<()> {
     {
         return Err(error("paired_actor_runtime_changed"));
     }
-    if !actor.enabled && !(connector["kind"] == "hark_connector" && expected["hark_stage"] == "claim") {
+    if !actor.enabled
+        && !(connector["kind"] == "hark_connector" && expected["hark_stage"] == "claim")
+    {
         return Err(error("paired_actor_stopped"));
     }
     let current = binding_for_actor(&connector, group_id, actor_id, generation)
