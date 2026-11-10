@@ -24,6 +24,8 @@ mod version_notice;
 mod lib_tests;
 #[cfg(test)]
 mod repo_tests;
+#[cfg(test)]
+mod test_support;
 
 use anyhow::Result;
 use cccc_client::DaemonClient;

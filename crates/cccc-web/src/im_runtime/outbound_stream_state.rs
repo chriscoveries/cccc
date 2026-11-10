@@ -1,4 +1,5 @@
 use cccc_contracts::Event;
+use cccc_core::json::trimmed;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -22,13 +23,13 @@ where
 /// Read a string field of a stream event, trimmed. A missing, non-string or
 /// whitespace-only field reads as empty; each caller decides what empty means.
 pub(super) fn event_string(event: &Event, key: &str) -> String {
-    event
-        .data
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_owned()
+    trimmed(
+        event
+            .data
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
 }
 
 #[cfg(test)]

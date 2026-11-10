@@ -1,4 +1,5 @@
 use cccc_client::DaemonClient;
+use cccc_core::json::trimmed_to;
 use cccc_core::{GroupDoc, HomeLayout, group_scope};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
@@ -633,12 +634,12 @@ fn build_inbox_preview(inbox: &Map<String, Value>, limit: usize) -> Value {
                 ("by".into(), trimmed_value(item.get("by"), 64)),
                 ("kind".into(), Value::String("chat.message".into())),
                 ("message_mode".into(), Value::String("mail".into())),
-                ("text_preview".into(), Value::String(trim_text(text, 220))),
+                ("text_preview".into(), Value::String(trimmed_to(text, 220))),
             ]));
             if let Some(insight) = data
                 .and_then(|value| value.get("insight"))
                 .and_then(Value::as_str)
-                .map(|value| trim_text(value, 220))
+                .map(|value| trimmed_to(value, 220))
                 .filter(|value| !value.is_empty())
             {
                 entry.insert("insight_preview".into(), Value::String(insight));
@@ -877,7 +878,7 @@ fn lower_string(value: Option<&Value>) -> String {
 }
 
 fn trimmed_value(value: Option<&Value>, max_chars: usize) -> Value {
-    Value::String(trim_text(
+    Value::String(trimmed_to(
         &string_value(value).unwrap_or_default(),
         max_chars,
     ))
@@ -913,28 +914,11 @@ fn trimmed_list(value: Option<&Value>, max_items: usize, max_chars: usize) -> Ve
         .into_iter()
         .flatten()
         .filter_map(|item| {
-            let text = trim_text(&string_value(Some(item)).unwrap_or_default(), max_chars);
+            let text = trimmed_to(&string_value(Some(item)).unwrap_or_default(), max_chars);
             (!text.is_empty()).then_some(Value::String(text))
         })
         .take(max_items)
         .collect()
-}
-
-fn trim_text(value: &str, max_chars: usize) -> String {
-    let text = value.trim();
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    if max_chars <= 3 {
-        return text.chars().take(max_chars).collect();
-    }
-    format!(
-        "{}...",
-        text.chars()
-            .take(max_chars - 3)
-            .collect::<String>()
-            .trim_end()
-    )
 }
 
 fn non_blank(value: Option<&Value>) -> bool {
