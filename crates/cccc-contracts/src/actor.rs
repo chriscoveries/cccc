@@ -181,6 +181,33 @@ impl ActorRuntime {
         matches!(self, Self::WebModel)
     }
 
+    /// The runtime's transport capabilities, surfaced where peers inspect
+    /// actors and enforced on send.
+    #[must_use]
+    pub const fn capabilities(self) -> ActorCapabilities {
+        const UNLIMITED: ActorCapabilities = ActorCapabilities {
+            attachments_out: true,
+            max_inbound_chars: None,
+            max_reply_chars: None,
+        };
+        match self {
+            Self::WebModel => ActorCapabilities {
+                attachments_out: false,
+                // Kept below the 24_000-char coalesced staged-prompt ceiling in
+                // web_model_delivery, leaving headroom for the bootstrap seed
+                // and batch markers.
+                max_inbound_chars: Some(32_000),
+                max_reply_chars: Some(8_000),
+            },
+            Self::ChatgptDots | Self::GrokWebModel | Self::Hark => ActorCapabilities {
+                attachments_out: false,
+                max_inbound_chars: None,
+                max_reply_chars: None,
+            },
+            _ => UNLIMITED,
+        }
+    }
+
     /// The runner is an implementation detail derived from the Runtime, not a
     /// user-selectable runner. Pi uses official RPC without a native attach;
     /// optional ACP providers derive their headless surface in `runner_for`.
@@ -208,6 +235,24 @@ impl ActorRuntime {
             _ => RuntimeStateSource::Terminal,
         }
     }
+}
+
+/// What a runtime's transport can carry and how large a message it accepts.
+/// Surfaced to peers through `actor_list`/`group_show` actor entries and
+/// enforced by the send path (`inbound_too_large`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActorCapabilities {
+    /// Replies produced on this runtime can carry file attachments.
+    pub attachments_out: bool,
+    /// Maximum `text` characters one inbound message may carry to this
+    /// runtime; sends above it are rejected with `inbound_too_large` rather
+    /// than truncated. `None` means no runtime-level cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_inbound_chars: Option<u32>,
+    /// Recommended ceiling for one `cccc_message_reply`; longer output should
+    /// be split into numbered replies. `None` means no runtime guidance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_reply_chars: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -362,6 +407,30 @@ mod tests {
         assert_eq!(actor.runner, RunnerKind::Headless);
         assert!(actor.command.is_empty());
         assert!(ActorRuntime::WebModel.is_browser_web_model());
+    }
+
+    #[test]
+    fn web_model_capabilities_expose_its_transport_limits() {
+        let capabilities = ActorRuntime::WebModel.capabilities();
+        assert!(!capabilities.attachments_out);
+        assert_eq!(capabilities.max_inbound_chars, Some(32_000));
+        assert_eq!(capabilities.max_reply_chars, Some(8_000));
+        for runtime in [
+            ActorRuntime::ChatgptDots,
+            ActorRuntime::GrokWebModel,
+            ActorRuntime::Hark,
+        ] {
+            assert!(!runtime.capabilities().attachments_out);
+            assert_eq!(runtime.capabilities().max_inbound_chars, None);
+        }
+        let codex = ActorRuntime::Codex.capabilities();
+        assert!(codex.attachments_out);
+        assert_eq!(codex.max_inbound_chars, None);
+        assert_eq!(codex.max_reply_chars, None);
+        assert_eq!(
+            serde_json::to_value(codex).expect("serialize"),
+            serde_json::json!({"attachments_out": true})
+        );
     }
 
     #[test]

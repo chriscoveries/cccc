@@ -17,8 +17,8 @@ pub mod voice_notifications;
 pub mod voice_secretary;
 
 pub use actor::{
-    Actor, ActorRole, ActorRuntime, ActorSubmit, GroupState, RunnerKind, RuntimeMode,
-    RuntimeStateSource,
+    Actor, ActorCapabilities, ActorRole, ActorRuntime, ActorSubmit, GroupState, RunnerKind,
+    RuntimeMode, RuntimeStateSource,
 };
 pub use codex_voice::{AgentRuntimeSettings, CodexVoiceAnalystSettings, CodexVoiceSettings};
 pub use deepseek::{
