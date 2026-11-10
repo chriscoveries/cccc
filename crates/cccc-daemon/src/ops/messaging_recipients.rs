@@ -541,25 +541,25 @@ mod tests {
     #[test]
     fn oversized_text_to_a_web_model_actor_is_rejected_not_truncated() {
         let group = group_with_actor("web_model");
-        let mut over = send_data(&"x".repeat(16_001));
+        let mut over = send_data(&"x".repeat(32_001));
         let error = normalize_chat_data(&group, "user", &mut over, false)
             .expect_err("oversized send must fail");
         assert_eq!(error.code, "inbound_too_large");
         assert_eq!(error.details["to"], json!(["webby"]));
         assert_eq!(error.details["max_inbound_chars"], json!(32_000));
-        assert_eq!(error.details["text_chars"], json!(16_001));
+        assert_eq!(error.details["text_chars"], json!(32_001));
 
         let mut fits = send_data(&"x".repeat(32_000));
         normalize_chat_data(&group, "user", &mut fits, false)
             .expect("a send at the limit still passes");
 
         let codex_group = group_with_actor("codex");
-        let mut large = send_data(&"x".repeat(16_001));
+        let mut large = send_data(&"x".repeat(32_001));
         normalize_chat_data(&codex_group, "user", &mut large, false)
             .expect("runtimes without a cap accept any size");
 
         let mut broadcast = serde_json::from_value(json!({
-            "to":["@all"],"text":"x".repeat(16_001),"message_mode":"send"
+            "to":["@all"],"text":"x".repeat(32_001),"message_mode":"send"
         }))
         .expect("data");
         let error = normalize_chat_data(&group, "user", &mut broadcast, false)
