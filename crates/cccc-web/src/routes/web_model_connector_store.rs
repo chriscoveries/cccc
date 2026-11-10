@@ -145,8 +145,7 @@ pub(super) fn resolve(
             "paired_actor_runtime_changed: The paired Actor's runtime changed; review its connection settings",
         ));
     }
-    if !actor.enabled
-        && !(connector["kind"] == "hark_connector" && binding["hark_stage"] == "claim")
+    if !(actor.enabled || connector["kind"] == "hark_connector" && binding["hark_stage"] == "claim")
     {
         return Err(ApiError::forbidden(
             "paired_actor_stopped: CCCC access is paused. Pairing is retained; resume access in CCCC to receive work. Do not pair again",
