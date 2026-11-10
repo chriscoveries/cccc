@@ -4,11 +4,11 @@
 //! daemon error. The daemon here is a stand-in over a unix socket.
 #![cfg(unix)]
 
-use cccc_contracts::{DaemonRequest, DaemonResponse};
+use cccc_contracts::DaemonRequest;
 use cccc_core::HomeLayout;
 use serde_json::{Value, json};
+use std::io::Write;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 /// Bind a stand-in daemon on a unix socket, pointing the client at it through
