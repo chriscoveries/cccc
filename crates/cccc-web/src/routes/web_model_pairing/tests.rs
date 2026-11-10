@@ -216,6 +216,52 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     let gid = &group.group_id;
     let (a, ah) = offline_page(&state, gid, "alpha", &temp.path().join("alpha"), &root_url).await;
     let (b, bh) = offline_page(&state, gid, "beta", &temp.path().join("beta"), &root_url).await;
+    let alpha_key = super::super::web_model_browser::key(gid, "alpha");
+    let stale_prompt = crate::browser_surface::pairing_prompt(&format!(
+        "wm_pair_{}",
+        "0123456789abcdef".repeat(4)
+    ));
+    page_value(
+        &a,
+        &format!(
+            "document.querySelector('textarea').value={}",
+            json!(stale_prompt.as_str())
+        ),
+    )
+    .await;
+    state
+        .browser_surfaces
+        .pairing_page(&alpha_key)
+        .await
+        .expect("an earlier pairing prompt is not a human draft");
+    assert_eq!(
+        page_value(&a, "document.querySelector('textarea').value").await,
+        ""
+    );
+    assert_eq!(page_value(&a, "window.submits").await, 0);
+    let stale_with_note = format!("{stale_prompt} Keep my note");
+    page_value(
+        &a,
+        &format!(
+            "document.querySelector('textarea').value={}",
+            json!(stale_with_note.as_str())
+        ),
+    )
+    .await;
+    assert!(
+        state
+            .browser_surfaces
+            .pairing_page(&alpha_key)
+            .await
+            .expect_err("a stale prompt with appended text is not ours")
+            .to_string()
+            .contains("pairing_composer_occupied")
+    );
+    assert_eq!(
+        page_value(&a, "document.querySelector('textarea').value").await,
+        stale_with_note
+    );
+    page_value(&a, "document.querySelector('textarea').value=''").await;
     page_value(
         &a,
         "document.querySelector('textarea').value='Keep my private draft'",
