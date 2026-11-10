@@ -89,7 +89,10 @@ impl Fixture {
         )
     }
     fn source(&self, text: &str) -> String {
-        self.call("send", json!({"to":["@hark"],"text":text}))["event"]["id"]
+        self.call(
+            "send",
+            json!({"to":["@hark"],"text":text,"message_mode":"send"}),
+        )["event"]["id"]
             .as_str()
             .expect("source event")
             .into()
@@ -156,7 +159,7 @@ fn execution_can_dispatch_to_a_named_actor_without_browser() {
     let claimed = f.poll();
     let sent = f.call(
         "send",
-        json!({"by":"hark","to":["@hhdot"],"text":"Please implement the plan.",
+        json!({"by":"hark","to":["@hhdot"],"text":"Please implement the plan.","message_mode":"send","insight":"Implement the reviewed plan.",
         "_cccc_web_binding":f.execution(&claimed,"cccc_message_send")}),
     );
     assert_eq!(sent["event"]["by"], "hark");
@@ -245,6 +248,9 @@ fn concurrent_polls_claim_once() {
 fn stopped_actor_or_group_never_claims() {
     let f = Fixture::new();
     let source = f.source("wait until started");
+    // An explicit owner Send wakes its target; stop after queuing to test
+    // that a subsequent scheduled poll respects the stopped state.
+    f.call("actor_stop", json!({}));
     assert_eq!(f.poll()["status"], "stopped");
     assert!(
         super::super::runtime_delivery::latest_state(&f.home, &f.group.group_id, "hark", &source)
