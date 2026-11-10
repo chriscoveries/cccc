@@ -226,7 +226,7 @@ jobs:
 
   rust-linux:
     needs: web
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -291,6 +291,13 @@ jobs:
             live_claude_empty_session_resumes_without_a_prompt -- --test-threads=1
           cargo test --workspace --lib --locked \
             live_kilo -- --test-threads=1
+
+      - name: Upload Linux candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: managed-stop-linux
+          path: target/debug/cccc
+          if-no-files-found: error
 
   ci-required:
     if: always()

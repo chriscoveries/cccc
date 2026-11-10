@@ -1,0 +1,37 @@
+{
+  "reader_stops": [
+    {
+      "kind": "actor.stop",
+      "data": {
+        "exit_code": null,
+        "reason": "process_exit",
+        "source": "managed_reader"
+      }
+    },
+    {
+      "kind": "actor.stop",
+      "data": {
+        "exit_code": null,
+        "reason": "process_exit",
+        "source": "managed_reader"
+      }
+    },
+    {
+      "kind": "actor.stop",
+      "data": {
+        "exit_code": null,
+        "reason": "process_exit",
+        "source": "managed_reader"
+      }
+    }
+  ],
+  "runtime_stop": {
+    "kind": "actor.stop",
+    "data": {
+      "exit_code": 0,
+      "exit_detail": "Success",
+      "reason": "process_exit",
+      "source": "runtime"
+    }
+  }
+}

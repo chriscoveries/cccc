@@ -58,14 +58,17 @@ fn reconcile_one(store: &GroupStore, status: SessionStatus) -> Result<(), OpErro
         status.exit_code,
         status.exit_detail.as_deref(),
         "runtime",
+        "process_exit",
     )
 }
 
-pub(crate) fn record_process_exit(
+pub(crate) fn record_managed_stop(
     home: &HomeLayout,
     group_id: &str,
     actor_id: &str,
     exit_code: Option<u32>,
+    exit_detail: Option<&str>,
+    reason: &str,
 ) -> Result<(), OpError> {
     let store = GroupStore::new(home.clone()).map_err(OpError::io)?;
     let Ok(group) = store.load(group_id) else {
@@ -81,8 +84,9 @@ pub(crate) fn record_process_exit(
         group_id,
         actor_id,
         exit_code,
-        None,
+        exit_detail,
         "managed_reader",
+        reason,
     )
 }
 
@@ -93,12 +97,13 @@ fn append_exit_event(
     exit_code: Option<u32>,
     exit_detail: Option<&str>,
     source: &str,
+    reason: &str,
 ) -> Result<(), OpError> {
     let mut event = Event::new("actor.stop", group_id);
     event.by = "system".into();
     let mut data = serde_json::json!({
         "actor_id": actor_id,
-        "reason": "process_exit",
+        "reason": reason,
         "exit_code": exit_code,
         "source": source,
     })

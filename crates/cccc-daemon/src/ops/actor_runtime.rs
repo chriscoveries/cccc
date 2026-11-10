@@ -28,7 +28,7 @@ pub(crate) use owner::{
     hold_group_browser_work,
 };
 pub use persistence::persist_lifecycle;
-pub(crate) use reconcile::record_process_exit;
+pub(crate) use reconcile::record_managed_stop;
 pub use reconcile::{reap_exited, reconcile_exited};
 pub(crate) use workspace::LaunchWorkspace;
 pub(super) use workspace::{caller_scope, displayed_scope, effective_scope, session_prompt};
