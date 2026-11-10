@@ -403,7 +403,7 @@ mod tests {
             "http://chatgpt.com/c/WEB:pending",
             "https://chatgpt.com.example/c/WEB:pending",
             "https://other.chatgpt.com/c/WEB:pending",
-            "https://user@chatgpt.com/c/WEB:pending",
+            "https://~@chatgpt.com/c/WEB:pending",
             "https://chatgpt.com:8443/c/WEB:pending",
             "about:blank",
         ] {
