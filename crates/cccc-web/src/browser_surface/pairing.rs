@@ -32,7 +32,13 @@ impl BrowserSurfaces {
         };
         let readiness = self.prompt_readiness(key).await?;
         if readiness["composer_chars"].as_u64().unwrap_or(0) > 0 {
-            bail!("pairing_composer_occupied");
+            // A draft left by an earlier pairing attempt is CCCC's own prompt:
+            // its code is already spent, so keeping it only wedges every later
+            // connect. Clear just that draft; any other text is a human's or
+            // another delivery's and still refuses.
+            if !clear_stale_pairing_draft(&target.page).await? {
+                bail!("pairing_composer_occupied");
+            }
         }
         if readiness["ready"] != true || readiness["running"] == true {
             bail!("pairing_browser_not_ready");
@@ -134,6 +140,38 @@ fn pending_new_chat_url(raw: &str) -> bool {
             })
     })
 }
+
+/// Clear the composer only when its whole draft is CCCC's own pairing prompt
+/// (the exact staged text, starting with the fixed instruction line and
+/// carrying a `wm_pair_` code). The stale code is already spent, so removing
+/// it loses nothing; any other draft still refuses with
+/// pairing_composer_occupied.
+async fn clear_stale_pairing_draft(page: &Page) -> Result<bool> {
+    let result = page
+        .evaluate(CLEAR_STALE_PAIRING_DRAFT_SCRIPT)
+        .await?
+        .into_value::<Value>()?;
+    Ok(result["cleared"] == true)
+}
+
+const CLEAR_STALE_PAIRING_DRAFT_SCRIPT: &str = r#"() => {
+  const el = document.querySelector('#prompt-textarea')
+    || document.querySelector('div[role="textbox"][contenteditable="true"]')
+    || document.querySelector('[contenteditable="true"]');
+  if (!el) return { cleared: false };
+  const text = (el.innerText || '').trim();
+  const own = text.startsWith('Connect this conversation to the Actor selected in CCCC')
+    && text.includes('temporary CCCC pairing code') && text.includes('wm_pair_');
+  if (!own) return { cleared: false };
+  el.focus();
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  sel.addRange(range);
+  document.execCommand('delete');
+  return { cleared: (el.innerText || '').trim().length === 0 };
+}"#;
 
 fn chatgpt_page_url(raw: &str) -> Option<reqwest::Url> {
     reqwest::Url::parse(raw).ok().filter(|url| {

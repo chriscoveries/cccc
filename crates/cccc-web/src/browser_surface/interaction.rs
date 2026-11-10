@@ -217,7 +217,11 @@ pub async fn serve_socket(
                 if matches!(message, Message::Close(_)) { break }
                 let Message::Text(text) = message else { continue };
                 let Ok(command) = serde_json::from_str::<Value>(&text) else { continue };
-                let command_id = command.get("id").and_then(Value::as_str).unwrap_or("");
+                // Any JSON id is echoed back verbatim; only a missing or empty
+                // id means the caller wants no command_result.
+                let command_id = command.get("id").cloned().unwrap_or(Value::Null);
+                let wants_result =
+                    !(command_id.is_null() || command_id.as_str().is_some_and(str::is_empty));
                 let Some(result) = until_shutdown(
                     &mut shutdown,
                     surfaces.command(key, &command),
@@ -226,13 +230,13 @@ pub async fn serve_socket(
                     break;
                 };
                 match result {
-                    Ok(()) if !command_id.is_empty() => {
+                    Ok(()) if wants_result => {
                         let _ = socket.send(Message::Text(
                             json!({"t":"command_result","id":command_id,"ok":true}).to_string().into(),
                         )).await;
                     }
                     Ok(()) => {}
-                    Err(error) if !command_id.is_empty() => {
+                    Err(error) if wants_result => {
                         let _ = socket.send(Message::Text(
                             json!({"t":"command_result","id":command_id,"ok":false,"message":error.to_string()}).to_string().into(),
                         )).await;
