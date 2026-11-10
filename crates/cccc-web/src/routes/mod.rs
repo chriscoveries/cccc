@@ -21,6 +21,7 @@ mod group_space;
 mod group_space_provider;
 mod group_workspace;
 mod groups;
+mod hark;
 mod headless;
 mod headless_store;
 mod im;
@@ -113,6 +114,7 @@ pub fn router() -> Router<AppState> {
         .merge(web_model_connectors::routes())
         .merge(web_model_dots::routes())
         .merge(grok_webhook::routes())
+        .merge(hark::routes())
         .merge(web_model_browser::routes())
         .merge(web_model_pairing::routes())
         .merge(web_model_shared_browser::routes())

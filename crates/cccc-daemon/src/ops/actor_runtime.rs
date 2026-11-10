@@ -58,9 +58,13 @@ pub fn apply(
     if matches!(kind, "actor.stop" | "actor.restart" | "actor.new_session") {
         super::dots_events::invalidate(home, group, actor_id)?;
         super::grok_webhook::invalidate(home, group, actor_id)?;
+        super::hark_pull::invalidate(home, group, actor_id)?;
     }
     if stored_actor.runtime.is_web_model()
-        && stored_actor.runtime != ActorRuntime::ChatgptDots
+        && !matches!(
+            stored_actor.runtime,
+            ActorRuntime::ChatgptDots | ActorRuntime::Hark
+        )
         && matches!(kind, "actor.stop" | "actor.restart" | "actor.new_session")
     {
         cccc_core::web_model_connectors::interrupt_automatic_pairings(
@@ -313,6 +317,7 @@ pub(super) fn stop_owner_confirmed(
     // credentials stop working here; cloud work already running does not.
     super::dots_events::invalidate(home, group, actor_id)?;
     super::grok_webhook::invalidate(home, group, actor_id)?;
+    super::hark_pull::invalidate(home, group, actor_id)?;
     cccc_core::web_model_connectors::interrupt_automatic_pairings(
         home,
         &group.group_id,
@@ -404,6 +409,7 @@ pub(crate) fn stop_all() -> Result<Vec<SessionStatus>, cccc_runtime::RuntimeErro
 pub fn stop_group(home: &HomeLayout, group: &GroupDoc) -> Result<Vec<SessionStatus>, OpError> {
     super::dots_events::invalidate_group(home, group)?;
     super::grok_webhook::invalidate_group(home, group)?;
+    super::hark_pull::invalidate_group(home, group)?;
     super::local_headless::stop_group(&group.group_id).map_err(OpError::io)?;
     super::deepseek_runtime::stop_group(&group.group_id);
     let mut stopped = Vec::new();

@@ -224,6 +224,17 @@ fn authorize_tool(
                 .map_err(|error| error.to_string())?,
         )
     };
+    if group.as_ref().is_some_and(|g| {
+        g.actors
+            .iter()
+            .any(|a| a.id == actor_id && a.runtime.wire_name() == "hark")
+    }) && !cccc_core::hark_tool_allowed(name)
+    {
+        return Err(
+            "hark_tool_unavailable: workspace execution and file tools are not available to Hark"
+                .into(),
+        );
+    }
     if let Some(group) = group.as_ref()
         && group
             .actors
