@@ -1040,7 +1040,7 @@ async fn hark_claims_without_metadata_sends_replies_and_never_replays() {
         let rejected = f.call(name, args, json!({})).await;
         assert_eq!(rejected["result"]["isError"], true, "{rejected}");
     }
-    let sent = f.call("cccc_message_send",json!({"actor_token":token,"to":["beta"],"text":"Named actor dispatch","mode":"send","by":"user","actor_id":"beta"}),json!({})).await;
+    let sent = f.call("cccc_message_send",json!({"actor_token":token,"to":["beta"],"text":"Named actor dispatch","insight":"Delegate this synthetic task to beta.","mode":"send","by":"user","actor_id":"beta"}),json!({})).await;
     assert_ne!(sent["result"]["isError"], true, "{sent}");
     let replied = f
         .call(
