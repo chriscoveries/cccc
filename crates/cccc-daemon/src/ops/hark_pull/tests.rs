@@ -417,3 +417,213 @@ fn execution_credentials_do_not_enter_public_ledger_or_status() {
             .contains(token)
     );
 }
+
+impl Fixture {
+    fn age_execution(&self) {
+        private::change(
+            &self.home,
+            &self.id,
+            &self.group.group_id,
+            "hark",
+            |_, s| {
+                s["execution"]["claimed_at"] = json!("2000-01-01T00:00:00Z");
+                Ok(())
+            },
+        )
+        .expect("age isolated execution");
+    }
+}
+
+#[test]
+fn expired_hark_lease_fences_zombies_and_claims_only_new_work() {
+    let f = Fixture::new();
+    f.start();
+    let old_source = f.source("abandoned work with uncertain side effects");
+    let first = f.poll();
+    let old_binding = f.execution(&first, "cccc_message_send");
+    let busy = f.poll();
+    assert_eq!(busy["reason_code"], "hark_turn_unfinished");
+    assert!(busy["active_turn_elapsed_seconds"].is_u64());
+    f.age_execution();
+    let new_source = f.source("independent new work");
+    let claimed = f.poll();
+    assert_eq!(claimed["status"], "work_available");
+    assert_eq!(claimed["reason_code"], "hark_turn_lease_expired");
+    assert_eq!(claimed["previous_turn_id"], first["turn"]["turn_id"]);
+    assert_eq!(claimed["turn"]["event_ids"], json!([new_source]));
+    assert!(store::validate_binding(&f.home, &old_binding).is_err());
+    for tool in ["cccc_message_send", "cccc_runtime_complete_turn"] {
+        assert!(
+            private::resolve(
+                &f.private(),
+                first["actor_token"].as_str().expect("token"),
+                tool
+            )
+            .is_none()
+        );
+    }
+    let status = f.call("hark_pull_status", json!({}));
+    assert_eq!(status["last_execution"]["status"], "expired");
+    assert_eq!(status["active_turn_id"], claimed["turn"]["turn_id"]);
+    assert_ne!(
+        super::super::runtime_delivery::latest_state(
+            &f.home,
+            &f.group.group_id,
+            "hark",
+            &old_source
+        )
+        .expect("state")
+        .expect("delivery")
+        .0,
+        "claimed"
+    );
+    assert_eq!(f.complete(&claimed)["status"], "done");
+    assert_eq!(f.poll()["status"], "idle");
+    assert_eq!(
+        f.ledger()
+            .iter()
+            .filter(|e| e.kind == "runtime.turn.completed"
+                && e.data["turn_id"] == first["turn"]["turn_id"])
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn hark_status_reports_pending_age_without_claiming_or_expiring() {
+    let f = Fixture::new();
+    f.start();
+    let empty = f.call("hark_pull_status", json!({}));
+    assert_eq!(empty["pending_count"], 0);
+    assert!(empty["oldest_pending_age"].is_null());
+    f.source("queued");
+    let before = f.ledger().len();
+    let pending = f.call("hark_pull_status", json!({}));
+    assert_eq!(pending["pending_count"], 1);
+    assert!(pending["oldest_pending_age"].is_u64());
+    assert!(pending["active_turn_id"].as_str().unwrap_or("").is_empty());
+    assert_eq!(f.ledger().len(), before);
+    let first = f.poll();
+    f.age_execution();
+    let before = f.ledger().len();
+    let status = f.call("hark_pull_status", json!({}));
+    assert_eq!(status["active_turn_id"], first["turn"]["turn_id"]);
+    assert_eq!(status["pending_count"], 0);
+    assert!(status["oldest_pending_age"].is_null());
+    assert_eq!(f.ledger().len(), before);
+    let expired = f.poll();
+    assert_eq!(expired["status"], "idle");
+    assert_eq!(expired["reason_code"], "hark_turn_lease_expired");
+    assert!(expired["actor_token"].is_null());
+}
+
+#[test]
+fn stopped_hark_does_not_expire_a_lease_until_started() {
+    let f = Fixture::new();
+    f.start();
+    f.source("stopped work");
+    let first = f.poll();
+    f.call("actor_stop", json!({}));
+    f.age_execution();
+    assert_eq!(f.poll()["status"], "turn_in_progress");
+    assert_eq!(
+        f.call("hark_pull_status", json!({}))["active_turn_id"],
+        first["turn"]["turn_id"]
+    );
+    f.start();
+    assert_eq!(f.poll()["reason_code"], "hark_turn_lease_expired");
+}
+
+#[test]
+fn hark_lease_recovers_lost_projection_and_committed_receipts() {
+    for outcome in [None, Some("done"), Some("expired")] {
+        let f = Fixture::new();
+        f.start();
+        let source = f.source("crash recovery");
+        let first = f.poll();
+        let turn = first["turn"]["turn_id"].as_str().expect("turn");
+        if let Some(status) = outcome {
+            super::super::runtime_completion::append(
+                &f.home,
+                &f.group.group_id,
+                "hark",
+                &super::super::runtime_completion::Completion {
+                    turn_id: turn.into(),
+                    event_ids: vec![source],
+                    status: status.into(),
+                    delivery_id: format!("runtime:{turn}"),
+                },
+            )
+            .expect("receipt survived crash");
+        }
+        private::change(&f.home, &f.id, &f.group.group_id, "hark", |_, s| {
+            s["execution"] = Value::Null;
+            Ok(())
+        })
+        .expect("lost projection");
+        let groups = GroupStore::new(f.home.clone()).expect("groups");
+        cccc_core::integration_state::group_update(
+            &groups,
+            &f.group.group_id,
+            "runtime_states",
+            |states| {
+                states["hark"]["updated_at"] = json!("2000-01-01T00:00:00Z");
+                Ok(())
+            },
+        )
+        .expect("age canonical ownership");
+        let recovered = f.poll();
+        assert_eq!(recovered["status"], "idle");
+        assert_eq!(recovered["reason_code"], "hark_turn_lease_expired");
+        assert_eq!(
+            f.call("hark_pull_status", json!({}))["last_execution"]["status"],
+            outcome.unwrap_or("expired")
+        );
+        assert_eq!(
+            f.ledger()
+                .iter()
+                .filter(|e| e.kind == "runtime.turn.completed" && e.data["turn_id"] == turn)
+                .count(),
+            1
+        );
+        assert_eq!(f.poll()["status"], "idle");
+    }
+}
+
+#[test]
+fn hark_lease_preserves_completion_after_canonical_clear_but_private_write_crash() {
+    let f = Fixture::new();
+    f.start();
+    let source = f.source("completed work with stale private execution");
+    let first = f.poll();
+    let turn = first["turn"]["turn_id"].as_str().expect("turn");
+    super::super::runtime_completion::append(
+        &f.home,
+        &f.group.group_id,
+        "hark",
+        &super::super::runtime_completion::Completion {
+            turn_id: turn.into(),
+            event_ids: vec![source],
+            status: "done".into(),
+            delivery_id: format!("runtime:{turn}"),
+        },
+    )
+    .expect("durable completion");
+    super::super::runtime_state::set_runtime_status(
+        &f.home,
+        &f.group,
+        "hark",
+        "waiting",
+        "",
+        "",
+        &[],
+    )
+    .expect("cleared canonical ownership");
+    f.age_execution();
+    assert_eq!(f.poll()["reason_code"], "hark_turn_lease_expired");
+    assert_eq!(
+        f.call("hark_pull_status", json!({}))["last_execution"]["status"],
+        "done"
+    );
+    assert_eq!(f.poll()["status"], "idle");
+}

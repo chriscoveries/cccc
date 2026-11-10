@@ -503,6 +503,22 @@ pub(super) fn pending_deliveries(
         snapshot.events(&projection.deliveries.pending(group, actor, limit))
     })
 }
+pub(super) fn pending_delivery_summary(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &str,
+) -> io::Result<PendingDeliverySummary> {
+    let state = load_raw(home, &group.group_id)?;
+    with_projection_policy(
+        home,
+        group,
+        &[],
+        &state,
+        CursorPolicy::Summary,
+        |projection, _, _| Ok(projection.deliveries.pending_summary(group, actor)),
+    )
+}
+
 pub(super) fn delivery_states(
     home: &HomeLayout,
     group: &GroupDoc,

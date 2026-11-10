@@ -18,6 +18,7 @@ pub(super) struct DeliveryState {
 }
 struct Source {
     id: String,
+    ts: String,
     position: usize,
     location: Location,
     recipients: Vec<usize>,
@@ -109,6 +110,7 @@ impl DeliveryState {
             if !recipients.is_empty() {
                 self.sources.push(Source {
                     id: event.id.clone(),
+                    ts: event.ts.clone(),
                     position,
                     location,
                     recipients,
@@ -179,15 +181,18 @@ impl DeliveryState {
             .and_then(|states| states.get(source))
             .map(|state| (state.state.clone(), state.transport.clone()))
     }
-    pub fn pending(&self, group: &GroupDoc, actor: &str, limit: usize) -> Vec<Location> {
-        let Some(actor_index) = self.actors.get(actor) else {
-            return Vec::new();
-        };
+    fn pending_sources<'a>(
+        &'a self,
+        group: &GroupDoc,
+        actor: &str,
+    ) -> impl Iterator<Item = &'a Source> {
+        let actor_index = self.actors.get(actor).copied();
         let external_session =
             find(group, actor).is_some_and(|actor| !actor.external_session_id.is_empty());
         let states = self.latest.get(actor);
         let generation = self.generations.get(actor).copied();
-        let current = |position: usize| generation.is_none_or(|generation| position > generation);
+        let current =
+            move |position: usize| generation.is_none_or(|generation| position > generation);
         let watermark = self
             .reads
             .get(actor)
@@ -203,8 +208,11 @@ impl DeliveryState {
             .max();
         self.sources
             .iter()
-            .filter(|source| current(source.position) && source.recipients.contains(actor_index))
-            .filter(|source| {
+            .filter(move |source| {
+                current(source.position)
+                    && actor_index.is_some_and(|index| source.recipients.contains(&index))
+            })
+            .filter(move |source| {
                 let (state, retryable) = states
                     .and_then(|states| states.get(&source.id))
                     .and_then(|state| state.pending.as_ref())
@@ -230,8 +238,95 @@ impl DeliveryState {
                 }
                 true
             })
+    }
+    pub fn pending(&self, group: &GroupDoc, actor: &str, limit: usize) -> Vec<Location> {
+        self.pending_sources(group, actor)
             .take(limit.max(1))
             .map(|source| source.location)
             .collect()
+    }
+    pub fn pending_summary(&self, group: &GroupDoc, actor: &str) -> PendingDeliverySummary {
+        let now = Utc::now();
+        let mut count = 0;
+        let mut oldest = None;
+        let mut unknown_age = false;
+        for source in self.pending_sources(group, actor) {
+            count += 1;
+            match DateTime::parse_from_rfc3339(&source.ts) {
+                Ok(created) if created <= now => {
+                    let age = now.signed_duration_since(created).num_seconds() as u64;
+                    oldest = Some(oldest.map_or(age, |previous: u64| previous.max(age)));
+                }
+                _ => unknown_age = true,
+            }
+        }
+        PendingDeliverySummary {
+            count,
+            oldest_age_seconds: if unknown_age { None } else { oldest },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cccc_contracts::Actor;
+
+    #[test]
+    fn delivery_summary_is_uncapped_and_matches_pending_filters() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home).expect("store");
+        let mut group = store.create("delivery summary", "").expect("group");
+        group.actors.push(Actor::new("hark"));
+        let mut state = DeliveryState::default();
+        for index in 0..10_005 {
+            let mut event = Event::new("chat.message", &group.group_id);
+            event.id = format!("source-{index}");
+            event.by = "user".into();
+            event.ts = "2020-01-01T00:00:00Z".into();
+            event.data = json!({"to":["hark"],"message_mode":"send"})
+                .as_object()
+                .expect("data")
+                .clone();
+            state.note(
+                &group,
+                &event,
+                Location {
+                    source: 0,
+                    offset: index as u64,
+                    end: index as u64 + 1,
+                },
+            );
+        }
+        for (index, outcome) in ["accepted", "ambiguous", "withdrawn", "claimed", "failed"]
+            .iter()
+            .enumerate()
+        {
+            let mut event = Event::new("runtime.delivery", &group.group_id);
+            event.data = json!({"actor_id":"hark","source_event_id":format!("source-{index}"),"state":outcome}).as_object().expect("data").clone();
+            state.note(
+                &group,
+                &event,
+                Location {
+                    source: 0,
+                    offset: 20_000,
+                    end: 20_001,
+                },
+            );
+        }
+        let summary = state.pending_summary(&group, "hark");
+        assert_eq!(summary.count, 10_002);
+        assert_eq!(
+            summary.count,
+            state.pending(&group, "hark", usize::MAX).len()
+        );
+        assert!(summary.oldest_age_seconds.expect("age") > 86_400);
+        assert_eq!(state.pending_summary(&group, "absent").count, 0);
+        state.sources[10].ts = "invalid".into();
+        assert_eq!(
+            state.pending_summary(&group, "hark").oldest_age_seconds,
+            None
+        );
     }
 }

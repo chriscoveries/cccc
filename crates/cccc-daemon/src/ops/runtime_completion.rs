@@ -99,7 +99,7 @@ pub(super) fn committed(
     if !matches(&event, actor_id, &completion)
         || !matches!(
             completion.status.as_str(),
-            "done" | "partial" | "failed" | "cancelled"
+            "done" | "partial" | "failed" | "cancelled" | "expired"
         )
         || completion.delivery_id.is_empty()
     {

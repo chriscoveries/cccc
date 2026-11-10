@@ -86,6 +86,7 @@ mod runtime_mcp;
 pub(crate) mod runtime_restore;
 mod runtime_session;
 mod runtime_state;
+mod runtime_turn_lease;
 mod settings;
 mod task_list;
 mod terminal;

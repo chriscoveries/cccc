@@ -68,6 +68,22 @@ pub fn pending_deliveries(
     projection::pending_deliveries(home, group, actor, limit)
 }
 
+/// Exact pending runtime count and age in seconds, with no message bodies.
+/// Unknown, future or absent timestamps produce an unknown age, not zero.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PendingDeliverySummary {
+    pub count: usize,
+    pub oldest_age_seconds: Option<u64>,
+}
+
+pub fn pending_delivery_summary(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &str,
+) -> io::Result<PendingDeliverySummary> {
+    projection::pending_delivery_summary(home, group, actor)
+}
+
 /// Latest delivery state and transport, preserving legacy claim semantics.
 pub fn delivery_states(
     home: &HomeLayout,
@@ -943,6 +959,51 @@ mod tests {
         })
         .expect("read ledger");
         assert_eq!(read_count, 1);
+    }
+
+    #[test]
+    fn delivery_summary_warm_reads_decode_no_payloads_and_do_not_consume_mail() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store
+            .create("payload-free delivery summary", "")
+            .expect("group");
+        group.actors.push(Actor::new("peer1"));
+        store.save(&group).expect("save");
+        let path = store.ledger_path(&group.group_id).expect("ledger");
+        for mode in ["send", "mail"] {
+            let mut event = Event::new("chat.message", &group.group_id);
+            event.by = "user".into();
+            event.ts = "2020-01-01T00:00:00Z".into();
+            event.data = json!({"to":["peer1"],"message_mode":mode,"text":"x".repeat(100_000)})
+                .as_object()
+                .expect("data")
+                .clone();
+            ledger::append(&path, &event).expect("append");
+        }
+        crate::ledger_index::invalidate_path(&path);
+        let summary = pending_delivery_summary(&home, &group, "peer1").expect("cold summary");
+        assert_eq!(summary.count, 1);
+        assert!(summary.oldest_age_seconds.expect("age") > 86_400);
+        let decoded = crate::ledger::snapshot::decoded_records();
+        let bytes = std::fs::read(&path).expect("ledger bytes");
+        for _ in 0..5 {
+            assert_eq!(
+                pending_delivery_summary(&home, &group, "peer1")
+                    .expect("warm summary")
+                    .count,
+                1
+            );
+        }
+        assert_eq!(crate::ledger::snapshot::decoded_records(), decoded);
+        assert!(!crate::ledger_index::is_cached(&path));
+        assert_eq!(std::fs::read(&path).expect("unchanged ledger"), bytes);
+        assert!(
+            cursor(&home, &group.group_id, "peer1")
+                .expect("cursor")
+                .is_none()
+        );
     }
 
     #[test]

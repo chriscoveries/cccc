@@ -105,7 +105,7 @@ fn configure(home: &HomeLayout, r: &DaemonRequest) -> OpResult {
             .ok_or_else(|| OpError::new("invalid_argument", "rotate must be a boolean"))?,
     };
     // Rotation retires remote authority but deliberately retains the canonical
-    // unfinished turn. Only explicit resolution may clear that turn.
+    // unfinished turn. Resolution or a later active lease-expiry poll clears it.
     object(
         private::configure(
             home,
@@ -146,7 +146,8 @@ fn status(home: &HomeLayout, r: &DaemonRequest) -> OpResult {
     let unfinished = runtime["active_turn_id"]
         .as_str()
         .is_some_and(|id| !id.is_empty());
-    let pending = super::runtime_delivery::pending_sources(home, &g, &a, 10_000)?.len();
+    let pending =
+        cccc_core::inbox::pending_delivery_summary(home, &g, &a.id).map_err(OpError::io)?;
     let phase = if unfinished {
         if active(&g, &a)
             && s["execution"]["state"] == "active"
@@ -160,14 +161,15 @@ fn status(home: &HomeLayout, r: &DaemonRequest) -> OpResult {
         "unconfigured"
     } else if !active(&g, &a) {
         "stopped"
-    } else if pending > 0 {
+    } else if pending.count > 0 {
         "pending"
     } else {
         "idle"
     };
     object(
         json!({"group_id":g.group_id,"actor_id":a.id,"connector_id":c["connector_id"],
-        "configured":!c.is_null(),"enabled":a.enabled,"phase":phase,"pending_count":pending,
+        "configured":!c.is_null(),"enabled":a.enabled,"phase":phase,"pending_count":pending.count,
+        "oldest_pending_age":pending.oldest_age_seconds,
         "last_poll_at":s["last_poll_at"],"last_poll_status":s["last_poll_status"],
         "last_claim_at":s["last_claim_at"],"reason_code":s["reason_code"],
         "active_turn_id":runtime["active_turn_id"],"active_event_ids":runtime["active_event_ids"],
@@ -209,12 +211,34 @@ fn claim(home: &HomeLayout, r: &DaemonRequest) -> OpResult {
         s["last_poll_at"] = json!(cccc_contracts::utc_now());
         let runtime = super::runtime_state::actor_state(home, &g.group_id, &a.id)
             .map_err(|_| std::io::Error::other("runtime_unavailable"))?;
-        let unfinished = runtime["active_turn_id"].as_str().is_some_and(|id| !id.is_empty())
+        let mut unfinished = runtime["active_turn_id"].as_str().is_some_and(|id| !id.is_empty())
             || s["execution"]["state"] == "active";
+        let elapsed = super::runtime_turn_lease::elapsed_seconds(&runtime, &s["execution"]);
+        let expired = unfinished && active(&g, &a)
+            && elapsed.is_some_and(|age| age >= super::runtime_turn_lease::TURN_LEASE_SECONDS);
+        if expired {
+            let status = super::runtime_turn_lease::expire(home, &g, &a, &runtime, &s["execution"],
+                "Hark turn lease expired; review side effects before explicit redelivery")
+                .map_err(|_| std::io::Error::other("hark_expire_failed"))?;
+            let mut last = s["execution"].clone();
+            if !last.is_object() || (runtime["active_turn_id"].as_str().is_some_and(|id| !id.is_empty())
+                && last["turn_id"] != runtime["active_turn_id"]) {
+                last = json!({"turn_id":runtime["active_turn_id"],"event_ids":runtime["active_event_ids"]});
+            }
+            last["state"] = json!("completed");
+            last["status"] = json!(status);
+            last["completed_at"] = json!(cccc_contracts::utc_now());
+            s["last_execution"] = last;
+            s["execution"] = Value::Null;
+            // Fence both late business calls and zombie completion retries.
+            // Never mint a new credential for the expired input batch.
+            s["epoch"] = json!(uuid::Uuid::new_v4().to_string());
+            unfinished = false;
+        }
         let mut result = if unfinished {
             json!({"status":"turn_in_progress","turn":null,"active_turn_id":runtime["active_turn_id"],
-                "event_ids":runtime["active_event_ids"],"reason_code":"hark_turn_unfinished",
-                "instructions":"An unfinished turn is visible in Hark status. Finish it with its original execution credential, or have the owner explicitly resolve it. Never replay it from a poll."})
+                "event_ids":runtime["active_event_ids"],"active_turn_elapsed_seconds":elapsed,"reason_code":"hark_turn_unfinished",
+                "instructions":"An unfinished turn is visible in Hark status. Finish it with its original execution credential, or have the owner explicitly resolve it. After the 30-minute lease, an active poll can retire it without replaying its inputs."})
         } else if !active(&g, &a) {
             json!({"status":"stopped","turn":null,"reason_code":"hark_actor_stopped"})
         } else {
@@ -237,6 +261,10 @@ fn claim(home: &HomeLayout, r: &DaemonRequest) -> OpResult {
             result["reason_code"] = json!("hark_no_work");
             // The hosted scheduler decides cadence; a poll never long-holds.
             result["suggested_retry_after_ms"] = json!(600_000);
+        }
+        if expired {
+            result["previous_turn_id"] = s["last_execution"]["turn_id"].clone();
+            result["reason_code"] = json!("hark_turn_lease_expired");
         }
         s["last_poll_status"] = result["status"].clone();
         s["reason_code"] = result["reason_code"].clone();

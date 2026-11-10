@@ -111,7 +111,7 @@ pub(super) fn extend_catalog(response: &mut Value) {
                 .push(json!("actor_token"));
         }
     }
-    tools.push(json!({"name":"cccc_connector_status","description":"Read this Hark actor's connection and unfinished-turn status. Uses the fixed connector route; does not claim or execute work.",
+    tools.push(json!({"name":"cccc_connector_status","description":"Read this Hark actor's connection, pending_count, oldest_pending_age (seconds, null if empty or unknown), and unfinished-turn status. Uses the fixed connector route; does not claim, expire, or execute work.",
         "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
         "annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}));
 }

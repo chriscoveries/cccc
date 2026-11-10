@@ -560,8 +560,12 @@ CCCC does not create or run that schedule for Hark.
    task instructions or source control.
 4. Register the returned MCP endpoint in Hark with Streamable HTTP transport.
    Prefer `/mcp/web-model/<connector_id>` with `Authorization: Bearer <secret>`
-   supplied from its vault. If the client cannot send that header, use the
-   once-shown private URL ending in `/token/<secret>` from the same vault. The
+   supplied from its vault. If the client cannot send that header, or injects
+   an unrelated CCCC admin bearer automatically, use the once-shown private URL
+   `/mcp/web-model/<connector_id>/token/<secret>` from the same vault. This route
+   authenticates the connector from the path, even when a different bearer is
+   present. The admin bearer alone is not a Hark connector credential. Do not
+   use a `?token=` query as a workaround: the header takes precedence there. The
    angle-bracket values here are placeholders, not working credentials. Hark
    does not need ChatGPT host metadata or a Dots pairing code. Existing ChatGPT
    and Grok connector credentials cannot be reused as a Hark connector.
@@ -605,8 +609,9 @@ On each tick:
    delayed Inbox delivery is intended.
 6. Call `cccc_runtime_complete_turn` with that execution `actor_token`, the
    claimed `turn_id`, the exact ordered `event_ids`, and an accurate `status`
-   (`done`, `partial`, `failed` or `cancelled`). A reply alone does not complete
-   the turn. If the completion response is uncertain, retry that same completion
+   (`done`, `partial`, `failed` or `cancelled`). Always reply before completing:
+   completion retires business-tool authority, so a later reply is rejected.
+   A reply alone does not complete the turn. If the completion response is uncertain, retry that same completion
    with unchanged turn, events and status; do not claim again or resend replies.
    Discard temporary execution context after confirmed completion.
 
@@ -628,6 +633,21 @@ records `claimed`, then `accepted`, `failed` or `ambiguous`; acceptance means th
 task was handed off, not that Hark finished it. An interrupted or uncertain turn
 remains visible and is never silently replayed by the next tick or a restart.
 
+A claimed turn has a **30-minute lease**, using the same abandonment policy as
+Dots. On the next poll while the agent and Group are active, a lease older than
+30 minutes is retired: CCCC preserves any committed completion, otherwise
+records `expired`, clears turn ownership and invalidates the old execution
+credential. New queued work can be claimed in that same poll. Status-only reads
+and polls while stopped do not expire work. Missing or invalid clocks do not
+prove a lease expired; use explicit resolution if no reliable age is available.
+
+This is recovery of queue progress, **not automatic redelivery**. CCCC cannot know
+whether the interrupted run already sent messages or performed external actions.
+Its old inputs remain accepted or ambiguous and are excluded from later polls.
+Review the original turn and side effects before sending a new explicit task.
+Expiry does not stop Hark cloud work; a late run's CCCC calls are rejected, but
+it may already have acted elsewhere. Finish or hand off work within the lease.
+
 Keep the original successful claim result for the duration of the run. If a
 local variable is lost, the same execution may use that original result to fill
 its tool arguments. Do not claim again, recover credentials from earlier runs or
@@ -646,7 +666,7 @@ Rotate a connector if its private connection information was exposed; replace
 Hark's vault entry with the newly shown value. Revoke it when disconnecting the
 agent, and disable Hark's saved schedule separately. Rotation retires the old
 execution authority but keeps any unfinished turn visible for explicit
-resolution; revocation blocks the connector entirely. Old, wrong, rotated or
+resolution or lease expiry on a later active poll; revocation blocks the connector entirely. Old, wrong, rotated or
 revoked credentials fail closed with a reason code; changing selector arguments
 cannot repair them.
 
@@ -654,15 +674,24 @@ cannot repair them.
 
 Open the saved agent's **Hark (pull)** panel to check connection status, pending
 work, the active turn, last poll, last claim and reason code. Hark can also call
-`cccc_connector_status` with `{}` without claiming a task. A recent successful
-poll proves connectivity, not task completion. The canonical completion receipt
+`cccc_connector_status` with `{}` without claiming a task. Its `pending_count`
+is an uncapped count of eligible runtime inputs, and `oldest_pending_age` is
+seconds since the oldest queued input, or `null` when empty or the age is unknown.
+These fields use payload-free delivery metadata, not a read or claim of the
+queued messages. Accepted active-turn inputs and ordinary unread Mail are not
+new pending work. A recent successful poll proves connectivity, not task completion. The canonical completion receipt
 is the authority for a finished turn.
 
 - `hark_no_work`: the poll found no queued work. Wait for the next scheduled tick.
 - `hark_turn_claimed`: the current run received a turn and its execution token.
 - `hark_actor_stopped`: start the intended agent and Group before polling again.
 - `hark_turn_unfinished`: finish the original execution or explicitly resolve it
-  after reviewing side effects. Another poll cannot resume it.
+  after reviewing side effects. Another poll cannot resume it; its response also
+  includes `active_turn_elapsed_seconds` when known.
+- `hark_turn_lease_expired`: this poll retired the previous turn, identified by
+  `previous_turn_id`. Check `status`: `work_available` carries a fresh turn and
+  execution token, while `idle` has no new work. Inspect `last_execution` for the
+  preserved outcome. Do not retry the old inputs automatically.
 - `hark_credential_invalid` or `hark_connector_revoked`: check the current
   connection configuration and vault entry with the owner. Rotated credentials
   cannot be restored by retrying.

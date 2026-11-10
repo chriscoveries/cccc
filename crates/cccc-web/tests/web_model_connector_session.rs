@@ -1103,3 +1103,62 @@ async fn hark_claims_without_metadata_sends_replies_and_never_replays() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body.to_string().contains("hark_connector_revoked"));
 }
+
+#[tokio::test]
+async fn hark_path_token_overrides_an_unrelated_admin_bearer_without_claiming() {
+    let mut f = Fixture::new();
+    let groups = GroupStore::new(f.home.clone()).expect("groups");
+    let group = groups
+        .mutate(&f.group, |g| {
+            g.actors[0].runtime = ActorRuntime::Hark;
+            g.running = true;
+            g.state = cccc_contracts::GroupState::Active;
+            Ok(g.clone())
+        })
+        .expect("Hark actor");
+    let created = store::hark::configure(
+        &f.home,
+        &f.group,
+        "alpha",
+        &cccc_core::actors::generation_identity(&group.actors[0]),
+        false,
+    )
+    .expect("connector");
+    f.connector = created["connector"].clone();
+    f.secret = created["secret"].as_str().expect("secret").into();
+    let _daemon = start_daemon(&f.home).await;
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cccc_connector_status","arguments":{}}});
+    let (status, rejected) = f
+        .request(body.clone(), Some("unrelated-admin-bearer"), false)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{rejected}");
+    let response = cccc_web::app(f.home.clone())
+        .oneshot(
+            Request::post(format!(
+                "/mcp/web-model/{}/token/{}",
+                f.connector["connector_id"].as_str().expect("id"),
+                f.secret
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, "Bearer unrelated-admin-bearer")
+            .body(Body::from(body.to_string()))
+            .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("json");
+    let status = &result["result"]["structuredContent"];
+    assert_eq!(status["pending_count"], 0, "{result}");
+    assert!(status["oldest_pending_age"].is_null());
+    assert!(status["active_turn_id"].as_str().unwrap_or("").is_empty());
+    assert!(status["last_claim_at"].is_null());
+}
