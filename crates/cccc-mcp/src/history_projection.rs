@@ -75,16 +75,13 @@ pub(crate) fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::object;
     use serde_json::json;
 
     const TEXT: &str =
         "Check the dependency boundary before the local patch.\nKeep the API stable.";
     const INSIGHT: &str = "The boundary matters more than the patch.";
     const QUOTE: &str = "An earlier request that is longer than the eighty characters the delivery header keeps for its quote...";
-
-    fn object(value: Value) -> Map<String, Value> {
-        value.as_object().cloned().expect("object")
-    }
 
     fn exact() -> Map<String, Value> {
         object(json!({"group_id":"g_test","event_id":"e1"}))
