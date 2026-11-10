@@ -175,7 +175,7 @@
   },
   {
     "name": "cccc_message_send",
-    "description": "Start a new visible chat message. Default to mode=mail for agents. Use mode=send only when delayed awareness costs more than interrupting the recipient, and mode=request_reply only when a concrete reply is also required. Mail is agent-only; messages to user must use send or request_reply. One message may address user alone or one/more agents, never both; send separate messages for separate audience domains. Do not send routine noise. Do not use this to answer an existing delivered message/event; use cccc_message_reply with that event_id instead. Choose `to` deliberately; request_reply requires concrete recipients and @all should be rare. When the user's decision or information is needed, add a question so they answer it in place.",
+    "description": "Start a new visible chat message. Default to mode=mail for agents. Use mode=send only when delayed awareness costs more than interrupting the recipient, and mode=request_reply only when a concrete reply is also required. Mail is agent-only; messages to user must use send or request_reply. One message may address user alone or one/more agents, never both; send separate messages for separate audience domains. Do not send routine noise. Do not use this to answer an existing delivered message/event; use cccc_message_reply with that event_id instead. Choose `to` deliberately; request_reply requires concrete recipients and @all should be rare. When the user's decision or information is needed, add a question so they answer it in place. Recipient runtime limits apply: text longer than a recipient's capabilities.max_inbound_chars (see cccc_actor list) is rejected with reason code inbound_too_large rather than truncated — shorten or split the message.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -438,7 +438,7 @@
   },
   {
     "name": "cccc_message_reply",
-    "description": "Reply to a visible chat message by its current event_id. Defaults to Send; choose Mail only when the recipient is an agent and the reply may wait in Inbox without an immediate prompt. Replies to user must use Send. One reply may address user alone or one/more agents, never both. Either mode fulfills the original reply request. Use only for the thread you are answering; set `to` explicitly if the audience differs. For Connect, use the received local event_id; omit to to address the original participants. Routing comes from that event, without looking up or passing a remote Group ID. A reply cannot carry a question: when the user's decision or information is needed, send a new request_reply message to user with a question.",
+    "description": "Reply to a visible chat message by its current event_id. Defaults to Send; choose Mail only when the recipient is an agent and the reply may wait in Inbox without an immediate prompt. Replies to user must use Send. One reply may address user alone or one/more agents, never both. Either mode fulfills the original reply request. Use only for the thread you are answering; set `to` explicitly if the audience differs. For Connect, use the received local event_id; omit to to address the original participants. Routing comes from that event, without looking up or passing a remote Group ID. A reply cannot carry a question: when the user's decision or information is needed, send a new request_reply message to user with a question. Recipient runtime limits apply: a reply longer than a recipient's capabilities.max_inbound_chars (see cccc_actor list) is rejected with reason code inbound_too_large rather than truncated — send shorter numbered replies.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -639,7 +639,7 @@
   },
   {
     "name": "cccc_file_send",
-    "description": "Attach a file, or up to 10 files as one message, from your effective workspace (running managed launch, otherwise Actor default or Group active) to a CCCC message. Choose the human user alone or agent recipients, never both. Send prompts recipients; Mail stores agent Inbox mail without prompting. For a connected instance, provide both dst_instance_id and dst_group_id from cccc_connect. Returns the message/queue receipt; it does not confirm that a recipient has read the file. Use cccc_file to read files without sending them.",
+    "description": "Attach a file, or up to 10 files as one message, from your effective workspace (running managed launch, otherwise Actor default or Group active) to a CCCC message. Choose the human user alone or agent recipients, never both. Send prompts recipients; Mail stores agent Inbox mail without prompting. For a connected instance, provide both dst_instance_id and dst_group_id from cccc_connect. Returns the message/queue receipt; it does not confirm that a recipient has read the file. Use cccc_file to read files without sending them. Recipients whose runtime capabilities.attachments_out is false (for example web_model actors) cannot return files the same way; ask them for inline text or a workspace path instead.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1404,7 +1404,7 @@
   },
   {
     "name": "cccc_actor",
-    "description": "Actor operations: list/profile_list/add/remove/start/stop/restart. Actor creation follows the caller's allowed Runtime/Profile surface.",
+    "description": "Actor operations: list/profile_list/add/remove/start/stop/restart. Actor creation follows the caller's allowed Runtime/Profile surface. list reports each member's runtime `capabilities` (attachments_out, max_inbound_chars, max_reply_chars); check them before sizing messages or asking for file output — web_model actors cannot return attachments and reject oversized inbound text.",
     "inputSchema": {
       "type": "object",
       "properties": {

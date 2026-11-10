@@ -42,6 +42,11 @@ pub(super) fn list(
                     &actor.id,
                 ));
                 object.insert("running".into(), Value::Bool(status.running));
+                object.insert(
+                    "capabilities".into(),
+                    serde_json::to_value(actor.runtime.capabilities())
+                        .unwrap_or_else(|_| json!({})),
+                );
                 let actual = super::local_headless::structured_state(&group.group_id, &actor.id);
                 let retained_pty = cccc_runtime::status(&group.group_id, &actor.id)
                     .is_ok_and(|status| status.running);

@@ -41,6 +41,8 @@ pub fn group(home: &cccc_core::HomeLayout, group: GroupDoc) -> Value {
             for (item, actor) in items.iter_mut().zip(&group.actors) {
                 item["role"] = serde_json::to_value(actors::effective_role(&group, &actor.id))
                     .unwrap_or(Value::Null);
+                item["capabilities"] = serde_json::to_value(actor.runtime.capabilities())
+                    .unwrap_or_else(|_| json!({}));
                 let status = actor_runtime_status::resolve(home, &group, actor);
                 item["running"] = Value::Bool(status.running);
                 item["pid"] = status

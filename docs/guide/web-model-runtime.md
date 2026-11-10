@@ -253,6 +253,62 @@ Use this split to avoid duplicate or drifting instructions:
 - Shared agent behavior: `cccc_bootstrap`, `cccc_help`, agent notes, capability state, context, memory, and messaging rules.
 - Web transport behavior: do not pull a browser-injected batch again; do pull when operating in remote-MCP mode without an injected batch; visible communication must use CCCC MCP tools. Confirmed browser submission records accepted delivery, post-click uncertainty records ambiguous delivery, and neither is automatically redelivered. Definite pre-submit failure remains retryable. Runtime completion and Inbox reading remain separate operations.
 
+## Message size limits and capabilities
+
+Each actor's `capabilities` in `cccc actor list` (and `cccc_group` info) reports
+what its runtime transport can carry:
+
+```json
+{"attachments_out": false, "max_inbound_chars": 16000, "max_reply_chars": 8000}
+```
+
+- `attachments_out: false` — the web surface cannot attach a file to a reply.
+  The agent shares content inline or points peers at workspace files readable
+  through `cccc_file`. Other runtimes report `attachments_out: true`.
+- `max_inbound_chars: 16000` — the configured ceiling for one message's `text`
+  addressed to a `web_model` actor. A send or reply above it is rejected before
+  delivery with reason code `inbound_too_large` (details carry `to`,
+  `max_inbound_chars`, `text_chars`); it is never silently truncated. This
+  applies to direct recipients and to `@all`/`@peers` audiences that include a
+  `web_model` actor. Other runtimes publish no cap.
+- `max_reply_chars: 8000` — the guidance the actor's bootstrap seed gives it:
+  keep one `cccc_message_reply` under this size and split longer output into
+  numbered parts (Part 1/N, 2/N, …) sent as separate replies. It is guidance in
+  the seed, not a send-path rejection.
+
+The actor's own bootstrap seed states the same limits, so a `web_model` agent
+knows not to promise files and how to split long output.
+
+### Where the numbers come from
+
+- The browser delivery path stages the composed batch into the ChatGPT composer
+  through CDP `Input.insertText` (`browser_surface/prompt_submission.rs`); the
+  code sets no explicit composer cap, but the staged-draft recovery path caps a
+  coalesced turn at **24,000 chars** before appending a truncation marker
+  (`routes/web_model_delivery.rs`, `legacy_wmd_staged_prompt`). The configured
+  16,000-char inbound ceiling keeps one message plus the bootstrap seed and
+  batch markers comfortably under that staged-prompt ceiling. The empirical
+  evidence for a real composer limit is indirect: oversized staged drafts are
+  what the existing truncation was built to avoid; treat 24,000 as the proven
+  ceiling, not a measured ChatGPT constant.
+- MCP tool call arguments travel inside the daemon IPC request, which is capped
+  at **16 MiB** (`MAX_REQUEST_BYTES`, `server_connection.rs`) — far above any
+  message limit; argument size is not the constraint here.
+- `max_reply_chars` (8,000) is a configured convention: replies are delivered
+  through the MCP connector, not the composer, so no hard transport cap applies;
+  the value keeps replies readable and matches the split-into-numbered-parts
+  guidance in the seed.
+
+### Attachments
+
+A `web_model` actor can read files peers sent (attachment references arrive as
+text in the prompt and bytes are readable through `cccc_file`), but its replies
+cannot carry attachments out of the web surface. Closing that gap would need a
+reply-side artifact channel, for example a `cccc_message_reply` mode that
+uploads a workspace/blob path as the attachment, or a reply-with-gist/blob
+upload tool that produces a ledger-visible link peers can fetch. Neither is
+built; peers should not ask a `web_model` actor for file output.
+
 ## Smoke Test
 
 Check that the remote MCP endpoint is reachable:

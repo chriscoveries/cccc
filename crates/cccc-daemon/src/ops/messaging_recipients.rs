@@ -157,10 +157,66 @@ pub(super) fn normalize_chat_preflight_for_service_reply(
         }
     }
     data.insert("to".into(), json!(recipients));
+    enforce_inbound_limits(group, by, data)?;
     normalize_peer_insight(group, by, data)?;
     data.entry("format")
         .or_insert_with(|| Value::String("plain".into()));
     super::message_metadata::add_sender_snapshot(group, by, data);
+    Ok(())
+}
+
+/// A runtime-published inbound cap is a hard contract, not a preference:
+/// delivery stages `text` into the transport's composer, so an oversized send
+/// is rejected up front instead of being truncated downstream.
+fn enforce_inbound_limits(
+    group: &GroupDoc,
+    by: &str,
+    data: &Map<String, Value>,
+) -> Result<(), OpError> {
+    let text_chars = u64::try_from(
+        data.get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .count(),
+    )
+    .unwrap_or(u64::MAX);
+    if text_chars == 0 {
+        return Ok(());
+    }
+    let mut probe = Event::new("chat.message", &group.group_id);
+    probe.by = by.to_owned();
+    probe.data.insert(
+        "to".into(),
+        data.get("to").cloned().unwrap_or_else(|| json!([])),
+    );
+    for actor in actors::visible(group) {
+        let Some(max_inbound_chars) = actor.runtime.capabilities().max_inbound_chars else {
+            continue;
+        };
+        if text_chars <= u64::from(max_inbound_chars)
+            || !inbox::is_for_actor(group, &probe, &actor.id)
+        {
+            continue;
+        }
+        let mut error = OpError::new(
+            "inbound_too_large",
+            format!(
+                "text is {text_chars} chars; {actor} accepts at most {max_inbound_chars} inbound chars on its {runtime} transport — shorten or split the message",
+                actor = actor.id,
+                runtime = actor.runtime.wire_name(),
+            ),
+        );
+        error.details.insert("to".into(), json!([actor.id]));
+        error.details.insert(
+            "max_inbound_chars".into(),
+            Value::from(u64::from(max_inbound_chars)),
+        );
+        error
+            .details
+            .insert("text_chars".into(), Value::from(text_chars));
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -456,5 +512,58 @@ pub(super) fn default_recipient(group: &GroupDoc) -> &'static str {
         "@all"
     } else {
         "@foreman"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group_with_actor(runtime: &str) -> GroupDoc {
+        let mut group: GroupDoc = serde_json::from_value(json!({
+            "v":1,"group_id":"g_test","title":"t","topic":"",
+            "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"
+        }))
+        .expect("group");
+        group
+            .actors
+            .push(serde_json::from_value(json!({"id":"webby","runtime":runtime})).expect("actor"));
+        group
+    }
+
+    fn send_data(text: &str) -> Map<String, Value> {
+        serde_json::from_value(json!({
+            "to":["webby"],"text":text,"message_mode":"send"
+        }))
+        .expect("data")
+    }
+
+    #[test]
+    fn oversized_text_to_a_web_model_actor_is_rejected_not_truncated() {
+        let group = group_with_actor("web_model");
+        let mut over = send_data(&"x".repeat(16_001));
+        let error = normalize_chat_data(&group, "user", &mut over, false)
+            .expect_err("oversized send must fail");
+        assert_eq!(error.code, "inbound_too_large");
+        assert_eq!(error.details["to"], json!(["webby"]));
+        assert_eq!(error.details["max_inbound_chars"], json!(16_000));
+        assert_eq!(error.details["text_chars"], json!(16_001));
+
+        let mut fits = send_data(&"x".repeat(16_000));
+        normalize_chat_data(&group, "user", &mut fits, false)
+            .expect("a send at the limit still passes");
+
+        let codex_group = group_with_actor("codex");
+        let mut large = send_data(&"x".repeat(16_001));
+        normalize_chat_data(&codex_group, "user", &mut large, false)
+            .expect("runtimes without a cap accept any size");
+
+        let mut broadcast = serde_json::from_value(json!({
+            "to":["@all"],"text":"x".repeat(16_001),"message_mode":"send"
+        }))
+        .expect("data");
+        let error = normalize_chat_data(&group, "user", &mut broadcast, false)
+            .expect_err("broadcast reaching a web actor must fail too");
+        assert_eq!(error.code, "inbound_too_large");
     }
 }

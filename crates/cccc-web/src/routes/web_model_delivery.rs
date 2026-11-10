@@ -29,7 +29,7 @@ fn deferred_retry_delay(retries: u32) -> Option<std::time::Duration> {
     (retries < DEFERRED_MAX_AUTOMATIC_RETRIES).then(|| DEFERRED_RETRY_BASE * (1_u32 << retries))
 }
 
-const BOOTSTRAP_SEED_VERSION: &str = "web-model-bootstrap-normal-system-prompt-v2";
+const BOOTSTRAP_SEED_VERSION: &str = "web-model-bootstrap-normal-system-prompt-v3";
 const COMPATIBILITY_IMAGE_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAKUlEQVR42u3OIQEAAAACIP+f1hkWWEB6FgEBAQEBAQEBAQEBAQEBgXdgl/rw4tnPBf0AAAAASUVORK5CYII=";
 const COMPATIBILITY_IMAGE_NOTE: &str = "[CCCC] Compatibility attachment: the blank image is transport-only and carries no task context.";
 const WEB_TRANSPORT_NOTE: &str = "[CCCC] Web transport:\n\
@@ -39,6 +39,26 @@ const WEB_TRANSPORT_NOTE: &str = "[CCCC] Web transport:\n\
 - For non-trivial local development work, default to cccc_code_exec so repo reads, patches, tests, diffs, and reports stay in one focused Codex-style loop; use direct tools only for simple one-step actions.\n\
 - If CCCC MCP tools are not visible in the selected web model, you do not have CCCC local access in this chat; tell the user to switch to a supported session that can see the CCCC connector.\n\
 - Text typed only in this web chat is not delivered to CCCC users or peers.";
+
+/// The actor's own transport limits, built from the same contract peers see in
+/// `capabilities` so the seed and enforcement never drift apart.
+fn web_limits_note() -> String {
+    let capabilities = cccc_contracts::ActorRuntime::WebModel.capabilities();
+    let mut lines = vec![
+        "- Replies in this chat cannot carry files or attachments; never promise one — share content inline in your reply text or point peers at workspace files they can read with cccc_file.".to_owned(),
+    ];
+    if let Some(max) = capabilities.max_reply_chars {
+        lines.push(format!(
+            "- Keep each cccc_message_reply under {max} characters; split longer output into numbered parts (Part 1/N, 2/N, …) sent as separate replies."
+        ));
+    }
+    if let Some(max) = capabilities.max_inbound_chars {
+        lines.push(format!(
+            "- Prompts staged into this composer are limited to {max} characters; longer sends are rejected before delivery rather than truncated."
+        ));
+    }
+    format!("[CCCC] Web limits:\n{}", lines.join("\n"))
+}
 
 struct BootstrapSeed {
     text: String,
@@ -1304,7 +1324,8 @@ fn build_browser_prompt(
     let prompt = required(turn, "coalesced_text")?;
     let system_prompt = required(turn, "system_prompt")?;
     let seed_text = format!(
-        "[CCCC] Session bootstrap for this browser chat:\n\n{system_prompt}\n\n{WEB_TRANSPORT_NOTE}"
+        "[CCCC] Session bootstrap for this browser chat:\n\n{system_prompt}\n\n{WEB_TRANSPORT_NOTE}\n{}",
+        web_limits_note()
     );
     let digest = bootstrap_seed_digest(&seed_text);
     let seed_required = target["bootstrap_seed_delivered_at"]
