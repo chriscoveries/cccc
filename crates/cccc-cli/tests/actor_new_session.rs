@@ -127,7 +127,10 @@ fn a_daemon_error_fails_and_reports_it() {
     let reply =
         json!({"v":1,"ok":false,"error":{"code":"actor_not_found","message":"no such actor"}});
     let _requests = stand_in(&home, reply);
-    let output = run(&home, &["actor", "new-session", "ghost"]);
+    let output = run(
+        &home,
+        &["actor", "new-session", "ghost", "--group", "g_test"],
+    );
     assert!(!output.status.success(), "expected failure");
     let stderr = String::from_utf8(output.stderr).expect("stderr");
     assert!(stderr.contains("actor_not_found"), "{stderr}");
