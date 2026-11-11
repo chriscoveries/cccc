@@ -532,4 +532,64 @@ mod tests {
             &cache::get(&path).expect("unchanged cache")
         ));
     }
+    #[test]
+    fn warm_lookup_and_page_wait_for_a_file_locked_partial_append() {
+        use fs2::FileExt;
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        for page in [false, true] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let path = temp.path().join("ledger.jsonl");
+            let (first, second) = pair();
+            crate::ledger::append(&path, &first).expect("captured first row");
+            crate::ledger::read_all(&path).expect("warm index");
+            let encoded = serde_json::to_vec(&second).expect("captured second row");
+            let split = encoded.len() / 2;
+            let mut writer = std::fs::OpenOptions::new()
+                .append(true)
+                .read(true)
+                .open(&path)
+                .expect("active file");
+            writer.lock_exclusive().expect("legacy file lock");
+            writer.write_all(&encoded[..split]).expect("partial row");
+            writer.flush().expect("flush partial row");
+            let (started, start) = mpsc::sync_channel(1);
+            let (send, receive) = mpsc::sync_channel(1);
+            let reader_path = path.clone();
+            let first_id = first.id.clone();
+            let second_id = second.id.clone();
+            let reader = std::thread::spawn(move || {
+                started.send(()).expect("reader started");
+                let result = if page {
+                    crate::ledger::events_after(&reader_path, &first_id, 1)
+                } else {
+                    crate::ledger::find_event(&reader_path, &second_id)
+                        .map(|event| event.into_iter().collect::<Vec<_>>())
+                };
+                send.send(result).expect("send result");
+            });
+            start
+                .recv_timeout(Duration::from_secs(2))
+                .expect("reader started");
+            let early = receive.recv_timeout(Duration::from_millis(50));
+            let blocked = matches!(&early, Err(RecvTimeoutError::Timeout));
+            // Complete/unlock even if the negative control failed, then join.
+            writer.write_all(&encoded[split..]).expect("complete row");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush complete row");
+            FileExt::unlock(&writer).expect("unlock writer");
+            let result = match early {
+                Ok(result) => result,
+                Err(RecvTimeoutError::Timeout) => receive
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("completed read"),
+                Err(error) => panic!("reader disconnected: {error}"),
+            };
+            reader.join().expect("join reader");
+            assert!(
+                blocked,
+                "warm query observed an in-progress file-locked append"
+            );
+            assert_eq!(result.expect("query"), vec![second]);
+        }
+    }
 }

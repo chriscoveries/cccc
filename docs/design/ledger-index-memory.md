@@ -21,8 +21,9 @@ replacement, truncation, changed segment set or unfinished line rebuilds the
 metadata instead. Source errors do not publish a partial replacement.
 Append notifications are no longer authoritative; canonical committed bytes
 are reconciled at query time, so late or duplicated callbacks cannot duplicate
-an event. Readers hold the stable shared ledger lock through hydration;
-callbacks execute after releasing it. No cached entry retains a descriptor.
+an event. Readers hold the stable shared ledger lock and the active-file shared lock
+through hydration, preserving existing file-locked append behavior;
+callbacks execute after releasing both. No cached entry retains a descriptor.
 
 There are deliberate costs and limits:
 
