@@ -583,6 +583,16 @@ fn rotation_with_live_confirmation_replaces_only_the_credential() {
         .to_owned();
     let old_secret = first["secret"].as_str().expect("secret").to_owned();
     let binding = bound(&home, &id, "actor-a", "session-a");
+    update(&home, |root| {
+        root["connectors"]["chatgpt_web"]["dots"] = json!({
+            "group_id":"g_fixture",
+            "actor_id":"actor-a",
+            "generation":"dots-generation-1",
+            "subscription":{"id":"synthetic-subscription"}
+        });
+        Ok(())
+    })
+    .expect("dots fixture");
     let before = live(&home);
 
     let rotated =
@@ -595,6 +605,10 @@ fn rotation_with_live_confirmation_replaces_only_the_credential() {
     assert_eq!(after["routing_salt"], before["routing_salt"]);
     assert_eq!(after["bindings"], before["bindings"]);
     assert_eq!(after["pairings"], before["pairings"]);
+    assert_eq!(
+        after["dots"], before["dots"],
+        "rotation must preserve the Dots binding and its state"
+    );
     assert_eq!(after["credential_generation"], 2);
     assert_eq!(rotated["previous_generation"], 1);
     assert_eq!(after["rotated_by"], "admin:test");
@@ -765,7 +779,7 @@ fn rejected_secret_is_recorded_bounded_and_without_request_material() {
         .get()
         .expect("throttle initialized")
         .lock()
-        .unwrap();
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(!throttle.pending.contains_key(unknown));
     assert!(!throttle.last_write.contains_key(unknown));
 }
@@ -855,7 +869,7 @@ fn revoke_and_retire_forget_rejection_throttle_state() {
             .get()
             .expect("throttle initialized")
             .lock()
-            .unwrap();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         throttle.pending.contains_key(id) || throttle.last_write.contains_key(id)
     };
     record_rejected_secret(&home, &id, "get_probe").expect("record");
