@@ -482,7 +482,7 @@ pub fn record_rejected_secret(
         );
         Ok(RejectionRecord::Written { count })
     });
-    if matches!(result, Ok(RejectionRecord::UnknownConnector)) {
+    if matches!(&result, Ok(RejectionRecord::UnknownConnector)) {
         forget_rejection(connector_id);
     }
     result
