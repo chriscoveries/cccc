@@ -51,10 +51,9 @@ pub(super) fn claim(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             .map_err(|_| denied("dots_runtime_state_unavailable"))?;
         // Canonical ownership wins even if a crash left the private execution
         // projection absent or only part of the source admission committed.
-        // Expiry runs before the duplicate-wake check: no new wake is
-        // delivered while a turn is active, so the only wake a stale claim can
-        // carry is the expired turn's own — checking it first would shadow the
-        // expiry and keep the dead end.
+        // Expiry precedes duplicate-wake checks. Interrupted projections can
+        // coexist with a pending new wake; resolve the old turn without
+        // consuming that wake or hiding unfinished canonical ownership.
         let unfinished = runtime["active_turn_id"]
             .as_str()
             .is_some_and(|id| !id.is_empty())
@@ -67,6 +66,15 @@ pub(super) fn claim(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 &c["dots"]["execution"],
                 chrono::Utc::now(),
             )
+            .or_else(|| {
+                // A receipt can clear canonical ownership before the private
+                // projection commits. Preserve the original claim's lease.
+                if runtime["active_turn_id"].as_str().is_none_or(str::is_empty) {
+                    age_seconds(c["dots"]["execution"]["claimed_at"].as_str())
+                } else {
+                    None
+                }
+            })
             .or_else(|| turn_age_seconds(&runtime));
             if elapsed.is_none_or(|elapsed| elapsed < TURN_LEASE_SECONDS) {
                 return Ok(Ok(json!({"status":"turn_in_progress","turn":null,
@@ -303,7 +311,11 @@ const TURN_LEASE_SECONDS: u64 = 1800;
 /// Fallback clock when the private execution projection is absent or does not
 /// match the canonical turn: the runtime state stamp still bounds its age.
 fn turn_age_seconds(runtime: &Value) -> Option<u64> {
-    let updated = chrono::DateTime::parse_from_rfc3339(runtime["updated_at"].as_str()?).ok()?;
+    age_seconds(runtime["updated_at"].as_str())
+}
+
+fn age_seconds(stamp: Option<&str>) -> Option<u64> {
+    let updated = chrono::DateTime::parse_from_rfc3339(stamp?).ok()?;
     chrono::Utc::now()
         .signed_duration_since(updated)
         .to_std()
@@ -323,8 +335,24 @@ fn expire_active_turn(
     runtime: &Value,
     c: &mut Value,
 ) -> Result<(), io::Error> {
-    let turn_id = runtime["active_turn_id"].as_str().unwrap_or_default();
-    let event_ids: Vec<String> = runtime["active_event_ids"]
+    let execution = &c["dots"]["execution"];
+    let canonical = runtime["active_turn_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty());
+    let turn_id = if canonical {
+        &runtime["active_turn_id"]
+    } else {
+        &execution["turn_id"]
+    }
+    .as_str()
+    .unwrap_or_default()
+    .to_owned();
+    let sources = if canonical {
+        &runtime["active_event_ids"]
+    } else {
+        &execution["event_ids"]
+    };
+    let event_ids: Vec<String> = sources
         .as_array()
         .map(|ids| {
             ids.iter()
@@ -341,7 +369,7 @@ fn expire_active_turn(
             home,
             &group.group_id,
             &actor.id,
-            turn_id,
+            &turn_id,
             &event_ids,
         )
         .map_err(|_| io::Error::other("dots_expire_failed"))?
@@ -387,7 +415,7 @@ fn expire_active_turn(
         // updated on the same connector snapshot the claim already holds.
         let fresh = super::super::runtime_state::actor_state(home, &group.group_id, &actor.id)
             .map_err(|_| io::Error::other("dots_expire_failed"))?;
-        if fresh["active_turn_id"].as_str() == Some(turn_id) {
+        if fresh["active_turn_id"].as_str() == Some(turn_id.as_str()) {
             super::super::runtime_state::set_runtime_status(
                 home,
                 group,
@@ -403,7 +431,9 @@ fn expire_active_turn(
     let dots = &mut c["dots"];
     let mut last = dots["execution"].clone();
     if last.is_null() {
-        last = json!({"event_id":dots["wake"]["event_id"],"epoch":dots["epoch"],
+        // Only the canonical turn identity is known here. Never borrow the
+        // pending wake: it can belong to new input and must remain claimable.
+        last = json!({"epoch":dots["epoch"],
             "turn_id":turn_id,"event_ids":event_ids,"state":"interrupted"});
     }
     last["state"] = json!("completed");

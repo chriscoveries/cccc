@@ -399,9 +399,10 @@ pub const ANSWERED_SEND: &str = "send delivery withdrawn: the Actor has answered
 
 /// A `send` chat.message the actor has already answered: any later
 /// chat.message from that actor means its session is processing, so handing
-/// the brief over again would only splice a duplicate. Like the mail-notice
-/// check, a failed ledger read keeps the delivery: a redundant copy is safer
-/// than a lost one.
+/// the brief over again would only splice a duplicate. This is an activity
+/// heuristic, not a reply relation: a later message to any recipient counts,
+/// including an unrelated actor-to-other message. Mail and request_reply are
+/// never withdrawn by this heuristic. A failed ledger read keeps the delivery.
 pub fn is_answered_send(
     home: &HomeLayout,
     group: &GroupDoc,

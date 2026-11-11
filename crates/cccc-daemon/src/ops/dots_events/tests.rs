@@ -1201,39 +1201,46 @@ fn dots_late_unsubscribe_cannot_retire_a_new_callback_subscription() {
 }
 
 #[test]
-fn dots_user_resolution_preserves_committed_done_receipt_after_projection_crash() {
-    let f = Fixture::new();
-    f.start();
-    f.source("completed before projection cleanup");
-    let delivery = f.delivery();
-    let turn = f.claim(&f.captured(&delivery, "cccc_runtime_wait_next_turn"))["turn"].clone();
-    let completion = super::super::runtime_completion::Completion {
-        turn_id: turn["turn_id"].as_str().expect("turn ID").into(),
-        event_ids: turn["event_ids"]
-            .as_array()
-            .expect("event IDs")
-            .iter()
-            .map(|id| id.as_str().expect("source ID").to_owned())
-            .collect(),
-        status: "done".into(),
-        delivery_id: "durable-cloud-completion".into(),
-    };
-    let receipt =
-        super::super::runtime_completion::append(&f.home, &f.group.group_id, "dot", &completion)
-            .expect("durable receipt before simulated crash");
-    f.call("actor_stop", json!({}));
-    let result = f.call(
-        "dots_work_control",
-        json!({"action":"resolve","turn_id":turn["turn_id"],"event_ids":turn["event_ids"]}),
-    );
-    assert_eq!(result["status"], "done");
-    assert_eq!(result["delivery_id"], "durable-cloud-completion");
-    assert_eq!(result["completion_event"], json!(receipt));
-    assert_eq!(
-        f.call("dots_events_status", json!({}))["active_turn_id"],
-        ""
-    );
-    assert!(f.delivery().is_null());
+fn dots_user_resolution_preserves_committed_receipt_after_projection_crash() {
+    // Outcome mutation of the retained fixture; not an observed field crash.
+    for status in ["done", "expired"] {
+        let f = Fixture::new();
+        f.start();
+        f.source("completed before projection cleanup");
+        let delivery = f.delivery();
+        let turn = f.claim(&f.captured(&delivery, "cccc_runtime_wait_next_turn"))["turn"].clone();
+        let completion = super::super::runtime_completion::Completion {
+            turn_id: turn["turn_id"].as_str().expect("turn ID").into(),
+            event_ids: turn["event_ids"]
+                .as_array()
+                .expect("event IDs")
+                .iter()
+                .map(|id| id.as_str().expect("source ID").to_owned())
+                .collect(),
+            status: status.into(),
+            delivery_id: "durable-cloud-completion".into(),
+        };
+        let receipt = super::super::runtime_completion::append(
+            &f.home,
+            &f.group.group_id,
+            "dot",
+            &completion,
+        )
+        .expect("durable receipt before simulated crash");
+        f.call("actor_stop", json!({}));
+        let result = f.call(
+            "dots_work_control",
+            json!({"action":"resolve","turn_id":turn["turn_id"],"event_ids":turn["event_ids"]}),
+        );
+        assert_eq!(result["status"], status);
+        assert_eq!(result["delivery_id"], "durable-cloud-completion");
+        assert_eq!(result["completion_event"], json!(receipt));
+        assert_eq!(
+            f.call("dots_events_status", json!({}))["active_turn_id"],
+            ""
+        );
+        assert!(f.delivery().is_null());
+    }
 }
 
 #[test]
@@ -1383,64 +1390,133 @@ fn a_dots_notification_does_not_store_the_captured_binding() {
 
 #[test]
 fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
-    let f = Fixture::new();
-    f.start();
-    let event_id = f.source("abandoned task");
-    let wake = f.delivery();
-    let turn = f.claim(&f.captured(&wake, "cccc_runtime_wait_next_turn"))["turn"].clone();
-    // A fresh unfinished turn still reports in progress, now with a reason.
-    let busy = f.claim(&f.claim_capture());
-    assert_eq!(busy["status"], "turn_in_progress");
-    assert_eq!(busy["reason_code"], "dots_turn_unfinished");
-    assert!(busy["active_turn_elapsed_seconds"].is_u64());
-    // No new wake is delivered while the turn is active.
-    assert!(f.delivery().is_null());
-    // Age the claimed execution beyond the lease.
-    store::update_connector(&f.home, &f.connector_id, |connector| {
-        connector["dots"]["execution"]["claimed_at"] = json!("2000-01-01T00:00:00Z")
-    })
-    .expect("age fixture execution");
-    // The only wake the remote can carry is the expired turn's own. The claim
-    // expires the turn instead of returning turn_in_progress forever.
-    let expired = f.claim(&f.captured(&wake, "cccc_runtime_wait_next_turn"));
-    // Lease expiry completes the abandoned turn; a repeated wake now follows
-    // the completed-wake contract rather than looking unfinished again.
-    assert_eq!(expired["status"], "idle");
-    assert_eq!(expired["reason_code"], "dots_wake_already_completed");
-    let status = f.call("dots_events_status", json!({}));
-    assert_eq!(status["last_execution"]["status"], "expired");
-    assert_eq!(status["active_turn_id"], "");
-    assert!(status["active_turn_elapsed_seconds"].is_null());
-    // The expired turn's inputs are never replayed.
-    assert!(f.delivery().is_null());
-    let groups = GroupStore::new(f.home.clone()).expect("group store");
-    let group = groups.load(&f.group.group_id).expect("group");
-    assert!(
-        super::super::runtime_delivery::latest_state(&f.home, &group.group_id, "dot", &event_id)
+    // Fault/timestamp controls over the retained fixture and its produced records.
+    for fault in [
+        "none",
+        "receipt-only",
+        "canonical-cleared",
+        "missing-execution-new-wake",
+    ] {
+        let f = Fixture::new();
+        f.start();
+        let event_id = f.source("abandoned task");
+        let wake = f.delivery();
+        let turn = f.claim(&f.captured(&wake, "cccc_runtime_wait_next_turn"))["turn"].clone();
+        // A fresh unfinished turn still reports in progress, now with a reason.
+        let busy = f.claim(&f.claim_capture());
+        assert_eq!(busy["status"], "turn_in_progress");
+        assert_eq!(busy["reason_code"], "dots_turn_unfinished");
+        assert!(busy["active_turn_elapsed_seconds"].is_u64());
+        // No new wake is delivered while the turn is active.
+        assert!(f.delivery().is_null());
+        // Age the claimed execution beyond the lease.
+        store::update_connector(&f.home, &f.connector_id, |connector| {
+            connector["dots"]["execution"]["claimed_at"] = json!("2000-01-01T00:00:00Z")
+        })
+        .expect("age fixture execution");
+        if matches!(fault, "receipt-only" | "canonical-cleared") {
+            let completion = super::super::runtime_completion::Completion {
+                turn_id: turn["turn_id"].as_str().expect("turn").to_owned(),
+                event_ids: vec![event_id.clone()],
+                status: "expired".into(),
+                delivery_id: format!("runtime:{}", turn["turn_id"].as_str().expect("turn")),
+            };
+            // Stop at the durable receipt boundary, retaining the fixture's
+            // canonical/private projections to model an interrupted commit.
+            super::super::runtime_completion::append(
+                &f.home,
+                &f.group.group_id,
+                "dot",
+                &completion,
+            )
+            .expect("committed expiry before cleanup");
+            if fault == "canonical-cleared" {
+                super::super::runtime_state::set_runtime_status(
+                    &f.home,
+                    &f.group,
+                    "dot",
+                    "waiting",
+                    "",
+                    "",
+                    &[],
+                )
+                .expect("canonical cleanup before private commit");
+            }
+        }
+        // The only wake the remote can carry is the expired turn's own. The claim
+        // expires the turn instead of returning turn_in_progress forever.
+        let expired = f.claim(&f.captured(&wake, "cccc_runtime_wait_next_turn"));
+        // Lease expiry completes the abandoned turn; a repeated wake now follows
+        // the completed-wake contract rather than looking unfinished again.
+        assert_eq!(expired["status"], "idle");
+        assert_eq!(expired["reason_code"], "dots_wake_already_completed");
+        let status = f.call("dots_events_status", json!({}));
+        assert_eq!(status["last_execution"]["status"], "expired");
+        assert_eq!(status["active_turn_id"], "");
+        assert!(status["active_turn_elapsed_seconds"].is_null());
+        // The expired turn's inputs are never replayed.
+        assert!(f.delivery().is_null());
+        let groups = GroupStore::new(f.home.clone()).expect("group store");
+        let group = groups.load(&f.group.group_id).expect("group");
+        assert!(
+            super::super::runtime_delivery::latest_state(
+                &f.home,
+                &group.group_id,
+                "dot",
+                &event_id
+            )
             .expect("delivery state")
             .is_some_and(|(state, _)| state != "claimed")
-    );
-    // A zombie completion for the expired turn is rejected.
-    let zombie = f.captured(&wake, "cccc_runtime_complete_turn");
-    assert!(
-        !f.response(
-            "runtime_complete_turn",
-            json!({"by":"dot","turn_id":turn["turn_id"],"event_ids":turn["event_ids"],
+        );
+        // A zombie completion for the expired turn is rejected.
+        let zombie = f.captured(&wake, "cccc_runtime_complete_turn");
+        assert!(
+            !f.response(
+                "runtime_complete_turn",
+                json!({"by":"dot","turn_id":turn["turn_id"],"event_ids":turn["event_ids"],
                 "status":"done","_cccc_web_binding":zombie})
-        )
-        .ok
-    );
-    // The next input wakes and claims normally.
-    f.source("fresh task");
-    let next_wake = f.delivery();
-    assert!(next_wake.is_object());
-    let claimed = f.claim(&f.captured(&next_wake, "cccc_runtime_wait_next_turn"));
-    assert_eq!(claimed["status"], "work_available");
-    assert!(claimed["actor_token"].is_string());
-    let done = f.complete(
-        &claimed["turn"],
-        &f.captured(&next_wake, "cccc_runtime_complete_turn"),
-    );
-    assert_eq!(done["status"], "done");
-    assert_eq!(f.call("dots_events_status", json!({}))["phase"], "ready");
+            )
+            .ok
+        );
+        // The next input wakes and claims normally.
+        let fresh_source = f.source("fresh task");
+        let next_wake = f.delivery();
+        assert!(next_wake.is_object());
+        if fault == "missing-execution-new-wake" {
+            // Reuse the producer's real next wake, restoring only the previous
+            // turn projection as a fault-injection control. Never invent a wake.
+            integration_state::group_update(&groups, &group.group_id, "runtime_states", |states| {
+                states["dot"]["active_turn_id"] = turn["turn_id"].clone();
+                states["dot"]["active_event_ids"] = turn["event_ids"].clone();
+                states["dot"]["updated_at"] = json!("2000-01-01T00:00:00Z");
+                Ok(())
+            })
+            .expect("restore stale canonical turn");
+            store::update_connector(&f.home, &f.connector_id, |connector| {
+                connector["dots"]["execution"] = Value::Null;
+            })
+            .expect("drop interrupted execution projection");
+        }
+        let claimed = f.claim(&f.captured(&next_wake, "cccc_runtime_wait_next_turn"));
+        assert_eq!(claimed["status"], "work_available");
+        assert_eq!(claimed["turn"]["event_ids"], json!([fresh_source]));
+        if fault == "missing-execution-new-wake" {
+            let private = f.private();
+            assert_eq!(
+                private["dots"]["last_execution"]["turn_id"],
+                turn["turn_id"]
+            );
+            assert_ne!(
+                private["dots"]["last_execution"]["event_id"],
+                next_wake["event_id"]
+            );
+        }
+        assert!(claimed["actor_token"].is_string());
+        let done = f.complete(
+            &claimed["turn"],
+            &f.captured(&next_wake, "cccc_runtime_complete_turn"),
+        );
+        assert_eq!(done["status"], "done");
+        assert_eq!(f.call("dots_events_status", json!({}))["phase"], "ready");
+    }
 }

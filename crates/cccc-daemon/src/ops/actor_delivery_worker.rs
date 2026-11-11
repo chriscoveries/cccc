@@ -1029,70 +1029,82 @@ mod tests {
 
     #[test]
     fn an_answered_send_is_withdrawn_instead_of_redelivered() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
-        let store = GroupStore::new(home.clone()).expect("store");
-        let mut group = store.create("answered send", "").expect("group");
-        let actor = Actor::new("peer1");
-        group.actors.push(actor.clone());
-        store.save(&group).expect("save group");
-        let ledger_path = store.ledger_path(&group.group_id).expect("ledger");
-        let message = |by: &str, mode: &str, text: &str| {
-            let mut event = Event::new("chat.message", &group.group_id);
-            event.by = by.into();
-            event.data = serde_json::json!({"to":["peer1"],"text":text,"message_mode":mode})
-                .as_object()
-                .cloned()
-                .expect("message");
-            event
-        };
-        let send = message("user", "send", "brief");
-        let mail = message("user", "mail", "letter");
-        let request = message("user", "request_reply", "question");
-        for event in [&send, &mail, &request] {
-            cccc_core::ledger::append(&ledger_path, event).expect("append");
-        }
-        let job = |event: &Event| DeliveryJob {
-            home: home.clone(),
-            group: group.clone(),
-            actor: actor.clone(),
-            event: event.clone(),
-            claimed: true,
-            transport: "pty",
-        };
-        let state = |event: &Event| {
-            crate::ops::runtime_delivery::latest_state(&home, &group.group_id, "peer1", &event.id)
+        for recipient in ["peer1", "peer2"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let home = cccc_core::HomeLayout::from_path(temp.path().join("home")).expect("home");
+            let store = GroupStore::new(home.clone()).expect("store");
+            let mut group = store.create("answered send", "").expect("group");
+            let actor = Actor::new("peer1");
+            group.actors.push(actor.clone());
+            store.save(&group).expect("save group");
+            let ledger_path = store.ledger_path(&group.group_id).expect("ledger");
+            let message = |by: &str, mode: &str, text: &str| {
+                let mut event = Event::new("chat.message", &group.group_id);
+                event.by = by.into();
+                event.data = serde_json::json!({"to":["peer1"],"text":text,"message_mode":mode})
+                    .as_object()
+                    .cloned()
+                    .expect("message");
+                event
+            };
+            let send = message("user", "send", "brief");
+            let mail = message("user", "mail", "letter");
+            let request = message("user", "request_reply", "question");
+            for event in [&send, &mail, &request] {
+                cccc_core::ledger::append(&ledger_path, event).expect("append");
+            }
+            let job = |event: &Event| DeliveryJob {
+                home: home.clone(),
+                group: group.clone(),
+                actor: actor.clone(),
+                event: event.clone(),
+                claimed: true,
+                transport: "pty",
+            };
+            let state = |event: &Event| {
+                crate::ops::runtime_delivery::latest_state(
+                    &home,
+                    &group.group_id,
+                    "peer1",
+                    &event.id,
+                )
                 .expect("state")
                 .map(|(state, _)| state)
-        };
+            };
 
-        // Before the actor answers, every mode stays for delivery.
-        let mut batch = vec![job(&send), job(&mail), job(&request)];
-        withdraw_answered_sends(&mut batch, &home, &group, &actor);
-        assert_eq!(batch.len(), 3);
+            // Before the actor answers, every mode stays for delivery.
+            let mut batch = vec![job(&send), job(&mail), job(&request)];
+            withdraw_answered_sends(&mut batch, &home, &group, &actor);
+            assert_eq!(batch.len(), 3);
 
-        // Another actor's later message does not count as an answer.
-        let mut other = message("user", "send", "to someone else");
-        other.data.insert("to".into(), serde_json::json!(["peer2"]));
-        cccc_core::ledger::append(&ledger_path, &other).expect("other");
-        withdraw_answered_sends(&mut batch, &home, &group, &actor);
-        assert_eq!(batch.len(), 3);
+            // A different author (user) does not establish this actor's activity.
+            let mut other = message("user", "send", "to someone else");
+            other.data.insert("to".into(), serde_json::json!(["peer2"]));
+            cccc_core::ledger::append(&ledger_path, &other).expect("other");
+            withdraw_answered_sends(&mut batch, &home, &group, &actor);
+            assert_eq!(batch.len(), 3);
 
-        // The actor's own later chat.message answers the send: it is
-        // withdrawn, while mail and request_reply deliveries are untouched.
-        let answer = message("peer1", "send", "done");
-        cccc_core::ledger::append(&ledger_path, &answer).expect("answer");
-        withdraw_answered_sends(&mut batch, &home, &group, &actor);
-        assert_eq!(
-            batch
-                .iter()
-                .map(|job| job.event.id.clone())
-                .collect::<Vec<_>>(),
-            vec![mail.id.clone(), request.id.clone()]
-        );
-        assert_eq!(state(&send).as_deref(), Some("withdrawn"));
-        assert_eq!(state(&mail), None);
-        assert_eq!(state(&request), None);
+            // Later actor activity withdraws the send, while mail and
+            // request_reply deliveries are untouched.
+            let mut answer = message("peer1", "send", "done");
+            // Recipient mutation: any later actor message, including actor-to-other,
+            // withdraws send under the existing activity heuristic; it is not a reply proof.
+            answer
+                .data
+                .insert("to".into(), serde_json::json!([recipient]));
+            cccc_core::ledger::append(&ledger_path, &answer).expect("answer");
+            withdraw_answered_sends(&mut batch, &home, &group, &actor);
+            assert_eq!(
+                batch
+                    .iter()
+                    .map(|job| job.event.id.clone())
+                    .collect::<Vec<_>>(),
+                vec![mail.id.clone(), request.id.clone()]
+            );
+            assert_eq!(state(&send).as_deref(), Some("withdrawn"));
+            assert_eq!(state(&mail), None);
+            assert_eq!(state(&request), None);
+        }
     }
 
     #[cfg(unix)]
