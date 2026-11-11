@@ -6,18 +6,41 @@ use futures_util::FutureExt;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
+
+#[derive(Default)]
+struct ModelRequests {
+    primary: AtomicUsize,
+    auxiliary: AtomicUsize,
+    unexpected: AtomicUsize,
+    routes: Mutex<Vec<Value>>,
+}
+
+impl ModelRequests {
+    fn observe(&self, body: &Value) {
+        let (role, counter) = match body["model"].as_str() {
+            Some("first") => ("primary", &self.primary),
+            Some("auxiliary") => ("auxiliary", &self.auxiliary),
+            _ => ("unexpected", &self.unexpected),
+        };
+        let ordinal = counter.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut routes = self.routes.lock().expect("request observations");
+        if routes.len() < 32 {
+            routes.push(json!({"role":role,"ordinal":ordinal}));
+        }
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_native_lazy_viewer_when_enabled() {
     if std::env::var("CCCC_KILO_MANAGED_LIVE").as_deref() != Ok("1") {
         return;
     }
-    let requests = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(ModelRequests::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("local model");
@@ -31,7 +54,9 @@ async fn live_native_lazy_viewer_when_enabled() {
                 axum::routing::post(move |body: axum::Json<Value>| {
                     let count = Arc::clone(&count);
                     async move {
-                        count.fetch_add(1, Ordering::AcqRel);
+                        // Native title generation uses small_model and is not a
+                        // second delivery. Keep the primary-turn oracle strict.
+                        count.observe(&body);
                         crate::ops::codex_voice_analyst::lazy_viewer_test_model(body).await
                     }
                 }),
@@ -58,10 +83,10 @@ async fn live_native_lazy_viewer_when_enabled() {
                 ("HOME".into(), root.to_string_lossy().into_owned()),
                 ("KILO_DB".into(), root.join("kilo.db").to_string_lossy().into_owned()),
                 ("TERM".into(), "xterm-256color".into()),
-                ("KILO_CONFIG_CONTENT".into(), json!({"model":"cccc-test/first","small_model":"cccc-test/first",
+                ("KILO_CONFIG_CONTENT".into(), json!({"model":"cccc-test/first","small_model":"cccc-test/auxiliary",
                     "provider":{"cccc-test":{"npm":"@ai-sdk/openai-compatible",
                         "options":{"baseURL":endpoint,"apiKey":"local-test"},
-                        "models":{"first":{"name":"First"}}}}}).to_string()),
+                        "models":{"first":{"name":"First"},"auxiliary":{"name":"Auxiliary"}}}}}).to_string()),
             ]);
             for part in ["CONFIG", "DATA", "STATE", "CACHE"] {
                 env.insert(format!("XDG_{part}_HOME"), root.join(part.to_lowercase()).to_string_lossy().into_owned());
@@ -82,7 +107,7 @@ async fn live_native_lazy_viewer_when_enabled() {
                 }
                 samples.push(sample(&item, "startup", enabled).await);
                 if enabled {
-                    exercise(&home, &group, &actor, &item, &requests, &mut samples).await;
+                    exercise(&home, &group, &actor, &item, &requests.primary, &mut samples).await;
                     // Old connections must not close or cancel a replacement owner.
                     let stale = super::acquire(&group.group_id, &actor.id).expect("old lease").expect("lazy");
                     let old_generation = stale.interrupt_generation().expect("old generation");
@@ -100,14 +125,19 @@ async fn live_native_lazy_viewer_when_enabled() {
             tokio::task::block_in_place(|| supervisor::stop(&group.group_id, &actor.id)).expect("native cleanup");
             if let Err(panic) = observed { std::panic::resume_unwind(panic); }
         }
+        eprintln!("LAZY_VIEWER_REQUEST_ROUTES {:?}", requests.routes.lock().expect("request observations"));
+        assert_eq!(requests.unexpected.load(Ordering::Acquire), 0, "unclassified native model request");
+        assert_eq!(requests.primary.load(Ordering::Acquire), 4, "duplicate or missing primary native model request");
         let report = json!({"runtime":"kilo","source":"native Linux process observations in CI",
             "rss_unit":"KiB","rss_kind":"sum of resident process trees, not PSS",
             "workload":"empty isolated checkout; same native CLI and local model configuration",
-            "native_model_requests":requests.load(Ordering::Acquire), "samples":samples,
+            "native_primary_model_requests":requests.primary.load(Ordering::Acquire),
+            "native_auxiliary_model_requests":requests.auxiliary.load(Ordering::Acquire),
+            "unexpected_model_requests":requests.unexpected.load(Ordering::Acquire),
+            "request_routes":*requests.routes.lock().expect("request observations"), "samples":samples,
             "checks":{"queued_delivery":true,"ack_replay_once":true,"durable_receipt_retirement":true,
                 "shared_viewer":true,"passive_cancel_refused":true,"writer_cancel":true,
                 "last_close_preserves_turn":true,"stale_lease_and_writer_fenced":true}});
-        assert_eq!(requests.load(Ordering::Acquire), 4, "duplicate or missing native model request");
         eprintln!("LAZY_VIEWER_PROOF {report}");
         if let Some(path) = std::env::var_os("CCCC_LAZY_VIEWER_REPORT") {
             std::fs::write(path, serde_json::to_vec_pretty(&report).expect("report JSON")).expect("write observations");
@@ -166,6 +196,11 @@ async fn exercise(
     wait_completion(&mut completions, "completed").await;
     wait_idle(item).await;
     assert_eq!(
+        requests.load(Ordering::Acquire),
+        1,
+        "first turn request count"
+    );
+    assert_eq!(
         submit_events(home, group, actor, &batch),
         BatchSubmission::Accepted
     );
@@ -184,6 +219,11 @@ async fn exercise(
     wait_until(|| requests.load(Ordering::Acquire) == 2).await;
     wait_completion(&mut completions, "completed").await;
     wait_idle(item).await;
+    assert_eq!(
+        requests.load(Ordering::Acquire),
+        2,
+        "paired turn request count"
+    );
     assert!(!terminal_running(group, actor), "delivery opened a viewer");
     let mut writer = connect(home, group, actor, false).await;
     let viewer_pid = cccc_runtime::status(&group.group_id, &actor.id)
@@ -222,6 +262,11 @@ async fn exercise(
     writer.write_all(b"\x03").await.expect("writer interrupt");
     wait_completion(&mut completions, "cancelled").await;
     wait_idle(item).await;
+    assert_eq!(
+        requests.load(Ordering::Acquire),
+        3,
+        "cancelled turn request count"
+    );
     let finishing = source(home, group, actor, "QUEUE_SLOW");
     assert_eq!(
         submit(home, group, actor, &finishing),
@@ -244,6 +289,11 @@ async fn exercise(
     );
     wait_completion(&mut completions, "completed").await;
     wait_idle(item).await;
+    assert_eq!(
+        requests.load(Ordering::Acquire),
+        4,
+        "last-close turn request count"
+    );
     samples.push(sample(item, "last_close", true).await);
     assert_eq!(item.managed.delivery_receipt_count().await, 0);
 }
