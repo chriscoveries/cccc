@@ -187,9 +187,14 @@ function ProviderSettings({
     setCopied(false);
     try {
       if (kind === "configure" || kind === "rotate") {
-        const r = await (kind === "rotate"
-          ? api.rotateWebModelConnector(provider)
-          : api.createWebModelConnector(provider));
+        const confirmation = connector?.rotation?.confirmation;
+        if (kind === "rotate" && !confirmation) {
+          throw new Error(t("common:retry"));
+        }
+        const r =
+          kind === "rotate"
+            ? await api.rotateWebModelConnector(provider, confirmation ?? "")
+            : await api.createWebModelConnector(provider);
         if (!r.ok) throw new Error(r.error.message);
         setConnector(r.result.connector);
         setNeedsSetup(false);
@@ -455,7 +460,11 @@ function ProviderSettings({
                   <button
                     type="button"
                     className={secondaryButtonClass()}
-                    disabled={actionsDisabled || address.kind !== "https"}
+                    disabled={
+                      actionsDisabled ||
+                      address.kind !== "https" ||
+                      !connector.rotation?.confirmation
+                    }
                     onClick={() => setConfirm("rotate")}
                   >
                     {label("rotate")}
@@ -495,6 +504,11 @@ function ProviderSettings({
                       }
                     >
                       {label(confirm === "rotate" ? "rotateHint" : "revokeHint")}
+                      {confirm === "rotate" && (
+                        <p>
+                          {connector.rotation?.recorded_binding_count ?? 0} {label("pairedActors")}
+                        </p>
+                      )}
                     </SettingsNotice>
                   </div>
                 )}

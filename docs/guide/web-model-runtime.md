@@ -76,19 +76,34 @@ not prove that ChatGPT has added or used it. Shared settings separately show the
 last recorded connector request and the number of verified agent bindings.
 Credential replacement and revocation are under **Manage connector credential**.
 
-Creating is safe to repeat: an existing connector is returned unchanged, without
-its secret or a token URL. **Rotate** remains an explicit maintenance action with
-the existing confirmation dialog. It replaces the credential while preserving
-conversation pairings and Dots state. The old URL stops working; copy the new URL
-and update every external plugin using it.
+Create is safe to repeat: an existing credential is returned unchanged without
+revealing its secret. **Rotate** remains an explicit maintenance action. Its
+confirmation shows the recorded binding count and warns that the old URL stops
+working; update every external plugin that uses it. That count cannot inventory
+external plugin installations. The confirmation is fenced to the listed
+credential generation and bindings: if either changes, refresh and confirm
+again. Rotation preserves existing conversation pairings and Dots state and
+shows the replacement URL once.
 
-For API/IPC callers, a flagless create no longer rotates. Send the boolean
-`rotate=true` explicitly to replace an active credential. Create returns
-`outcome=created` with the secret once, or `outcome=existing` without it; rotation
-returns `outcome=rotated` with the replacement secret once. Existing
-`create_only` callers must accept the successful `existing` response instead of
-expecting `connector_exists`. Non-boolean flags and conflicting `rotate=true`
-and `create_only=true` are refused without changing the connector.
+The API records credential_generation, secret_rotated_at and rotated_by together
+with rotation. The attribution is the daemon's local authorized caller
+(local:user), not a claimed remote human. Older stores have an unrecorded
+generation (0) and no invented rotation timestamp. Wrong-secret attempts remain
+403 and are recorded separately from rotation/call history. That ten-entry
+rejection log coalesces writes per process/connector over five seconds, with no
+timer flush. Pending hits are lost on restart, so count is a lower bound; at is
+write-time, not last-seen time. Detailed rejection/last-rotation UI is separate
+follow-up work.
+
+#### API migration: create_only callers
+
+Keep sending boolean create_only if needed, but handle success with
+outcome=existing and no secret instead of expecting connector_exists. A flagless
+POST no longer rotates. To intentionally rotate, read the list's
+rotation.confirmation and send rotate=true with that confirmation; do not
+combine rotate=true and create_only=true. Creation/rotation disclose a secret
+once; an existing response has secret_available=false and no token URL.
+
 
 ### Conversation pairing and diagnostics
 

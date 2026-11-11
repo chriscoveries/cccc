@@ -15,6 +15,11 @@ export type WebModelConnector = {
   revoked?: boolean;
   created_at?: string;
   updated_at?: string;
+  credential_generation?: number | null;
+  secret_rotated_at?: string | null;
+  rotated_by?: string | null;
+  /** Non-secret preview used by the explicit rotation flow. */
+  rotation?: WebModelConnectorRotation;
   last_activity_at?: string;
   last_method?: string;
   last_tool_name?: string;
@@ -31,6 +36,8 @@ export type WebModelConnector = {
   connector_url_path_token?: string;
   secret_available?: boolean;
 };
+
+export type WebModelConnectorRotation = { recorded_binding_count: number; confirmation: string };
 
 export type WebModelConnectorCreateResult = {
   outcome: "created" | "existing" | "rotated";
@@ -339,8 +346,9 @@ export type WebModelProvider = "chatgpt_web" | "grok_web";
 export type WebModelView = WebModelProvider | "dots";
 
 /**
- * Create only when absent; otherwise return the unchanged connector without
- * its secret. Creating never rotates a credential.
+ * Create the provider's shared connector when absent. An existing connector is
+ * returned unchanged as `outcome:"existing"` with no secret; this call never
+ * rotates a credential.
  */
 export async function createWebModelConnector(
   provider: WebModelProvider = "chatgpt_web",
@@ -352,11 +360,11 @@ export async function createWebModelConnector(
   });
 }
 
-/** Explicit credential replacement; the settings view confirms it first. */
-export async function rotateWebModelConnector(provider: WebModelProvider) {
+/** Explicit, fenced rotation. The server derives its own attribution. */
+export async function rotateWebModelConnector(provider: WebModelProvider, confirmation: string) {
   return apiJson<WebModelConnectorCreateResult>("/api/v1/web-model/connectors", {
     method: "POST",
-    body: JSON.stringify({ provider, rotate: true }),
+    body: JSON.stringify({ provider, rotate: true, confirmation }),
   });
 }
 

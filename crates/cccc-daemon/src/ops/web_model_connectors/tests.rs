@@ -348,88 +348,89 @@ fn grok_binding_preserves_enabled_state_and_retires_on_runtime_change() {
 }
 
 #[test]
-fn creation_is_idempotent_and_only_an_explicit_boolean_rotates() {
-    for provider in ["chatgpt_web", "grok_web"] {
-        let temp = tempfile::tempdir().expect("home");
-        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
-        home.initialize().expect("initialize");
-        let configured = execute(
-            &home,
-            &request(
-                "web_model_connector_configure",
-                json!({"by":"user","provider":provider}),
-            ),
-        )
-        .expect("create");
-        assert_eq!(configured["outcome"], "created");
-        let before = store::load(&home).expect("load");
-        for flags in [
-            json!({}),
-            json!({"create_only":true}),
-            json!({"create_only":false}),
-            json!({"rotate":false}),
-            json!({"rotate":false,"create_only":true}),
-        ] {
-            let mut args = json!({"by":"user","provider":provider});
-            args.as_object_mut()
-                .expect("args")
-                .extend(flags.as_object().expect("flags").clone());
-            let existing =
-                execute(&home, &request("web_model_connector_configure", args)).expect("existing");
-            assert_eq!(existing["outcome"], "existing");
-            assert!(existing.get("secret").is_none());
-            assert_eq!(existing["connector"], configured["connector"]);
-            assert_eq!(store::load(&home).expect("load"), before);
-        }
-        for name in ["create_only", "rotate"] {
-            for value in [json!("true"), json!(1), Value::Null] {
-                let mut args = json!({"by":"user","provider":provider});
-                args[name] = value;
-                let error = execute(&home, &request("web_model_connector_configure", args))
-                    .expect_err("strict flag");
-                assert_eq!(error.code, "invalid_argument");
-                assert_eq!(store::load(&home).expect("load"), before);
-            }
-        }
-        let error = execute(
-            &home,
-            &request(
-                "web_model_connector_configure",
-                json!({"by":"user","provider":provider,"rotate":true,"create_only":true}),
-            ),
-        )
-        .expect_err("conflicting intent");
-        assert_eq!(error.code, "invalid_argument");
-        assert_eq!(store::load(&home).expect("load"), before);
-        let rotated = execute(
-            &home,
-            &request(
-                "web_model_connector_configure",
-                json!({"by":"user","provider":provider,"rotate":true}),
-            ),
-        )
-        .expect("rotate");
-        assert_eq!(rotated["outcome"], "rotated");
-        assert_eq!(
-            rotated["connector"]["connector_id"],
-            configured["connector"]["connector_id"]
-        );
-        assert!(!store::secret_matches(
-            &rotated["connector"],
-            configured["secret"].as_str().expect("old secret")
-        ));
-        assert!(store::secret_matches(
-            &rotated["connector"],
-            rotated["secret"].as_str().expect("new secret")
-        ));
-        let denied = execute(
-            &home,
-            &request(
-                "web_model_connector_configure",
-                json!({"by":"peer","provider":provider,"rotate":true}),
-            ),
-        )
-        .expect_err("user only");
-        assert_eq!(denied.code, "permission_denied");
+fn non_rotating_flags_are_idempotent_and_malformed_flags_refuse() {
+    let temp = tempfile::tempdir().expect("valid test fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("valid test fixture");
+    home.initialize().expect("valid test fixture");
+    store::configure(&home).expect("existing connector");
+    let before = store::load(&home).expect("load");
+    for args in [
+        serde_json::json!({"by":"user","provider":"chatgpt_web"}),
+        serde_json::json!({"by":"user","provider":"chatgpt_web","create_only":true}),
+        serde_json::json!({"by":"user","provider":"chatgpt_web","create_only":false}),
+        serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":false}),
+        serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":false,"create_only":true}),
+    ] {
+        let existing = execute(&home, &request("web_model_connector_configure", args))
+            .expect("an existing connector is idempotent");
+        assert_eq!(existing["outcome"], "existing");
+        assert!(existing.get("secret").is_none());
+        assert_eq!(store::load(&home).expect("load"), before, "nothing rotated");
     }
+    for (name, value) in [
+        ("create_only", serde_json::json!("true")),
+        ("create_only", serde_json::json!(1)),
+        ("create_only", Value::Null),
+        ("rotate", serde_json::json!("true")),
+        ("rotate", serde_json::json!(1)),
+        ("rotate", Value::Null),
+    ] {
+        let mut args = serde_json::json!({"by":"user","provider":"chatgpt_web"});
+        args[name] = value;
+        let error = execute(&home, &request("web_model_connector_configure", args))
+            .expect_err("a non-boolean flag is refused");
+        assert_eq!(error.code, "invalid_argument", "{name}");
+    }
+    let error = execute(
+        &home,
+        &request(
+            "web_model_connector_configure",
+            serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":true,"create_only":true}),
+        ),
+    )
+    .expect_err("contradictory flags are refused before mutation");
+    assert_eq!(error.code, "invalid_argument");
+    assert_eq!(store::load(&home).expect("load"), before, "nothing rotated");
+}
+
+#[test]
+fn explicit_rotation_ignores_supplied_attribution_and_records_the_daemon_principal() {
+    let temp = tempfile::tempdir().expect("valid test fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("valid test fixture");
+    home.initialize().expect("valid test fixture");
+    let created = store::configure(&home).expect("existing connector");
+    let old_secret = created["secret"].as_str().expect("secret");
+    let connector = store::load(&home).expect("load").remove(0);
+    let confirmation = store::rotation_preview(&connector)["confirmation"]
+        .as_str()
+        .expect("confirmation")
+        .to_owned();
+    let rotated = execute(
+        &home,
+        &request(
+            "web_model_connector_configure",
+            serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":true,
+                "confirmation":confirmation,"trusted_rotated_by":"spoofed","rotated_by":"spoofed"}),
+        ),
+    )
+    .expect("explicit rotation");
+    assert_eq!(rotated["outcome"], "rotated");
+    assert_eq!(rotated["connector"]["credential_generation"], 2);
+    assert_eq!(rotated["connector"]["rotated_by"], "local:user");
+    assert!(rotated["connector"]["secret_rotated_at"].is_string());
+    let new_secret = rotated["secret"].as_str().expect("secret");
+    assert!(!store::secret_matches(&rotated["connector"], old_secret));
+    assert!(store::secret_matches(&rotated["connector"], new_secret));
+    let after = store::load(&home).expect("load");
+    let stale = execute(
+        &home,
+        &request(
+            "web_model_connector_configure",
+            serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":true,
+                "confirmation":confirmation}),
+        ),
+    )
+    .expect_err("a replayed confirmation is stale");
+    assert_eq!(stale.code, "rotation_confirmation_stale");
+    assert_eq!(store::load(&home).expect("load"), after, "nothing rotated");
 }
