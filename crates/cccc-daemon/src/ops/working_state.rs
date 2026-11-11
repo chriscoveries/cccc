@@ -105,7 +105,72 @@ pub(super) fn fields(
             ),
         }
     } else if runner_effective == "headless" {
-        ("idle".to_owned(), "headless_running".to_owned(), None, None)
+        // The runner's own turn record. `status` is authoritative because a
+        // stopped or waiting runner can leave a stale turn id behind. A live
+        // turn id is still a working fallback for records written before the
+        // status field existed. No runner lock is taken and the ledger is
+        // never rescanned — `actor_state` reads the small per-actor record the
+        // runner updates on its turn events. No record is not "idle": the
+        // state cannot be known, so the reason says so.
+        match super::runtime_state::actor_state(home, group_id, &actor.id) {
+            Ok(runtime) if !runtime.is_null() => {
+                let active_turn = runtime["active_turn_id"]
+                    .as_str()
+                    .filter(|value| !value.is_empty());
+                let last_turn_end = runtime["last_turn_end"]
+                    .as_str()
+                    .filter(|value| !value.is_empty());
+                let updated_at = runtime["updated_at"]
+                    .as_str()
+                    .filter(|value| !value.is_empty());
+                // Idle is evidence-backed: the turn end when the runner wrote
+                // one, otherwise the record's own write time (a real status
+                // write always stamps it). A live turn id is only the legacy
+                // fallback for records written before `status` existed; an
+                // empty or unrecognized status is not treated as working.
+                let (state, reason) = match runtime.get("status") {
+                    None if active_turn.is_some() => ("working", "headless_turn_record"),
+                    Some(Value::String(status)) => match status.as_str() {
+                        "working" => ("working", "headless_turn_record"),
+                        "idle" if last_turn_end.is_some() || updated_at.is_some() => {
+                            ("idle", "headless_turn_record")
+                        }
+                        "waiting" => ("waiting", "headless_turn_record"),
+                        "stopped" => ("stopped", "headless_turn_record"),
+                        _ => ("waiting", "headless_state_unknown"),
+                    },
+                    _ => ("waiting", "headless_state_unknown"),
+                };
+                let timestamp = match (state, reason) {
+                    ("working", _) => updated_at,
+                    ("idle" | "waiting" | "stopped", "headless_turn_record") => {
+                        last_turn_end.or(updated_at)
+                    }
+                    _ => None,
+                }
+                .map(str::to_owned);
+                let active_task_id = if state == "working" {
+                    runtime["task_id"]
+                        .as_str()
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                } else {
+                    None
+                };
+                (
+                    state.to_owned(),
+                    reason.to_owned(),
+                    timestamp,
+                    active_task_id,
+                )
+            }
+            _ => (
+                "waiting".to_owned(),
+                "headless_state_unknown".to_owned(),
+                None,
+                None,
+            ),
+        }
     } else {
         (
             "waiting".to_owned(),
