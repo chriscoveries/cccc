@@ -31,6 +31,7 @@ Independently started Codex, Claude Code, Pi and OpenCode V2 CLI sessions can al
 | ChatGPT Web Model | `web_model` | Bound ChatGPT Web conversation | Browser delivery + remote MCP connector |
 | ChatGPT Dots | `chatgpt_dots` | One explicitly bound Dot | MCP Events + task-scoped remote MCP; no browser message delivery |
 | Grok Bot Web Model | `grok_web_model` | Dedicated Grok Bot URL | Native Webhook Routine + task-scoped remote MCP connector |
+| Hark (pull) | `hark` | Scheduled remote MCP polling | Agent-bound connector + task-scoped execution credential |
 
 `custom` is also supported as a manual fallback for any command-line agent that can be launched by CCCC.
 
@@ -62,6 +63,7 @@ CCCC applies runtime-specific launch defaults for agents it starts. These defaul
 | `kilo` | `kilo` | Request-scoped one-time ACP approval; no persistent provider approval is written. |
 | `web_model` | N/A | Browser-delivered runtime; local CLI launch flags do not apply. |
 | `chatgpt_dots` | N/A | Event-triggered cloud runtime; CCCC agent permissions apply to each accepted task. |
+| `hark` | N/A | Pull-only remote runtime; CCCC agent permissions apply to each claimed task. No workspace execution by default. |
 | `custom` | User command | CCCC preserves the user-provided command exactly. |
 
 CCCC disables Codex startup update checks by default so an interactive upgrade
@@ -556,6 +558,161 @@ Chet accepts Antigravity only in ACP mode, using the same adapter, login, permis
 
 `grok_web_model` connects an existing Bot URL per agent through a native Webhook Routine and one shared remote MCP connector. Save the URL in agent settings, copy the credential-free Routine setup instructions, then enter its desktop-provided POST to URL and Key. CCCC does not create Bots, manage Grok browser login or deliver through a browser. Each event grants only a task claim; the claim returns a separate execution credential. CCCC owns sequencing, completion and explicit unfinished-task recovery. See [Grok Bot Web Model](/guide/grok-web-model-runtime) for setup, authority boundaries and validation status.
 
+## Hark (pull)
+
+The `hark` runtime lets Hark act as a CCCC manager or advisor through scheduled
+remote MCP calls. CCCC queues work addressed to the agent; Hark polls, claims one
+turn, replies in CCCC and completes it. No browser delivery, inbound webhook,
+local Hark process or vendor API is required. Hark's scheduler has a 10-minute
+minimum interval, so queued work normally waits until the next successful tick.
+CCCC does not create or run that schedule for Hark.
+
+### Setup
+
+1. Expose CCCC at a public HTTPS address using Web Access settings or a reverse
+   proxy. Hark must be able to reach its Streamable HTTP MCP endpoint. Install a
+   CCCC build that includes the `hark` runtime before configuring the connection.
+2. Create and save an agent with runtime **Hark (pull)** in the intended Group.
+   For example, give it the agent ID `hark`. Choose its role and permissions for
+   the manager/advisor work it will do.
+3. In that agent's settings, choose **Create Hark connector**. The credential is
+   bound to exactly this Group and agent. Save the private connection information
+   in Hark's vault when it is shown; it is shown only on creation or rotation.
+   Do not put the URL or credential in chat, issue comments, screenshots, saved
+   task instructions or source control.
+4. Register the returned MCP endpoint in Hark with Streamable HTTP transport.
+   Prefer `/mcp/web-model/<connector_id>` with `Authorization: Bearer <secret>`
+   supplied from its vault. If the client cannot send that header, use the
+   once-shown private URL ending in `/token/<secret>` from the same vault. The
+   angle-bracket values here are placeholders, not working credentials. Hark
+   does not need ChatGPT host metadata or a Dots pairing code. Existing ChatGPT
+   and Grok connector credentials cannot be reused as a Hark connector.
+5. Save one Hark scheduled task that runs every 10 minutes and performs the
+   claim/reply/complete sequence below. Keep credentials in the vault and each
+   run's temporary state, not in the saved handler. Verify that the task is
+   actually saved and enabled; a chat acknowledgement is not a running schedule.
+6. Start the agent and Group, then send `@hark` a test message using **Send**.
+   Check the next scheduled poll, its reply in the original thread and its
+   completion receipt. Merely connecting MCP does not prove delivery works.
+
+The connector determines the caller's Group and agent, rather than a
+model-supplied `actor_id`, `group_id`, or host conversation metadata. Separate
+agents need separate Hark connectors. Possession of a connector credential
+permits claiming work for its bound agent; it does not grant another agent's
+identity or replace the temporary credential needed for business tools.
+
+### Scheduled handler
+
+On each tick:
+
+1. Call `cccc_runtime_wait_next_turn` with `{}` through the registered Hark
+   connector. This is an immediate poll, not a long-held request. Do not add an
+   invented timeout argument or busy-loop between schedule ticks.
+2. With `status: idle` and `turn: null`, end the run quietly. A stopped agent or
+   Group cannot admit a new claim. With `turn_in_progress`, leave the unfinished
+   turn visible for review instead of claiming or replaying its work.
+3. With `status: work_available`, keep the returned task materials, top-level
+   execution `actor_token`, `turn.turn_id` and ordered `turn.event_ids` together
+   in temporary state for this run. Use that execution credential for `cccc_bootstrap`, `cccc_help`
+   and the role-permitted business tools. The permanent connector credential is
+   not the execution token.
+4. Process the task and use `cccc_message_reply` with the original message's
+   `event_id` and the execution `actor_token`. This records `reply_to` in the
+   Group thread. Use the actual event you are answering, not a new message sent
+   to the same recipient.
+5. To dispatch new work to another named actor, use `cccc_message_send` with
+   `to: "@hhdot"` (or another actual agent ID), `mode: "send"`, the task `text`,
+   an agent-facing `insight` and the same execution `actor_token`. A name in
+   `text` alone is not a recipient selection. Use `mode: "mail"` only when
+   delayed Inbox delivery is intended.
+6. Call `cccc_runtime_complete_turn` with that execution `actor_token`, the
+   claimed `turn_id`, the exact ordered `event_ids`, and an accurate `status`
+   (`done`, `partial`, `failed` or `cancelled`). A reply alone does not complete
+   the turn. If the completion response is uncertain, retry that same completion
+   with unchanged turn, events and status; do not claim again or resend replies.
+   Discard temporary execution context after confirmed completion.
+
+A claim may coalesce several queued events into one turn. Reply to the relevant
+events, but complete the full claimed event list. Claiming and completion record
+runtime delivery; they do not advance the separate Mail cursor. Use
+`cccc_inbox_read` only when you intend to consume Mail.
+
+Hark has the same role-scoped messaging, memory and capability tools as other
+actors, without workspace execution by default. Delegating to a named coding
+agent is the normal route for code or workspace work. CCCC does not automate
+Hark's browser or Mac app.
+
+### Stop, rotation and unfinished work
+
+Only the first successful claimant receives a turn and its execution credential.
+Concurrent or duplicate polls cannot acquire those inputs twice. Runtime delivery
+records `claimed`, then `accepted`, `failed` or `ambiguous`; acceptance means the
+task was handed off, not that Hark finished it. An interrupted or uncertain turn
+remains visible and is never silently replayed by the next tick or a restart.
+
+Keep the original successful claim result for the duration of the run. If a
+local variable is lost, the same execution may use that original result to fill
+its tool arguments. Do not claim again, recover credentials from earlier runs or
+store them in files, commands, logs, messages or saved instructions. If the
+original result is unavailable, report the unfinished turn for explicit recovery.
+
+Stopping the agent prevents new claims and retires its execution authority; it
+cannot undo actions already performed by Hark. Starting the agent again does not
+replay accepted work. Review unfinished work and any side effects, then choose
+**Resolve unfinished turn** in the Hark panel if it cannot finish. This requires
+the exact current turn and event IDs, retires its authority and preserves an
+existing completion or records cancellation. It does not stop Hark cloud work.
+To run the original task again, send a new, explicit message after that review.
+
+Rotate a connector if its private connection information was exposed; replace
+Hark's vault entry with the newly shown value. Revoke it when disconnecting the
+agent, and disable Hark's saved schedule separately. Rotation retires the old
+execution authority but keeps any unfinished turn visible for explicit
+resolution; revocation blocks the connector entirely. Old, wrong, rotated or
+revoked credentials fail closed with a reason code; changing selector arguments
+cannot repair them.
+
+### Diagnostics
+
+Open the saved agent's **Hark (pull)** panel to check connection status, pending
+work, the active turn, last poll, last claim and reason code. Hark can also call
+`cccc_connector_status` with `{}` without claiming a task. A recent successful
+poll proves connectivity, not task completion. The canonical completion receipt
+is the authority for a finished turn.
+
+- `hark_no_work`: the poll found no queued work. Wait for the next scheduled tick.
+- `hark_turn_claimed`: the current run received a turn and its execution token.
+- `hark_actor_stopped`: start the intended agent and Group before polling again.
+- `hark_turn_unfinished`: finish the original execution or explicitly resolve it
+  after reviewing side effects. Another poll cannot resume it.
+- `hark_credential_invalid` or `hark_connector_revoked`: check the current
+  connection configuration and vault entry with the owner. Rotated credentials
+  cannot be restored by retrying.
+- `hark_execution_token_invalid` or `hark_task_expired`: use only the original
+  successful claim result for this run if its authority is still valid. Do not
+  substitute the connector credential. Stopped, rotated or resolved executions
+  cannot regain authority by polling.
+- `hark_binding_required`: check that the connector still belongs to the
+  intended Hark agent and Group.
+- `hark_tool_unavailable`: the requested tool is outside the Hark manager lane.
+  Delegate workspace execution to a named coding agent instead.
+
+### Acceptance check
+
+Use an isolated test Group after deployment:
+
+- Send an owner `@hark` message, observe a claim within one successful schedule
+  tick, and verify the reply's `reply_to` points to the original event.
+- Verify a wrong or rotated credential is rejected with a reason code and that
+  a stopped agent admits no claims.
+- Repeat or overlap polls. Confirm only one receives the turn; leave a test turn
+  unfinished and check that it remains visible without automatic replay.
+- Ask Hark to dispatch a test message with `cccc_message_send` to a named actor
+  such as `@hhdot`, and verify its sender and recipient in CCCC.
+
+Local regression tests do not establish Hark-side scheduling, vault setup or
+live end-to-end delivery. Run these checks with Hark against the deployed build.
+
 ## ChatGPT Web Model
 
 `web_model` does not use `cccc setup`. Configure shared sign-in and the MCP connector in **Settings → This instance → Web Models → ChatGPT**, then choose each agent's conversation in that agent's settings. Normal agent startup verifies an unpaired conversation before delivering queued tasks.
@@ -746,6 +903,7 @@ Use a mixed group when different agents are good at different roles:
 - Use a Claude Code or Codex agent as the foreman when you want strong local coding orchestration.
 - Add a second runtime as reviewer to diversify feedback.
 - Use ChatGPT Web Model when you want a browser-backed GPT-5.x agent with CCCC MCP access.
+- Use Hark (pull) for a remote manager/advisor that checks for CCCC work on a schedule.
 - Use `custom` only when the runtime is not first-class yet or needs a special command.
 
 Each agent can have its own Runtime, command override, and private environment. CCCC derives the interaction surface from the selected Runtime. Runtime state stays in `CCCC_HOME`, not in your repository.

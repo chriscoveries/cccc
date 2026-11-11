@@ -976,3 +976,130 @@ async fn connector_list_reports_the_public_base_before_any_connector_exists() {
         "https://cccc.example.test"
     );
 }
+
+#[tokio::test]
+async fn hark_claims_without_metadata_sends_replies_and_never_replays() {
+    let mut f = Fixture::new();
+    let groups = GroupStore::new(f.home.clone()).expect("groups");
+    let group = groups
+        .mutate(&f.group, |g| {
+            g.actors[0].runtime = ActorRuntime::Hark;
+            g.running = true;
+            g.state = cccc_contracts::GroupState::Active;
+            Ok(g.clone())
+        })
+        .expect("Hark actor");
+    let generation = cccc_core::actors::generation_identity(&group.actors[0]);
+    let created =
+        store::hark::configure(&f.home, &f.group, "alpha", &generation, false).expect("connector");
+    f.connector = created["connector"].clone();
+    f.secret = created["secret"].as_str().expect("secret").into();
+    let mut event = cccc_contracts::Event::new("chat.message", &f.group);
+    event.by = "user".into();
+    event.data = json!({"to":["alpha"],"text":"Hark test task","message_mode":"send"})
+        .as_object()
+        .expect("event")
+        .clone();
+    cccc_core::ledger::append(&groups.ledger_path(&f.group).expect("ledger"), &event)
+        .expect("append");
+    let _daemon = start_daemon(&f.home).await;
+    let poll = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cccc_runtime_wait_next_turn","arguments":{}}});
+    let first = f.request(poll.clone(), Some(&f.secret), false).await.1;
+    assert_eq!(
+        first["result"]["structuredContent"]["status"], "work_available",
+        "{first}"
+    );
+    let claimed = &first["result"]["structuredContent"];
+    let token = claimed["actor_token"]
+        .as_str()
+        .expect("execution credential");
+    let duplicate = f.request(poll.clone(), Some(&f.secret), false).await.1;
+    assert_eq!(
+        duplicate["result"]["structuredContent"]["status"], "turn_in_progress",
+        "{duplicate}"
+    );
+    assert!(duplicate["result"]["structuredContent"]["actor_token"].is_null());
+    for (name, args) in [
+        (
+            "cccc_shell",
+            json!({"actor_token":token,"command":"echo forbidden"}),
+        ),
+        (
+            "cccc_file",
+            json!({"actor_token":token,"rel_path":"sample.txt"}),
+        ),
+        (
+            "cccc_capability_use",
+            json!({"actor_token":token,"tool_name":"cccc_shell","tool_arguments":{"command":"echo forbidden"}}),
+        ),
+        (
+            "cccc_message_send",
+            json!({"actor_token":token,"group_id":"g_other","to":["beta"],"text":"wrong group"}),
+        ),
+    ] {
+        let rejected = f.call(name, args, json!({})).await;
+        assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    }
+    let sent = f.call("cccc_message_send",json!({"actor_token":token,"to":["beta"],"text":"Named actor dispatch","insight":"Delegate this synthetic task to beta.","mode":"send","by":"user","actor_id":"beta"}),json!({})).await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    let replied = f
+        .call(
+            "cccc_message_reply",
+            json!({"actor_token":token,"event_id":event.id,"text":"Hark reply"}),
+            json!({}),
+        )
+        .await;
+    assert_ne!(replied["result"]["isError"], true, "{replied}");
+    let ledger =
+        std::fs::read_to_string(groups.ledger_path(&f.group).expect("ledger")).expect("read");
+    let events = ledger
+        .lines()
+        .map(|s| serde_json::from_str::<Value>(s).expect("event"))
+        .collect::<Vec<_>>();
+    assert!(events.iter().any(|e| e["by"] == "alpha"
+        && e["data"]["to"] == json!(["beta"])
+        && e["data"]["text"] == "Named actor dispatch"));
+    assert!(events.iter().any(|e| e["by"] == "alpha"
+        && e["data"]["reply_to"] == event.id
+        && e["data"]["text"] == "Hark reply"));
+    assert!(!ledger.contains(token));
+    let args = json!({"actor_token":token,"turn_id":claimed["turn"]["turn_id"],"event_ids":claimed["turn"]["event_ids"],"status":"done"});
+    let complete = f
+        .call("cccc_runtime_complete_turn", args.clone(), json!({}))
+        .await;
+    assert_ne!(complete["result"]["isError"], true, "{complete}");
+    let repeat = f.call("cccc_runtime_complete_turn", args, json!({})).await;
+    assert_ne!(repeat["result"]["isError"], true, "{repeat}");
+    let denied = f
+        .call(
+            "cccc_message_send",
+            json!({"actor_token":token,"to":["beta"],"text":"expired"}),
+            json!({}),
+        )
+        .await;
+    assert_eq!(denied["result"]["isError"], true);
+    let old_secret = f.secret.clone();
+    let rotated =
+        store::hark::configure(&f.home, &f.group, "alpha", &generation, true).expect("rotate");
+    f.secret = rotated["secret"].as_str().expect("new secret").into();
+    for secret in ["wrong", old_secret.as_str()] {
+        let (status, body) = f.request(poll.clone(), Some(secret), false).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.to_string().contains("hark_credential_invalid"));
+    }
+    groups
+        .mutate(&f.group, |g| {
+            g.actors[0].enabled = false;
+            Ok(())
+        })
+        .expect("stop");
+    let stopped = f.request(poll.clone(), Some(&f.secret), false).await.1;
+    assert_eq!(
+        stopped["result"]["structuredContent"]["status"], "stopped",
+        "{stopped}"
+    );
+    store::revoke(&f.home, f.connector["connector_id"].as_str().expect("id")).expect("revoke");
+    let (status, body) = f.request(poll, Some(&f.secret), false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.to_string().contains("hark_connector_revoked"));
+}

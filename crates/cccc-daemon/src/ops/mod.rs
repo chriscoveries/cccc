@@ -48,6 +48,7 @@ mod group_runtime;
 mod group_scopes;
 mod group_space;
 mod groups;
+mod hark_pull;
 mod hermes_runtime;
 mod im;
 pub(crate) mod instruction_files;
@@ -131,6 +132,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         runtime_state::resolve_operation,
         dots_events::resolve_operation,
         grok_webhook::resolve_operation,
+        hark_pull::resolve_operation,
         maintenance::resolve_operation,
         owned_process_recovery::resolve_operation,
         im::resolve_operation,

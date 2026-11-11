@@ -56,6 +56,7 @@ import {
   type ActorSecretSaveChanges,
 } from "./actorSecretManagerModel";
 import { WebModelActorSetup } from "../webModel/WebModelActorSetup";
+import { HarkActorPanel } from "../webModel/HarkActorPanel";
 import { DotsActorPanel } from "../webModel/DotsActorPanel";
 import { useGroupStore, useModalStore, useUIStore } from "../../stores";
 import { SUPPORTED_RUNTIMES } from "../../types";
@@ -797,23 +798,27 @@ function CreateActorConfigModal({
                             data-status-tone="info"
                           >
                             <div className="font-medium">
-                              {runtime === "grok_web_model"
-                                ? "Grok Bot Web Model"
-                                : runtime === "chatgpt_dots"
-                                  ? "ChatGPT Dots"
-                                  : t("webModelActorBoundConnectorTitle", {
-                                      defaultValue: "ChatGPT Web Model",
-                                    })}
+                              {runtime === "hark"
+                                ? "Hark (pull)"
+                                : runtime === "grok_web_model"
+                                  ? "Grok Bot Web Model"
+                                  : runtime === "chatgpt_dots"
+                                    ? "ChatGPT Dots"
+                                    : t("webModelActorBoundConnectorTitle", {
+                                        defaultValue: "ChatGPT Web Model",
+                                      })}
                             </div>
                             <div className="mt-1">
-                              {runtime === "grok_web_model"
-                                ? t("settings:grokActor.hint")
-                                : runtime === "chatgpt_dots"
-                                  ? t("settings:dotsActor.createHint")
-                                  : t("webModelActorBoundConnectorHint", {
-                                      defaultValue:
-                                        "Use shared login and one connector in global Web Model settings. After saving this Actor, pair its own conversation below.",
-                                    })}
+                              {runtime === "hark"
+                                ? "After saving, create an agent-bound Hark connector below. Scheduled pull; no browser or inbound webhook."
+                                : runtime === "grok_web_model"
+                                  ? t("settings:grokActor.hint")
+                                  : runtime === "chatgpt_dots"
+                                    ? t("settings:dotsActor.createHint")
+                                    : t("webModelActorBoundConnectorHint", {
+                                        defaultValue:
+                                          "Use shared login and one connector in global Web Model settings. After saving this Actor, pair its own conversation below.",
+                                      })}
                             </div>
                           </div>
                         ) : null}
@@ -2347,23 +2352,27 @@ function EditActorConfigModal({
                             data-status-tone="info"
                           >
                             <div className="font-medium">
-                              {runtime === "grok_web_model"
-                                ? "Grok Bot Web Model"
-                                : runtime === "chatgpt_dots"
-                                  ? "ChatGPT Dots"
-                                  : t("webModelActorBoundConnectorTitle", {
-                                      defaultValue: "ChatGPT Web Model",
-                                    })}
+                              {runtime === "hark"
+                                ? "Hark (pull)"
+                                : runtime === "grok_web_model"
+                                  ? "Grok Bot Web Model"
+                                  : runtime === "chatgpt_dots"
+                                    ? "ChatGPT Dots"
+                                    : t("webModelActorBoundConnectorTitle", {
+                                        defaultValue: "ChatGPT Web Model",
+                                      })}
                             </div>
                             <div className="mt-1">
-                              {runtime === "grok_web_model"
-                                ? t("settings:grokActor.hint")
-                                : runtime === "chatgpt_dots"
-                                  ? t("settings:dotsActor.createHint")
-                                  : t("webModelActorBoundConnectorHint", {
-                                      defaultValue:
-                                        "Use shared login and one connector in global Web Model settings. After saving this Actor, pair its own conversation below.",
-                                    })}
+                              {runtime === "hark"
+                                ? "After saving, create an agent-bound Hark connector below. Scheduled pull; no browser or inbound webhook."
+                                : runtime === "grok_web_model"
+                                  ? t("settings:grokActor.hint")
+                                  : runtime === "chatgpt_dots"
+                                    ? t("settings:dotsActor.createHint")
+                                    : t("webModelActorBoundConnectorHint", {
+                                        defaultValue:
+                                          "Use shared login and one connector in global Web Model settings. After saving this Actor, pair its own conversation below.",
+                                      })}
                             </div>
                           </div>
                         ) : null}
@@ -2456,7 +2465,16 @@ function EditActorConfigModal({
               <p className="mb-3 text-xs text-[var(--color-text-muted)]">
                 {t("settings:webModelActor.immediateHint")}
               </p>
-              {conversationRuntime === "chatgpt_dots" ? (
+              {conversationRuntime === "hark" ? (
+                <HarkActorPanel
+                  groupId={groupId}
+                  actorId={actorId}
+                  isVisible={!suspended}
+                  canAccessConnection={canAccessGlobalSettings}
+                  onBusyChange={setConnectionBusy}
+                  saving={secretsBusy || busy === "actor-update"}
+                />
+              ) : conversationRuntime === "chatgpt_dots" ? (
                 <DotsActorPanel
                   key={`${groupId}/${actorId}/dots`}
                   groupId={groupId}

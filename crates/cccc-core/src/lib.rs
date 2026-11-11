@@ -76,9 +76,9 @@ pub mod workspace_changes;
 pub mod workspace_git;
 
 pub use capability_builtin::{
-    CORE_TOOL_NAMES, LOCAL_SESSION_TOOL_NAMES, SELF_EVOLUTION_CAPABILITY_ID,
+    CORE_TOOL_NAMES, HARK_TOOL_NAMES, LOCAL_SESSION_TOOL_NAMES, SELF_EVOLUTION_CAPABILITY_ID,
     USER_CONTROL_TOOL_NAMES, VOICE_SECRETARY_TASK_TOOL_NAMES, actor_base_tool_names,
-    is_builtin_capability_pack_tool, web_model_tool_names,
+    hark_tool_allowed, is_builtin_capability_pack_tool, web_model_tool_names,
 };
 pub use group::{GroupDoc, GroupStore, Scope};
 pub use home::{HomeError, HomeLayout};

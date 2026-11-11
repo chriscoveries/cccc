@@ -86,7 +86,7 @@ pub(super) async fn create(
     }
 }
 
-fn connector_base_url(state: &AppState) -> Result<String, ApiError> {
+pub(super) fn connector_base_url(state: &AppState) -> Result<String, ApiError> {
     let settings = settings::load(&state.home).map_err(store::io_error)?;
     let mut base = settings
         .remote_access
@@ -102,9 +102,9 @@ fn connector_base_url(state: &AppState) -> Result<String, ApiError> {
     Ok(base)
 }
 
-fn public(item: &Value, base_url: &str) -> Value {
+pub(super) fn public(item: &Value, base_url: &str) -> Value {
     let id = item["connector_id"].as_str().unwrap_or_default();
-    let mut result = json!({"connector_id":id,"kind":"web_model_connector","routing_mode":item["routing_mode"],"provider":item["provider"],
+    let mut result = json!({"connector_id":id,"kind":item["kind"],"routing_mode":item["routing_mode"],"provider":item["provider"],
         "connector_url":format!("{base_url}/mcp/web-model/{id}"),"secret_available":false,
         "bound_actor_count":item["bindings"].as_object().map_or(0, |b| b.len())});
     for field in [
@@ -127,6 +127,8 @@ fn public(item: &Value, base_url: &str) -> Value {
     // The fence and binding count are non-secret; the UI can preview a
     // rotation from the normal list read without another endpoint.
     result["rotation"] = cccc_core::web_model_connectors::rotation_preview(item);
+    result["group_id"] = item["group_id"].clone();
+    result["actor_id"] = item["actor_id"].clone();
     // Which Actor the Dot is bound to; its credentials and callback stay private.
     let dots = &item["dots"];
     result["dots_actor"] = if dots["actor_id"].is_string() {
