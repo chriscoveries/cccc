@@ -59,6 +59,7 @@ def test_pr_jobs_keep_quality_web_package_and_native_boundaries() -> None:
         "windows-smoke",
         "tui-macos-smoke",
         "rust-linux",
+        "patch-release",
         "ci-required",
     }
     assert set(jobs["ci-required"]["needs"]) == set(jobs) - {"ci-required"}
@@ -79,6 +80,29 @@ def test_pr_jobs_keep_quality_web_package_and_native_boundaries() -> None:
         )
         assert setup["with"]["cache"] == "pip", name
         assert setup["with"]["cache-dependency-path"] == "pyproject.toml", name
+
+
+def test_patch_artifact_preserves_the_linux_release_dependency_boundary() -> None:
+    jobs = _workflow()["jobs"]
+    patch = jobs["patch-release"]
+    assert patch["if"] == "github.head_ref == 'patch/dotsweb-v0.4.54'"
+    assert set(patch["needs"]) == {"web", "rust-linux"}
+    assert patch["container"] == _release_workflow()["jobs"]["build-linux"]["container"]
+    checkout = patch["steps"][0]
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
+    runs = _runs(patch)
+    assert 'test "$(git rev-parse HEAD)" = "$PATCH_EXPECTED_HEAD"' in runs
+    assert "verify_standalone_binary.py --platform linux target/release/cccc" in runs
+    assert "sha256sum cccc ./*.tar.gz > SHA256SUMS" in runs
+    aggregate = jobs["ci-required"]["steps"][0]
+    assert (
+        aggregate["env"]["PATCH_REQUIRED"]
+        == "${{ github.head_ref == 'patch/dotsweb-v0.4.54' }}"
+    )
+    assert (
+        '.key != "patch-release" or $patch_required or .value.result != "skipped"'
+        in aggregate["run"]
+    )
 
 
 def test_web_ci_uses_managed_node_and_composite_vite_plus_check() -> None:
