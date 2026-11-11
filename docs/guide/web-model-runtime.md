@@ -100,9 +100,12 @@ not from a value supplied in the request.
 > working credential. `create_only` is now accepted only as a compatibility
 > field; every non-rotating call is create-when-absent and returns
 > `outcome:"existing"` without a secret. Existing URLs keep working until an
-> administrator explicitly confirms **Replace credential**. Direct daemon
-> callers that send no `principal_token` are recorded as `local`; a
-> non-administrator token is refused.
+> administrator explicitly confirms **Replace credential**. Connectors written
+> before `credential_generation` existed read as generation 0 and have unknown
+> rotation metadata until the next confirmed rotation; the new
+> `credential_generation`, `secret_rotated_at`, `rotated_by`, `security_events_log`
+> and `rotation` fields are additive. Direct daemon callers that send no
+> `principal_token` are recorded as `local`; a non-administrator token is refused.
 
 ### Conversation pairing and diagnostics
 
