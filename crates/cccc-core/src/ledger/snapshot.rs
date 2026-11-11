@@ -15,6 +15,7 @@ use std::time::SystemTime;
 #[cfg(test)]
 thread_local! {
     static GZIP_READERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static HYDRATED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static DECODED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -23,6 +24,11 @@ pub(crate) fn decoded_records() -> u64 {
     // Snapshot decoding is synchronous on the query thread. Parallel tests
     // must not count each other's unrelated history reads.
     DECODED.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn hydrated_records() -> u64 {
+    HYDRATED.with(std::cell::Cell::get)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,7 +146,7 @@ impl Snapshot {
         Ok(last[0] == b'\n')
     }
 
-    fn file(&self, source: usize) -> io::Result<File> {
+    pub(crate) fn source_file(&self, source: usize) -> io::Result<File> {
         if let Some((index, file)) = &self.active
             && *index == source
         {
@@ -159,7 +165,7 @@ impl Snapshot {
 
     fn reader(&self, source: usize, offset: u64) -> io::Result<Box<dyn BufRead>> {
         let token = &self.sources[source];
-        let mut file = self.file(source)?;
+        let mut file = self.source_file(source)?;
         // Cloned descriptors share their offset; each snapshot is used serially.
         file.seek(SeekFrom::Start(0))?;
         if is_gzip(&token.path) {
@@ -295,7 +301,7 @@ impl Snapshot {
                 None
             };
             let mut plain = if compressed.is_none() {
-                Some(self.file(source)?)
+                Some(self.source_file(source)?)
             } else {
                 None
             };
@@ -338,6 +344,8 @@ impl Snapshot {
 }
 
 fn read_event(reader: &mut impl Read, location: Location) -> io::Result<Event> {
+    #[cfg(test)]
+    HYDRATED.with(|count| count.set(count.get() + 1));
     let length = usize::try_from(location.end - location.offset).map_err(io::Error::other)?;
     let mut bytes = vec![0; length];
     reader.read_exact(&mut bytes)?;
