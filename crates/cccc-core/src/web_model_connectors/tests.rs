@@ -821,9 +821,11 @@ fn throttle_writes_once_per_interval_and_folds_the_rest_into_count() {
         throttle.admit("a", t0 + Duration::from_secs(2), interval),
         None
     );
+    // The t0 hit was already written as 1; this write folds the three hits
+    // that arrived inside the interval.
     assert_eq!(
         throttle.admit("a", t0 + Duration::from_secs(5), interval),
-        Some(4)
+        Some(3)
     );
     // Another connector is throttled independently.
     assert_eq!(
