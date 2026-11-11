@@ -66,7 +66,8 @@ pub(super) fn record_route(
     .map(|_| ())
 }
 
-/// Shared, bounded diagnostics; observations do not displace actionable calls.
+/// Shared, bounded tool-call diagnostics. Credential rejection/rotation events
+/// use a separate `security_events_log`, so they cannot displace these calls.
 pub(super) fn append_call(connector: &mut Value, entry: Value) {
     cccc_core::web_model_connectors::push_event(connector, entry);
 }

@@ -54,14 +54,12 @@ pub(super) async fn create(
             .as_str()
             .ok_or_else(|| ApiError::bad("confirmation is required to rotate"))?;
         args["confirmation"] = json!(confirmation);
-        // The label comes from the authenticated principal, never the body.
-        // A local browser principal is `local`; a bearer token names its user.
-        let rotated_by = if principal.raw_token.is_empty() {
-            "local".to_owned()
-        } else {
-            format!("user:{}", principal.user_id)
-        };
-        args["trusted_rotated_by"] = json!(rotated_by);
+        // Forward the credential the middleware already authenticated, not a
+        // label: the daemon revalidates it and derives `user:<id>` itself. The
+        // local browser principal has no bearer token and becomes `local`.
+        if !principal.raw_token.is_empty() {
+            args["principal_token"] = json!(principal.raw_token);
+        }
     }
     let response = call(
         &state,
@@ -121,6 +119,7 @@ pub(super) fn public(item: &Value, base_url: &str) -> Value {
         "last_call_status",
         "last_error",
         "events_log",
+        "security_events_log",
     ] {
         result[field] = item[field].clone();
     }

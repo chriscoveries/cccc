@@ -27,8 +27,10 @@ export type WebModelConnector = {
   last_wait_status?: string;
   last_turn_id?: string;
   last_error?: string;
-  /** Bounded outcomes, fixed reasons and optional salted host identity fingerprints. */
-  events_log?: WebModelConnectorCall[];
+  /** Bounded tool-call outcomes, fixed reasons and optional salted host fingerprints. */
+  events_log?: WebModelConnectorEvent[];
+  /** Bounded credential rejection/rotation events, kept separate from calls. */
+  security_events_log?: WebModelConnectorEvent[];
   /** The Actor this connector's Dot is bound to, if any. */
   dots_actor?: { group_id: string; actor_id: string } | null;
   connector_url?: string;
@@ -67,14 +69,23 @@ export type DotsPhase =
   | "failed"
   | "stopped";
 
-export type WebModelConnectorCall = {
+export type WebModelConnectorEvent = {
   at: string;
-  method: string;
+  method?: string;
   tool_name?: string;
-  ok: boolean;
-  reason: string | null;
+  ok?: boolean;
+  reason?: string | null;
+  outcome?: "ok" | "denied";
+  transport?: "get_probe" | "post_header" | "post_path_token" | "other";
+  count?: number;
+  credential_generation?: number;
+  rotated_by?: string;
+  recorded_binding_count?: number;
   host_identity?: { session: string; subject: string | null; organization: string | null };
 };
+
+/** @deprecated Use WebModelConnectorEvent; kept for older imports. */
+export type WebModelConnectorCall = WebModelConnectorEvent;
 
 export type DotsActorState = {
   group_id: string;
@@ -410,6 +421,22 @@ export async function reloadWebModelBrowserSession(groupId: string, actorId: str
   return apiJson<WebModelBrowserSurfaceResult>("/api/v1/web-model/browser-session/reload", {
     method: "POST",
     body: JSON.stringify({ group_id: groupId, actor_id: actorId }),
+  });
+}
+
+/**
+ * Explicitly replace the shared connector's credential. The confirmation is
+ * the non-secret fence from the list's `rotation` preview; a stale preview is
+ * refused and must be fetched again.
+ */
+export async function rotateWebModelConnector(
+  provider: WebModelProvider,
+  connectorId: string,
+  confirmation: string,
+) {
+  return apiJson<WebModelConnectorCreateResult>("/api/v1/web-model/connectors", {
+    method: "POST",
+    body: JSON.stringify({ provider, connector_id: connectorId, rotate: true, confirmation }),
   });
 }
 

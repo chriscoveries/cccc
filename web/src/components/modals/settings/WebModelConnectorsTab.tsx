@@ -114,7 +114,8 @@ function ProviderSettings({
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [nonce, setNonce] = useState(0);
-  const [confirm, setConfirm] = useState(false);
+  const [confirm, setConfirm] = useState<"rotate" | "revoke" | null>(null);
+  const [rotation, setRotation] = useState<api.WebModelConnectorRotation | null>(null);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [loadNonce, setLoadNonce] = useState(0);
   const actionPending = useRef(false);
@@ -135,7 +136,8 @@ function ProviderSettings({
     let cancelled = false;
     setLoadState("loading");
     setError("");
-    setConfirm(false);
+    setConfirm(null);
+    setRotation(null);
     void Promise.all([
       api.fetchWebModelConnectors(),
       provider === "chatgpt_web"
@@ -150,8 +152,10 @@ function ProviderSettings({
               c.result.connectors.find(
                 (c) => !c.revoked && (c.provider || "chatgpt_web") === provider,
               ) || null;
-            return next && previous?.connector_id === next.connector_id
-              ? { ...next, connector_url_path_token: previous?.connector_url_path_token }
+            return next &&
+              previous?.connector_id === next.connector_id &&
+              previous.credential_generation === next.credential_generation
+              ? { ...next, connector_url_path_token: previous.connector_url_path_token }
               : next;
           });
           setNeedsSetup(provider === "chatgpt_web" && Boolean(c.result.requires_reconfiguration));
@@ -178,7 +182,9 @@ function ProviderSettings({
     [provider],
   );
   const actionsDisabled = busy || !isActive || loadState !== "ready";
-  async function action(kind: "create" | "revoke" | "open" | "check" | "close") {
+  async function action(
+    kind: "create" | "revoke" | "previewRotation" | "rotate" | "open" | "check" | "close",
+  ) {
     if (actionPending.current || actionsDisabled) return;
     if (kind === "create" && address.kind !== "https") return;
     actionPending.current = true;
@@ -197,12 +203,51 @@ function ProviderSettings({
             : { ...r.result.connector, connector_url_path_token: undefined },
         );
         setNeedsSetup(false);
-        setConfirm(false);
+        setConfirm(null);
+        setRotation(null);
+      } else if (kind === "previewRotation" && connector) {
+        // Fetch a fresh fence before showing the impact dialog. A preview from
+        // an old list read could already be stale after another admin's change.
+        const r = await api.fetchWebModelConnectors();
+        if (!r.ok) throw new Error(r.error.message);
+        const next =
+          r.result.connectors.find(
+            (item) => !item.revoked && (item.provider || "chatgpt_web") === provider,
+          ) || null;
+        if (!next || next.connector_id !== connector.connector_id || !next.rotation) {
+          throw new Error(label("rotationUnavailable"));
+        }
+        setConnector((previous) =>
+          previous?.connector_id === next.connector_id &&
+          previous.credential_generation === next.credential_generation
+            ? { ...next, connector_url_path_token: previous.connector_url_path_token }
+            : { ...next, connector_url_path_token: undefined },
+        );
+        setRotation(next.rotation);
+        setConfirm("rotate");
+      } else if (kind === "rotate" && connector && rotation) {
+        const r = await api.rotateWebModelConnector(
+          provider,
+          connector.connector_id,
+          rotation.confirmation,
+        );
+        if (!r.ok) {
+          if (r.error.code === "rotation_confirmation_stale") {
+            setRotation(null);
+            setConfirm(null);
+          }
+          throw new Error(r.error.message);
+        }
+        setConnector(r.result.connector);
+        setRotation(null);
+        setConfirm(null);
+        setNeedsSetup(false);
       } else if (kind === "revoke" && connector) {
         const r = await api.revokeWebModelConnector(connector.connector_id);
         if (!r.ok) throw new Error(r.error.message);
         setConnector(null);
-        setConfirm(false);
+        setConfirm(null);
+        setRotation(null);
       } else {
         const r = await api.sharedWebModelBrowser(
           kind === "check" ? "status" : (kind as "open" | "close"),
@@ -449,7 +494,10 @@ function ProviderSettings({
               <details
                 className="text-[13px]"
                 onToggle={(event) => {
-                  if (!event.currentTarget.open) setConfirm(false);
+                  if (!event.currentTarget.open) {
+                    setConfirm(null);
+                    setRotation(null);
+                  }
                 }}
               >
                 <summary className="cursor-pointer text-[var(--color-text-secondary)]">
@@ -458,14 +506,68 @@ function ProviderSettings({
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
                     type="button"
+                    data-web-model-action="preview-rotation"
+                    className={secondaryButtonClass()}
+                    disabled={actionsDisabled}
+                    onClick={() => void action("previewRotation")}
+                  >
+                    {label("rotate")}
+                  </button>
+                  <button
+                    type="button"
+                    data-web-model-action="revoke"
                     className={dangerButtonClass()}
                     disabled={actionsDisabled}
-                    onClick={() => setConfirm(true)}
+                    onClick={() => setConfirm("revoke")}
                   >
                     {label("revoke")}
                   </button>
                 </div>
-                {confirm && (
+                {confirm === "rotate" && rotation && (
+                  <div className="mt-3">
+                    <SettingsNotice
+                      tone="warning"
+                      action={
+                        <>
+                          <button
+                            type="button"
+                            data-web-model-confirm="rotate"
+                            className={dangerButtonClass()}
+                            disabled={actionsDisabled}
+                            onClick={() => void action("rotate")}
+                          >
+                            {label("rotate")}
+                          </button>
+                          <button
+                            type="button"
+                            className={secondaryButtonClass()}
+                            disabled={actionsDisabled}
+                            onClick={() => {
+                              setConfirm(null);
+                              setRotation(null);
+                            }}
+                          >
+                            {label("cancel")}
+                          </button>
+                        </>
+                      }
+                    >
+                      <p>{label("rotateHint")}</p>
+                      <p className="mt-2">
+                        {t("webModelShared.rotationImpact", {
+                          generation: rotation.credential_generation,
+                          count: rotation.recorded_binding_count,
+                        })}
+                      </p>
+                      <p className="mt-2">
+                        {rotation.dots_binding_recorded
+                          ? t("webModelShared.rotationDots")
+                          : t("webModelShared.rotationNoDots")}
+                      </p>
+                    </SettingsNotice>
+                  </div>
+                )}
+                {confirm === "revoke" && (
                   <div className="mt-3">
                     <SettingsNotice
                       tone="warning"
@@ -483,7 +585,7 @@ function ProviderSettings({
                             type="button"
                             className={secondaryButtonClass()}
                             disabled={actionsDisabled}
-                            onClick={() => setConfirm(false)}
+                            onClick={() => setConfirm(null)}
                           >
                             {label("cancel")}
                           </button>

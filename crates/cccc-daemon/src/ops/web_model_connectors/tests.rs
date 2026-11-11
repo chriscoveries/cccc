@@ -405,22 +405,66 @@ fn explicit_rotation_requires_the_current_preview_and_records_its_actor() {
         .as_str()
         .expect("confirmation")
         .to_owned();
+    // A direct daemon caller cannot name itself by putting a label in request
+    // JSON. Without a revalidated token it is a local operation.
     let rotated = execute(
         &home,
         &request(
             "web_model_connector_configure",
             serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":true,
-                "confirmation":confirmation,"trusted_rotated_by":"user:admin"}),
+                "confirmation":confirmation,"trusted_rotated_by":"user:admin",
+                "rotated_by":"user:admin"}),
         ),
     )
     .expect("explicit rotation");
     assert_eq!(rotated["outcome"], "rotated");
     assert_eq!(rotated["connector"]["credential_generation"], 2);
-    assert_eq!(rotated["connector"]["rotated_by"], "user:admin");
+    assert_eq!(rotated["connector"]["rotated_by"], "local");
     assert!(rotated["connector"]["secret_rotated_at"].is_string());
     let new_secret = rotated["secret"].as_str().expect("secret");
     assert!(!store::secret_matches(&rotated["connector"], old_secret));
     assert!(store::secret_matches(&rotated["connector"], new_secret));
+
+    // A real administrator bearer token is revalidated by the daemon and
+    // produces the user label; an invalid token is refused, not downgraded.
+    let admin = cccc_core::access_tokens::AccessTokenStore::new(home.clone())
+        .expect("access store")
+        .create("admin", Vec::new(), true, None)
+        .expect("admin token")
+        .token;
+    let connector = store::load(&home).expect("load").remove(0);
+    let confirmation = store::rotation_preview(&connector)["confirmation"]
+        .as_str()
+        .expect("confirmation")
+        .to_owned();
+    let rotated = execute(
+        &home,
+        &request(
+            "web_model_connector_configure",
+            serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":true,
+                "confirmation":confirmation,"principal_token":admin}),
+        ),
+    )
+    .expect("authenticated rotation");
+    assert_eq!(rotated["connector"]["rotated_by"], "user:admin");
+    assert_eq!(rotated["connector"]["credential_generation"], 3);
+    let before_bad_token = store::load(&home).expect("load");
+    let connector = before_bad_token[0].clone();
+    let confirmation = store::rotation_preview(&connector)["confirmation"]
+        .as_str()
+        .expect("confirmation")
+        .to_owned();
+    let denied = execute(
+        &home,
+        &request(
+            "web_model_connector_configure",
+            serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":true,
+                "confirmation":confirmation,"principal_token":"not-an-admin-token"}),
+        ),
+    )
+    .expect_err("invalid token is refused");
+    assert_eq!(denied.code, "permission_denied");
+    assert_eq!(store::load(&home).expect("load"), before_bad_token);
     let after = store::load(&home).expect("load");
     let stale = execute(
         &home,

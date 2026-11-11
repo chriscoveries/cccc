@@ -3,7 +3,10 @@
 use super::operation::{Operation, Policy::GlobalWrite};
 use crate::dispatch::{OpError, OpResult, object, required_arg, string_arg};
 use cccc_contracts::{DaemonRequest, GroupState, RunnerKind};
-use cccc_core::{GroupStore, HomeLayout, integration_state, web_model_connectors as store};
+use cccc_core::{
+    GroupStore, HomeLayout, access_tokens::AccessTokenStore, integration_state,
+    web_model_connectors as store,
+};
 use serde_json::json;
 
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
@@ -60,11 +63,41 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         }
         if rotate {
             let confirmation = required_arg(request, "confirmation")?;
-            // Only the authenticated Web layer may name the actor. Direct
-            // daemon callers get the local label; remote request JSON cannot
-            // choose it.
-            let rotated_by =
-                string_arg(request, "trusted_rotated_by").unwrap_or_else(|| "local".into());
+            // The Web layer forwards the bearer credential it already
+            // authenticated, never a display label. The daemon revalidates it
+            // here, so request JSON cannot name `user:admin` without that
+            // administrator's token. An empty/absent token is a local daemon
+            // caller and is labelled `local`; the old `trusted_rotated_by`
+            // field is deliberately ignored.
+            let rotated_by = match request.args.get("principal_token") {
+                None => "local".to_owned(),
+                Some(serde_json::Value::String(token)) if token.trim().is_empty() => {
+                    "local".to_owned()
+                }
+                Some(serde_json::Value::String(token)) => {
+                    let principal = AccessTokenStore::new(home.clone())
+                        .map_err(OpError::io)?
+                        .lookup(token.trim())
+                        .map_err(OpError::io)?;
+                    match principal {
+                        Some(principal) if principal.is_admin => {
+                            format!("user:{}", principal.user_id)
+                        }
+                        _ => {
+                            return Err(OpError::new(
+                                "permission_denied",
+                                "rotation principal is not an administrator",
+                            ));
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err(OpError::new(
+                        "invalid_argument",
+                        "principal_token must be a string",
+                    ));
+                }
+            };
             return object(
                 store::rotate_provider(home, provider, &confirmation, &rotated_by).map_err(
                     |e| match e.to_string().as_str() {

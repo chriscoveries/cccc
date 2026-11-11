@@ -52,7 +52,9 @@ export function WebModelConnectorDiagnostics({
   onRefresh: () => void;
 }) {
   const { t } = useTranslation("settings");
-  const calls = [...(connector.events_log ?? [])].reverse();
+  const events = [...(connector.events_log ?? []), ...(connector.security_events_log ?? [])].sort(
+    (left, right) => right.at.localeCompare(left.at),
+  );
   return (
     <SettingsCard
       title={t("webModelDiagnostics.title")}
@@ -68,55 +70,105 @@ export function WebModelConnectorDiagnostics({
         </button>
       }
     >
-      {calls.length ? (
+      <p
+        data-web-model-last-rotation
+        className="px-5 pt-3.5 text-xs text-[var(--color-text-secondary)]"
+      >
+        {connector.secret_rotated_at
+          ? t("webModelDiagnostics.lastRotation", {
+              time: formatMessageTimestamp(connector.secret_rotated_at),
+              actor: connector.rotated_by || t("webModelDiagnostics.unknownActor"),
+            })
+          : t("webModelDiagnostics.lastRotationUnknown")}
+      </p>
+      {events.length ? (
         <ul className="divide-y divide-[var(--glass-border-subtle)]">
-          {calls.map((call, index) => (
-            <li
-              key={`${call.at}-${index}`}
-              data-web-model-call={call.ok ? "ok" : "failed"}
-              className="flex flex-wrap items-center justify-between gap-2 px-5 py-2.5 text-sm"
-            >
-              <span className="break-all font-mono text-xs">{call.tool_name || call.method}</span>
-              <span
-                data-status-tone={call.ok ? "ok" : "error"}
-                className={
-                  call.ok
-                    ? "text-xs text-emerald-700 dark:text-emerald-300"
-                    : "break-words text-xs text-rose-700 dark:text-rose-300"
+          {events.map((event, index) => {
+            const rejected = event.reason === "invalid_secret";
+            const rotated = event.reason === "secret_rotated";
+            const failed = rejected || event.ok === false;
+            const transport = event.transport
+              ? t(`webModelDiagnostics.transports.${event.transport}`)
+              : "-";
+            return (
+              <li
+                key={`${event.at}-${index}`}
+                data-web-model-call={
+                  rejected ? "rejected" : rotated ? "rotated" : event.ok ? "ok" : "failed"
                 }
+                className="flex flex-wrap items-center justify-between gap-2 px-5 py-2.5 text-sm"
               >
-                {call.ok
-                  ? t("webModelDiagnostics.callOk")
-                  : t("webModelDiagnostics.callFailed", { reason: call.reason || "-" })}
-              </span>
-              <span className="w-full text-xs text-[var(--color-text-muted)] sm:w-auto">
-                {formatMessageTimestamp(call.at)}
-              </span>
-              {!call.ok && call.tool_name && (
-                <p className="w-full text-xs text-[var(--color-text-secondary)]">
-                  {t(`webModelDiagnostics.reasons.${reasonHint(call.reason)}`)}
-                </p>
-              )}
-              {call.host_identity && (
-                <details className="w-full text-xs text-[var(--color-text-secondary)]">
-                  <summary className="cursor-pointer">
-                    {t("webModelDiagnostics.identity.title")}
-                  </summary>
-                  <p className="mt-2">{t("webModelDiagnostics.identity.hint")}</p>
-                  <dl className="mt-2 grid gap-2">
-                    {(["session", "subject", "organization"] as const).map((field) => (
-                      <div key={field}>
-                        <dt>{t(`webModelDiagnostics.identity.${field}`)}</dt>
-                        <dd className="break-all font-mono">
-                          {call.host_identity?.[field] ?? t("webModelDiagnostics.identity.absent")}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                </details>
-              )}
-            </li>
-          ))}
+                <span className="break-all font-mono text-xs">
+                  {rejected
+                    ? t("webModelDiagnostics.invalidSecret")
+                    : rotated
+                      ? t("webModelDiagnostics.rotated")
+                      : event.tool_name || event.method || t("webModelDiagnostics.unknownCall")}
+                </span>
+                <span
+                  data-status-tone={failed ? "error" : "ok"}
+                  className={
+                    failed
+                      ? "break-words text-xs text-rose-700 dark:text-rose-300"
+                      : "text-xs text-emerald-700 dark:text-emerald-300"
+                  }
+                >
+                  {rejected
+                    ? t("webModelDiagnostics.invalidSecretStatus", {
+                        transport,
+                        count: event.count ?? 1,
+                      })
+                    : rotated
+                      ? t("webModelDiagnostics.rotatedStatus", {
+                          generation: event.credential_generation ?? "-",
+                        })
+                      : event.ok
+                        ? t("webModelDiagnostics.callOk")
+                        : t("webModelDiagnostics.callFailed", { reason: event.reason || "-" })}
+                </span>
+                <span className="w-full text-xs text-[var(--color-text-muted)] sm:w-auto">
+                  {formatMessageTimestamp(event.at)}
+                </span>
+                {rejected && (
+                  <p className="w-full text-xs text-[var(--color-text-secondary)]">
+                    {t("webModelDiagnostics.invalidSecretHint")}
+                  </p>
+                )}
+                {rotated && (
+                  <p className="w-full text-xs text-[var(--color-text-secondary)]">
+                    {t("webModelDiagnostics.rotatedHint", {
+                      actor: event.rotated_by || t("webModelDiagnostics.unknownActor"),
+                      count: event.recorded_binding_count ?? 0,
+                    })}
+                  </p>
+                )}
+                {!event.ok && !rejected && !rotated && event.tool_name && (
+                  <p className="w-full text-xs text-[var(--color-text-secondary)]">
+                    {t(`webModelDiagnostics.reasons.${reasonHint(event.reason ?? null)}`)}
+                  </p>
+                )}
+                {event.host_identity && (
+                  <details className="w-full text-xs text-[var(--color-text-secondary)]">
+                    <summary className="cursor-pointer">
+                      {t("webModelDiagnostics.identity.title")}
+                    </summary>
+                    <p className="mt-2">{t("webModelDiagnostics.identity.hint")}</p>
+                    <dl className="mt-2 grid gap-2">
+                      {(["session", "subject", "organization"] as const).map((field) => (
+                        <div key={field}>
+                          <dt>{t(`webModelDiagnostics.identity.${field}`)}</dt>
+                          <dd className="break-all font-mono">
+                            {event.host_identity?.[field] ??
+                              t("webModelDiagnostics.identity.absent")}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </details>
+                )}
+              </li>
+            );
+          })}
         </ul>
       ) : (
         <p className="px-5 py-3.5 text-sm text-[var(--color-text-muted)]">

@@ -74,7 +74,35 @@ not required to replace a conversation.
 unsaved draft. Creating a connector credential only creates its address: it does
 not prove that ChatGPT has added or used it. Shared settings separately show the
 last recorded connector request and the number of verified agent bindings.
+Creation is create-only: if a connector already exists, the create action is
+absent and an older client that posts creation anyway receives the existing
+connector without a secret. It never replaces a credential implicitly.
+
 Credential replacement and revocation are under **Manage connector credential**.
+**Replace credential** first reads a fresh impact preview: the current
+`credential_generation`, recorded binding count and whether a Dots binding is
+present. Confirming sends that non-secret fence back; if another change made it
+stale, CCCC refuses the rotation and asks for a new preview. A successful
+rotation keeps the connector ID, routing salt, conversation pairings, bindings
+and Dots state, increments the generation, and shows the new URL once. Update the
+one provider connector with that URL; the previous URL stops working.
+
+The diagnostics panel keeps tool-call outcomes and credential rejection/rotation
+events in separate bounded logs, so a burst of rejected secrets cannot hide a
+failed tool call. A rejected credential means the provider still holds an older
+URL: copy the current connector URL from this page; if it is not shown, rotate
+again to issue a new one. If it was rotated, update the provider connector. The panel also shows the last rotation time and actor;
+`rotated_by` is derived by the daemon from the authenticated administrator token,
+not from a value supplied in the request.
+
+> **Migration from create-or-rotate clients:** older CCCC Web builds treated a
+> non-create-only configure call as rotation, so re-running setup could replace a
+> working credential. `create_only` is now accepted only as a compatibility
+> field; every non-rotating call is create-when-absent and returns
+> `outcome:"existing"` without a secret. Existing URLs keep working until an
+> administrator explicitly confirms **Replace credential**. Direct daemon
+> callers that send no `principal_token` are recorded as `local`; a
+> non-administrator token is refused.
 
 ### Conversation pairing and diagnostics
 
@@ -200,7 +228,7 @@ For remote-MCP pull mode, prompt the model to use CCCC explicitly:
 
 ## Common setup blockers
 
-- **MCP URL is localhost or HTTP**: ChatGPT cannot reach local URLs. Set a public HTTPS URL in `Settings > This instance > Web Access`, then rotate/copy the MCP URL again.
+- **MCP URL is localhost or HTTP**: ChatGPT cannot reach local URLs. Set a public HTTPS URL in `Settings > This instance > Web Access`, then use **Manage connector credential > Replace credential** and copy the new MCP URL. Creation alone will not replace an existing credential.
 - **ChatGPT cannot see the CCCC connector**: first use a ChatGPT model/account with Developer mode and the CCCC app enabled. If a GPT Pro chat exposes the connector only when an image is attached, select **GPT Pro (experimental)** in that agent's runtime panel; CCCC still cannot guarantee or control ChatGPT-side MCP availability.
 - **Conversation is not paired**: refresh the ChatGPT app tool list, enable the connector in the intended conversation, and start the agent. If a previous attempt failed or was cancelled, use **Retry connection** in its agent settings. `cccc_connector_status` shows the current route without starting work.
 - **ChatGPT says `CCCC tool has been disabled`**: first refresh the CCCC app/tool list, enable the connector for the current chat, and approve the trusted call in ChatGPT. That wording is normally ChatGPT-side permission or connector state. Treat it as a CCCC policy failure only when the CCCC connector activity panel records a concrete error such as `code_mode_disabled` or `permission_denied` for the same call.

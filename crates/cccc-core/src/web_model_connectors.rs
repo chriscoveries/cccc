@@ -145,6 +145,12 @@ const UNRECORDED_GENERATION: u64 = 0;
 /// Same bound as cccc-web's `append_call`; the web helper should call `push_event`
 /// instead of keeping its own copy once this lands.
 const EVENTS_LOG_RETAINED: usize = 10;
+/// Credential events have their own bound. They never share `events_log`, so a
+/// rejection burst cannot evict the actionable tool-call evidence below.
+const SECURITY_EVENTS_LOG_RETAINED: usize = 10;
+/// Hard cap for the process-local throttle. Unknown connector ids are admitted
+/// before the store is read, so the map needs a bound of its own.
+const REJECTION_THROTTLE_MAX_KEYS: usize = 1024;
 /// The connector URL is public: unauthenticated traffic may hit it at any rate.
 /// The store is rewritten for rejections at most this often per connector.
 const REJECTION_WRITE_INTERVAL: Duration = Duration::from_secs(5);
@@ -184,7 +190,9 @@ fn install_secret(connector: &mut Value, now: &str) -> String {
     secret
 }
 
-/// Bounded diagnostics shared with the web layer. Oldest entries drop first.
+/// Bounded tool-call diagnostics shared with the web layer. Oldest entries drop
+/// first. Credential rejection/rotation entries go to `push_security_event`, so
+/// they cannot displace an actionable call from this log.
 pub fn push_event(connector: &mut Value, entry: Value) {
     let mut log = connector["events_log"]
         .as_array()
@@ -194,6 +202,19 @@ pub fn push_event(connector: &mut Value, entry: Value) {
     let excess = log.len().saturating_sub(EVENTS_LOG_RETAINED);
     log.drain(..excess);
     connector["events_log"] = Value::Array(log);
+}
+
+/// Bounded credential diagnostics, separate from `events_log`. Oldest entries
+/// drop first within this log only.
+pub fn push_security_event(connector: &mut Value, entry: Value) {
+    let mut log = connector["security_events_log"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    log.push(entry);
+    let excess = log.len().saturating_sub(SECURITY_EVENTS_LOG_RETAINED);
+    log.drain(..excess);
+    connector["security_events_log"] = Value::Array(log);
 }
 
 // ---- creation: never rotates ----------------------------------------------------
@@ -307,7 +328,7 @@ pub fn rotate_provider(
         connector["credential_generation"] = json!(generation);
         connector["secret_rotated_at"] = json!(now);
         connector["rotated_by"] = json!(rotated_by);
-        push_event(
+        push_security_event(
             &mut connector,
             json!({"at":now,"reason":"secret_rotated","outcome":"ok","rotated_by":rotated_by,
                 "credential_generation":generation,
@@ -357,10 +378,13 @@ pub enum RejectionRecord {
     UnknownConnector,
 }
 
-/// Process-local write throttle keyed by connector id. Only ids of known,
-/// active connectors are ever inserted, so an attacker cannot grow it.
-/// Pending counts are lost if the process exits before the next flush;
-/// `count` on a stored entry is therefore a lower bound, and the PR text says so.
+/// Process-local write throttle keyed by connector id. Admission happens before
+/// the store is read, so an unauthenticated rejection flood does not rewrite or
+/// even parse the store more than once per interval per key. Unknown ids may
+/// therefore enter the map briefly; a hard cap evicts the oldest key, and a
+/// revoke/retire removes its id explicitly. Pending counts are lost if the
+/// process exits before the next flush; `count` on a stored entry is therefore a
+/// lower bound.
 #[derive(Default)]
 pub(crate) struct RejectionThrottle {
     last_write: HashMap<String, Instant>,
@@ -370,6 +394,9 @@ pub(crate) struct RejectionThrottle {
 impl RejectionThrottle {
     /// Count one hit; return how many hits to write now, or `None` to defer.
     pub(crate) fn admit(&mut self, key: &str, now: Instant, interval: Duration) -> Option<u64> {
+        if !self.pending.contains_key(key) && self.pending.len() >= REJECTION_THROTTLE_MAX_KEYS {
+            self.evict_oldest();
+        }
         let pending = self.pending.entry(key.to_owned()).or_insert(0);
         *pending += 1;
         match self.last_write.get(key) {
@@ -381,6 +408,33 @@ impl RejectionThrottle {
             }
         }
     }
+
+    fn evict_oldest(&mut self) {
+        let oldest = self
+            .last_write
+            .iter()
+            .min_by_key(|(_, at)| **at)
+            .map(|(key, _)| key.clone())
+            .or_else(|| self.pending.keys().next().cloned());
+        if let Some(key) = oldest {
+            self.forget(&key);
+        }
+    }
+
+    pub(crate) fn forget(&mut self, key: &str) {
+        self.last_write.remove(key);
+        self.pending.remove(key);
+    }
+}
+
+fn forget_rejection(connector_id: &str) {
+    let Some(throttle) = REJECTIONS.get() else {
+        return;
+    };
+    throttle
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .forget(connector_id);
 }
 
 static REJECTIONS: OnceLock<Mutex<RejectionThrottle>> = OnceLock::new();
@@ -398,13 +452,9 @@ pub fn record_rejected_secret(
         "get_probe" | "post_header" | "post_path_token" => transport,
         _ => "other",
     };
-    // Existence first, so unknown ids never reach the throttle map or the store.
-    let known = load(home)?
-        .into_iter()
-        .any(|c| c["connector_id"] == connector_id && c["revoked"] != true);
-    if !known {
-        return Ok(RejectionRecord::UnknownConnector);
-    }
+    // Throttle first: the public connector URL can be hit at any rate, and a
+    // deferred hit must not even parse the store. The map is capped, and an id
+    // found not to exist below is removed again.
     let count = {
         let mut throttle = REJECTIONS
             .get_or_init(|| Mutex::new(RejectionThrottle::default()))
@@ -415,7 +465,7 @@ pub fn record_rejected_secret(
             None => return Ok(RejectionRecord::Deferred),
         }
     };
-    update(home, |root| {
+    let result = update(home, |root| {
         let Some(connector) = root["connectors"]
             .as_object_mut()
             .expect("validated store")
@@ -425,17 +475,21 @@ pub fn record_rejected_secret(
             return Ok(RejectionRecord::UnknownConnector);
         };
         let generation = credential_generation(connector);
-        push_event(
+        push_security_event(
             connector,
             json!({"at":cccc_contracts::utc_now(),"reason":"invalid_secret","outcome":"denied",
                 "transport":transport,"count":count,"credential_generation":generation}),
         );
         Ok(RejectionRecord::Written { count })
-    })
+    });
+    if matches!(result, Ok(RejectionRecord::UnknownConnector)) {
+        forget_rejection(connector_id);
+    }
+    result
 }
 
 pub fn revoke(home: &HomeLayout, id: &str) -> io::Result<bool> {
-    update(home, |root| {
+    let revoked = update(home, |root| {
         let Some(connector) = root["connectors"]
             .as_object_mut()
             .expect("validated store")
@@ -453,7 +507,11 @@ pub fn revoke(home: &HomeLayout, id: &str) -> io::Result<bool> {
             .remove("grok_webhooks");
         connector.as_object_mut().expect("connector").remove("dots");
         Ok(true)
-    })
+    })?;
+    if revoked {
+        forget_rejection(id);
+    }
+    Ok(revoked)
 }
 
 pub fn secret_matches(item: &Value, supplied: &str) -> bool {
@@ -873,13 +931,17 @@ pub fn conversation_url(value: &str) -> io::Result<String> {
 }
 
 fn retire(home: &HomeLayout, group: &str, actor: Option<&str>) -> io::Result<Vec<Value>> {
-    update(home, |root| {
+    let mut touched = Vec::new();
+    let retired = update(home, |root| {
         let mut retired = Vec::new();
         for c in root["connectors"]
             .as_object_mut()
             .expect("validated store")
             .values_mut()
         {
+            if let Some(id) = c["connector_id"].as_str() {
+                touched.push(id.to_owned());
+            }
             for collection in ["bindings", "pairings", "grok_webhooks"] {
                 let keys = c[collection]
                     .as_object()
@@ -908,7 +970,11 @@ fn retire(home: &HomeLayout, group: &str, actor: Option<&str>) -> io::Result<Vec
             }
         }
         Ok(retired)
-    })
+    })?;
+    for id in touched {
+        forget_rejection(&id);
+    }
+    Ok(retired)
 }
 /// Held by a Web process for one Actor's browser work, from its claim to its
 /// last write, and by a runtime switch. Neither waits, so the work falls wholly

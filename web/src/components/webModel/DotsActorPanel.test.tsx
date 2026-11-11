@@ -995,11 +995,29 @@ it("blocks setup navigation and binding actions until the one-time connector res
           connector_url_path_token:
             "https://cccc.example.test/mcp/web-model/shared/token/probe-only",
         },
+        secret: "wmcs_probe-only",
       },
     }),
   );
   expect(button("dotsActor.sharedSettings").disabled).toBe(false);
   expect(button("dotsActor.connect").disabled).toBe(false);
+});
+
+it("never invents a URL when a created response has no secret", async () => {
+  mocks.connectors.mockResolvedValue({
+    ok: true,
+    result: { connectors: [], connector_base_url: "https://cccc.example.test" },
+  });
+  mocks.create.mockResolvedValue({
+    ok: true,
+    result: { outcome: "created", connector: { connector_id: "shared" } },
+  });
+  await render({ onOpenSharedSettings: vi.fn() });
+  await act(async () => button("dotsActor.setup.createConnector").click());
+  expect(host.textContent).toContain("dotsActor.setup.connectorExists");
+  expect(host.querySelector("[data-chatgpt-plugin-setup]")).toBeNull();
+  expect(button("dotsActor.setup.createConnector")).toBeUndefined();
+  expect(button("dotsActor.sharedSettings")).toBeTruthy();
 });
 
 it.each(["network", "api"])(

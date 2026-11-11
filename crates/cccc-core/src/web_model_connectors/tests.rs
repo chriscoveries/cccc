@@ -601,7 +601,7 @@ fn rotation_with_live_confirmation_replaces_only_the_credential() {
     assert!(after["secret_rotated_at"].is_string());
     assert!(binding_for_actor(&after, "g_fixture", "actor-a", "generation-1").is_some());
     assert_eq!(binding["state"], "bound");
-    let audit = after["events_log"]
+    let audit = after["security_events_log"]
         .as_array()
         .expect("log")
         .last()
@@ -609,6 +609,14 @@ fn rotation_with_live_confirmation_replaces_only_the_credential() {
         .expect("entry");
     assert_eq!(audit["reason"], "secret_rotated");
     assert_eq!(audit["recorded_binding_count"], 1);
+    assert_eq!(audit["rotated_by"], "admin:test");
+    assert_eq!(audit["credential_generation"], 2);
+    assert!(
+        after["events_log"]
+            .as_array()
+            .is_none_or(|log| log.is_empty()),
+        "rotation must not consume a tool-call slot"
+    );
     assert!(!String::from_utf8_lossy(&store_bytes(&home)).contains(new_secret));
 }
 
@@ -711,9 +719,11 @@ fn rejected_secret_is_recorded_bounded_and_without_request_material() {
         .as_str()
         .expect("id")
         .to_owned();
+    // Rotate first so the recorded event must name the new generation.
+    rotate_provider(&home, "chatgpt_web", &confirmation(&home), "admin:test").expect("rotate");
     let record = record_rejected_secret(&home, &id, "post_path_token").expect("record");
     assert_eq!(record, RejectionRecord::Written { count: 1 });
-    let entry = live(&home)["events_log"]
+    let entry = live(&home)["security_events_log"]
         .as_array()
         .expect("log")
         .last()
@@ -723,6 +733,7 @@ fn rejected_secret_is_recorded_bounded_and_without_request_material() {
     assert_eq!(entry["outcome"], "denied");
     assert_eq!(entry["transport"], "post_path_token");
     assert_eq!(entry["count"], 1);
+    assert_eq!(entry["credential_generation"], 2);
     for forbidden in [
         "secret",
         "secret_hash",
@@ -741,24 +752,45 @@ fn rejected_secret_is_recorded_bounded_and_without_request_material() {
         record_rejected_secret(&home, &id, "get_probe").expect("record"),
         RejectionRecord::Deferred
     );
-    // Unknown connector: no write, no throttle entry.
+    // Unknown connector: no write, and the throttle entry is removed again.
+    let unknown = "wmc_unknown_throttle_probe";
+    forget_rejection(unknown);
     let before = store_bytes(&home);
     assert_eq!(
-        record_rejected_secret(&home, "wmc_does_not_exist", "get_probe").expect("record"),
+        record_rejected_secret(&home, unknown, "get_probe").expect("record"),
         RejectionRecord::UnknownConnector
     );
     assert_eq!(store_bytes(&home), before);
+    let throttle = REJECTIONS
+        .get()
+        .expect("throttle initialized")
+        .lock()
+        .unwrap();
+    assert!(!throttle.pending.contains_key(unknown));
+    assert!(!throttle.last_write.contains_key(unknown));
 }
 
 #[test]
-fn events_log_is_bounded() {
-    let mut connector = json!({"events_log":[]});
-    for i in 0..(EVENTS_LOG_RETAINED + 5) {
+fn events_log_is_bounded_and_security_events_never_evict_calls() {
+    let mut connector = json!({"events_log":[],"security_events_log":[]});
+    for i in 0..EVENTS_LOG_RETAINED {
         push_event(&mut connector, json!({"i":i}));
     }
+    push_security_event(&mut connector, json!({"reason":"invalid_secret"}));
     let log = connector["events_log"].as_array().expect("log");
     assert_eq!(log.len(), EVENTS_LOG_RETAINED);
-    assert_eq!(log[0]["i"], 5);
+    assert_eq!(log[0]["i"], 0);
+    for i in 0..(SECURITY_EVENTS_LOG_RETAINED + 5) {
+        push_security_event(&mut connector, json!({"reason":"invalid_secret","i":i}));
+    }
+    let security = connector["security_events_log"].as_array().expect("log");
+    assert_eq!(security.len(), SECURITY_EVENTS_LOG_RETAINED);
+    assert_eq!(security[0]["i"], 5);
+    assert_eq!(
+        connector["events_log"].as_array().expect("log").len(),
+        EVENTS_LOG_RETAINED,
+        "security events have their own bound"
+    );
 }
 
 #[test]
@@ -789,4 +821,57 @@ fn throttle_writes_once_per_interval_and_folds_the_rest_into_count() {
         2,
         "only keys that were admitted exist"
     );
+    throttle.forget("a");
+    assert!(!throttle.pending.contains_key("a"));
+    assert!(!throttle.last_write.contains_key("a"));
+    assert!(throttle.pending.contains_key("b"));
+}
+
+#[test]
+fn throttle_has_a_hard_bound_for_unknown_connector_ids() {
+    let mut throttle = RejectionThrottle::default();
+    let t0 = Instant::now();
+    let interval = Duration::from_secs(5);
+    for i in 0..(REJECTION_THROTTLE_MAX_KEYS + 8) {
+        assert!(
+            throttle
+                .admit(&format!("unknown-{i}"), t0, interval)
+                .is_some()
+        );
+    }
+    assert_eq!(throttle.pending.len(), REJECTION_THROTTLE_MAX_KEYS);
+    assert_eq!(throttle.last_write.len(), REJECTION_THROTTLE_MAX_KEYS);
+}
+
+#[test]
+fn revoke_and_retire_forget_rejection_throttle_state() {
+    let (_temp, home, c) = fixture();
+    let id = c["connector"]["connector_id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let throttled = |id: &str| {
+        let throttle = REJECTIONS
+            .get()
+            .expect("throttle initialized")
+            .lock()
+            .unwrap();
+        throttle.pending.contains_key(id) || throttle.last_write.contains_key(id)
+    };
+    record_rejected_secret(&home, &id, "get_probe").expect("record");
+    assert!(throttled(&id));
+    revoke(&home, &id).expect("revoke");
+    assert!(!throttled(&id), "revoke must not retain an inactive id");
+
+    let created = create_provider_if_absent(&home, "chatgpt_web")
+        .expect("create")
+        .expect("fresh connector");
+    let fresh = created["connector"]["connector_id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    record_rejected_secret(&home, &fresh, "get_probe").expect("record");
+    assert!(throttled(&fresh));
+    retire_actor(&home, "g_fixture", "a").expect("retire");
+    assert!(!throttled(&fresh), "retire must not retain an inactive id");
 }

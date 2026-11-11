@@ -1699,7 +1699,10 @@ async fn explicit_rotation_over_http_uses_the_authenticated_principal_and_a_live
     let before = fixture.connector();
     let preview = connectors::rotation_preview(&before);
     let confirmation = preview["confirmation"].as_str().expect("confirmation");
-    let body = json!({"provider":"chatgpt_web","rotate":true,"confirmation":confirmation});
+    // A caller-supplied label is ignored; the route forwards the authenticated
+    // bearer token and the daemon derives the actor itself.
+    let body = json!({"provider":"chatgpt_web","rotate":true,"confirmation":confirmation,
+        "rotated_by":"user:attacker","trusted_rotated_by":"user:attacker"});
     let (status, response) = fixture
         .send(
             Request::builder()
@@ -1736,81 +1739,110 @@ async fn explicit_rotation_over_http_uses_the_authenticated_principal_and_a_live
 
 #[tokio::test]
 async fn rejected_secrets_are_recorded_once_without_disclosing_the_credential() {
-    let mut fixture = Fixture::new();
-    fixture.start_daemon().await;
-    let old_secret = format!("{}_stale", fixture.secret);
-    let (status, body) = fixture
-        .send(
-            Request::builder()
+    // A fresh fixture per transport avoids the 5 s write throttle, so each
+    // real request shape is observed rather than folded into the first one.
+    for transport in ["get_probe", "post_header", "post_path_token"] {
+        let mut fixture = Fixture::new();
+        fixture.start_daemon().await;
+        let old_secret = fixture.secret.clone();
+        let before = fixture.connector();
+        let confirmation = connectors::rotation_preview(&before)["confirmation"]
+            .as_str()
+            .expect("confirmation")
+            .to_owned();
+        let (status, response) = fixture
+            .send(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/web-model/connectors")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", fixture.admin))
+                    .body(Body::from(
+                        json!({"provider":"chatgpt_web","rotate":true,
+                            "confirmation":confirmation})
+                        .to_string(),
+                    ))
+                    .expect("rotate request"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{transport}");
+        assert_eq!(response["result"]["outcome"], "rotated", "{transport}");
+        assert_eq!(
+            response["result"]["connector"]["credential_generation"], 2,
+            "{transport}"
+        );
+        let new_secret = response["result"]["secret"]
+            .as_str()
+            .expect("new secret")
+            .to_owned();
+        assert_ne!(old_secret, new_secret, "{transport}");
+
+        let request = match transport {
+            "get_probe" => Request::builder()
                 .method("GET")
                 .uri(format!(
                     "/mcp/web-model/{}/token/{old_secret}",
                     fixture.connector_id
                 ))
-                .body(Body::empty())
-                .expect("old path-token probe"),
-        )
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body["error"]["code"], "permission_denied");
-    let (status, body) = fixture
-        .send(
-            Request::builder()
+                .body(Body::empty()),
+            "post_header" => Request::builder()
                 .method("POST")
                 .uri(format!("/mcp/web-model/{}", fixture.connector_id))
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::AUTHORIZATION, format!("Bearer {old_secret}"))
-                .body(Body::from("{}"))
-                .expect("old header post"),
-        )
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body["error"]["code"], "permission_denied");
-    let (status, body) = fixture
-        .send(
-            Request::builder()
+                .body(Body::from("{}")),
+            _ => Request::builder()
                 .method("POST")
                 .uri(format!(
                     "/mcp/web-model/{}/token/{old_secret}",
                     fixture.connector_id
                 ))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from("{}"))
-                .expect("old path-token post"),
-        )
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body["error"]["code"], "permission_denied");
-    let events = fixture.connector()["events_log"]
-        .as_array()
-        .cloned()
-        .expect("events log");
-    let rejected: Vec<_> = events
-        .iter()
-        .filter(|event| event["reason"] == "invalid_secret")
-        .collect();
-    assert_eq!(rejected.len(), 1, "the rejection write is throttled");
-    assert_eq!(rejected[0]["transport"], "get_probe");
-    assert!(
-        !serde_json::to_string(&events)
-            .expect("events")
-            .contains(&old_secret)
-    );
-    // The real credential still works.
-    let status = fixture
-        .send_status(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/mcp/web-model/{}/token/{}",
-                    fixture.connector_id, fixture.secret
-                ))
-                .body(Body::empty())
-                .expect("valid probe"),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    fixture.close().await;
+                .body(Body::from("{}")),
+        }
+        .expect("old credential request");
+        let (status, body) = fixture.send(request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{transport}");
+        assert_eq!(body["error"]["code"], "permission_denied", "{transport}");
+        let events = fixture.connector()["security_events_log"]
+            .as_array()
+            .cloned()
+            .expect("security events log");
+        let rejected: Vec<_> = events
+            .iter()
+            .filter(|event| event["reason"] == "invalid_secret")
+            .collect();
+        assert_eq!(rejected.len(), 1, "{transport}: one throttled write");
+        assert_eq!(rejected[0]["transport"], transport);
+        assert_eq!(rejected[0]["credential_generation"], 2);
+        assert!(
+            !serde_json::to_string(&events)
+                .expect("events")
+                .contains(&old_secret),
+            "{transport}: the presented secret is never stored"
+        );
+        assert!(
+            !serde_json::to_string(&fixture.connector()["events_log"])
+                .expect("call events")
+                .contains(&old_secret),
+            "{transport}: rejection must not enter the tool-call log"
+        );
+        // The real, rotated credential still works.
+        let status = fixture
+            .send_status(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/mcp/web-model/{}/token/{new_secret}",
+                        fixture.connector_id
+                    ))
+                    .body(Body::empty())
+                    .expect("valid probe"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{transport}");
+        fixture.close().await;
+    }
 }
 
 /// The operation under test writes nothing to the ledger. The daemon's
