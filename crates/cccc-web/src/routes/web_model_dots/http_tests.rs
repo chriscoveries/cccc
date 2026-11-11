@@ -162,6 +162,16 @@ impl Fixture {
         )
     }
 
+    // SSE probes return text/event-stream, so they have no JSON body to parse.
+    async fn send_status(&self, request: Request<Body>) -> StatusCode {
+        self.router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("response")
+            .status()
+    }
+
     fn mcp_request(&self, method: &str, mut params: Value, modern: bool) -> Request<Body> {
         let mut builder = Request::builder()
             .method("POST")
@@ -1666,8 +1676,8 @@ async fn one_click_create_is_idempotent_and_never_discloses_an_existing_secret()
     }
     // The credential already added to ChatGPT keeps working.
     assert_eq!(fixture.connector()["secret_hash"], before["secret_hash"]);
-    let (status, _) = fixture
-        .send(
+    let status = fixture
+        .send_status(
             Request::builder()
                 .method("GET")
                 .uri(format!(
@@ -1787,8 +1797,8 @@ async fn rejected_secrets_are_recorded_once_without_disclosing_the_credential() 
             .contains(&old_secret)
     );
     // The real credential still works.
-    let (status, _) = fixture
-        .send(
+    let status = fixture
+        .send_status(
             Request::builder()
                 .method("GET")
                 .uri(format!(
