@@ -330,10 +330,10 @@ mod tests {
         let active = json!({"revision":1,"status":"active","assignee":"actor-a","waiting_on":"actor","blocked":false});
         let finished = json!({"revision":2,"status":"done","assignee":"actor-a","waiting_on":"actor","blocked":false});
         opened["data"]["changes"][0]["task_transition"] =
-            json!({"schema":1,"task_id":"T001","before":planned,"after":active});
+            json!({"schema":1,"task_id":"task-a","before":planned,"after":active});
         done["data"]["changes"][0]["task_transition"] =
-            json!({"schema":1,"task_id":"T001","before":active,"after":finished});
-        linked["data"]["task_ref"] = json!("T001");
+            json!({"schema":1,"task_id":"task-a","before":active,"after":finished});
+        linked["data"]["task_ref"] = json!("task-a");
         let output = project(
             "g_example",
             &[opened.clone(), linked.clone(), done.clone(), linked.clone()],
@@ -448,10 +448,10 @@ mod tests {
         let active = json!({"revision":1,"status":"active","assignee":"actor-a","waiting_on":"actor","blocked":false});
         let after = json!({"revision":2,"status":"done","assignee":"actor-a","waiting_on":"actor","blocked":false});
         opened["data"]["changes"][0]["task_transition"] =
-            json!({"schema":1,"task_id":"T001","before":before,"after":active});
+            json!({"schema":1,"task_id":"task-a","before":before,"after":active});
         done["data"]["changes"][0]["task_transition"] =
-            json!({"schema":1,"task_id":"T001","before":active,"after":after});
-        linked["data"]["task_ref"] = json!("T001");
+            json!({"schema":1,"task_id":"task-a","before":active,"after":after});
+        linked["data"]["task_ref"] = json!("task-a");
         let mut conflict = linked.clone();
         conflict["data"]["input_tokens"] = json!(7);
         let output = project(
@@ -480,12 +480,12 @@ mod tests {
         let active = json!({"revision":1,"status":"active","assignee":"actor-a","waiting_on":"actor","blocked":false});
         let finished = json!({"revision":2,"status":"done","assignee":"actor-a","waiting_on":"actor","blocked":false});
         opened["data"]["changes"][0]["task_transition"] =
-            json!({"schema":1,"task_id":"T001","before":planned,"after":active});
+            json!({"schema":1,"task_id":"task-a","before":planned,"after":active});
         done["data"]["changes"][0]["task_transition"] =
-            json!({"schema":1,"task_id":"T001","before":active,"after":finished});
-        first["data"]["task_ref"] = json!("T001");
+            json!({"schema":1,"task_id":"task-a","before":active,"after":finished});
+        first["data"]["task_ref"] = json!("task-a");
         first["data"]["runtime"] = json!("claude");
-        second["data"]["task_ref"] = json!("T001");
+        second["data"]["task_ref"] = json!("task-a");
         second["data"]["model_id"] = json!("other-model");
         second["data"]["runtime"] = json!("pi");
         second["data"]["started_at"] = first["data"]["started_at"].clone();
@@ -520,7 +520,7 @@ mod tests {
         let active = json!({"revision":1,"status":"active","assignee":"actor-a","waiting_on":"actor","blocked":false});
         let finished = json!({"revision":2,"status":"done","assignee":"actor-a","waiting_on":"actor","blocked":false});
         let mut events = Vec::new();
-        for (index, id) in ["T001", "T002", "T003"].iter().enumerate() {
+        for (index, id) in ["task-a", "task-b", "task-c"].iter().enumerate() {
             let mut opened = source[5].clone();
             let mut done = source[6].clone();
             let mut turn = source[0].clone();
@@ -540,7 +540,7 @@ mod tests {
             } else {
                 "later-label"
             });
-            if *id == "T002" {
+            if *id == "task-b" {
                 turn["data"]["input_tokens"] = Value::Null;
             }
             events.extend([opened, turn, done]);
@@ -550,7 +550,7 @@ mod tests {
         reopened["ts"] = json!("2026-11-02T18:27:40Z");
         let active_again = json!({"revision":3,"status":"active","assignee":"actor-a","waiting_on":"actor","blocked":false});
         reopened["data"]["changes"][0]["task_transition"] =
-            json!({"schema":1,"task_id":"T003","before":finished,"after":active_again});
+            json!({"schema":1,"task_id":"task-c","before":finished,"after":active_again});
         events.push(reopened);
         let mut snapshots: Vec<Value> =
             serde_json::from_str(include_str!("context/captured_tasks.json"))
@@ -647,7 +647,7 @@ mod tests {
             json!({"revision":5,"status":"done","assignee":"actor-a","waiting_on":"user","blocked":true}),
         ];
         for (index, event) in events.iter_mut().enumerate() {
-            event["data"]["changes"][0]["task_transition"] = json!({"schema":1,"task_id":"T001","before":states[index],"after":states[index + 1]});
+            event["data"]["changes"][0]["task_transition"] = json!({"schema":1,"task_id":"task-a","before":states[index],"after":states[index + 1]});
         }
         let report = project("g_example", &events, &[], false, false, None);
         assert_eq!(report["tasks"][0]["observed_intervals"], 2);

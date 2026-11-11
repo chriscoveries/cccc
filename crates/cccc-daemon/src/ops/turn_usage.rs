@@ -356,7 +356,7 @@ mod tests {
                 "turn",
                 Some("delivery"),
                 Some("runtime-task"),
-                Some("T001"),
+                Some("task-a"),
                 &usage(),
                 "failed"
             )
@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         let event = &events[0];
         assert_eq!(event.data["task_id"], "runtime-task");
-        assert_eq!(event.data["task_ref"], "T001");
+        assert_eq!(event.data["task_ref"], "task-a");
         assert_eq!(event.data["delivery_id"], "delivery");
         assert_eq!(event.data["status"], "failed");
         let directory = state.join("turn-usage");
@@ -394,7 +394,7 @@ mod tests {
             "turn",
             Some("delivery"),
             Some("runtime-task"),
-            Some("T001"),
+            Some("task-a"),
             &usage(),
             "failed",
         )

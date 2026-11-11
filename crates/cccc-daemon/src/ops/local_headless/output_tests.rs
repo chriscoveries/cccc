@@ -460,11 +460,11 @@ async fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
         .as_str()
         .expect("captured delivery names a task");
     session.bind_delivery_task("delivery", Some(task_ref.into()));
-    session.bind_delivery_task("unconfirmed", Some("T002".into()));
+    session.bind_delivery_task("unconfirmed", Some("task-b".into()));
     let start = json!({"method":"turn/started","params":{"turn":{"id":"runtime-turn"}}});
     handle_event(session, start.clone(), Some("delivery"));
     // A later, unrelated admission cannot rename an already-owned turn.
-    session.bind_delivery_task("later", Some("T001".into()));
+    session.bind_delivery_task("later", Some("task-a".into()));
     handle_event(session, start, None);
     let completed = json!({"method":"turn/completed","params":{"turn":{
         "id":"runtime-turn","status":"completed","usage":usage}}});
@@ -484,7 +484,7 @@ async fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
         .collect::<Vec<_>>();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].data["delivery_id"], "delivery");
-    assert_eq!(events[0].data["task_ref"], "T001");
+    assert_eq!(events[0].data["task_ref"], "task-a");
     assert_eq!(events[0].data["task_id"], "runtime-turn");
     assert_eq!(events[0].data["runtime"], json!(session.managed.runtime()));
     assert!(session.take_delivery_task("delivery").is_none());
@@ -505,7 +505,7 @@ async fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
         .filter(|event| event.kind == "turn.usage")
         .collect::<Vec<_>>();
     assert_eq!(events.len(), 2);
-    assert_eq!(events[1].data["task_ref"], "T002");
+    assert_eq!(events[1].data["task_ref"], "task-b");
     assert_eq!(events[1].data["delivery_id"], "unconfirmed");
     assert_eq!(events[1].data["status"], "cancelled");
     assert_eq!(events[1].data["input_tokens"], 14);
@@ -516,10 +516,10 @@ async fn captured_usage_binds_only_the_owned_delivery_and_settles_once() {
             .take_delivery_task("later")
             .is_none()
     );
-    session.bind_delivery_task("conflict", Some("T001".into()));
-    session.bind_delivery_task("conflict", Some("T002".into()));
+    session.bind_delivery_task("conflict", Some("task-a".into()));
+    session.bind_delivery_task("conflict", Some("task-b".into()));
     assert_eq!(session.take_delivery_task("conflict"), Some(None));
-    session.bind_delivery_task("rejected", Some("T001".into()));
+    session.bind_delivery_task("rejected", Some("task-a".into()));
     session.forget_delivery_task("rejected");
     assert!(session.take_delivery_task("rejected").is_none());
 }
@@ -615,13 +615,13 @@ async fn captured_turn_keeps_the_generation_label_seen_at_start() {
 async fn consumed_delivery_cannot_be_rebound_to_another_task() {
     let fixture = Fixture::new(false, "unused");
     let session = &fixture.session;
-    session.bind_delivery_task("delivery", Some("T001".into()));
+    session.bind_delivery_task("delivery", Some("task-a".into()));
     handle_event(
         session,
         json!({"method":"turn/started","params":{"turn":{"id":"first"}}}),
         Some("delivery"),
     );
-    session.bind_delivery_task("delivery", Some("T002".into()));
+    session.bind_delivery_task("delivery", Some("task-b".into()));
     assert!(
         session
             .active_turn

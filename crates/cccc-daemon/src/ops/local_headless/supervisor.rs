@@ -825,7 +825,7 @@ fn captured_task_refs_require_exactly_one_valid_entry() {
         .expect("captured task reference is an object")
         .remove("task_id");
     for (refs, expected) in [
-        (json!([first]), Some("T001")),
+        (json!([first]), Some("task-a")),
         (json!([first, second]), None),
         (json!([first, first]), None),
         (json!([first, malformed]), None),
