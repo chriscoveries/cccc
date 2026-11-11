@@ -85,6 +85,9 @@ def test_pr_jobs_keep_quality_web_package_and_native_boundaries() -> None:
 def test_patch_artifact_preserves_the_linux_release_dependency_boundary() -> None:
     jobs = _workflow()["jobs"]
     patch = jobs["patch-release"]
+    assert jobs["tui-macos-smoke"]["runs-on"] == (
+        "${{ github.head_ref == 'patch/dotsweb-v0.4.54' && 'macos-15-intel' || 'macos-15' }}"
+    )
     assert patch["if"] == "github.head_ref == 'patch/dotsweb-v0.4.54'"
     assert set(patch["needs"]) == {"web", "rust-linux"}
     assert patch["container"] == _release_workflow()["jobs"]["build-linux"]["container"]
