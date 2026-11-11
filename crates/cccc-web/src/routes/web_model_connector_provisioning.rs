@@ -1,10 +1,12 @@
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use cccc_core::settings;
 use serde_json::{Value, json};
 
 use crate::AppState;
-use crate::api::{ApiError, ApiResult, success};
+use crate::api::{ApiError, ApiResult, call, success};
+use crate::auth::Principal;
 
 use super::web_model_connector_store as store;
 
@@ -21,36 +23,65 @@ pub(super) async fn list(State(state): State<AppState>) -> ApiResult {
     })))
 }
 
-pub(super) async fn create(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult {
+pub(super) async fn create(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(body): Json<Value>,
+) -> ApiResult {
     let provider = match body.get("provider") {
         None => "chatgpt_web",
         Some(value) => value
             .as_str()
             .ok_or_else(|| ApiError::bad("provider must be a string"))?,
     };
-    // create_only: create when absent, never rotate an existing credential. Only
-    // a real boolean may choose; a mistyped flag must not fall back to rotation.
-    let create_only = match body.get("create_only") {
-        None => false,
-        Some(Value::Bool(value)) => *value,
-        Some(_) => return Err(ApiError::bad("create_only must be a boolean")),
+    let flag = |name: &str| -> Result<bool, ApiError> {
+        match body.get(name) {
+            None => Ok(false),
+            Some(Value::Bool(value)) => Ok(*value),
+            Some(_) => Err(ApiError::bad(format!("{name} must be a boolean"))),
+        }
     };
-    let result = super::web_model_delivery_completion::call(
+    let rotate = flag("rotate")?;
+    // Older clients may still send create_only. It keeps its create-when-absent
+    // meaning and can never select rotation.
+    let create_only = flag("create_only")?;
+    let mut args = json!({"by":"user","provider":provider,"rotate":rotate});
+    if create_only {
+        args["create_only"] = json!(true);
+    }
+    if rotate {
+        let confirmation = body["confirmation"]
+            .as_str()
+            .ok_or_else(|| ApiError::bad("confirmation is required to rotate"))?;
+        args["confirmation"] = json!(confirmation);
+        // Forward the credential the middleware already authenticated, not a
+        // label: the daemon revalidates it and derives `user:<id>` itself. The
+        // local browser principal has no bearer token and becomes `local`.
+        if !principal.raw_token.is_empty() {
+            args["principal_token"] = json!(principal.raw_token);
+        }
+    }
+    let response = call(
         &state,
         "web_model_connector_configure",
-        json!({"by":"user","provider":provider,"create_only":create_only})
-            .as_object()
-            .expect("literal JSON object")
-            .clone(),
+        args.as_object().expect("literal JSON object").clone(),
     )
     .await?;
+    let result = &response.0["result"];
+    let outcome = result["outcome"].as_str().unwrap_or("existing");
     let base_url = connector_base_url(&state)?;
     let mut connector = public(&result["connector"], &base_url);
-    let url = connector["connector_url"].as_str().unwrap_or_default();
-    let secret = result["secret"].as_str().unwrap_or_default();
-    connector["connector_url_path_token"] = json!(format!("{url}/token/{secret}"));
-    connector["secret_available"] = json!(true);
-    Ok(success(json!({"connector":connector,"secret":secret})))
+    match result["secret"].as_str() {
+        Some(secret) => {
+            let url = connector["connector_url"].as_str().unwrap_or_default();
+            connector["connector_url_path_token"] = json!(format!("{url}/token/{secret}"));
+            connector["secret_available"] = json!(true);
+            Ok(success(
+                json!({"outcome":outcome,"connector":connector,"secret":secret}),
+            ))
+        }
+        None => Ok(success(json!({"outcome":outcome,"connector":connector}))),
+    }
 }
 
 pub(super) fn connector_base_url(state: &AppState) -> Result<String, ApiError> {
@@ -79,15 +110,22 @@ pub(super) fn public(item: &Value, base_url: &str) -> Value {
         "updated_at",
         "revoked",
         "secret_preview",
+        "credential_generation",
+        "secret_rotated_at",
+        "rotated_by",
         "last_activity_at",
         "last_method",
         "last_tool_name",
         "last_call_status",
         "last_error",
         "events_log",
+        "security_events_log",
     ] {
         result[field] = item[field].clone();
     }
+    // The fence and binding count are non-secret; the UI can preview a
+    // rotation from the normal list read without another endpoint.
+    result["rotation"] = cccc_core::web_model_connectors::rotation_preview(item);
     result["group_id"] = item["group_id"].clone();
     result["actor_id"] = item["actor_id"].clone();
     // Which Actor the Dot is bound to; its credentials and callback stay private.

@@ -3,7 +3,10 @@
 use super::operation::{Operation, Policy::GlobalWrite};
 use crate::dispatch::{OpError, OpResult, object, required_arg, string_arg};
 use cccc_contracts::{DaemonRequest, GroupState, RunnerKind};
-use cccc_core::{GroupStore, HomeLayout, integration_state, web_model_connectors as store};
+use cccc_core::{
+    GroupStore, HomeLayout, access_tokens::AccessTokenStore, integration_state,
+    web_model_connectors as store,
+};
 use serde_json::json;
 
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
@@ -38,22 +41,92 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 .as_str()
                 .ok_or_else(|| OpError::new("invalid_argument", "provider must be a string"))?,
         };
-        let create_only = match request.args.get("create_only") {
-            None => false,
-            Some(value) => value
-                .as_bool()
-                .ok_or_else(|| OpError::new("invalid_argument", "create_only must be a boolean"))?,
-        };
-        if create_only {
-            return match store::create_provider_if_absent(home, provider).map_err(OpError::io)? {
-                Some(created) => object(created),
-                None => Err(OpError::new(
-                    "connector_exists",
-                    "A shared connector already exists; its credential was not changed",
+        let flag = |name: &str| -> Result<bool, OpError> {
+            match request.args.get(name) {
+                None => Ok(false),
+                Some(serde_json::Value::Bool(value)) => Ok(*value),
+                Some(_) => Err(OpError::new(
+                    "invalid_argument",
+                    format!("{name} must be a boolean"),
                 )),
-            };
+            }
+        };
+        let rotate = flag("rotate")?;
+        // Accepted for compatibility with older Web clients; it never changes
+        // the safe default. A mistyped value is still refused.
+        let create_only = flag("create_only")?;
+        if rotate && create_only {
+            return Err(OpError::new(
+                "invalid_argument",
+                "rotate and create_only conflict",
+            ));
         }
-        return object(store::configure_provider(home, provider).map_err(OpError::io)?);
+        if rotate {
+            let confirmation = required_arg(request, "confirmation")?;
+            // The Web layer forwards the bearer credential it already
+            // authenticated, never a display label. The daemon revalidates it
+            // here, so request JSON cannot name `user:admin` without that
+            // administrator's token. An empty/absent token is a local daemon
+            // caller and is labelled `local`; the old `trusted_rotated_by`
+            // field is deliberately ignored.
+            let rotated_by = match request.args.get("principal_token") {
+                None => "local".to_owned(),
+                Some(serde_json::Value::String(token)) if token.trim().is_empty() => {
+                    "local".to_owned()
+                }
+                Some(serde_json::Value::String(token)) => {
+                    let principal = AccessTokenStore::new(home.clone())
+                        .map_err(OpError::io)?
+                        .lookup(token.trim())
+                        .map_err(OpError::io)?;
+                    match principal {
+                        Some(principal) if principal.is_admin => {
+                            format!("user:{}", principal.user_id)
+                        }
+                        _ => {
+                            return Err(OpError::new(
+                                "permission_denied",
+                                "rotation principal is not an administrator",
+                            ));
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err(OpError::new(
+                        "invalid_argument",
+                        "principal_token must be a string",
+                    ));
+                }
+            };
+            return object(
+                store::rotate_provider(home, provider, &confirmation, &rotated_by).map_err(
+                    |e| match e.to_string().as_str() {
+                        "rotation_confirmation_stale" => OpError::new(
+                            "rotation_confirmation_stale",
+                            "The connector changed since the rotation was previewed; refresh and confirm again",
+                        ),
+                        "connector_unavailable" => OpError::new(
+                            "connector_unavailable",
+                            "No active connector to rotate",
+                        ),
+                        _ => OpError::io(e),
+                    },
+                )?,
+            );
+        }
+        return match store::create_provider_if_absent(home, provider).map_err(OpError::io)? {
+            Some(created) => object(created),
+            None => {
+                // One idempotent success for every non-rotating call: the
+                // existing connector and no credential.
+                let connector = store::load(home)
+                    .map_err(OpError::io)?
+                    .into_iter()
+                    .find(|c| c["provider"] == provider && c["revoked"] != true)
+                    .ok_or_else(|| OpError::new("connector_unavailable", "connector vanished"))?;
+                object(json!({"outcome":"existing","connector":connector}))
+            }
+        };
     }
     let id = required_arg(request, "connector_id")?;
     if request.op == "web_model_connector_revoke" {

@@ -1594,6 +1594,10 @@
     "create": "创建共享连接器",
     "revoke": "撤销连接器",
     "rotateHint": "旧 URL 将立即对所有智能体失效，需要在 ChatGPT 中更新连接器 URL。已有对话配对会保留。",
+    "rotationImpact": "这会替换第 {{generation}} 代凭证。已记录的 {{count}} 个智能体绑定会保留，路由和对话配对不变。外部插件安装数量未知。",
+    "rotationDots": "Dots 绑定及其本地状态会保留。",
+    "rotationNoDots": "当前没有记录 Dots 绑定。",
+    "rotationUnavailable": "无法获取此连接器的轮换预览。请刷新后重试。",
     "revokeHint": "所有 ChatGPT 智能体将失去工具访问权限。重新创建连接器后需要重新配对各对话。",
     "confirm": "确认",
     "cancel": "取消",
@@ -2099,9 +2103,25 @@
       "absent": "宿主未提供"
     },
     "refresh": "刷新",
-    "noCalls": "还没有调用记录。",
+    "noCalls": "还没有调用或凭证事件记录。",
     "callOk": "调用成功",
     "callFailed": "失败 · {{reason}}",
+    "unknownCall": "连接器调用",
+    "unknownActor": "未知操作者",
+    "invalidSecret": "凭证被拒绝",
+    "invalidSecretStatus": "{{transport}} · 拒绝 {{count}} 次",
+    "invalidSecretHint": "供应商发送的凭证已不匹配此连接器。请从此页面复制当前连接器 URL；如果未显示，请再次轮换以签发新 URL。如果凭证已轮换，请同步更新供应商连接器。",
+    "rotated": "凭证已轮换",
+    "rotatedStatus": "第 {{generation}} 代",
+    "rotatedHint": "{{actor}} 轮换了凭证，保留了 {{count}} 个已记录绑定。旧凭证已失效。",
+    "lastRotation": "最近轮换：{{time}}，操作者 {{actor}}",
+    "lastRotationUnknown": "最近轮换：无记录（旧连接器或从未轮换）。",
+    "transports": {
+      "get_probe": "URL 探测",
+      "post_header": "Authorization 请求头",
+      "post_path_token": "URL 令牌",
+      "other": "其他传输方式"
+    },
     "reasons": {
       "pairingExpired": "请从目标智能体的连接设置重新配置连接。配对码会在 10 分钟后过期。",
       "bindingChanged": "先核对目标智能体及其当前连接，再获取新的设置说明。",
@@ -2112,6 +2132,6 @@
       "callFailed": "重试前在供应商应用中查看具体失败调用；仅凭此记录不能判断任务是否已经完成。"
     },
     "title": "连接器诊断",
-    "hint": "此共享连接器最近 10 条订阅与任务工具调用结果，最新记录在前，可能涉及多个智能体。记录固定原因码和可选的加盐身份指纹，不含凭据或调用参数。"
+    "hint": "此共享连接器最近 10 条工具调用结果，以及最近 10 条凭证拒绝/轮换事件，最新记录在前，可能涉及多个智能体。两类日志分开保存，拒绝事件激增不会挤掉失败调用。记录固定原因码和可选的加盐身份指纹，不含凭据或调用参数。"
   }
 }

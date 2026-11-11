@@ -9,6 +9,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{HomeLayout, fs};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 const VERSION: u64 = 3;
 
@@ -136,53 +139,110 @@ fn current<'a>(root: &'a mut Value, id: &str) -> io::Result<&'a mut Value> {
     Ok(connector)
 }
 
-/// Configure or rotate the current entrance. Return the new credential once;
-/// its hash is the only credential representation persisted in the store.
-pub fn configure(home: &HomeLayout) -> io::Result<Value> {
-    configure_provider(home, "chatgpt_web")
+const ROTATION_CONFIRMATION_DOMAIN: &str = "cccc-web-model-rotation-confirmation-v1";
+/// Connectors written before this field existed. 0 means "unrecorded", not "first".
+const UNRECORDED_GENERATION: u64 = 0;
+/// Same bound as cccc-web's `append_call`; the web helper should call `push_event`
+/// instead of keeping its own copy once this lands.
+const EVENTS_LOG_RETAINED: usize = 10;
+/// Credential events have their own bound. They never share `events_log`, so a
+/// rejection burst cannot evict the actionable tool-call evidence below.
+const SECURITY_EVENTS_LOG_RETAINED: usize = 10;
+/// Hard cap for the process-local throttle. Unknown connector ids are admitted
+/// before the store is read, so the map needs a bound of its own.
+const REJECTION_THROTTLE_MAX_KEYS: usize = 1024;
+/// The connector URL is public: unauthenticated traffic may hit it at any rate.
+/// The store is rewritten for rejections at most this often per connector.
+const REJECTION_WRITE_INTERVAL: Duration = Duration::from_secs(5);
+
+// ---- small helpers ------------------------------------------------------------
+fn credential_generation(connector: &Value) -> u64 {
+    connector["credential_generation"]
+        .as_u64()
+        .unwrap_or(UNRECORDED_GENERATION)
 }
 
-pub fn configure_provider(home: &HomeLayout, provider: &str) -> io::Result<Value> {
-    configure_inner(home, provider, true).map(|created| created.expect("configure always writes"))
+fn active_provider<'a>(root: &'a Value, provider: &str) -> Option<&'a Value> {
+    let connector = &root["connectors"][provider];
+    (connector.is_object() && connector["revoked"] != true).then_some(connector)
 }
+
+fn require_provider(provider: &str) -> io::Result<()> {
+    if matches!(provider, "chatgpt_web" | "grok_web") {
+        Ok(())
+    } else {
+        Err(error("invalid_web_model_provider"))
+    }
+}
+
+/// Fresh credential; only its hash and a preview are persisted.
+fn install_secret(connector: &mut Value, now: &str) -> String {
+    let secret = format!(
+        "wmcs_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    connector["secret_hash"] = json!(hash(&secret));
+    connector["secret_preview"] =
+        json!(format!("{}…{}", &secret[..6], &secret[secret.len() - 4..]));
+    connector["updated_at"] = json!(now);
+    connector["revoked"] = json!(false);
+    secret
+}
+
+/// Bounded tool-call diagnostics shared with the web layer. Oldest entries drop
+/// first. Credential rejection/rotation entries go to `push_security_event`, so
+/// they cannot displace an actionable call from this log.
+pub fn push_event(connector: &mut Value, entry: Value) {
+    let mut log = connector["events_log"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    log.push(entry);
+    let excess = log.len().saturating_sub(EVENTS_LOG_RETAINED);
+    log.drain(..excess);
+    connector["events_log"] = Value::Array(log);
+}
+
+/// Bounded credential diagnostics, separate from `events_log`. Oldest entries
+/// drop first within this log only.
+pub fn push_security_event(connector: &mut Value, entry: Value) {
+    let mut log = connector["security_events_log"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    log.push(entry);
+    let excess = log.len().saturating_sub(SECURITY_EVENTS_LOG_RETAINED);
+    log.drain(..excess);
+    connector["security_events_log"] = Value::Array(log);
+}
+
+// ---- creation: never rotates ----------------------------------------------------
 
 /// Create the provider's connector only when none is active, in the same locked
-/// update that checks it. `None` means one exists and is left untouched: a
-/// one-click "create" must never rotate a credential already in use.
+/// update that checks it. `None` means one exists and was left untouched:
+/// `secret_hash`, `credential_generation`, bindings and routing salt are not
+/// read, let alone written. This is the only path a default POST may reach.
 pub fn create_provider_if_absent(home: &HomeLayout, provider: &str) -> io::Result<Option<Value>> {
-    configure_inner(home, provider, false)
-}
-
-fn configure_inner(
-    home: &HomeLayout,
-    provider: &str,
-    rotate_existing: bool,
-) -> io::Result<Option<Value>> {
-    if !matches!(provider, "chatgpt_web" | "grok_web") {
-        return Err(error("invalid_web_model_provider"));
-    }
+    require_provider(provider)?;
     update(home, |root| {
-        let old = &root["connectors"][provider];
-        if !rotate_existing && old.is_object() && old["revoked"] != true {
+        if active_provider(root, provider).is_some() {
             return Ok(None);
         }
         let now = cccc_contracts::utc_now();
-        let mut connector = if old.is_object() && old["revoked"] != true {
-            old.clone()
-        } else {
-            json!({"connector_id":format!("wmc_{}",Uuid::new_v4().simple()),"kind":"web_model_connector","routing_mode":if provider == "grok_web" {"credential"} else {"session"},"provider":provider,"routing_salt":Uuid::new_v4().to_string(),"created_at":now,"bindings":{},"pairings":{}})
-        };
-        let secret = format!(
-            "wmcs_{}{}",
-            Uuid::new_v4().simple(),
-            Uuid::new_v4().simple()
-        );
-        connector["secret_hash"] = json!(hash(&secret));
-        connector["secret_preview"] =
-            json!(format!("{}…{}", &secret[..6], &secret[secret.len() - 4..]));
-        connector["updated_at"] = json!(now);
-        connector["revoked"] = json!(false);
-        if provider == "grok_web" && !connector["routing_key"].is_string() {
+        let mut connector = json!({
+            "connector_id": format!("wmc_{}", Uuid::new_v4().simple()),
+            "kind": "web_model_connector",
+            "routing_mode": if provider == "grok_web" { "credential" } else { "session" },
+            "provider": provider,
+            "routing_salt": Uuid::new_v4().to_string(),
+            "created_at": now,
+            "credential_generation": 1,
+            "bindings": {},
+            "pairings": {}
+        });
+        let secret = install_secret(&mut connector, &now);
+        if provider == "grok_web" {
             connector["routing_key"] = json!(format!(
                 "{}{}",
                 Uuid::new_v4().simple(),
@@ -193,12 +253,243 @@ fn configure_inner(
         if provider == "chatgpt_web" {
             root["requires_reconfiguration"] = json!(false);
         }
-        Ok(Some(json!({"connector":connector,"secret":secret})))
+        Ok(Some(
+            json!({"outcome":"created","connector":connector,"secret":secret}),
+        ))
     })
 }
 
-pub fn revoke(home: &HomeLayout, id: &str) -> io::Result<bool> {
+// ---- rotation: explicit, fenced, atomic ----------------------------------------
+
+/// What an administrator sees before rotating, and the fence a rotation must
+/// carry. `confirmation` is not a secret and grants nothing (authority is the
+/// caller's admin principal, checked outside core). It is a hash of the live
+/// state the rotation would replace: connector id, credential generation and
+/// the sorted set of recorded binding keys. A stale page, a replayed request
+/// or a binding added between preview and click therefore cannot rotate.
+/// `recorded_binding_count` counts CCCC bindings (the Dots binding is already
+/// among them, so it is not added again); it is not a count of installed plugins.
+pub fn rotation_preview(connector: &Value) -> Value {
+    let mut keys: Vec<&String> = connector["bindings"]
+        .as_object()
+        .map(|b| b.keys().collect())
+        .unwrap_or_default();
+    keys.sort();
+    let recorded_binding_count = keys.len();
+    let generation = credential_generation(connector);
+    let confirmation = hash(
+        &json!([
+            ROTATION_CONFIRMATION_DOMAIN,
+            connector["connector_id"],
+            generation,
+            keys
+        ])
+        .to_string(),
+    );
+    json!({
+        "connector_id": connector["connector_id"],
+        "credential_generation": generation,
+        "recorded_binding_count": recorded_binding_count,
+        "dots_binding_recorded": connector["dots"]["actor_id"].is_string(),
+        "secret_rotated_at": connector["secret_rotated_at"],
+        "rotated_by": connector["rotated_by"],
+        "confirmation": confirmation
+    })
+}
+
+/// Replace the active connector's credential and nothing else: id, routing
+/// salt and key, bindings, pairings and Dots state survive. Refuses without
+/// writing when there is no active connector (it never silently creates a
+/// replacement) or when `confirmation` was not computed from the state being
+/// replaced. Credential, generation, rotation metadata and the audit entry are
+/// written in one locked store update: they commit together or not at all.
+pub fn rotate_provider(
+    home: &HomeLayout,
+    provider: &str,
+    confirmation: &str,
+    rotated_by: &str,
+) -> io::Result<Value> {
+    require_provider(provider)?;
+    if rotated_by.trim().is_empty() {
+        return Err(error("rotated_by_required"));
+    }
     update(home, |root| {
+        let live = active_provider(root, provider).ok_or_else(|| error("connector_unavailable"))?;
+        let preview = rotation_preview(live);
+        if preview["confirmation"] != confirmation {
+            // `update` only writes on Ok, so a stale fence leaves the file untouched.
+            return Err(error("rotation_confirmation_stale"));
+        }
+        let previous_generation = credential_generation(live);
+        let generation = previous_generation + 1;
+        let mut connector = live.clone();
+        let now = cccc_contracts::utc_now();
+        let secret = install_secret(&mut connector, &now);
+        connector["credential_generation"] = json!(generation);
+        connector["secret_rotated_at"] = json!(now);
+        connector["rotated_by"] = json!(rotated_by);
+        push_security_event(
+            &mut connector,
+            json!({"at":now,"reason":"secret_rotated","outcome":"ok","rotated_by":rotated_by,
+                "credential_generation":generation,
+                "recorded_binding_count":preview["recorded_binding_count"]}),
+        );
+        root["connectors"][provider] = connector.clone();
+        Ok(
+            json!({"outcome":"rotated","connector":connector,"secret":secret,
+            "previous_generation":previous_generation}),
+        )
+    })
+}
+
+// ---- legacy convenience kept for fixtures ----------------------------------------
+
+/// Create when absent, otherwise rotate with a confirmation read from the live
+/// state. Two locked steps, so it is NOT a fence against a concurrent
+/// administrator; it exists for test fixtures and local tooling. The daemon op
+/// must call `create_provider_if_absent` / `rotate_provider` directly.
+pub fn configure_provider(home: &HomeLayout, provider: &str) -> io::Result<Value> {
+    if let Some(created) = create_provider_if_absent(home, provider)? {
+        return Ok(created);
+    }
+    let live = load(home)?
+        .into_iter()
+        .find(|c| c["provider"] == provider && c["revoked"] != true)
+        .ok_or_else(|| error("connector_unavailable"))?;
+    let confirmation = rotation_preview(&live)["confirmation"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    rotate_provider(home, provider, &confirmation, "local")
+}
+
+pub fn configure(home: &HomeLayout) -> io::Result<Value> {
+    configure_provider(home, "chatgpt_web")
+}
+
+// ---- rejected-secret diagnostics ---------------------------------------------
+
+/// Outcome of recording a credential rejection. `Deferred` means the hit was
+/// counted in memory and will be folded into the next written entry.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RejectionRecord {
+    Written { count: u64 },
+    Deferred,
+    UnknownConnector,
+}
+
+/// Process-local write throttle keyed by connector id. Admission happens before
+/// the store is read, so an unauthenticated rejection flood does not rewrite or
+/// even parse the store more than once per interval per key. Unknown ids may
+/// therefore enter the map briefly; a hard cap evicts the oldest key, and a
+/// revoke/retire removes its id explicitly. Pending counts are lost if the
+/// process exits before the next flush; `count` on a stored entry is therefore a
+/// lower bound.
+#[derive(Default)]
+pub(crate) struct RejectionThrottle {
+    last_write: HashMap<String, Instant>,
+    pending: HashMap<String, u64>,
+}
+
+impl RejectionThrottle {
+    /// Count one hit; return how many hits to write now, or `None` to defer.
+    pub(crate) fn admit(&mut self, key: &str, now: Instant, interval: Duration) -> Option<u64> {
+        if !self.pending.contains_key(key) && self.pending.len() >= REJECTION_THROTTLE_MAX_KEYS {
+            self.evict_oldest();
+        }
+        let pending = self.pending.entry(key.to_owned()).or_insert(0);
+        *pending += 1;
+        match self.last_write.get(key) {
+            Some(last) if now.saturating_duration_since(*last) < interval => None,
+            _ => {
+                let count = std::mem::take(pending);
+                self.last_write.insert(key.to_owned(), now);
+                Some(count)
+            }
+        }
+    }
+
+    fn evict_oldest(&mut self) {
+        let oldest = self
+            .last_write
+            .iter()
+            .min_by_key(|(_, at)| **at)
+            .map(|(key, _)| key.clone())
+            .or_else(|| self.pending.keys().next().cloned());
+        if let Some(key) = oldest {
+            self.forget(&key);
+        }
+    }
+
+    pub(crate) fn forget(&mut self, key: &str) {
+        self.last_write.remove(key);
+        self.pending.remove(key);
+    }
+}
+
+fn forget_rejection(connector_id: &str) {
+    let Some(throttle) = REJECTIONS.get() else {
+        return;
+    };
+    throttle
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .forget(connector_id);
+}
+
+static REJECTIONS: OnceLock<Mutex<RejectionThrottle>> = OnceLock::new();
+
+/// Record that a request for a known, active connector carried a wrong secret.
+/// Called by the web layer BEFORE it returns 403; the denial never depends on
+/// this succeeding. Nothing from the request is stored: `transport` is mapped
+/// onto a fixed vocabulary, and the supplied secret is never passed in.
+pub fn record_rejected_secret(
+    home: &HomeLayout,
+    connector_id: &str,
+    transport: &str,
+) -> io::Result<RejectionRecord> {
+    let transport = match transport {
+        "get_probe" | "post_header" | "post_path_token" => transport,
+        _ => "other",
+    };
+    // Throttle first: the public connector URL can be hit at any rate, and a
+    // deferred hit must not even parse the store. The map is capped, and an id
+    // found not to exist below is removed again.
+    let count = {
+        let mut throttle = REJECTIONS
+            .get_or_init(|| Mutex::new(RejectionThrottle::default()))
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match throttle.admit(connector_id, Instant::now(), REJECTION_WRITE_INTERVAL) {
+            Some(count) => count,
+            None => return Ok(RejectionRecord::Deferred),
+        }
+    };
+    let result = update(home, |root| {
+        let Some(connector) = root["connectors"]
+            .as_object_mut()
+            .expect("validated store")
+            .values_mut()
+            .find(|c| c["connector_id"] == connector_id && c["revoked"] != true)
+        else {
+            return Ok(RejectionRecord::UnknownConnector);
+        };
+        let generation = credential_generation(connector);
+        push_security_event(
+            connector,
+            json!({"at":cccc_contracts::utc_now(),"reason":"invalid_secret","outcome":"denied",
+                "transport":transport,"count":count,"credential_generation":generation}),
+        );
+        Ok(RejectionRecord::Written { count })
+    });
+    if matches!(&result, Ok(RejectionRecord::UnknownConnector)) {
+        forget_rejection(connector_id);
+    }
+    result
+}
+
+pub fn revoke(home: &HomeLayout, id: &str) -> io::Result<bool> {
+    let revoked = update(home, |root| {
         let Some(connector) = root["connectors"]
             .as_object_mut()
             .expect("validated store")
@@ -216,7 +507,11 @@ pub fn revoke(home: &HomeLayout, id: &str) -> io::Result<bool> {
             .remove("grok_webhooks");
         connector.as_object_mut().expect("connector").remove("dots");
         Ok(true)
-    })
+    })?;
+    if revoked {
+        forget_rejection(id);
+    }
+    Ok(revoked)
 }
 
 pub fn secret_matches(item: &Value, supplied: &str) -> bool {
@@ -636,13 +931,17 @@ pub fn conversation_url(value: &str) -> io::Result<String> {
 }
 
 fn retire(home: &HomeLayout, group: &str, actor: Option<&str>) -> io::Result<Vec<Value>> {
-    update(home, |root| {
+    let mut touched = Vec::new();
+    let retired = update(home, |root| {
         let mut retired = Vec::new();
         for c in root["connectors"]
             .as_object_mut()
             .expect("validated store")
             .values_mut()
         {
+            if let Some(id) = c["connector_id"].as_str() {
+                touched.push(id.to_owned());
+            }
             for collection in ["bindings", "pairings", "grok_webhooks"] {
                 let keys = c[collection]
                     .as_object()
@@ -671,7 +970,11 @@ fn retire(home: &HomeLayout, group: &str, actor: Option<&str>) -> io::Result<Vec
             }
         }
         Ok(retired)
-    })
+    })?;
+    for id in touched {
+        forget_rejection(&id);
+    }
+    Ok(retired)
 }
 /// Held by a Web process for one Actor's browser work, from its claim to its
 /// last write, and by a runtime switch. Neither waits, so the work falls wholly

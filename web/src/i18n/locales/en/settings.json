@@ -1597,6 +1597,10 @@
     "create": "Create shared connector",
     "revoke": "Revoke connector",
     "rotateHint": "The old URL will stop working for all agents. Update the one ChatGPT connector with the new URL. Existing conversation pairings remain.",
+    "rotationImpact": "This replaces credential generation {{generation}}. {{count}} recorded agent binding(s) stay attached; routing and conversation pairings are unchanged. The number of external plugin installations is unknown.",
+    "rotationDots": "The Dots binding and its local state are preserved.",
+    "rotationNoDots": "No Dots binding is recorded.",
+    "rotationUnavailable": "A rotation preview is not available for this connector. Refresh and try again.",
     "revokeHint": "All ChatGPT agents will lose tool access. Creating a connector again will require pairing their conversations again.",
     "confirm": "Confirm",
     "cancel": "Cancel",
@@ -2110,9 +2114,25 @@
       "absent": "Not supplied by host"
     },
     "refresh": "Refresh",
-    "noCalls": "No recorded calls yet.",
+    "noCalls": "No recorded calls or credential events yet.",
     "callOk": "Call succeeded",
     "callFailed": "Failed · {{reason}}",
+    "unknownCall": "Connector call",
+    "unknownActor": "unknown actor",
+    "invalidSecret": "Rejected credential",
+    "invalidSecretStatus": "{{transport}} · {{count}} rejection(s)",
+    "invalidSecretHint": "The provider sent a credential that no longer matches this connector. Copy the current connector URL from this page; if it is not shown, rotate again to issue a new one. If the credential was rotated, update the provider connector.",
+    "rotated": "Credential rotated",
+    "rotatedStatus": "Generation {{generation}}",
+    "rotatedHint": "{{actor}} rotated the credential; {{count}} recorded binding(s) were preserved. The previous credential is no longer valid.",
+    "lastRotation": "Last rotation: {{time}} by {{actor}}",
+    "lastRotationUnknown": "Last rotation: not recorded (legacy connector or never rotated).",
+    "transports": {
+      "get_probe": "URL check",
+      "post_header": "Authorization header",
+      "post_path_token": "URL token",
+      "other": "Other transport"
+    },
     "reasons": {
       "pairingExpired": "Retry connection setup from the intended agent's connection settings. Pairing codes expire after 10 minutes.",
       "bindingChanged": "Check the intended agent and its current connection before requesting new setup instructions.",
@@ -2123,6 +2143,6 @@
       "callFailed": "Check the failed call in the provider app before retrying; this record alone does not establish whether a turn completed."
     },
     "title": "Connector diagnostics",
-    "hint": "The latest 10 subscription and task-tool outcomes for this shared connector, newest first. These may involve multiple agents. Records include fixed reasons and optional salted identity fingerprints, without credentials or call arguments."
+    "hint": "The latest 10 tool-call outcomes and the latest 10 credential rejection/rotation events for this shared connector, newest first. Separate logs mean a burst of rejected credentials cannot hide a failed call. Records include fixed reasons and optional salted identity fingerprints, without credentials or call arguments."
   }
 }

@@ -6,6 +6,57 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 
 ## [Unreleased]
 
+## [0.4.54]
+
+### Added
+
+- A managed agent that starts a new conversation although one was saved now leaves a record. Until
+  now the saved conversation was replaced without a trace when the agent's runtime, command, model,
+  workspace, launch settings or launch environment no longer matched it. The agent's page shows a
+  small information mark after its status; hovering over it or selecting it gives the time of the
+  record and the compared settings that had changed. For managed Claude and Pi agents and for ACP
+  agents other than Antigravity, a changed launch `PATH` and a changed CCCC program location are
+  named separately from the other launch settings when both the saved record and the new one contain
+  that detail; a record saved by an earlier version does not. CCCC also attempts to write one
+  system notice addressed to the user, which an enabled IM bridge can forward, and the Actor
+  listing reports `runtime_session_replaced_at` and `runtime_session_replaced_reasons`. Which
+  conversation a start selects is unchanged.
+
+### Changed
+
+- CCCC Web ignores file-open notifications when it watches Group ledgers. On Linux, read-only
+  opens of a ledger could queue redundant ledger checks. Writes, rotations, Group removal and the
+  periodic recovery scan are handled as before.
+
+### Fixed
+
+- History and the Inbox read a Group's rotated ledger segments in the order they were rotated,
+  even when the system clock went backwards between two rotations. Segments were read in
+  file-name order, and a name starts with the time of its rotation, so a later segment stamped
+  with an earlier time was read first: history showed its messages out of order and an Inbox
+  read could skip Mail. Nothing was removed from the ledger. A ledger is rotated only by an
+  explicit compaction such as `cccc ledger compact`. In a Group that was already read in the
+  wrong order, new Mail arrives normally after the update, but Mail that an Inbox read had
+  already passed over may not return to the Inbox; it remains in the Group's history.
+- On a phone-sized screen, the Edit button under a stopped agent's page no longer breaks its label
+  over two lines and grows taller than the buttons beside it. It shows its icon alone there, as it
+  already does while the agent is running.
+- The Group menu, opened from the run button in the header or from a Group in the sidebar, no
+  longer reserves extra width as if neighbouring items stood side by side. The labels filled only
+  part of it.
+- **Agent State** no longer shows an agent that was removed from the Group. Removal cleared the
+  agent's state but left an empty entry in the stored context, so Project Context kept a card
+  for it and context reads returned it. Context reads now return states only for agents still in
+  the Group, including for entries left by earlier removals. States of agents still in the Group
+  are kept even if they are disabled or stopped. This filtering does not rewrite the stored
+  context.
+- Three smaller layout defects in CCCC Web. In the add-agent dialog, Cancel no longer grows
+  taller than the create button beside it when that button has a hint line under it. A settings
+  choice whose options wrap onto a second row, such as the default recipient in Japanese and
+  English, now forms one block of aligned rows. The card that opens from a recipient in the
+  composer gives the recipient's kind more room on wider screens; it was cut off in Japanese and
+  English.
+
 ## [0.4.53]
 
 ### Added

@@ -162,6 +162,16 @@ impl Fixture {
         )
     }
 
+    // SSE probes return text/event-stream, so they have no JSON body to parse.
+    async fn send_status(&self, request: Request<Body>) -> StatusCode {
+        self.router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("response")
+            .status()
+    }
+
     fn mcp_request(&self, method: &str, mut params: Value, modern: bool) -> Request<Body> {
         let mut builder = Request::builder()
             .method("POST")
@@ -1591,10 +1601,10 @@ async fn subscription_refresh_and_unsubscribe_use_modern_wire_contract_and_fixed
 }
 
 #[tokio::test]
-async fn one_click_create_refuses_to_rotate_an_existing_connector() {
+async fn one_click_create_is_idempotent_and_never_discloses_an_existing_secret() {
     let mut fixture = Fixture::new();
     fixture.start_daemon().await;
-    let before = fixture.connector()["secret_hash"].clone();
+    let before = fixture.connector();
     let (status, response) = fixture
         .send(
             Request::builder()
@@ -1602,18 +1612,32 @@ async fn one_click_create_refuses_to_rotate_an_existing_connector() {
                 .uri("/api/v1/web-model/connectors")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::AUTHORIZATION, format!("Bearer {}", fixture.admin))
-                .body(Body::from(
-                    json!({"provider":"chatgpt_web","create_only":true}).to_string(),
-                ))
-                .expect("create-only request"),
+                .body(Body::from(json!({"provider":"chatgpt_web"}).to_string()))
+                .expect("create request"),
         )
         .await;
-    assert_ne!(status, StatusCode::OK);
-    assert_eq!(response["ok"], false);
-    assert_eq!(response["error"]["code"], "connector_exists");
-    // A mistyped flag is refused rather than read as "rotate".
-    for flag in [json!("true"), json!(1), Value::Null] {
-        let (status, _) = fixture
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["result"]["outcome"], "existing");
+    assert_eq!(
+        response["result"]["connector"]["connector_id"],
+        fixture.connector_id
+    );
+    assert_eq!(
+        response["result"]["connector"]["credential_generation"],
+        before["credential_generation"]
+    );
+    assert_eq!(response["result"]["connector"]["secret_available"], false);
+    assert!(response["result"].get("secret").is_none());
+    assert!(
+        response["result"]["connector"]
+            .get("connector_url_path_token")
+            .is_none()
+    );
+    assert!(!response.to_string().contains(&fixture.secret));
+    assert_eq!(fixture.connector()["secret_hash"], before["secret_hash"]);
+    // The older flag keeps its create-when-absent meaning and never rotates.
+    for flag in [json!(true), json!(false)] {
+        let (status, response) = fixture
             .send(
                 Request::builder()
                     .method("POST")
@@ -1623,15 +1647,202 @@ async fn one_click_create_refuses_to_rotate_an_existing_connector() {
                     .body(Body::from(
                         json!({"provider":"chatgpt_web","create_only":flag}).to_string(),
                     ))
-                    .expect("mistyped request"),
+                    .expect("legacy create request"),
             )
             .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{flag}");
+        assert_eq!(status, StatusCode::OK, "{flag}");
+        assert_eq!(response["result"]["outcome"], "existing");
+        assert!(response["result"].get("secret").is_none());
     }
-    assert!(!response.to_string().contains("wmcs_"));
+    // A mistyped or contradictory flag is refused rather than read as "rotate".
+    for args in [
+        json!({"provider":"chatgpt_web","rotate":"true"}),
+        json!({"provider":"chatgpt_web","create_only":1}),
+        json!({"provider":"chatgpt_web","rotate":true,"create_only":true}),
+        json!({"provider":"chatgpt_web","rotate":true}),
+    ] {
+        let (status, _) = fixture
+            .send(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/web-model/connectors")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", fixture.admin))
+                    .body(Body::from(args.to_string()))
+                    .expect("invalid request"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{args}");
+    }
     // The credential already added to ChatGPT keeps working.
-    assert_eq!(fixture.connector()["secret_hash"], before);
+    assert_eq!(fixture.connector()["secret_hash"], before["secret_hash"]);
+    let status = fixture
+        .send_status(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/mcp/web-model/{}/token/{}",
+                    fixture.connector_id, fixture.secret
+                ))
+                .body(Body::empty())
+                .expect("valid probe"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
     fixture.close().await;
+}
+
+#[tokio::test]
+async fn explicit_rotation_over_http_uses_the_authenticated_principal_and_a_live_fence() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon().await;
+    let before = fixture.connector();
+    let preview = connectors::rotation_preview(&before);
+    let confirmation = preview["confirmation"].as_str().expect("confirmation");
+    // A caller-supplied label is ignored; the route forwards the authenticated
+    // bearer token and the daemon derives the actor itself.
+    let body = json!({"provider":"chatgpt_web","rotate":true,"confirmation":confirmation,
+        "rotated_by":"user:attacker","trusted_rotated_by":"user:attacker"});
+    let (status, response) = fixture
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/web-model/connectors")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {}", fixture.admin))
+                .body(Body::from(body.to_string()))
+                .expect("rotate request"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["result"]["outcome"], "rotated");
+    assert_eq!(response["result"]["connector"]["credential_generation"], 2);
+    assert_eq!(response["result"]["connector"]["rotated_by"], "user:admin");
+    assert!(response["result"]["secret"].as_str().is_some());
+    // Replaying the same fence is a conflict, not a second rotation.
+    let (status, response) = fixture
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/web-model/connectors")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {}", fixture.admin))
+                .body(Body::from(body.to_string()))
+                .expect("replayed rotate request"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(response["error"]["code"], "rotation_confirmation_stale");
+    assert_eq!(fixture.connector()["credential_generation"], 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn rejected_secrets_are_recorded_once_without_disclosing_the_credential() {
+    // A fresh fixture per transport avoids the 5 s write throttle, so each
+    // real request shape is observed rather than folded into the first one.
+    for transport in ["get_probe", "post_header", "post_path_token"] {
+        let mut fixture = Fixture::new();
+        fixture.start_daemon().await;
+        let old_secret = fixture.secret.clone();
+        let before = fixture.connector();
+        let confirmation = connectors::rotation_preview(&before)["confirmation"]
+            .as_str()
+            .expect("confirmation")
+            .to_owned();
+        let (status, response) = fixture
+            .send(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/web-model/connectors")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", fixture.admin))
+                    .body(Body::from(
+                        json!({"provider":"chatgpt_web","rotate":true,
+                            "confirmation":confirmation})
+                        .to_string(),
+                    ))
+                    .expect("rotate request"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{transport}");
+        assert_eq!(response["result"]["outcome"], "rotated", "{transport}");
+        assert_eq!(
+            response["result"]["connector"]["credential_generation"], 2,
+            "{transport}"
+        );
+        let new_secret = response["result"]["secret"]
+            .as_str()
+            .expect("new secret")
+            .to_owned();
+        assert_ne!(old_secret, new_secret, "{transport}");
+
+        let request = match transport {
+            "get_probe" => Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/mcp/web-model/{}/token/{old_secret}",
+                    fixture.connector_id
+                ))
+                .body(Body::empty()),
+            "post_header" => Request::builder()
+                .method("POST")
+                .uri(format!("/mcp/web-model/{}", fixture.connector_id))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {old_secret}"))
+                .body(Body::from("{}")),
+            _ => Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/mcp/web-model/{}/token/{old_secret}",
+                    fixture.connector_id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}")),
+        }
+        .expect("old credential request");
+        let (status, body) = fixture.send(request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{transport}");
+        assert_eq!(body["error"]["code"], "permission_denied", "{transport}");
+        let events = fixture.connector()["security_events_log"]
+            .as_array()
+            .cloned()
+            .expect("security events log");
+        let rejected: Vec<_> = events
+            .iter()
+            .filter(|event| event["reason"] == "invalid_secret")
+            .collect();
+        assert_eq!(rejected.len(), 1, "{transport}: one throttled write");
+        assert_eq!(rejected[0]["transport"], transport);
+        assert_eq!(rejected[0]["credential_generation"], 2);
+        assert!(
+            !serde_json::to_string(&events)
+                .expect("events")
+                .contains(&old_secret),
+            "{transport}: the presented secret is never stored"
+        );
+        assert!(
+            !serde_json::to_string(&fixture.connector()["events_log"])
+                .expect("call events")
+                .contains(&old_secret),
+            "{transport}: rejection must not enter the tool-call log"
+        );
+        // The real, rotated credential still works.
+        let status = fixture
+            .send_status(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/mcp/web-model/{}/token/{new_secret}",
+                        fixture.connector_id
+                    ))
+                    .body(Body::empty())
+                    .expect("valid probe"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{transport}");
+        fixture.close().await;
+    }
 }
 
 /// The operation under test writes nothing to the ledger. The daemon's
