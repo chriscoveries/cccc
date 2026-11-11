@@ -1,6 +1,9 @@
+use cccc_core::context::open_blocked_by;
 use serde_json::{Map, Value, json};
 
-use super::task_list_query::{matches_task, sort_tasks, task_number, task_status};
+use super::task_list_query::{
+    matches_task, sort_tasks, stamp_open_blocked_by, task_number, task_status,
+};
 
 pub(super) struct PageFilter<'a> {
     pub query: &'a str,
@@ -19,6 +22,7 @@ pub(super) fn page(
         .iter()
         .filter(|task| {
             matches_task(
+                tasks,
                 task,
                 status,
                 filter.attention,
@@ -30,11 +34,12 @@ pub(super) fn page(
         .collect::<Vec<_>>();
     sort_tasks(&mut matching, status);
     let total_count = matching.len();
-    let items = matching
+    let mut items = matching
         .into_iter()
         .skip(offset)
         .take(limit)
         .collect::<Vec<_>>();
+    stamp_open_blocked_by(tasks, &mut items);
     let count = items.len();
     json!({
         "tasks":items,
@@ -78,6 +83,10 @@ pub(super) fn index(tasks: &[Map<String, Value>]) -> Value {
                     item.insert(field.into(), value.clone());
                 }
             }
+            item.insert(
+                "open_blocked_by".into(),
+                json!(open_blocked_by(tasks, task)),
+            );
             item
         })
         .collect::<Vec<_>>();

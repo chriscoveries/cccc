@@ -1,5 +1,23 @@
 use super::*;
 
+fn captured_tasks() -> Vec<Value> {
+    serde_json::from_str(include_str!(
+        "../../../tests/fixtures/open-blocked-by/tasks.json"
+    ))
+    .expect("captured tasks")
+}
+
+fn captured_document() -> ContextDoc {
+    let tasks = captured_tasks()
+        .into_iter()
+        .map(|task| task.as_object().cloned().expect("captured task"))
+        .collect();
+    ContextDoc {
+        tasks,
+        ..ContextDoc::default()
+    }
+}
+
 fn document() -> ContextDoc {
     let task = json!({
         "id":"task-1",
@@ -59,6 +77,69 @@ fn full_context_keeps_task_objects_in_the_board_projection() {
     assert_eq!(result["board"]["active"], json!([]));
     assert_eq!(result["tasks_summary"]["blocked"], 1);
     assert_eq!(result["attention"]["blocked"][0]["id"], "task-1");
+}
+
+#[test]
+fn open_blocked_by_is_derived_and_emitted_next_to_the_stored_list() {
+    let mut document = captured_document();
+    for status in ["planned", "active", "done", "archived"] {
+        document.tasks[1].insert("status".into(), json!(status));
+        let result = project(document.clone(), "v1".into(), "summary");
+        let task = &result["coordination"]["tasks"][0];
+        assert_eq!(task["blocked_by"], json!(["blocker-task"]), "{status}");
+        let open = if matches!(status, "done" | "archived") {
+            json!([])
+        } else {
+            json!(["blocker-task"])
+        };
+        assert_eq!(task["open_blocked_by"], open, "{status}");
+        let blocked = usize::from(matches!(status, "planned" | "active"));
+        assert_eq!(result["attention"]["blocked"], blocked, "{status}");
+        assert_eq!(result["tasks_summary"]["blocked"], blocked, "{status}");
+    }
+    // A blocker restored to an unfinished status blocks again; restoring it
+    // to done does not — the set is derived on every read.
+    document.tasks[1].insert("status".into(), json!("done"));
+    assert_eq!(
+        project(document.clone(), "v1".into(), "summary")["attention"]["blocked"],
+        0
+    );
+    document.tasks[1].insert("status".into(), json!("planned"));
+    assert_eq!(
+        project(document, "v1".into(), "summary")["attention"]["blocked"],
+        1
+    );
+}
+
+#[test]
+fn stored_open_blocked_by_is_recomputed() {
+    let mut document = captured_document();
+    document.tasks[0].insert("open_blocked_by".into(), json!([]));
+
+    let result = project(document, "v1".into(), "summary");
+    let task = &result["coordination"]["tasks"][0];
+
+    assert_eq!(task["blocked_by"], json!(["blocker-task"]));
+    assert_eq!(task["open_blocked_by"], json!(["blocker-task"]));
+    assert_eq!(result["attention"]["blocked"], 1);
+    assert_eq!(result["tasks_summary"]["blocked"], 1);
+}
+
+#[test]
+fn full_and_board_projections_carry_open_blocked_by() {
+    let mut document = captured_document();
+    // Keep the blocked task in the attention list while its blocker is done:
+    // waiting_on is a separate, test-only reason to be blocked.
+    document.tasks[0].insert("waiting_on".into(), json!("actor"));
+    document.tasks[1].insert("status".into(), json!("done"));
+    let result = project(document, "v1".into(), "full");
+    for task in [
+        &result["coordination"]["tasks"][0],
+        &result["board"]["planned"][0],
+        &result["attention"]["blocked"][0],
+    ] {
+        assert_eq!(task["open_blocked_by"], json!([]), "{task}");
+    }
 }
 
 #[test]

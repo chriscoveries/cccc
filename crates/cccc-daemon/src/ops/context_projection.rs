@@ -1,11 +1,35 @@
-use cccc_core::context::ContextDoc;
+use cccc_core::context::{ContextDoc, open_blocked_by};
 use serde_json::{Map, Value, json};
 
+/// Stamps each task with `open_blocked_by`, the derived subset of its stored
+/// `blocked_by` that still blocks (a blocker done or archived stops counting;
+/// an id naming no task keeps blocking). A stored or client-supplied value is
+/// overwritten. A page slice stamped against the full set is passed through
+/// with `stamp` false instead. Stored data is never rewritten; the field
+/// exists only in projections.
+fn inject_open_blocked_by(tasks: &mut [Map<String, Value>]) {
+    let slice: &[Map<String, Value>] = tasks;
+    let opens = slice
+        .iter()
+        .map(|task| open_blocked_by(slice, task))
+        .collect::<Vec<_>>();
+    for (task, open) in tasks.iter_mut().zip(opens) {
+        task.insert("open_blocked_by".into(), json!(open));
+    }
+}
+
 pub(super) fn project(document: ContextDoc, version: String, detail: &str) -> Value {
+    project_tasks(document, version, detail, true)
+}
+
+fn project_tasks(document: ContextDoc, version: String, detail: &str, stamp: bool) -> Value {
     if detail == "overview" {
         return context_overview::project(document, version);
     }
-    let tasks = document.tasks;
+    let mut tasks = document.tasks;
+    if stamp {
+        inject_open_blocked_by(&mut tasks);
+    }
     let tasks_version = format!("tasksv:{}", document.tasks_revision);
     let full = detail == "full";
     let attention = attention(&tasks, full);
@@ -49,7 +73,8 @@ pub(super) fn project_page(
     detail: &str,
     page: &Page,
 ) -> Result<Value, usize> {
-    let tasks = std::mem::take(&mut document.tasks);
+    let mut tasks = std::mem::take(&mut document.tasks);
+    inject_open_blocked_by(&mut tasks);
     let attention = attention(&tasks, false);
     let summary = task_summary(&tasks, &attention);
     let mut candidates = tasks
@@ -62,7 +87,7 @@ pub(super) fn project_page(
     loop {
         let mut slice = document.clone();
         slice.tasks = candidates[..take].to_vec();
-        let mut value = project(slice, version.clone(), detail);
+        let mut value = project_tasks(slice, version.clone(), detail, false);
         let truncated = take < candidates.len();
         let next_cursor = truncated
             .then(|| {
@@ -169,7 +194,7 @@ fn coordination(
 }
 
 fn summary_task(task: &Map<String, Value>) -> Map<String, Value> {
-    const FIELDS: [&str; 19] = [
+    const FIELDS: [&str; 20] = [
         "id",
         "rev",
         "title",
@@ -180,6 +205,7 @@ fn summary_task(task: &Map<String, Value>) -> Map<String, Value> {
         "assignee",
         "priority",
         "blocked_by",
+        "open_blocked_by",
         "waiting_on",
         "handoff_to",
         "task_type",
@@ -227,8 +253,11 @@ fn status(task: &Map<String, Value>) -> &str {
         .unwrap_or("planned")
 }
 
+/// Whether the task still waits on unfinished blockers. `open_blocked_by` is
+/// stamped by `inject_open_blocked_by` before `attention` runs, so the stored
+/// `blocked_by` list itself is never consulted here.
 fn is_blocked(task: &Map<String, Value>) -> bool {
-    task.get("blocked_by")
+    task.get("open_blocked_by")
         .and_then(Value::as_array)
         .is_some_and(|items| !items.is_empty())
         || matches!(

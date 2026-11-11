@@ -3,6 +3,13 @@ use cccc_contracts::DaemonRequest;
 use cccc_core::{GroupStore, HomeLayout};
 use serde_json::{Map, Value, json};
 
+fn captured_tasks() -> Vec<Value> {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/open-blocked-by/tasks.json"
+    ))
+    .expect("captured tasks")
+}
+
 fn request(group_id: &str, args: Value) -> DaemonRequest {
     let mut args = args.as_object().cloned().expect("args");
     args.insert("group_id".into(), json!(group_id));
@@ -33,6 +40,58 @@ fn seeded() -> (tempfile::TempDir, HomeLayout, String) {
         .sync(&group.group_id, &ops, None, "user", false)
         .expect("seed");
     (temp, home, group.group_id)
+}
+
+fn captured_task_maps() -> Vec<Map<String, Value>> {
+    captured_tasks()
+        .into_iter()
+        .map(|task| task.as_object().cloned().expect("captured task"))
+        .collect()
+}
+
+fn seeded_with_finished_blocker() -> (tempfile::TempDir, HomeLayout, String) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("tasks", "").expect("group");
+    let contexts = ContextStore::new(home.clone()).expect("contexts");
+    let captured = captured_tasks();
+    let blocked = &captured[0];
+    let blocker = &captured[1];
+    let ops = [
+        json!({
+            "op":"task.create",
+            "title":blocker["title"],
+            "status":"done",
+            "task_type":blocker["task_type"],
+            "client_request_id":"captured-blocker",
+        }),
+        json!({
+            "op":"task.create",
+            "title":blocked["title"],
+            "status":blocked["status"],
+            "task_type":blocked["task_type"],
+            "client_request_id":"captured-blocked",
+            "parent_ref":"captured-blocker",
+            "blocked_by_refs":["captured-blocker"],
+        }),
+    ]
+    .into_iter()
+    .map(|op| op.as_object().cloned().expect("op"))
+    .collect::<Vec<Map<String, Value>>>();
+    contexts
+        .sync(&group.group_id, &ops, None, "user", false)
+        .expect("seed");
+    (temp, home, group.group_id)
+}
+
+fn task_named<'a>(tasks: &'a Value, title: &str) -> &'a Value {
+    tasks
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|task| task["title"] == title)
+        .expect("named task")
 }
 
 #[test]
@@ -169,6 +228,7 @@ fn attention_facets_and_filters_ignore_completed_history() {
 
     assert_eq!(facets["blocked"], 1);
     assert!(super::task_list_query::matches_task(
+        &tasks,
         &tasks[0],
         None,
         Some("blocked"),
@@ -176,10 +236,220 @@ fn attention_facets_and_filters_ignore_completed_history() {
         ""
     ));
     assert!(!super::task_list_query::matches_task(
+        &tasks,
         &tasks[1],
         None,
         Some("blocked"),
         "",
         ""
     ));
+}
+
+#[test]
+fn a_blocker_that_is_done_or_archived_stops_blocking() {
+    let mut tasks = captured_task_maps();
+    for status in ["planned", "active"] {
+        tasks[1].insert("status".into(), json!(status));
+        assert_eq!(
+            super::task_list_query::facets(&tasks)["blocked"],
+            1,
+            "{status}"
+        );
+        assert!(super::task_list_query::matches_task(
+            &tasks,
+            &tasks[0],
+            None,
+            Some("blocked"),
+            "",
+            ""
+        ));
+    }
+    for status in ["done", "archived"] {
+        tasks[1].insert("status".into(), json!(status));
+        assert_eq!(
+            super::task_list_query::facets(&tasks)["blocked"],
+            0,
+            "{status}"
+        );
+        assert!(!super::task_list_query::matches_task(
+            &tasks,
+            &tasks[0],
+            None,
+            Some("blocked"),
+            "",
+            ""
+        ));
+    }
+    // Restoring the blocker to an unfinished status blocks again; the set is
+    // derived on every read, nothing is stored.
+    tasks[1].insert("status".into(), json!("planned"));
+    assert_eq!(super::task_list_query::facets(&tasks)["blocked"], 1);
+}
+
+#[test]
+fn a_blocker_id_that_names_no_task_keeps_blocking() {
+    let mut tasks = captured_task_maps();
+    tasks[0].insert("blocked_by".into(), json!(["missing-blocker"]));
+    assert_eq!(super::task_list_query::facets(&tasks)["blocked"], 1);
+    assert!(super::task_list_query::matches_task(
+        &tasks,
+        &tasks[0],
+        None,
+        Some("blocked"),
+        "",
+        ""
+    ));
+}
+
+#[test]
+fn waiting_on_still_blocks_without_any_open_blocker() {
+    let mut tasks = captured_task_maps();
+    tasks[1].insert("status".into(), json!("done"));
+    tasks[0].insert("waiting_on".into(), json!("actor"));
+    assert_eq!(super::task_list_query::facets(&tasks)["blocked"], 1);
+    assert!(super::task_list_query::matches_task(
+        &tasks,
+        &tasks[0],
+        None,
+        Some("blocked"),
+        "",
+        ""
+    ));
+}
+
+#[test]
+fn every_task_list_response_stamps_open_blocked_by() {
+    let captured = captured_tasks();
+    let blocked_title = captured[0]["title"].as_str().expect("blocked title");
+    let blocker_title = captured[1]["title"].as_str().expect("blocker title");
+    let (_temp, home, group_id) = seeded_with_finished_blocker();
+    let plain = run(&home, &request(&group_id, json!({}))).expect("plain");
+    let blocked = task_named(&plain["tasks"], blocked_title);
+    let blocker = task_named(&plain["tasks"], blocker_title);
+    let blocked_id = blocked["id"].as_str().expect("blocked id").to_owned();
+    let blocker_id = blocker["id"].as_str().expect("blocker id").to_owned();
+    assert_eq!(
+        blocked["blocked_by"]
+            .as_array()
+            .expect("stored blockers")
+            .len(),
+        1
+    );
+    assert_eq!(blocked["open_blocked_by"], json!([]));
+
+    let page = run(
+        &home,
+        &request(&group_id, json!({"status":"planned","limit":10})),
+    )
+    .expect("page");
+    assert_eq!(
+        task_named(&page["tasks"], blocked_title)["open_blocked_by"],
+        json!([])
+    );
+
+    let pages = run(
+        &home,
+        &request(&group_id, json!({"statuses":"planned,done","limit":10})),
+    )
+    .expect("pages");
+    assert_eq!(
+        task_named(&pages["pages"]["planned"]["tasks"], blocked_title)["open_blocked_by"],
+        json!([])
+    );
+
+    let one = run(&home, &request(&group_id, json!({"task_id":blocker_id}))).expect("one");
+    assert_eq!(one["task"]["open_blocked_by"], json!([]));
+    let child = task_named(&one["task"]["children"], blocked_title);
+    assert_eq!(child["open_blocked_by"], json!([]));
+
+    let many = run(
+        &home,
+        &request(&group_id, json!({"task_ids":blocked_id.clone()})),
+    )
+    .expect("many");
+    assert_eq!(many["tasks"][0]["open_blocked_by"], json!([]));
+
+    let indexed = run(
+        &home,
+        &request(&group_id, json!({"limit":10,"include_index":true})),
+    )
+    .expect("indexed");
+    let index_item = indexed["task_index"]
+        .as_array()
+        .expect("task index")
+        .iter()
+        .find(|task| task["id"].as_str() == Some(blocked_id.as_str()))
+        .expect("indexed task");
+    assert_eq!(index_item["open_blocked_by"], json!([]));
+}
+
+#[test]
+fn forged_open_blocked_by_cannot_hide_a_planned_blocker() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("tasks", "").expect("group");
+    let contexts = ContextStore::new(home.clone()).expect("contexts");
+    let captured = captured_tasks();
+    let blocked = &captured[0];
+    let blocker = &captured[1];
+    let ops = [
+        json!({
+            "op":"task.create",
+            "title":blocker["title"],
+            "status":blocker["status"],
+            "task_type":blocker["task_type"],
+            "client_request_id":"captured-blocker",
+        }),
+        json!({
+            "op":"task.create",
+            "title":blocked["title"],
+            "status":blocked["status"],
+            "task_type":blocked["task_type"],
+            "client_request_id":"captured-blocked",
+            "blocked_by_refs":["captured-blocker"],
+            "open_blocked_by":[],
+        }),
+    ]
+    .into_iter()
+    .map(|op| op.as_object().cloned().expect("op"))
+    .collect::<Vec<Map<String, Value>>>();
+    contexts
+        .sync(&group.group_id, &ops, None, "user", false)
+        .expect("seed");
+
+    let stored = contexts.load(&group.group_id).expect("context");
+    let blocker_id = stored
+        .tasks
+        .iter()
+        .find(|task| task["title"] == blocker["title"])
+        .and_then(|task| task["id"].as_str())
+        .expect("blocker id")
+        .to_owned();
+    let blocked = stored
+        .tasks
+        .iter()
+        .find(|task| task["title"] == blocked["title"])
+        .expect("blocked task");
+    assert!(blocked.get("open_blocked_by").is_none());
+
+    let listed = run(&home, &request(&group.group_id, json!({}))).expect("listed");
+    assert_eq!(
+        task_named(&listed["tasks"], blocked["title"].as_str().expect("title"))["open_blocked_by"],
+        json!([blocker_id.clone()])
+    );
+
+    let projected = super::super::context_projection::project(
+        contexts.load(&group.group_id).expect("context"),
+        "v1".into(),
+        "summary",
+    );
+    assert_eq!(
+        task_named(
+            &projected["coordination"]["tasks"],
+            blocked["title"].as_str().expect("title")
+        )["open_blocked_by"],
+        json!([blocker_id])
+    );
+    assert_eq!(projected["attention"]["blocked"], 1);
 }
