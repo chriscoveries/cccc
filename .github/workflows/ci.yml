@@ -265,6 +265,43 @@ jobs:
         run: >-
           cargo test --package cccc --test integration --locked
           daemon_self_launch:: -- --test-threads=1
+      - name: Replay retained ledger against baseline and candidate
+        env:
+          REPLAY_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline_ref=a910336dd5462fa0b032e2b40dcba1764535a581
+          replay_root="$RUNNER_TEMP/ledger-index-replay"
+          mkdir -p "$replay_root"
+          gzip -dc crates/cccc-core/tests/fixtures/ledger-index-memory/captured.jsonl.gz > "$replay_root/workload.jsonl"
+          printf '%s  %s\n' 5bcf36cdf5053a6016ba573ec6e4ac9143ce1cd067f68a2eb89f64736646d521 "$replay_root/workload.jsonl" | sha256sum --check
+          cargo build --package cccc-pair-core --example ledger_index_replay --locked
+          target/debug/examples/ledger_index_replay "$replay_root/workload.jsonl" > "$replay_root/candidate.json"
+          git fetch --no-tags --depth=1 https://github.com/ChesterRa/cccc.git "$baseline_ref"
+          git worktree add --detach "$replay_root/baseline" "$baseline_ref"
+          trap 'git worktree remove --force "$replay_root/baseline"' EXIT
+          mkdir -p "$replay_root/baseline/crates/cccc-core/examples"
+          cp crates/cccc-core/examples/ledger_index_replay.rs "$replay_root/baseline/crates/cccc-core/examples/"
+          (
+            cd "$replay_root/baseline"
+            CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --package cccc-pair-core --example ledger_index_replay --locked
+          )
+          target/debug/examples/ledger_index_replay "$replay_root/workload.jsonl" > "$replay_root/baseline.json"
+          jq -n --slurpfile before "$replay_root/baseline.json" --slurpfile after "$replay_root/candidate.json" \
+            --arg baseline "$baseline_ref" --arg candidate "$REPLAY_CANDIDATE_SHA" --arg tested "$(git rev-parse HEAD)" \
+            '{baseline_ref:$baseline,candidate_ref:$candidate,tested_commit:$tested,before:$before[0],after:$after[0]}' > "$replay_root/measurements.json"
+          jq -e '.before.correctness_sha256 == .after.correctness_sha256 and .before.records == .after.records' "$replay_root/measurements.json"
+          cat "$replay_root/measurements.json"
+      - name: Upload ledger replay measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ledger-index-replay
+          path: ${{ runner.temp }}/ledger-index-replay/*.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Set up Node for offline native-runtime smoke tests
         uses: actions/setup-node@v7
         with:
