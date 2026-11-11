@@ -1090,7 +1090,7 @@ fn rpc_error(runtime: &str, method: &str, error: &Value, private_values: &[Strin
                 diagnostic,
                 rejected: matches!(
                     error.get("code").and_then(Value::as_i64),
-                    Some(-32600 | -32601 | -32602)
+                    Some(-32602..=-32600)
                 ),
             },
         )
