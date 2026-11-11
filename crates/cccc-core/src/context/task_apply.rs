@@ -390,9 +390,13 @@ mod tests {
             "lead",
         )
         .expect("independent");
+        let independent_task_id = doc.tasks[1]["id"]
+            .as_str()
+            .expect("independent task id")
+            .to_owned();
         move_task(
             &mut doc,
-            &operation(json!({"op":"task.move","task_id":"T002","status":"active"})),
+            &operation(json!({"op":"task.move","task_id": independent_task_id,"status":"active"})),
         )
         .expect("progress");
         assert_eq!(doc.tasks.len(), 2);
