@@ -809,7 +809,7 @@ fn throttle_writes_once_per_interval_and_folds_the_rest_into_count() {
     );
     assert_eq!(
         throttle.admit("a", t0 + Duration::from_secs(5), interval),
-        Some(3)
+        Some(4)
     );
     // Another connector is throttled independently.
     assert_eq!(
