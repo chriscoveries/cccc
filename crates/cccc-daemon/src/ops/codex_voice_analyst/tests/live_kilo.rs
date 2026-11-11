@@ -292,7 +292,7 @@ async fn wait_for_cancel_confirmation(group_id: &str, mut cursor: u64) {
     });
 }
 
-async fn local_model(axum::Json(body): axum::Json<Value>) -> axum::response::Response {
+pub(crate) async fn local_model(axum::Json(body): axum::Json<Value>) -> axum::response::Response {
     use axum::response::IntoResponse;
     let input = body["messages"]
         .as_array()

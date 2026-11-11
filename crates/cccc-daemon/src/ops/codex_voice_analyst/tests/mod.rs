@@ -5,7 +5,7 @@ mod grok_redirect;
 #[cfg(unix)]
 mod grok_session;
 mod live_claude;
-mod live_kilo;
+pub(super) mod live_kilo;
 #[cfg(unix)]
 mod live_native_acp;
 mod live_session;

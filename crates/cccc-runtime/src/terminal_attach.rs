@@ -64,6 +64,15 @@ impl TerminalInput {
             data,
         )
     }
+
+    /// Run a provider control only while this attachment owns the writer.
+    /// Passive connections and replaced writers cannot cancel a managed turn.
+    pub fn with_writer(
+        &self,
+        operation: impl FnOnce() -> Result<(), RuntimeError>,
+    ) -> Result<bool, RuntimeError> {
+        self.registry.run_if_writer(self.attachment_id, operation)
+    }
 }
 
 pub struct TerminalAttachment {

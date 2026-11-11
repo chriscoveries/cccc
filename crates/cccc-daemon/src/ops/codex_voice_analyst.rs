@@ -33,6 +33,8 @@ mod launch_secretary;
 pub(crate) use launch_antigravity::login_antigravity;
 pub(crate) mod lifecycle_timing;
 mod native_input;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use tests::live_kilo::local_model as lazy_viewer_test_model;
 mod opencode;
 mod pi_rpc;
 #[cfg(test)]

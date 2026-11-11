@@ -162,6 +162,28 @@ impl Session {
         Ok(())
     }
 
+    pub(super) fn close_viewer(&self) -> io::Result<()> {
+        let _guard = self.stop_lock.lock().map_err(|_| super::poisoned())?;
+        if self.stopped.load(Ordering::Acquire) || !self.has_terminal() {
+            return Ok(());
+        }
+        match cccc_runtime::stop(&self.group_id, &self.actor_id) {
+            Ok(_) | Err(cccc_runtime::RuntimeError::NotFound(_, _)) => {}
+            Err(error) => return Err(io::Error::other(error)),
+        }
+        self.has_terminal.store(false, Ordering::Release);
+        if let Ok(mut state) = self.status.lock() {
+            state.pid = None;
+        }
+        // Preserve the managed turn's status; only its viewer has gone away.
+        output::emit(
+            self,
+            "headless.session.viewer_detached",
+            serde_json::Map::new(),
+        );
+        Ok(())
+    }
+
     pub(super) fn has_terminal(&self) -> bool {
         self.has_terminal.load(Ordering::Acquire)
     }

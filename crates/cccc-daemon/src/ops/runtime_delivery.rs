@@ -93,6 +93,17 @@ pub fn append_state(
     }
     ledger::append(&store.ledger_path(group_id).map_err(OpError::io)?, &event)
         .map_err(OpError::io)?;
+    if matches!(
+        outcome,
+        DeliveryOutcome::Accepted | DeliveryOutcome::Ambiguous(_)
+    ) {
+        super::local_headless::lazy_viewer::settled_delivery(
+            group_id,
+            actor_id,
+            actor_created_at,
+            source_event_id,
+        );
+    }
     Ok(event)
 }
 

@@ -113,6 +113,7 @@ async fn shutdown_requests_all_jobs_and_confirms_stops_concurrently() {
                     },
                     false,
                 )),
+                lazy_viewer: None,
                 has_terminal: AtomicBool::new(false),
                 viewer: Mutex::new(None),
                 status: Mutex::new(HeadlessStatus {

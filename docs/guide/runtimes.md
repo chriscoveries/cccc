@@ -116,7 +116,42 @@ cccc actor add worker --runtime custom --command "my-agent --with-flags"
 
 Users choose a Runtime, not an arbitrary runner. Antigravity, Auggie, Copilot, Devin, Cursor, Kimi Code, Kiro, Hermes and Droid offer an explicit official ACP mode without a terminal. Pi uses its official RPC surface by default and has no same-session native terminal attachment. Other CLI runtimes expose their native terminal so the user can inspect and operate the agent. Codex, Claude Code, Grok Build, OpenCode, and Kilo additionally run a structured background protocol against the same provider session; CCCC uses that protocol for identity, lifecycle, progress, completion, and cancellation.
 
-Agent messages still enter those managed Runtimes through their native terminal. CCCC does not decide whether a message steers an active turn or waits behind it; the receiving Runtime applies its own configuration. DeepSeek Harness has only a structured ACP surface, while ChatGPT Web Model uses browser delivery plus a remote MCP connector. These are Runtime capabilities, not user-selectable modes.
+Agent messages generally enter those managed Runtimes through their native terminal; OpenCode V2 uses its owned HTTP queue. CCCC does not decide whether a terminal message steers an active turn or waits behind it; the receiving Runtime applies its own configuration. DeepSeek Harness has only a structured ACP surface, while ChatGPT Web Model uses browser delivery plus a remote MCP connector. These are Runtime capabilities, not user-selectable modes.
+
+#### Optional lazy Kilo/OpenCode viewers
+
+Set `CCCC_OPENCODE_HEADLESS=1` in a Kilo or OpenCode agent's environment, then
+restart that agent, to keep its native viewer closed until a terminal connection
+opens. The first connection starts a viewer; concurrent connections share it;
+closing the last connection frees only that viewer. The provider session and
+admitted work continue. A connection from an older session cannot close or
+cancel a replacement. With the setting absent or `0`, the usual startup viewer
+and input paths remain in use. Other runtimes ignore this setting.
+
+In this opt-in mode Kilo messages use ACP and wait behind an active turn without
+requiring a terminal. OpenCode keeps its V2 HTTP/SSE queue. Kilo's terminal writer
+can cancel the managed turn with Ctrl-C; passive connections cannot cancel it.
+OpenCode retains its native TUI keys and its existing refusal of exact-turn HTTP
+interrupts. Viewer closure itself never cancels a turn.
+
+Delivery admission is distinct from completion. Pending receipts and their
+source bindings are bounded to 256 batches and are retired only after every
+source's accepted or ambiguous outcome is recorded durably. A full receipt set
+applies backpressure without evicting uncertain admission. A known pre-admission
+rejection can retry; an uncertain sent prompt is quarantined instead of replayed.
+Restart retains the existing durable-claim recovery: stranded work is ambiguous,
+not automatically resubmitted. Viewer reconnects do not reset these receipts.
+
+The Linux native Kilo CI probe exercises queued delivery, a repeated submission
+before durable acknowledgement, shared first/last connections, cancellation,
+live-turn survival and old-session cleanup. Its `native-lazy-viewer` artifact
+contains actual process-tree RSS samples for default startup, opt-in startup,
+two connections and last close on an empty isolated checkout. Samples use the
+same pinned native CLI and local model configuration, exclude the CCCC daemon,
+and sum shared resident mappings per process; they are not PSS or a fixed saving
+guarantee. Native OpenCode V2 and macOS/Windows lazy-viewer behavior are not proved
+by that Linux Kilo probe. No provider watcher, snapshot, LSP or npm launcher
+optimization is enabled by this option.
 
 Cline currently opens a fresh native terminal on each start. CCCC does not persist or reuse Cline's `--id` session identifier.
 

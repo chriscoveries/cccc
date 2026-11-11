@@ -1079,13 +1079,24 @@ fn rpc_error(runtime: &str, method: &str, error: &Value, private_values: &[Strin
     } else {
         format!("{prefix}: {message}")
     };
-    io::Error::new(
-        kind,
-        diagnostic
-            .chars()
-            .take(super::diagnostic::LIMIT)
-            .collect::<String>(),
-    )
+    let diagnostic = diagnostic
+        .chars()
+        .take(super::diagnostic::LIMIT)
+        .collect::<String>();
+    if method == "session/prompt" {
+        io::Error::new(
+            kind,
+            super::PromptReplyError {
+                diagnostic,
+                rejected: matches!(
+                    error.get("code").and_then(Value::as_i64),
+                    Some(-32600 | -32601 | -32602)
+                ),
+            },
+        )
+    } else {
+        io::Error::new(kind, diagnostic)
+    }
 }
 
 #[cfg(test)]
@@ -1132,6 +1143,19 @@ mod tests {
             &[],
         );
         assert_eq!(busy.kind(), io::ErrorKind::WouldBlock);
+        assert!(super::super::prompt_reply_error(&busy));
+        assert!(!super::super::prompt_was_rejected(&busy));
+        assert!(!super::super::prompt_reply_error(&io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "local admission backpressure",
+        )));
+        let rejected = rpc_error(
+            "kilo",
+            "session/prompt",
+            &json!({"code":-32602,"message":"invalid params"}),
+            &[],
+        );
+        assert!(super::super::prompt_was_rejected(&rejected));
     }
 
     #[test]

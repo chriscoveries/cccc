@@ -22,6 +22,31 @@ const FRAME_CAPACITY: usize = 256;
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const LIFECYCLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Debug)]
+struct PromptReplyError {
+    diagnostic: String,
+    rejected: bool,
+}
+impl std::fmt::Display for PromptReplyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.diagnostic)
+    }
+}
+impl std::error::Error for PromptReplyError {}
+
+pub(super) fn prompt_reply_error(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<PromptReplyError>())
+}
+
+pub(super) fn prompt_was_rejected(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|cause| cause.downcast_ref::<PromptReplyError>())
+        .is_some_and(|reply| reply.rejected)
+}
+
 struct RpcRequest {
     method: String,
     params: Value,

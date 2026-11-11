@@ -18,22 +18,25 @@ pub(crate) async fn handle<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut attachment = match tokio::task::spawn_blocking(move || prepare(&home, &request)).await?
-    {
-        Ok(attachment) => attachment,
-        Err(response) => {
-            write_response(stream.get_mut(), &response).await?;
-            return Ok(());
-        }
-    };
+    let (mut attachment, _viewer_lease) =
+        match tokio::task::spawn_blocking(move || prepare(&home, &request)).await? {
+            Ok(attachment) => attachment,
+            Err(response) => {
+                write_response(stream.get_mut(), &response).await?;
+                return Ok(());
+            }
+        };
     let response = attach_response(&attachment);
     write_response(stream.get_mut(), &response).await?;
 
     let input = attachment.input();
+    let generation = _viewer_lease
+        .as_ref()
+        .and_then(|lease| lease.interrupt_generation());
     let (read, write) = tokio::io::split(stream);
     tokio::select! {
         result = pump_output(write, &mut attachment) => result,
-        result = pump_input(read, input, INPUT_WRITE_TIMEOUT) => result,
+        result = pump_input(read, input, INPUT_WRITE_TIMEOUT, generation) => result,
         changed = shutdown.changed() => {
             changed.ok();
             Ok(())
@@ -44,9 +47,16 @@ where
 fn prepare(
     home: &HomeLayout,
     request: &DaemonRequest,
-) -> Result<TerminalAttachment, DaemonResponse> {
+) -> Result<
+    (
+        TerminalAttachment,
+        Option<crate::ops::local_headless::lazy_viewer::ViewerLease>,
+    ),
+    DaemonResponse,
+> {
     if request.op == "voice_secretary_terminal_attach" {
         return crate::ops::voice_secretary::terminal::attach(home, request)
+            .map(|attachment| (attachment, None))
             .map_err(|error| DaemonResponse::failure(error.code, error.message));
     }
     let group_id = non_blank(request, "group_id")
@@ -83,7 +93,9 @@ fn prepare(
     } else {
         TerminalAttachMode::Control
     };
-    if mode == TerminalAttachMode::Control {
+    let lease = crate::ops::local_headless::lazy_viewer::acquire(&group_id, &actor_id)
+        .map_err(|error| DaemonResponse::failure("runtime_error", error.to_string()))?;
+    if lease.is_none() && mode == TerminalAttachMode::Control {
         crate::ops::local_headless::ensure_viewer(&group_id, &actor_id)
             .map_err(|error| DaemonResponse::failure("runtime_error", error.to_string()))?;
     }
@@ -116,7 +128,9 @@ fn prepare(
         }
         (false, None) => cccc_runtime::attach(&group_id, &actor_id, mode, takeover, since),
     };
-    attached.map_err(runtime_error)
+    attached
+        .map(|attachment| (attachment, lease))
+        .map_err(runtime_error)
 }
 
 fn runtime_error(error: cccc_runtime::RuntimeError) -> DaemonResponse {
@@ -185,6 +199,7 @@ async fn pump_input<R>(
     mut read: R,
     input: TerminalInput,
     write_timeout: std::time::Duration,
+    generation: Option<String>,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin,
@@ -197,12 +212,28 @@ where
         }
         let data = buffer[..count].to_vec();
         let writer = input.clone();
+        let generation = generation.clone();
         // A stalled write prevents reading EOF from a disconnected client.
         // End this attachment after a bounded input wait; dropping its writer
         // ownership also cancels the Linux PTY task. Do not replay partial input.
         tokio::time::timeout(
             write_timeout,
-            tokio::task::spawn_blocking(move || writer.write(&data)),
+            tokio::task::spawn_blocking(move || {
+                if data == b"\x03"
+                    && let Some(generation) = generation
+                {
+                    return writer.with_writer(|| {
+                        crate::ops::local_headless::lazy_viewer::interrupt(
+                            writer.group_id(),
+                            writer.actor_id(),
+                            &generation,
+                        )
+                        .map_err(cccc_runtime::RuntimeError::Io)?;
+                        Ok(())
+                    });
+                }
+                writer.write(&data)
+            }),
         )
         .await
         .map_err(|_| anyhow!("terminal input stalled"))?
@@ -273,7 +304,7 @@ mod tests {
         drop(client);
         let result = tokio::time::timeout(
             Duration::from_secs(1),
-            pump_input(server, attachment.input(), Duration::from_millis(50)),
+            pump_input(server, attachment.input(), Duration::from_millis(50), None),
         )
         .await;
         // The outer stream select drops this owner on the pump's error.
