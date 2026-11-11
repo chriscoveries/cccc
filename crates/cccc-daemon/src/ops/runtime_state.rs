@@ -1137,7 +1137,7 @@ fn default_state(group: &GroupDoc, actor_id: &str) -> Value {
     })
 }
 
-fn set_runtime_status(
+pub(super) fn set_runtime_status(
     home: &HomeLayout,
     group: &GroupDoc,
     actor_id: &str,
