@@ -424,6 +424,9 @@ fn explicit_rotation_requires_the_current_preview_and_records_its_actor() {
     let new_secret = rotated["secret"].as_str().expect("secret");
     assert!(!store::secret_matches(&rotated["connector"], old_secret));
     assert!(store::secret_matches(&rotated["connector"], new_secret));
+    // Keep the pre-rotation fence for the replay check below; the next
+    // confirmation belongs to the generation the administrator will replace.
+    let stale_confirmation = confirmation;
 
     // A real administrator bearer token is revalidated by the daemon and
     // produces the user label; an invalid token is refused, not downgraded.
@@ -471,7 +474,7 @@ fn explicit_rotation_requires_the_current_preview_and_records_its_actor() {
         &request(
             "web_model_connector_configure",
             serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":true,
-                "confirmation":confirmation}),
+                "confirmation":stale_confirmation}),
         ),
     )
     .expect_err("a replayed confirmation is stale");
