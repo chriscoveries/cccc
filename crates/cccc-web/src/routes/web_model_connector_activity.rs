@@ -68,14 +68,7 @@ pub(super) fn record_route(
 
 /// Shared, bounded diagnostics; observations do not displace actionable calls.
 pub(super) fn append_call(connector: &mut Value, entry: Value) {
-    let mut log = connector["events_log"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    log.push(entry);
-    let excess = log.len().saturating_sub(10);
-    log.drain(..excess);
-    connector["events_log"] = Value::Array(log);
+    cccc_core::web_model_connectors::push_event(connector, entry);
 }
 
 fn retain_tool_call(activity: &Activity<'_>) -> bool {

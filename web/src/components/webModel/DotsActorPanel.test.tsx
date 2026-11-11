@@ -885,10 +885,12 @@ it("creates the missing shared connector from step 1 and hands over its private 
   mocks.create.mockResolvedValue({
     ok: true,
     result: {
+      outcome: "created",
       connector: {
         connector_id: "shared",
         connector_url_path_token: "https://cccc.example.test/mcp/web-model/shared/token/test-only",
       },
+      secret: "wmcs_test-only",
     },
   });
   await render({ onOpenSharedSettings: vi.fn() });
@@ -897,7 +899,7 @@ it("creates the missing shared connector from step 1 and hands over its private 
   // The shared settings stay reachable beside the one-click creation.
   expect(button("dotsActor.sharedSettings")).toBeTruthy();
   await act(async () => button("dotsActor.setup.createConnector").click());
-  expect(mocks.create).toHaveBeenCalledExactlyOnceWith("chatgpt_web", { createOnly: true });
+  expect(mocks.create).toHaveBeenCalledExactlyOnceWith("chatgpt_web");
   expect(step.querySelector("[data-chatgpt-plugin-setup]")).not.toBeNull();
   expect(host.textContent).not.toContain("test-only");
   expect(button("dotsActor.setup.createConnector")).toBeUndefined();
@@ -928,8 +930,8 @@ it("leaves a connector created elsewhere untouched when the page was stale", asy
     result: { connectors: [], connector_base_url: "https://cccc.example.test" },
   });
   mocks.create.mockResolvedValue({
-    ok: false,
-    error: { code: "connector_exists", message: "exists" },
+    ok: true,
+    result: { outcome: "existing", connector: { connector_id: "shared" } },
   });
   await render({ onOpenSharedSettings: vi.fn() });
   await act(async () => button("dotsActor.setup.createConnector").click());
@@ -955,11 +957,13 @@ it("keeps a host dialog open while the one-time connector URL is being created",
     finish({
       ok: true,
       result: {
+        outcome: "created",
         connector: {
           connector_id: "shared",
           connector_url_path_token:
             "https://cccc.example.test/mcp/web-model/shared/token/test-only",
         },
+        secret: "wmcs_test-only",
       },
     }),
   );
@@ -985,6 +989,7 @@ it("blocks setup navigation and binding actions until the one-time connector res
     finish({
       ok: true,
       result: {
+        outcome: "created",
         connector: {
           connector_id: "shared",
           connector_url_path_token:

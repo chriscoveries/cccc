@@ -114,7 +114,7 @@ function ProviderSettings({
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [nonce, setNonce] = useState(0);
-  const [confirm, setConfirm] = useState<"rotate" | "revoke" | null>(null);
+  const [confirm, setConfirm] = useState(false);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [loadNonce, setLoadNonce] = useState(0);
   const actionPending = useRef(false);
@@ -135,7 +135,7 @@ function ProviderSettings({
     let cancelled = false;
     setLoadState("loading");
     setError("");
-    setConfirm(null);
+    setConfirm(false);
     void Promise.all([
       api.fetchWebModelConnectors(),
       provider === "chatgpt_web"
@@ -178,25 +178,31 @@ function ProviderSettings({
     [provider],
   );
   const actionsDisabled = busy || !isActive || loadState !== "ready";
-  async function action(kind: "configure" | "revoke" | "open" | "check" | "close") {
+  async function action(kind: "create" | "revoke" | "open" | "check" | "close") {
     if (actionPending.current || actionsDisabled) return;
-    if (kind === "configure" && address.kind !== "https") return;
+    if (kind === "create" && address.kind !== "https") return;
     actionPending.current = true;
     setBusy(true);
     setError("");
     setCopied(false);
     try {
-      if (kind === "configure") {
+      if (kind === "create") {
         const r = await api.createWebModelConnector(provider);
         if (!r.ok) throw new Error(r.error.message);
-        setConnector(r.result.connector);
+        // An existing connector is returned without a secret. Keep the known
+        // metadata, but never render a token URL that was not disclosed.
+        setConnector(
+          r.result.secret
+            ? r.result.connector
+            : { ...r.result.connector, connector_url_path_token: undefined },
+        );
         setNeedsSetup(false);
-        setConfirm(null);
+        setConfirm(false);
       } else if (kind === "revoke" && connector) {
         const r = await api.revokeWebModelConnector(connector.connector_id);
         if (!r.ok) throw new Error(r.error.message);
         setConnector(null);
-        setConfirm(null);
+        setConfirm(false);
       } else {
         const r = await api.sharedWebModelBrowser(
           kind === "check" ? "status" : (kind as "open" | "close"),
@@ -363,7 +369,7 @@ function ProviderSettings({
                 type="button"
                 className={primaryButtonClass()}
                 disabled={actionsDisabled || address.kind !== "https"}
-                onClick={() => void action("configure")}
+                onClick={() => void action("create")}
               >
                 {label("create")}
               </button>
@@ -443,7 +449,7 @@ function ProviderSettings({
               <details
                 className="text-[13px]"
                 onToggle={(event) => {
-                  if (!event.currentTarget.open) setConfirm(null);
+                  if (!event.currentTarget.open) setConfirm(false);
                 }}
               >
                 <summary className="cursor-pointer text-[var(--color-text-secondary)]">
@@ -452,17 +458,9 @@ function ProviderSettings({
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
                     type="button"
-                    className={secondaryButtonClass()}
-                    disabled={actionsDisabled || address.kind !== "https"}
-                    onClick={() => setConfirm("rotate")}
-                  >
-                    {label("rotate")}
-                  </button>
-                  <button
-                    type="button"
                     className={dangerButtonClass()}
                     disabled={actionsDisabled}
-                    onClick={() => setConfirm("revoke")}
+                    onClick={() => setConfirm(true)}
                   >
                     {label("revoke")}
                   </button>
@@ -477,9 +475,7 @@ function ProviderSettings({
                             type="button"
                             className={dangerButtonClass()}
                             disabled={actionsDisabled}
-                            onClick={() =>
-                              void action(confirm === "rotate" ? "configure" : "revoke")
-                            }
+                            onClick={() => void action("revoke")}
                           >
                             {label("confirm")}
                           </button>
@@ -487,14 +483,14 @@ function ProviderSettings({
                             type="button"
                             className={secondaryButtonClass()}
                             disabled={actionsDisabled}
-                            onClick={() => setConfirm(null)}
+                            onClick={() => setConfirm(false)}
                           >
                             {label("cancel")}
                           </button>
                         </>
                       }
                     >
-                      {label(confirm === "rotate" ? "rotateHint" : "revokeHint")}
+                      {label("revokeHint")}
                     </SettingsNotice>
                   </div>
                 )}
