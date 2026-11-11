@@ -91,7 +91,10 @@ def test_patch_artifact_preserves_the_linux_release_dependency_boundary() -> Non
     checkout = patch["steps"][0]
     assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
     runs = _runs(patch)
-    assert 'test "$(git rev-parse HEAD)" = "$PATCH_EXPECTED_HEAD"' in runs
+    source_read = 'git -c "safe.directory=$GITHUB_WORKSPACE" rev-parse HEAD'
+    assert f'test "$({source_read})" = "$PATCH_EXPECTED_HEAD"' in runs
+    assert f"{source_read} > patch-dist/SOURCE_COMMIT" in runs
+    assert "safe.directory=*" not in runs
     assert "verify_standalone_binary.py --platform linux target/release/cccc" in runs
     assert "sha256sum cccc ./*.tar.gz > SHA256SUMS" in runs
     aggregate = jobs["ci-required"]["steps"][0]

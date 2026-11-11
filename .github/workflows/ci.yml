@@ -320,7 +320,7 @@ jobs:
         env:
           PATCH_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          test "$(git rev-parse HEAD)" = "$PATCH_EXPECTED_HEAD"
+          test "$(git -c "safe.directory=$GITHUB_WORKSPACE" rev-parse HEAD)" = "$PATCH_EXPECTED_HEAD"
           touch web/dist/index.html
           cargo build --release --locked --features standalone -p cccc --bin cccc
           strip target/release/cccc
@@ -330,7 +330,7 @@ jobs:
           python scripts/build_standalone_archive.py \
             target/release/cccc --target x86_64-unknown-linux-gnu --output-dir patch-dist
           install -m 755 target/release/cccc patch-dist/cccc
-          git rev-parse HEAD > patch-dist/SOURCE_COMMIT
+          git -c "safe.directory=$GITHUB_WORKSPACE" rev-parse HEAD > patch-dist/SOURCE_COMMIT
           (cd patch-dist && sha256sum cccc ./*.tar.gz > SHA256SUMS)
       - name: Upload the exact-head patch release artifact
         uses: actions/upload-artifact@v7
