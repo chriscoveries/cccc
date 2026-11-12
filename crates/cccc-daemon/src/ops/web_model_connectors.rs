@@ -192,16 +192,24 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 "Automatic connection requires an enabled Actor in a running Group",
             ));
         }
-        if store::binding_for_actor(
-            &connector,
-            &group_id,
-            &actor_id,
-            &cccc_core::actors::generation_identity(actor),
-        )
-        .is_some_and(|b| {
-            request.op != "web_model_pairing_confirm"
-                || request.args.get("pairing_id") != Some(&b["pairing_id"])
-        }) {
+        // cwf#821: an explicit user re-pair (`replace: true`) may supersede the
+        // existing binding. It is never removed up front: the old binding stays
+        // in force until this pairing's confirm overwrites it, so a failed or
+        // abandoned attempt leaves the working route untouched.
+        let replace = request.args.get("by") == Some(&json!("user"))
+            && request.args.get("replace") == Some(&json!(true));
+        if !replace
+            && store::binding_for_actor(
+                &connector,
+                &group_id,
+                &actor_id,
+                &cccc_core::actors::generation_identity(actor),
+            )
+            .is_some_and(|b| {
+                request.op != "web_model_pairing_confirm"
+                    || request.args.get("pairing_id") != Some(&b["pairing_id"])
+            })
+        {
             return Err(OpError::new(
                 "already_paired",
                 "Automatic connection cannot replace an existing binding",

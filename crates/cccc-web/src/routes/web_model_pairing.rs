@@ -85,11 +85,26 @@ async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
     }
     if action == "remove" {
         let _control = super::web_model_delivery::control_guard(&group, &actor)?;
+        // cwf#821: an opt-in guard for scripted repair (remove then connect).
+        // Refuse the remove while the browser could not pair again, so a
+        // working binding is not traded for an unpaired Actor.
+        if body["require_browser_ready"] == true {
+            let key = super::web_model_browser::key(&group, &actor);
+            state
+                .browser_surfaces
+                .pairing_page(&key)
+                .await
+                .map_err(|e| pairing_error(&e.to_string()))?;
+        }
         return Ok(success(
             call(&state, "web_model_binding_remove", args).await?,
         ));
     }
-    start_connection(&state, &group, &actor, false)
+    // cwf#821: `replace: true` re-pairs an Actor that already has a binding
+    // without removing it first. The old binding stays in force until the new
+    // pairing is confirmed, so a browser that is not ready changes nothing.
+    let replace = body["replace"] == true;
+    start_connection(&state, &group, &actor, false, replace)
         .await
         .map(success)
 }
@@ -97,7 +112,7 @@ async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
 /// The first attempt follows normal Actor startup. An existing attempt, even
 /// expired/cancelled/interrupted, requires an explicit retry; never replay sends.
 pub(super) async fn ensure_automatic(state: &AppState, group: &str, actor: &str) {
-    let _ = start_connection(state, group, actor, true).await;
+    let _ = start_connection(state, group, actor, true, false).await;
 }
 
 async fn start_connection(
@@ -105,6 +120,7 @@ async fn start_connection(
     group: &str,
     actor: &str,
     first_attempt: bool,
+    replace: bool,
 ) -> Result<Value, ApiError> {
     let control = super::web_model_delivery::control_guard(group, actor)?;
     let connector = store::load(state)?
@@ -139,6 +155,9 @@ async fn start_connection(
     .as_object()
     .expect("literal JSON object")
     .clone();
+    if replace {
+        args.insert("replace".into(), json!(true));
+    }
     let key = super::web_model_browser::key(group, actor);
     let target = state
         .browser_surfaces
@@ -309,6 +328,8 @@ fn pairing_error(code: &str) -> ApiError {
     let code = match code {
         "pairing_browser_required" => "pairing_browser_required",
         "pairing_browser_not_ready" => "pairing_browser_not_ready",
+        "pairing_browser_rate_limited" => "pairing_browser_rate_limited",
+        "pairing_browser_load_failed" => "pairing_browser_load_failed",
         "pairing_composer_occupied" => "pairing_composer_occupied",
         "pairing_target_changed" => "pairing_target_changed",
         _ => "pairing_failed",

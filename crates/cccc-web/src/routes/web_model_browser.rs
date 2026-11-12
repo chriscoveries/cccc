@@ -587,6 +587,16 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
             "Sign in",
             "Sign in using the shared browser for this provider.",
         )
+    } else if !ready
+        && crate::browser_surface::is_load_error_state(readiness["state"].as_str().unwrap_or(""))
+    {
+        (
+            "wait_for_rate_limit",
+            "Waiting for ChatGPT to load",
+            readiness["message"]
+                .as_str()
+                .unwrap_or("ChatGPT could not load this conversation. Delivery is paused."),
+        )
     } else if !ready {
         (
             "check_browser",
@@ -621,6 +631,10 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
     } else {
         "neutral"
     };
+    // cwf#821: "bound but not delivering" must be visible. The oldest pending
+    // runtime delivery for this Actor, read from the warm inbox projection.
+    let (oldest_undelivered_at, oldest_undelivered_age_secs) =
+        oldest_undelivered(state, &store, group_id, actor_id);
     let health = json!({
         "schema":"cccc.web_model.health.v1","group_id":group_id,"actor_id":actor_id,
         "tone":tone,
@@ -635,7 +649,8 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
             }),
             "active":active,"ready":ready,"logged_in_guess":ready,"url":url,
             "viewer_attached":surface["controller_attached"],
-            "last_frame_at":surface["last_frame_at"]
+            "last_frame_at":surface["last_frame_at"],
+            "rate_limit":metadata.get("rate_limit").cloned().unwrap_or(Value::Null)
         },
         "target":{
             "state":target_state,"label":target_label,"reason":target_reason,
@@ -649,6 +664,9 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
             "last_turn_id":target["last_delivery_turn_id"],
             "last_event_ids":target["last_delivery_event_ids"],
             "last_delivery_at":target["last_delivery_at"],
+            "last_submitted_at":target["last_submitted_at"],
+            "oldest_undelivered_at":oldest_undelivered_at,
+            "oldest_undelivered_age_secs":oldest_undelivered_age_secs,
             "last_submission_evidence":submission_evidence,
             "last_send_selector":send_selector,
             "last_error":if delivery_state == "pending_bind" && last_error == "conversation_url_pending" {""} else {last_error},
@@ -717,6 +735,31 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
         "browser_session":browser,"browser_surface":surface,"health_snapshot":health,
         "pairing":pairing_state(state,group_id,actor_id)?
     })))
+}
+
+fn oldest_undelivered(
+    state: &AppState,
+    store: &GroupStore,
+    group_id: &str,
+    actor_id: &str,
+) -> (Value, Value) {
+    let Ok(group) = store.load(group_id) else {
+        return (Value::Null, Value::Null);
+    };
+    let Some(event) = cccc_core::inbox::pending_deliveries(&state.home, &group, actor_id, 1)
+        .ok()
+        .and_then(|events| events.into_iter().next())
+    else {
+        return (Value::Null, Value::Null);
+    };
+    let age = chrono::DateTime::parse_from_rfc3339(&event.ts)
+        .ok()
+        .map(|ts| {
+            (chrono::Utc::now() - ts.with_timezone(&chrono::Utc))
+                .num_seconds()
+                .max(0)
+        });
+    (json!(event.ts), json!(age))
 }
 
 fn cached_readiness(surface: &Value) -> Value {
