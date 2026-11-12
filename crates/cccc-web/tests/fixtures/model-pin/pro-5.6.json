@@ -1,0 +1,57 @@
+{
+  "pre": {
+    "buttonText": "Thinking effort 5.6 Pro",
+    "buttonAttrs": {
+      "type": "button",
+      "aria-label": "Select ChatGPT model",
+      "aria-expanded": "false",
+      "aria-haspopup": "menu",
+      "data-state": "closed",
+      "data-selected-reasoning-effort": "medium"
+    }
+  },
+  "menu": {
+    "menuAttrs": { "role": "menu", "aria-orientation": "vertical", "data-state": "open" },
+    "nodes": [
+      {
+        "tag": "div",
+        "attrs": { "role": "group" },
+        "text": "5.6 Pro Pro, 5 of 5. Use Left and Right arrow keys to adjust power Locked, opens"
+      },
+      {
+        "tag": "div",
+        "attrs": { "role": "menuitem", "aria-label": "Select model" },
+        "text": "5.6 Pro"
+      },
+      {
+        "tag": "div",
+        "attrs": { "role": "menuitem", "aria-label": "Reset to default", "data-state": "closed" },
+        "text": ""
+      },
+      { "tag": "span", "attrs": { "role": "status" }, "text": "Pro, 5 of 5." },
+      { "tag": "div", "attrs": { "role": "menuitem", "aria-label": "Power" }, "text": "" },
+      {
+        "tag": "span",
+        "attrs": {
+          "role": "slider",
+          "aria-valuenow": "4",
+          "aria-valuemin": "0",
+          "aria-valuemax": "4",
+          "aria-orientation": "horizontal"
+        },
+        "text": ""
+      },
+      {
+        "tag": "div",
+        "attrs": { "role": "menuitemradio", "aria-checked": "false" },
+        "text": "GPT-6"
+      },
+      {
+        "tag": "div",
+        "attrs": { "role": "menuitemradio", "aria-checked": "true" },
+        "text": "GPT-5.6 Sol"
+      }
+    ]
+  },
+  "after": { "menuOpen": false, "buttonText": "Thinking effort 5.6 Pro" }
+}

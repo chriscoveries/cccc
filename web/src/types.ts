@@ -1,5 +1,16 @@
 // Shared type definitions for CCCC Web UI
 
+export type WebModelSelection = {
+  model: "gpt-5.6-pro" | "gpt-6";
+  effort: "instant" | "medium" | "high" | "extra_high" | null;
+};
+
+export type WebModelPin = WebModelSelection & {
+  on_unavailable?: "hold" | "fallback";
+  fallback?: WebModelSelection | null;
+  deny?: WebModelSelection[];
+};
+
 // Theme types
 export type Theme = "light" | "dark" | "system";
 export type TextScale = 70 | 90 | 100 | 125;
@@ -345,6 +356,8 @@ export type Actor = {
   internal_kind?: string | null;
   title?: string;
   model_label?: string;
+  web_model_pin?: WebModelPin | null;
+  readonly web_model_pin_revision?: number;
   avatar_asset_path?: string;
   avatar_url?: string | null;
   has_custom_avatar?: boolean;

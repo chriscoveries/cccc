@@ -2,6 +2,8 @@ pub mod access_tokens;
 pub mod active;
 pub mod actors;
 #[cfg(test)]
+mod actors_model_pin_tests;
+#[cfg(test)]
 mod actors_tests;
 pub mod assistant_state;
 pub mod automation;

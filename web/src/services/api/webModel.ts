@@ -1,4 +1,4 @@
-import type { PresentationBrowserSurfaceState } from "../../types";
+import type { PresentationBrowserSurfaceState, WebModelPin, WebModelSelection } from "../../types";
 import type { ApiResponse } from "./base";
 import { apiJson, normalizePresentationBrowserSurfaceState, withAuthToken } from "./base";
 
@@ -215,6 +215,17 @@ export type WebModelBrowserSession = {
 };
 
 export type WebModelHealthSnapshot = {
+  model_pin?: {
+    state?: string;
+    reason?: string;
+    requested?: WebModelPin | null;
+    observed?: WebModelSelection | null;
+    observed_family?: string;
+    observed_power?: number | null;
+    checked_at?: string;
+    policy_revision?: number;
+    effective?: { selection?: WebModelSelection; source?: string } | null;
+  };
   schema?: string;
   group_id?: string;
   actor_id?: string;

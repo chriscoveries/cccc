@@ -26,6 +26,10 @@ const RUNTIME_STATES_KEY: &str = "runtime_states";
 #[path = "actors_confirmation_tests.rs"]
 mod confirmation_tests;
 
+#[cfg(test)]
+#[path = "actors_model_pin_tests.rs"]
+mod model_pin_tests;
+
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "actor_list" => Operation::new(Read, list),
@@ -285,13 +289,16 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     };
     final_preview.role = None;
     final_preview.normalize_runtime_constraints();
+    actors::normalize_web_model_pin(&mut final_preview).map_err(OpError::invalid)?;
     // A Web Model's route is its authority, so saving a new one ends it. A turn
     // that route still carries is settled by a runtime switch, not by a save.
     let route_changes = web_model_route_changes(&original_actor, &final_preview);
-    let _browser_work = route_changes
+    let pin_changes = original_actor.web_model_pin != final_preview.web_model_pin;
+    let pin_patched = patch.contains_key("web_model_pin");
+    let _browser_work = (route_changes || pin_patched)
         .then(|| actor_runtime::hold_browser_work(home, &group_id, &actor_id))
         .transpose()?;
-    if route_changes
+    if (route_changes || pin_changes)
         && super::runtime_state::actor_state(home, &group_id, &actor_id)?["active_turn_id"]
             .as_str()
             .is_some_and(|id| !id.is_empty())
@@ -319,6 +326,21 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let was_running = actor_process_running(&group, &original_actor);
     let actor = store(home)?
         .mutate(&group_id, |doc| {
+            if pin_patched {
+                let current = doc
+                    .actors
+                    .iter()
+                    .find(|actor| actor.id == actor_id)
+                    .ok_or_else(|| std::io::Error::other("actor not found"))?;
+                if actors::generation_identity(current)
+                    != actors::generation_identity(&original_actor)
+                    || current.web_model_pin_revision != original_actor.web_model_pin_revision
+                {
+                    return Err(std::io::Error::other(
+                        "The model pin changed. Refresh the member settings before saving.",
+                    ));
+                }
+            }
             let patched = actors::update(doc, &actor_id, &patch)?;
             let mut final_actor = if !profile_id.is_empty() {
                 actor_profile_runtime::link(home, &patched, &profile_id)
@@ -337,6 +359,7 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             };
             final_actor.role = None;
             final_actor.normalize_runtime_constraints();
+            actors::normalize_web_model_pin(&mut final_actor)?;
             let index = doc
                 .actors
                 .iter()
@@ -1245,6 +1268,17 @@ fn rollback_actor_lifecycle(
 }
 
 fn actor_from_args(request: &DaemonRequest) -> Result<Actor, OpError> {
+    if request.args.contains_key("web_model_pin_revision")
+        || request
+            .args
+            .get("actor")
+            .is_some_and(|actor| actor.get("web_model_pin_revision").is_some())
+    {
+        return Err(OpError::new(
+            "unsupported_field",
+            "web_model_pin_revision is server-owned",
+        ));
+    }
     if request
         .args
         .get("external_session_id")

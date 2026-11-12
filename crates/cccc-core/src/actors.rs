@@ -95,6 +95,78 @@ pub fn validate_model_label(value: &str) -> io::Result<String> {
     Ok(label.to_owned())
 }
 
+/// Validate after runtime/profile resolution as well as before persistence.
+pub fn normalize_web_model_pin(actor: &mut Actor) -> io::Result<()> {
+    if let Some(pin) = &mut actor.web_model_pin {
+        if actor.runtime != cccc_contracts::ActorRuntime::WebModel {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "web_model_pin requires the ChatGPT web_model runtime",
+            ));
+        }
+        pin.normalize()
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+    }
+    Ok(())
+}
+
+/// A known-unsent browser hold can preserve claims, never restore terminal ones.
+/// Callers must separately verify each source's current native claim state.
+pub fn model_pin_hold_is_current(group: &GroupDoc, actor: &Actor, target: &Value) -> bool {
+    let hold = &target["model_pin_hold"];
+    let Some(runtime) = group
+        .extra
+        .get("runtime_states")
+        .and_then(|states| states.get(&actor.id))
+    else {
+        return false;
+    };
+    let ids = &target["last_delivery_event_ids"];
+    actor.runtime == cccc_contracts::ActorRuntime::WebModel
+        && matches!(
+            target["last_delivery_status"].as_str(),
+            Some("model_pin_held" | "model_pin_resuming")
+        )
+        && hold["v"] == 1
+        && hold["legacy"] == false
+        && target["last_submission_evidence"]["submitted"] == false
+        && target["last_submission_evidence"]["submission_evidence"] == "model_pin_unavailable"
+        && hold["prompt_sha256"].as_str().is_some_and(|hash| {
+            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        && hold["actor_generation"] == generation_identity(actor)
+        && hold["policy_revision"].as_u64() == Some(actor.web_model_pin_revision)
+        && hold["binding_revision"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+        && hold["binding_revision"] == target["binding_revision"]
+        && hold["url"].as_str().is_some_and(|url| !url.is_empty())
+        && hold["url"] == target["url"]
+        && target["last_delivery_turn_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+        && target["last_delivery_turn_id"] == runtime["active_turn_id"]
+        && ids.as_array().is_some_and(|ids| {
+            !ids.is_empty()
+                && ids
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == ids.len()
+                && ids
+                    .iter()
+                    .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
+        })
+        && ids == &runtime["active_event_ids"]
+        && hold["turn_id"] == target["last_delivery_turn_id"]
+        && hold["event_ids"] == *ids
+        && hold["delivery_id"] == target["last_delivery_id"]
+        && hold["delivery_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+}
+
 pub fn visible(group: &GroupDoc) -> impl Iterator<Item = &Actor> {
     group
         .actors
@@ -171,6 +243,14 @@ pub fn add(group: &mut GroupDoc, mut actor: Actor) -> io::Result<Actor> {
 
     actor.id = validate_actor_id(&actor.id)?;
     actor.model_label = validate_model_label(&actor.model_label)?;
+    normalize_web_model_pin(&mut actor)?;
+    if actor.web_model_pin_revision != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "web_model_pin_revision is server-owned",
+        ));
+    }
+    actor.web_model_pin_revision = u64::from(actor.web_model_pin.is_some());
     if !actor.external_session_id.is_empty()
         && !matches!(
             actor.runtime,
@@ -218,6 +298,12 @@ pub fn update(
     actor_id: &str,
     patch: &Map<String, Value>,
 ) -> io::Result<Actor> {
+    if patch.contains_key("web_model_pin_revision") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "web_model_pin_revision is server-owned",
+        ));
+    }
     let index = group
         .actors
         .iter()
@@ -264,6 +350,13 @@ pub fn update(
     }
     actor.role = None;
     actor.model_label = validate_model_label(&actor.model_label)?;
+    normalize_web_model_pin(&mut actor)?;
+    if actor.web_model_pin != current.web_model_pin {
+        actor.web_model_pin_revision = current
+            .web_model_pin_revision
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("web_model_pin_revision exhausted"))?;
+    }
     actor
         .runtime_mode
         .validate(actor.runtime)
