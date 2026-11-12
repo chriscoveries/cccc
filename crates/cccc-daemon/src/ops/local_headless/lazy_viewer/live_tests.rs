@@ -179,6 +179,44 @@ async fn exercise(
     assert_eq!(item.managed.delivery_receipt_count().await, 1);
     accepted(home, group, actor, &first);
     assert_eq!(item.managed.delivery_receipt_count().await, 0);
+    // Real source, injected local saturation: no provider request was attempted.
+    {
+        let mut pending = item
+            .lazy_viewer
+            .as_ref()
+            .expect("lazy")
+            .pending
+            .lock()
+            .expect("pending");
+        pending.extend(
+            (0..256).map(|n| (format!("capacity-{n}"), BTreeSet::from([first.id.clone()]))),
+        );
+    }
+    let never_sent = source(home, group, actor, "capacity control");
+    let started = AtomicBool::new(false);
+    assert_eq!(
+        tokio::task::block_in_place(|| supervisor::submit_batch_marked(
+            home,
+            group,
+            actor,
+            std::slice::from_ref(&never_sent),
+            &AtomicBool::new(false),
+            &started
+        )),
+        BatchSubmission::Deferred
+    );
+    assert!(
+        !started.load(Ordering::Acquire),
+        "local capacity was marked submitted"
+    );
+    assert_eq!(requests.load(Ordering::Acquire), 1);
+    item.lazy_viewer
+        .as_ref()
+        .expect("lazy")
+        .pending
+        .lock()
+        .expect("pending")
+        .clear();
     let second = source(home, group, actor, "Say hello.");
     let paired = source(home, group, actor, "Say hello again.");
     let batch = [second.clone(), paired.clone()];
@@ -216,6 +254,11 @@ async fn exercise(
     );
     accepted(home, group, actor, &paired);
     assert_eq!(item.managed.delivery_receipt_count().await, 0);
+    assert_eq!(
+        submit_events(home, group, actor, &batch),
+        BatchSubmission::Accepted,
+        "fully durable acceptance was replayed after receipt retirement"
+    );
     wait_until(|| requests.load(Ordering::Acquire) == 2).await;
     wait_completion(&mut completions, "completed").await;
     wait_idle(item).await;
@@ -254,12 +297,20 @@ async fn exercise(
     accepted(home, group, actor, &cancel);
     wait_until(|| requests.load(Ordering::Acquire) == 3).await;
     passive.write_all(b"\x03").await.expect("passive interrupt");
+    let mut takeover = connect_mode(home, group, actor, false, true).await;
+    writer
+        .write_all(b"\x03")
+        .await
+        .expect("old writer interrupt");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
         item.active_turn.lock().expect("turn").is_some(),
-        "passive viewer cancelled work"
+        "passive or replaced writer cancelled work"
     );
-    writer.write_all(b"\x03").await.expect("writer interrupt");
+    takeover
+        .write_all(b"\x03")
+        .await
+        .expect("current writer interrupt");
     wait_completion(&mut completions, "cancelled").await;
     wait_idle(item).await;
     assert_eq!(
@@ -267,6 +318,8 @@ async fn exercise(
         3,
         "cancelled turn request count"
     );
+    drop(writer);
+    writer = takeover;
     let finishing = source(home, group, actor, "QUEUE_SLOW");
     assert_eq!(
         submit(home, group, actor, &finishing),
@@ -296,6 +349,37 @@ async fn exercise(
     );
     samples.push(sample(item, "last_close", true).await);
     assert_eq!(item.managed.delivery_receipt_count().await, 0);
+    let mut failed_close = super::acquire(&group.group_id, &actor.id)
+        .expect("close control")
+        .expect("lease");
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = item.stop_lock.lock().expect("stop lock");
+        panic!("injected viewer teardown failure");
+    }));
+    assert!(poisoned.is_err());
+    let owner = std::mem::take(&mut failed_close.0);
+    tokio::task::block_in_place(|| super::release(owner));
+    drop(failed_close);
+    assert_eq!(
+        item.lazy_viewer
+            .as_ref()
+            .expect("lazy")
+            .clients
+            .load(Ordering::Acquire),
+        0
+    );
+    assert!(
+        terminal_running(group, actor),
+        "failed close lost its viewer"
+    );
+    assert!(item.running(), "failed close stopped the provider");
+    item.stop_lock.clear_poison();
+    let retry_close = super::acquire(&group.group_id, &actor.id)
+        .expect("retry lease")
+        .expect("lazy");
+    drop(retry_close);
+    wait_until(|| !terminal_running(group, actor)).await;
+    assert!(item.running());
 }
 
 fn source(home: &HomeLayout, group: &GroupDoc, actor: &Actor, text: &str) -> Event {
@@ -354,12 +438,22 @@ async fn connect(
     actor: &Actor,
     passive: bool,
 ) -> DuplexStream {
+    connect_mode(home, group, actor, passive, false).await
+}
+
+async fn connect_mode(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    passive: bool,
+    takeover: bool,
+) -> DuplexStream {
     let (client, server) = tokio::io::duplex(16 * 1024);
     let request = DaemonRequest {
         v: 1,
         op: "term_attach".into(),
         args: json!({"group_id":group.group_id,
-        "actor_id":actor.id,"mode":if passive {"viewer"} else {"control"}})
+        "actor_id":actor.id,"mode":if passive {"viewer"} else {"control"},"takeover":takeover})
         .as_object()
         .expect("args")
         .clone(),

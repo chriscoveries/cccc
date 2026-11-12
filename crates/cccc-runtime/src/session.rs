@@ -304,6 +304,18 @@ impl Session {
         self.attachments.is_writer(attachment_id)
     }
 
+    pub(crate) fn control_from_attachment(
+        &self,
+        registry: &AttachmentRegistry,
+        attachment_id: u64,
+        operation: impl FnOnce() -> Result<(), RuntimeError>,
+    ) -> Result<bool, RuntimeError> {
+        if !self.attachments.same_session(registry) {
+            return Ok(false);
+        }
+        registry.try_run_if_writer(attachment_id, operation)
+    }
+
     pub(crate) fn resize_from_attachment(
         &self,
         attachment_id: u64,

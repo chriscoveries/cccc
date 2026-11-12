@@ -53,11 +53,73 @@ struct RpcRequest {
     response: oneshot::Sender<io::Result<Value>>,
 }
 
+fn try_cancel_turn(
+    commands: &mpsc::Sender<AcpCommand>,
+    session_id: &str,
+    turn_id: &str,
+) -> io::Result<super::CancelReceipt> {
+    let (response, receiver) = oneshot::channel();
+    commands
+        .try_send(AcpCommand::Cancel {
+            session_id: session_id.to_owned(),
+            delegation_id: None,
+            expected_turn_id: Some(turn_id.to_owned()),
+            response,
+        })
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                io::Error::new(io::ErrorKind::WouldBlock, "ACP control queue is full")
+            }
+            mpsc::error::TrySendError::Closed(_) => closed_error(),
+        })?;
+    Ok(receiver)
+}
+
+#[cfg(test)]
+mod terminal_cancel_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn full_or_closed_control_queue_never_waits_and_admitted_ticket_keeps_its_turn() {
+        let (commands, mut consumer) = mpsc::channel(1);
+        let ticket = try_cancel_turn(&commands, "session", "old-turn").expect("admit");
+        assert_eq!(
+            try_cancel_turn(&commands, "session", "other-turn")
+                .expect_err("full")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let AcpCommand::Cancel {
+            session_id,
+            expected_turn_id,
+            response,
+            ..
+        } = consumer.recv().await.expect("ticket")
+        else {
+            panic!("cancel command")
+        };
+        assert_eq!(session_id, "session");
+        assert_eq!(expected_turn_id.as_deref(), Some("old-turn"));
+        drop(ticket);
+        assert!(
+            response.is_closed(),
+            "an undispatched expired receipt is visible"
+        );
+        drop(consumer);
+        assert!(try_cancel_turn(&commands, "session", "other-turn").is_err());
+    }
+}
+
 struct PromptRequest {
     session_id: String,
     text: String,
     delegation_id: String,
     response: oneshot::Sender<io::Result<String>>,
+}
+
+struct TerminalCancel {
+    turn_id: String,
+    response: oneshot::Sender<io::Result<Option<String>>>,
 }
 
 enum AcpCommand {
@@ -66,6 +128,7 @@ enum AcpCommand {
     Cancel {
         session_id: String,
         delegation_id: Option<String>,
+        expected_turn_id: Option<String>,
         response: oneshot::Sender<io::Result<Option<String>>>,
     },
     Respond {
@@ -415,6 +478,14 @@ impl AcpClient {
         self.cancel_input(session_id, None).await.map(|_| ())
     }
 
+    pub(super) fn try_cancel_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> io::Result<super::CancelReceipt> {
+        try_cancel_turn(&self.commands, session_id, turn_id)
+    }
+
     pub(super) async fn cancel_input(
         &self,
         session_id: &str,
@@ -425,6 +496,7 @@ impl AcpClient {
             .send(AcpCommand::Cancel {
                 session_id: session_id.to_owned(),
                 delegation_id: delegation_id.map(str::to_owned),
+                expected_turn_id: None,
                 response: sender,
             })
             .await

@@ -19,8 +19,21 @@ fn attachment_input_enforces_writer_and_session_identity() {
     assert!(!viewer.input().write(b"x").expect("viewer input"));
 
     let stale_input = control.input();
+    assert!(stale_input.with_writer(|| Ok(())).expect("current control"));
+    {
+        let session = crate::registry::lookup(group_id, actor_id).expect("current terminal");
+        let _held = session.lock().expect("session lock");
+        assert!(
+            matches!(stale_input.with_writer(|| panic!("contended control admitted")), Err(crate::RuntimeError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
     stop(group_id, actor_id).expect("stop first session");
     start(spec(&temp, group_id, actor_id, "sleep 30")).expect("replacement session");
+    assert!(
+        !stale_input
+            .with_writer(|| panic!("old terminal admitted provider control"))
+            .expect("stale control")
+    );
     assert!(
         !stale_input
             .write(b"stale")

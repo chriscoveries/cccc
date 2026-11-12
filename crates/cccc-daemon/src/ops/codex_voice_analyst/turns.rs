@@ -57,8 +57,13 @@ impl AnalystSession {
             .await
     }
 
-    pub(crate) async fn start_delivery(&self, id: &str, text: &str) -> io::Result<TurnReceipt> {
-        self.start_turn_with_limit(self.generation(), id, text, Some(256))
+    pub(crate) async fn start_delivery(
+        &self,
+        id: &str,
+        text: &str,
+        started: &std::sync::atomic::AtomicBool,
+    ) -> io::Result<TurnReceipt> {
+        self.start_turn_with_limit(self.generation(), id, text, Some((256, started)))
             .await
     }
 
@@ -76,7 +81,7 @@ impl AnalystSession {
         expected_generation: &str,
         delegation_id: &str,
         text: &str,
-        capacity: Option<usize>,
+        capacity: Option<(usize, &std::sync::atomic::AtomicBool)>,
     ) -> io::Result<TurnReceipt> {
         self.require_generation(expected_generation)?;
         let delegation_id = required_value(delegation_id, "delegation_id")?;
@@ -93,11 +98,16 @@ impl AnalystSession {
                 )),
             };
         }
-        if capacity.is_some_and(|limit| delegations.len() >= limit) {
+        if capacity.is_some_and(|(limit, _)| delegations.len() >= limit) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "pending delivery receipts are full",
             ));
+        }
+        // Both local capacity checks precede this remote-admission boundary.
+        // Cancellation from here onward must conservatively retain uncertainty.
+        if let Some((_, started)) = capacity {
+            started.store(true, std::sync::atomic::Ordering::Release);
         }
         let turn_result = match &self.protocol {
             ManagedProtocol::Codex(protocol) => protocol
@@ -142,19 +152,22 @@ impl AnalystSession {
         };
         let turn_id = match turn_result {
             Ok(turn_id) => turn_id,
-            Err(error) if capacity.is_some() && acp::prompt_was_rejected(&error) => {
-                return Err(io::Error::new(io::ErrorKind::WouldBlock, error));
-            }
             Err(error)
                 if error.kind() == io::ErrorKind::WouldBlock
                     && !(capacity.is_some() && acp::prompt_reply_error(&error)) =>
             {
+                if let Some((_, started)) = capacity {
+                    started.store(false, std::sync::atomic::Ordering::Release);
+                }
                 return Err(error);
             }
             Err(error) => {
                 // Remote busy can arrive after execution; only local admission
                 // backpressure above is safe to retry. Keep legacy turns intact.
-                let kind = if capacity.is_some() && error.kind() == io::ErrorKind::WouldBlock {
+                let kind = if capacity.is_some()
+                    && (error.kind() == io::ErrorKind::WouldBlock
+                        || acp::prompt_was_rejected(&error))
+                {
                     io::ErrorKind::Other
                 } else {
                     error.kind()

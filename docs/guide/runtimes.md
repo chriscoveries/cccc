@@ -130,15 +130,24 @@ and input paths remain in use. Other runtimes ignore this setting.
 
 In this opt-in mode Kilo messages use ACP and wait behind an active turn without
 requiring a terminal. OpenCode keeps its V2 HTTP/SSE queue. Kilo's terminal writer
-can cancel the managed turn with Ctrl-C; passive connections cannot cancel it.
+can cancel the managed turn with Ctrl-C; passive and replaced writers cannot cancel it.
+Writer authority covers only a nonblocking, turn-specific command enqueue. The
+provider wait runs outside attachment locks and times out after two seconds with
+an unconfirmed outcome. No new managed prompt is admitted until that prompt
+confirms cancellation; a nonconfirming reply retires the managed protocol and a
+missing reply keeps admission held. A timeout does not revoke a dispatched cancel.
+At idle, Ctrl-C follows the normal native terminal writer path.
 OpenCode retains its native TUI keys and its existing refusal of exact-turn HTTP
 interrupts. Viewer closure itself never cancels a turn.
 
 Delivery admission is distinct from completion. Pending receipts and their
 source bindings are bounded to 256 batches and are retired only after every
 source's accepted or ambiguous outcome is recorded durably. A full receipt set
-applies backpressure without evicting uncertain admission. A known pre-admission
-rejection can retry; an uncertain sent prompt is quarantined instead of replayed.
+applies backpressure without evicting uncertain admission. Only known local
+backpressure retries automatically; permanent ACP request/parameter/method
+errors and uncertain sent prompts are quarantined instead of replayed. Local
+capacity rejection is not marked as attempted remote submission. Fully recorded
+acceptance remains deduplicated after the transient receipt is retired.
 Restart retains the existing durable-claim recovery: stranded work is ambiguous,
 not automatically resubmitted. Viewer reconnects do not reset these receipts.
 

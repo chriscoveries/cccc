@@ -26,6 +26,61 @@ fn attachment(
 }
 
 #[tokio::test]
+async fn a_pending_control_receipt_does_not_lock_out_takeover_or_unregister() {
+    let history = SessionHistory::new(None).expect("history");
+    let registry = AttachmentRegistry::default();
+    let old = attachment(&history, &registry, TerminalAttachMode::Control, false);
+    let passive = attachment(&history, &registry, TerminalAttachMode::Viewer, false);
+    let (send, mut receive) = tokio::sync::oneshot::channel::<()>();
+    let mut send = Some(send);
+    let mut pending = None;
+    assert!(
+        registry
+            .try_run_if_writer(old.attachment_id(), || {
+                pending = send.take();
+                Ok(())
+            })
+            .expect("writer")
+    );
+    assert_eq!(
+        receive.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    );
+    // A provider that never replies must not own the registry while waiting.
+    let new = attachment(&history, &registry, TerminalAttachMode::Control, true);
+    assert!(
+        !registry
+            .try_run_if_writer(old.attachment_id(), || panic!(
+                "replaced writer admitted a cancel"
+            ))
+            .expect("old")
+    );
+    assert!(
+        !registry
+            .try_run_if_writer(passive.attachment_id(), || panic!(
+                "passive admitted a cancel"
+            ))
+            .expect("passive")
+    );
+    drop(old);
+    drop(passive);
+    assert!(
+        registry
+            .try_run_if_writer(new.attachment_id(), || Ok(()))
+            .expect("new owner")
+    );
+    drop(new);
+    drop(pending);
+    drop(receive);
+    assert!(
+        registry
+            .register(TerminalAttachMode::Control, false)
+            .expect("register after unregister")
+            .writable
+    );
+}
+
+#[tokio::test]
 async fn negotiated_snapshot_uses_the_raw_cursor_as_its_live_fence() {
     let history = SessionHistory::new(None).expect("history");
     let raw = b"old\r\n\x1b[2J\x1b[Hlatest";

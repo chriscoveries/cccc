@@ -216,29 +216,73 @@ where
         // A stalled write prevents reading EOF from a disconnected client.
         // End this attachment after a bounded input wait; dropping its writer
         // ownership also cancels the Linux PTY task. Do not replay partial input.
-        tokio::time::timeout(
+        let cancel = tokio::time::timeout(
             write_timeout,
-            tokio::task::spawn_blocking(move || {
-                if data == b"\x03"
-                    && let Some(generation) = generation
-                {
-                    return writer.with_writer(|| {
-                        crate::ops::local_headless::lazy_viewer::interrupt(
-                            writer.group_id(),
-                            writer.actor_id(),
-                            &generation,
-                        )
-                        .map_err(cccc_runtime::RuntimeError::Io)?;
-                        Ok(())
-                    });
-                }
-                writer.write(&data)
-            }),
+            tokio::task::spawn_blocking(
+                move || -> std::result::Result<_, cccc_runtime::RuntimeError> {
+                    if data == b"\x03"
+                        && let Some(generation) = generation
+                    {
+                        return control_input(&writer, &data, || {
+                            crate::ops::local_headless::lazy_viewer::interrupt(
+                                writer.group_id(),
+                                writer.actor_id(),
+                                &generation,
+                            )
+                            .map_err(cccc_runtime::RuntimeError::Io)
+                        });
+                    }
+                    // Idle Ctrl-C retains native TUI behavior. write rechecks
+                    // ownership if a takeover happened after the control check.
+                    writer.write(&data)?;
+                    Ok(None)
+                },
+            ),
         )
         .await
         .map_err(|_| anyhow!("terminal input stalled"))?
         .map_err(|error| anyhow!("terminal input task failed: {error}"))??;
+        if let Some(receipt) = cancel {
+            wait_cancel(
+                receipt,
+                write_timeout.min(std::time::Duration::from_secs(2)),
+            )
+            .await?;
+        }
     }
+}
+
+fn control_input(
+    writer: &TerminalInput,
+    data: &[u8],
+    control: impl FnOnce() -> std::result::Result<
+        Option<crate::ops::codex_voice_analyst::CancelReceipt>,
+        cccc_runtime::RuntimeError,
+    >,
+) -> std::result::Result<
+    Option<crate::ops::codex_voice_analyst::CancelReceipt>,
+    cccc_runtime::RuntimeError,
+> {
+    let mut cancel = None;
+    writer.with_writer(|| {
+        cancel = control()?;
+        Ok(())
+    })?;
+    if cancel.is_none() {
+        writer.write(data)?;
+    }
+    Ok(cancel)
+}
+
+async fn wait_cancel(
+    receipt: crate::ops::codex_voice_analyst::CancelReceipt,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    tokio::time::timeout(timeout, receipt)
+        .await
+        .map_err(|_| anyhow!("terminal cancel outcome unconfirmed"))?
+        .map_err(|_| anyhow!("terminal cancel provider disconnected"))??;
+    Ok(())
 }
 
 fn non_blank(request: &DaemonRequest, name: &str) -> Option<String> {
@@ -267,6 +311,74 @@ fn requested_size(request: &DaemonRequest) -> Option<(u16, u16)> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_ctrl_c_reaches_the_pty_and_stalled_cancel_does_not_block_attachment_ownership() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let group = format!("g_control_{}", uuid::Uuid::new_v4().simple());
+        let actor = "peer";
+        cccc_runtime::start(cccc_runtime::LaunchSpec {
+            group_id: group.clone(),
+            actor_id: actor.into(),
+            runner: RunnerKind::Pty,
+            command: vec![
+                "sh".into(),
+                "-c".into(),
+                "stty raw -echo; touch ready; dd bs=1 count=1 of=byte 2>/dev/null; sleep 30".into(),
+            ],
+            cwd: temp.path().into(),
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        })
+        .expect("terminal");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !temp.path().join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("ready");
+        let old = cccc_runtime::attach(&group, actor, TerminalAttachMode::Control, false, None)
+            .expect("old");
+        assert!(
+            control_input(&old.input(), b"\x03", || Ok(None))
+                .expect("idle control")
+                .is_none()
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while std::fs::read(temp.path().join("byte")).ok().as_deref() != Some(b"\x03") {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("native idle Ctrl-C byte");
+        let (sender, receipt) = tokio::sync::oneshot::channel();
+        let receipt = control_input(&old.input(), b"\x03", || Ok(Some(receipt)))
+            .expect("admit cancel")
+            .expect("ticket");
+        let waiting = tokio::spawn(wait_cancel(receipt, Duration::from_millis(50)));
+        let fresh = cccc_runtime::attach(&group, actor, TerminalAttachMode::Control, true, None)
+            .expect("takeover while provider stalled");
+        drop(old);
+        assert!(
+            fresh
+                .input()
+                .with_writer(|| Ok(()))
+                .expect("fresh ownership")
+        );
+        assert!(
+            waiting
+                .await
+                .expect("task")
+                .expect_err("unconfirmed cancel")
+                .to_string()
+                .contains("unconfirmed")
+        );
+        assert!(sender.is_closed());
+        drop(fresh);
+        cccc_runtime::stop(&group, actor).expect("cleanup");
+    }
 
     #[tokio::test]
     async fn disconnected_backpressured_input_has_a_bounded_attachment_lifetime() {

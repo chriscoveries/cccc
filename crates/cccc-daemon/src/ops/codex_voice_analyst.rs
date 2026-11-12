@@ -156,6 +156,9 @@ pub struct TurnReceipt {
     pub turn_id: String,
 }
 
+/// Local admission of a terminal cancel; waiting never owns terminal locks.
+pub(crate) type CancelReceipt = tokio::sync::oneshot::Receiver<io::Result<Option<String>>>;
+
 #[derive(Debug)]
 enum DelegationState {
     Started(TurnReceipt),

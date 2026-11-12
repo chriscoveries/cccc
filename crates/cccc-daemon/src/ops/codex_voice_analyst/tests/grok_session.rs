@@ -22,6 +22,81 @@ mod socket_fixture;
 const FAKE_SESSION_ID: &str = "01a0623c-19b3-7ec3-b777-95e24279ec67";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delivery_capacity_and_permanent_acp_errors_do_not_retry_or_claim_local_submission() {
+    use super::super::{DelegationState, TurnReceipt};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for code in [-32600, -32601, -32602] {
+        let temp = socket_fixture::tempdir();
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("initialize");
+        // Reuse the existing ACP harness, injecting only the protocol failure.
+        let executable = fake_grok_busy_once(temp.path());
+        let script = std::fs::read_to_string(&executable)
+            .expect("existing harness")
+            .replace("-32603", &code.to_string());
+        std::fs::write(&executable, script).expect("inject permanent code");
+        let launched = launch(
+            &home,
+            temp.path(),
+            &[executable.to_string_lossy().into_owned()],
+            &BTreeMap::new(),
+            None,
+            "delivery-boundary",
+        )
+        .await
+        .expect("launch");
+        let analyst = analyst_from_grok(launched, temp.path(), "delivery-boundary");
+        {
+            let mut receipts = analyst.delegations.lock().await;
+            receipts.extend((0..256).map(|n| {
+                (
+                    format!("retained-{n}"),
+                    DelegationState::Started(TurnReceipt {
+                        delegation_id: format!("retained-{n}"),
+                        thread_id: FAKE_SESSION_ID.into(),
+                        turn_id: "retained-turn".into(),
+                    }),
+                )
+            }));
+        }
+        let started = AtomicBool::new(false);
+        let full = analyst
+            .start_delivery("blocked", "retry me", &started)
+            .await
+            .expect_err("capacity");
+        assert_eq!(full.kind(), io::ErrorKind::WouldBlock);
+        assert!(!started.load(Ordering::Acquire));
+        assert_eq!(
+            analyst
+                .start_delivery("retained-0", "retry me", &started)
+                .await
+                .expect("existing receipt at capacity")
+                .turn_id,
+            "retained-turn"
+        );
+        assert!(!started.load(Ordering::Acquire));
+        analyst.delegations.lock().await.clear();
+        let rejected = analyst
+            .start_delivery("permanent", "retry me", &started)
+            .await
+            .expect_err("RPC rejection");
+        assert_ne!(rejected.kind(), io::ErrorKind::WouldBlock);
+        assert!(started.load(Ordering::Acquire));
+        assert!(matches!(
+            analyst.delegations.lock().await.get("permanent"),
+            Some(DelegationState::Unresolved(_))
+        ));
+        let retry = analyst
+            .start_delivery("permanent", "retry me", &AtomicBool::new(false))
+            .await
+            .expect_err("no automatic replay");
+        assert_eq!(retry.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(analyst.delegations.lock().await.len(), 1);
+        analyst.stop(analyst.generation()).await.expect("cleanup");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejected_actor_grok_resume_never_creates_a_replacement_session() {
     let temp = socket_fixture::tempdir();
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
@@ -808,6 +883,106 @@ async fn launch_fake_acp(
         .await
         .expect("create fake ACP session");
     (protocol, process)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_cancel_requires_exact_turn_and_provider_confirmation_before_reuse() {
+    for outcome in ["cancelled", "end_turn", "silent"] {
+        let temp = tempfile::tempdir().expect("isolated protocol");
+        let executable = fake_acp_cancel_as_end_turn(temp.path());
+        let script = std::fs::read_to_string(&executable).expect("existing harness");
+        let script = if outcome == "silent" {
+            script
+                .lines()
+                .map(|line| if line.contains("\"id\":3") { ":" } else { line })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            script.replace("end_turn", outcome)
+        };
+        std::fs::write(&executable, script).expect("inject cancellation outcome");
+        let (protocol, process) =
+            launch_fake_acp(temp.path(), &executable, PromptCompletion::SessionEvents).await;
+        let lifecycle = protocol.lifecycle_control();
+        let admission = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            lifecycle
+                .user_text(FAKE_SESSION_ID, "cancel me")
+                .await
+                .expect("native receipt")
+        };
+        let (turn, _) = tokio::join!(
+            protocol.start_prompt(FAKE_SESSION_ID, "old", "cancel me"),
+            admission
+        );
+        let turn = turn.expect("old admitted");
+        assert_eq!(
+            protocol
+                .try_cancel_turn(FAKE_SESSION_ID, "wrong-turn")
+                .expect("local ticket")
+                .await
+                .expect("receipt")
+                .expect_err("stale target")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        let receipt = protocol
+            .try_cancel_turn(FAKE_SESSION_ID, &turn)
+            .expect("current ticket");
+        if outcome == "silent" {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), receipt)
+                    .await
+                    .is_err()
+            );
+            lifecycle
+                .status(FAKE_SESSION_ID, false)
+                .await
+                .expect("local idle observation");
+            assert_eq!(
+                protocol
+                    .start_prompt(FAKE_SESSION_ID, "next", "next")
+                    .await
+                    .expect_err("unconfirmed cancel holds admission")
+                    .kind(),
+                io::ErrorKind::WouldBlock
+            );
+        } else {
+            let result = tokio::time::timeout(Duration::from_secs(2), receipt)
+                .await
+                .expect("bounded reply")
+                .expect("receipt");
+            if outcome == "cancelled" {
+                assert_eq!(result.expect("confirmed"), Some(turn));
+                let next_receipt = async {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    lifecycle
+                        .user_text(FAKE_SESSION_ID, "next")
+                        .await
+                        .expect("next native receipt")
+                };
+                let (next, _) = tokio::join!(
+                    protocol.start_prompt(FAKE_SESSION_ID, "next", "next"),
+                    next_receipt
+                );
+                assert!(
+                    next.is_ok(),
+                    "confirmed cancellation did not release managed admission"
+                );
+            } else {
+                assert!(result.is_err());
+                assert!(
+                    protocol
+                        .start_prompt(FAKE_SESSION_ID, "next", "next")
+                        .await
+                        .is_err(),
+                    "unconfirmed session was reused"
+                );
+            }
+        }
+        protocol.close().await;
+        process.stop().expect("cleanup");
+    }
 }
 
 fn fake_analyst_session(

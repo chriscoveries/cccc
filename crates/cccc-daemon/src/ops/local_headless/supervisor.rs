@@ -551,15 +551,17 @@ fn submit_admitted(
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
                 return false;
             }
-            started.store(true, Ordering::Release);
+            if item.lazy_viewer.is_none() {
+                started.store(true, Ordering::Release);
+            }
             match super::block_on_managed(async {
                 tokio::select! {
                     biased;
                     result = async {
                         if item.lazy_viewer.is_some() {
-                            super::lazy_viewer::submit(item, &id, source_events, prepared).await
+                            super::lazy_viewer::submit(item, &id, source_events, prepared, started).await
                         } else {
-                            item.managed.start_turn(item.managed.generation(), &id, prepared).await
+                            item.managed.start_turn(item.managed.generation(), &id, prepared).await.map(|_| ())
                         }
                     } => result,
                     _ = async {
@@ -691,6 +693,18 @@ fn render_turn(event: &Event) -> Option<(String, String)> {
 
 pub(super) fn lookup(key: &Key) -> Option<Arc<Session>> {
     sessions().read().ok()?.get(key).cloned()
+}
+
+pub(super) fn try_lookup(key: &Key) -> io::Result<Option<Arc<Session>>> {
+    sessions()
+        .try_read()
+        .map(|items| items.get(key).cloned())
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "managed session registry is busy",
+            )
+        })
 }
 
 pub(crate) fn structured_state(group: &str, actor: &str) -> Option<serde_json::Value> {

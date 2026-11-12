@@ -135,7 +135,31 @@ pub(super) async fn submit(
     id: &str,
     events: &[Event],
     text: &str,
-) -> io::Result<super::super::codex_voice_analyst::TurnReceipt> {
+    started: &std::sync::atomic::AtomicBool,
+) -> io::Result<()> {
+    let mut accepted = !events.is_empty();
+    for event in events {
+        let state = super::super::runtime_delivery::latest_state(
+            &item.home,
+            &item.group_id,
+            &item.actor_id,
+            &event.id,
+        )
+        .map_err(|_| io::Error::other("delivery state is unavailable"))?;
+        if state
+            .as_ref()
+            .is_some_and(|(state, _)| state == "ambiguous")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "durable delivery is ambiguous and cannot be replayed",
+            ));
+        }
+        accepted &= state.is_some_and(|(state, _)| state == "accepted");
+    }
+    if accepted {
+        return Ok(());
+    }
     {
         let mut pending = item
             .lazy_viewer
@@ -154,7 +178,7 @@ pub(super) async fn submit(
             .entry(id.to_owned())
             .or_insert_with(|| events.iter().map(|event| event.id.clone()).collect());
     }
-    let result = item.managed.start_delivery(id, text).await;
+    let result = item.managed.start_delivery(id, text, started).await;
     if result
         .as_ref()
         .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock)
@@ -167,13 +191,18 @@ pub(super) async fn submit(
             .map_err(|_| super::poisoned())?
             .remove(id);
     }
-    result
+    result.map(|_| ())
 }
 
-/// The caller must hold terminal writer authority across this control call.
-pub(crate) fn interrupt(group_id: &str, actor_id: &str, generation: &str) -> io::Result<()> {
+/// Admit only a nonblocking, exact-turn cancel while the caller owns the writer.
+/// The receipt must be awaited after releasing terminal writer authority.
+pub(crate) fn interrupt(
+    group_id: &str,
+    actor_id: &str,
+    generation: &str,
+) -> io::Result<Option<super::super::codex_voice_analyst::CancelReceipt>> {
     let Some(item) =
-        supervisor::lookup(&(group_id.to_owned(), actor_id.to_owned())).filter(|item| {
+        supervisor::try_lookup(&(group_id.to_owned(), actor_id.to_owned()))?.filter(|item| {
             item.lazy_viewer.is_some()
                 && item.managed.runtime() == ActorRuntime::Kilo
                 && item.managed.generation() == generation
@@ -186,12 +215,15 @@ pub(crate) fn interrupt(group_id: &str, actor_id: &str, generation: &str) -> io:
     };
     let turn = item
         .active_turn
-        .lock()
-        .map_err(|_| super::poisoned())?
+        .try_lock()
+        .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "managed turn state is busy"))?
         .as_ref()
         .map(|turn| turn.turn_id.clone());
     if let Some(turn) = turn {
-        block_on_managed(item.managed.interrupt(item.managed.generation(), &turn))?;
+        return item
+            .managed
+            .try_interrupt(item.managed.generation(), &turn)
+            .map(Some);
     }
-    Ok(())
+    Ok(None)
 }

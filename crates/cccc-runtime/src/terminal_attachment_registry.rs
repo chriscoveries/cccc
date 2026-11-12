@@ -81,4 +81,22 @@ impl AttachmentRegistry {
     pub(crate) fn same_session(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.state, &other.state)
     }
+
+    pub(crate) fn try_run_if_writer(
+        &self,
+        id: u64,
+        operation: impl FnOnce() -> Result<(), RuntimeError>,
+    ) -> Result<bool, RuntimeError> {
+        let state = self.state.try_lock().map_err(|_| {
+            RuntimeError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "terminal writer registry is busy",
+            ))
+        })?;
+        if state.writer != Some(id) {
+            return Ok(false);
+        }
+        operation()?;
+        Ok(true)
+    }
 }

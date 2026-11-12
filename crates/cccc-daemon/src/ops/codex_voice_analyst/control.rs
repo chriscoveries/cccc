@@ -132,6 +132,26 @@ impl AnalystSession {
         }
     }
 
+    pub(crate) fn try_interrupt(
+        &self,
+        expected_generation: &str,
+        turn_id: &str,
+    ) -> io::Result<super::CancelReceipt> {
+        self.require_generation(expected_generation)?;
+        let turn_id = required_value(turn_id, "turn_id")?;
+        match &self.protocol {
+            ManagedProtocol::Acp(protocol)
+                if self.runtime() == cccc_contracts::ActorRuntime::Kilo =>
+            {
+                protocol.try_cancel_turn(&self.thread_id, turn_id)
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "terminal cancellation requires Kilo ACP",
+            )),
+        }
+    }
+
     pub(crate) async fn interrupt(
         &self,
         expected_generation: &str,
