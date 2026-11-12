@@ -1,15 +1,18 @@
-# Browser delivery reset capture
+# Browser reset captures
 
-The target is a minimal projection of a real persisted browser delivery captured
-on 11 November 2026: submitted, zero reconcile attempts and an empty error.
-Actor and event/turn/delivery identifiers are redacted; conversation URLs,
-bootstrap material and browser inventories are omitted. Timestamps and state
-values are unchanged. No user message body is included.
+`submitted.json` is a minimal saved browser projection captured on 2026-11-11.
+Its original redaction removed ID correlation; it remains an unknown/refusal
+control. An empty error and `submitted` alone prove no provider outcome.
 
-The capture's accompanying trace recorded a completed handoff, but redaction did
-not preserve enough identifier correlation to prove the exact receipt join.
-Tests therefore retain that distinction: the captured target alone cannot
-authorize reset. Positive cases explicitly install an exact committed receipt
-through the native completion writer as a consumer-controlled test mutation.
-They do not claim the capture itself proves that join or provider completion.
-Other controls mutate only identity, lifecycle, route and failure boundaries.
+`correlated.json` is a separate metadata-only capture read on 2026-11-12 from a
+bounded historical query for the 2026-11-11 02:09 delivery. It retains one
+addressed source, the browser submission tuple, its accepted transport record,
+and the matching native completion tuple. Actor, group and event identities
+are consistently redacted; message bodies and credentials are omitted. This
+does not reconstruct the erased IDs in `submitted.json`.
+
+Tests rebase these identities into temporary groups and regenerate only the
+native deterministic transport/receipt IDs. Removing the completion, making a
+source ambiguous, failed setup, crashes and successor bindings are explicitly
+controlled mutations. No test claims a provider execution was cancelled or
+that an unseen message can safely be replayed.

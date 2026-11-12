@@ -196,6 +196,34 @@ pub fn fence_actor(group_id: &str, actor_id: &str) -> DeliveryFence {
     DeliveryFence(key)
 }
 
+/// Recovery may replace only an idle delivery owner. Exclude new enqueue
+/// under the same worker-map lock, and fail closed on poisoned registries.
+pub(super) fn fence_idle_actor(
+    group_id: &str,
+    actor_id: &str,
+) -> Result<DeliveryFence, crate::dispatch::OpError> {
+    let busy = || {
+        crate::dispatch::OpError::new(
+            "actor_delivery_busy",
+            "Delivery ownership is active or unavailable",
+        )
+    };
+    let _workers = workers().lock().map_err(|_| busy())?;
+    if in_flight()
+        .lock()
+        .map_err(|_| busy())?
+        .iter()
+        .any(|(g, a, _)| g == group_id && a == actor_id)
+    {
+        return Err(busy());
+    }
+    let key = (group_id.to_owned(), actor_id.to_owned());
+    if !fenced().lock().map_err(|_| busy())?.insert(key.clone()) {
+        return Err(busy());
+    }
+    Ok(DeliveryFence(key))
+}
+
 fn is_fenced(group_id: &str, actor_id: &str) -> bool {
     fenced()
         .lock()
@@ -1668,5 +1696,25 @@ done"#;
             [&event.id],
             "the switch's own dispatch offers it again"
         );
+    }
+}
+
+#[cfg(test)]
+mod idle_recovery_fence_tests {
+    use super::*;
+
+    #[test]
+    fn idle_fence_refuses_inflight_and_excludes_new_delivery_until_drop() {
+        let group = "g_idle_recovery_control";
+        let actor = "member";
+        let key = (group.into(), actor.into(), "source".into());
+        in_flight().lock().unwrap().insert(key.clone());
+        assert!(fence_idle_actor(group, actor).is_err());
+        in_flight().lock().unwrap().remove(&key);
+        let guard = fence_idle_actor(group, actor).unwrap();
+        assert!(is_fenced(group, actor));
+        assert!(fence_idle_actor(group, actor).is_err());
+        drop(guard);
+        assert!(!is_fenced(group, actor));
     }
 }

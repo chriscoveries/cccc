@@ -1,4 +1,4 @@
-//! Attended retirement of a settled browser route; never completion or replay.
+//! Fenced browser-authority retirement or an idle, completed restart. Never replay.
 use super::*;
 use cccc_contracts::{ActorRuntime, Event};
 use cccc_core::ledger;
@@ -50,6 +50,7 @@ enum Phase {
     Intent,
     AuthorityRetired,
     TargetResolved,
+    Restarted,
 }
 
 fn execute_with_hook(
@@ -72,6 +73,12 @@ fn execute_with_hook(
             .as_bool()
             .ok_or_else(|| OpError::new("invalid_argument", "apply must be boolean"))?,
     };
+    let automatic = match request.args.get("automatic") {
+        None => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| OpError::new("invalid_argument", "automatic must be boolean"))?,
+    };
     let groups = GroupStore::new(home.clone()).map_err(OpError::io)?;
     let ledger_path = groups.ledger_path(&group_id).map_err(OpError::io)?;
     let expected = string_arg(request, "expected_snapshot").unwrap_or_default();
@@ -83,6 +90,7 @@ fn execute_with_hook(
     {
         if outcome.kind != "web_model.delivery_reset.completed"
             || outcome.data.get("reason") != Some(&json!(reason))
+            || outcome.data.get("automatic") != Some(&json!(automatic))
         {
             return Err(OpError::new("reset_conflict", "reset receipt differs"));
         }
@@ -106,6 +114,7 @@ fn execute_with_hook(
     super::super::actor_switch::refuse_pending(home, &group_id, &actor_id)?;
     // The same cross-process exclusion spans every browser attempt and its final write.
     let _browser = super::super::actor_runtime::hold_browser_work(home, &group_id, &actor_id)?;
+    let _delivery = super::super::actor_delivery::fence_idle_actor(&group_id, &actor_id)?;
     let quiescent = !actor.enabled
         && super::super::actor_runtime::delivery_owner(&group_id, &actor_id)
             .map_err(OpError::io)?
@@ -121,7 +130,7 @@ fn execute_with_hook(
     // Complete only that prior audit, even if a new pairing now exists.
     if apply && !expected.is_empty() && target["last_delivery_reset"]["snapshot"] == expected {
         let result = &target["last_delivery_reset"];
-        if result["reason"] != reason {
+        if result["reason"] != reason || result["automatic"] != automatic {
             return Err(OpError::new("reset_conflict", "reset reason differs"));
         }
         let mut outcome = Event::new("web_model.delivery_reset.completed", &group_id);
@@ -144,7 +153,15 @@ fn execute_with_hook(
     let turn = field("last_delivery_turn_id")?;
     let events: Vec<String> = serde_json::from_value(target["last_delivery_event_ids"].clone())
         .map_err(|_| OpError::new("invalid_delivery", "event IDs must be strings"))?;
-    if events.is_empty() || events.len() > 20 || events.iter().any(String::is_empty) {
+    if events.is_empty()
+        || events.len() > 20
+        || events.iter().any(String::is_empty)
+        || events
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != events.len()
+    {
         return Err(OpError::new(
             "invalid_delivery",
             "exact source event IDs are required",
@@ -168,34 +185,109 @@ fn execute_with_hook(
             && runtime["active_event_ids"]
                 .as_array()
                 .is_some_and(Vec::is_empty));
+    // Existing terminal delivery facts remain enforceable after re-pairing:
+    // normal pending_sources/claim exclude accepted and ambiguous sources.
+    let source_fenced = events.iter().all(|id| {
+        let source = ledger::find_event(&ledger_path, id).ok().flatten();
+        source.is_some_and(|event| {
+            matches!(event.kind.as_str(), "chat.message" | "system.notify")
+                && event.by != actor_id
+                && cccc_core::inbox::is_for_actor(&group, &event, &actor_id)
+                && chrono::DateTime::parse_from_rfc3339(&event.ts)
+                    .ok()
+                    .zip(chrono::DateTime::parse_from_rfc3339(&actor.created_at).ok())
+                    .is_some_and(|(at, born)| at >= born)
+        }) && super::super::runtime_delivery::latest_state(home, &group_id, &actor_id, id)
+            .ok()
+            .flatten()
+            .is_some_and(|(state, _)| matches!(state.as_str(), "accepted" | "ambiguous"))
+    });
     let committed = completion.as_ref().map(|c| {
         json!({"turn_id":c.turn_id,
         "delivery_id":c.delivery_id,"event_ids":c.event_ids,"status":c.status})
     });
     let identity = digest(&json!({"group_id":group_id,"actor":actor,"target":target,
-        "runtime":runtime,"completion":committed,"reason":reason}));
+        "runtime":runtime,"completion":committed,"reason":reason,"automatic":automatic,
+        "group_state":group.state,"group_running":group.running}));
     let route_state = routes(home, &group_id, &actor_id)?;
+    // Only non-secret identity metadata is shown to the operator. In
+    // particular, no pairing code, session key, token or conversation URL.
+    let authorities: Vec<Value> = route_state
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| {
+            let value = &entry[3];
+            json!({"connector_id":entry[0],"collection":entry[1],"record_key":entry[2],
+            "revision":value["revision"],"generation":value["generation"],
+            "pairing_id":value["pairing_id"],"state":value["state"]})
+        })
+        .collect();
     let route_hash = digest(&route_state);
+    let routes = route_state.as_array().expect("route array");
+    let unbound = !routes
+        .iter()
+        .any(|r| r[1] == "bindings" && r[3]["state"] == "bound");
+    let pairing_idle = routes.iter().filter(|r| r[1] == "pairings").all(|r| {
+        matches!(
+            r[3]["state"].as_str(),
+            Some("failed" | "expired" | "cancelled")
+        )
+    });
+    let stale = target["last_delivery_started_at"]
+        .as_str()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .is_some_and(|at| chrono::Utc::now().signed_duration_since(at).num_seconds() >= 1800)
+        && (matches!(
+            target["last_delivery_status"].as_str(),
+            Some("pending" | "submitting" | "submission_ambiguous" | "completion_ambiguous")
+        ) || (target["last_delivery_status"] == "submitted" && unbound));
+    // A current failed automatic setup is positive obstruction evidence. A
+    // manually cancelled/expired pairing or deliberately stopped member is
+    // never an automatic restart invitation.
+    let obstruction = unbound
+        && routes.iter().any(|r| {
+            r[1] == "pairings"
+                && r[3]["automatic"] == true
+                && r[3]["state"] == "failed"
+                && r[3]["error_code"] == "pairing_timeout"
+                && r[3]["generation"] == cccc_core::actors::generation_identity(actor)
+        });
+    let can_restart = group.running
+        && group.state == cccc_contracts::GroupState::Active
+        && actor.enabled
+        && inactive
+        && completion.is_some()
+        && source_fenced
+        && stale
+        && pairing_idle
+        && obstruction
+        && actor.profile_id.is_empty()
+        && super::super::actor_runtime::delivery_owner(&group_id, &actor_id)
+            .map_err(OpError::io)?
+            .is_none();
     let snapshot = digest(&json!([identity, route_hash]));
     let mut result = json!({
         "group_id":group_id,"actor_id":actor_id,"reason":reason,
         "snapshot":snapshot,"generation":cccc_core::actors::generation_identity(actor),
         "delivery_id":delivery,"turn_id":turn,"event_ids":events,
         "saved_status":target["last_delivery_status"],
-        "route_records_to_retire":route_state.as_array().map(Vec::len),
+        "route_records_to_retire":if automatic { 0 } else { authorities.len() },
+        "authorities":authorities,
         "completion_status":completion.as_ref().map(|c| c.status.as_str()),
+        "source_fenced":source_fenced,"automatic":automatic,
         "actor_stopped":quiescent,"canonical_inactive":inactive,
-        "can_apply":quiescent && inactive && completion.is_some(),
-        "action":"retire_settled_conversation_authority",
+        "can_apply":if automatic { can_restart } else { quiescent && inactive && source_fenced },
+        "action":if automatic { "restart_browser_actor" } else if completion.is_some() { "retire_settled_conversation_authority" } else { "abandon_browser_authority" },
         "warning":"No provider execution is undone. Source records and completion receipts are preserved. Unseen/unfinished work is never acknowledged or requeued. Stop the Actor before applying; use a fresh chat when chat-local tool loss is suspected."
     });
     if !apply {
         return object(json!({"reset":result,"dry_run":true}));
     }
-    if !quiescent || !inactive || completion.is_none() {
+    if result["can_apply"] != true {
         return Err(OpError::new(
             "reset_unsafe",
-            "Requires stopped browser ownership, no active turn and an exact committed completion; unfinished/unknown work is held",
+            "Requires quiescent ownership and exact fenced sources; automatic restart additionally requires committed completion and a stale-authority obstruction",
         ));
     }
     if expected.is_empty() {
@@ -204,8 +296,24 @@ fn execute_with_hook(
             "Preview and supply expected_snapshot",
         ));
     }
-    let intent_id = audit_id("intent", &group_id, &actor_id, &expected);
+    let intent_key = if automatic {
+        digest(&json!([
+            cccc_core::actors::generation_identity(actor),
+            delivery,
+            turn,
+            events
+        ]))
+    } else {
+        expected.clone()
+    };
+    let intent_id = audit_id("intent", &group_id, &actor_id, &intent_key);
     let previous = ledger::find_event(&ledger_path, &intent_id).map_err(OpError::io)?;
+    if automatic && previous.is_some() {
+        return Err(OpError::new(
+            "reset_outcome_unknown",
+            "A prior restart intent has no outcome; do not repeat the action",
+        ));
+    }
     if let Some(intent) = &previous {
         if intent.kind != "web_model.delivery_reset.requested"
             || intent.data.get("identity") != Some(&json!(identity))
@@ -235,6 +343,19 @@ fn execute_with_hook(
         ledger::append(&ledger_path, &intent).map_err(OpError::io)?;
     }
     after(Phase::Intent)?;
+    if automatic {
+        // The native global write permit and both ownership guards still
+        // span the check and the existing lifecycle operation. No new-session.
+        super::super::actors::lifecycle(home, request, "actor.restart")?;
+        after(Phase::Restarted)?;
+        result["applied"] = json!(true);
+        let mut outcome = Event::new("web_model.delivery_reset.completed", &group_id);
+        outcome.id = outcome_id;
+        outcome.by = "user".into();
+        outcome.data = result.as_object().cloned().expect("restart outcome");
+        ledger::append(&ledger_path, &outcome).map_err(OpError::io)?;
+        return object(json!({"reset":result,"already_applied":false}));
+    }
     // Authority first: a crash here leaves a stopped, unpaired Actor with all
     // source/receipt fences intact. Retrying the same intent accepts only an
     // unchanged target and the original route set or its empty retired set.
