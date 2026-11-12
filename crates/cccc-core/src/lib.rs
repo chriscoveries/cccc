@@ -42,6 +42,7 @@ pub mod inbox;
 mod inbox_tests;
 pub mod instance_identity;
 pub mod integration_state;
+pub mod json;
 pub mod ledger;
 pub mod ledger_archive;
 mod ledger_index;

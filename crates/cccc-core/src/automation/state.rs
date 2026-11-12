@@ -4,8 +4,9 @@ use std::io;
 
 use crate::GroupStore;
 use crate::fs::{read_json, write_json};
+use crate::json::object_mut as object;
 use cccc_contracts::utc_now;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct RunRecord {
@@ -245,15 +246,6 @@ fn trigger_text<'a>(rule: &'a Value, key: &str) -> &'a str {
         .and_then(|trigger| trigger.get(key))
         .and_then(Value::as_str)
         .unwrap_or("")
-}
-
-fn object(value: &mut Value) -> &mut Map<String, Value> {
-    if !value.is_object() {
-        *value = json!({});
-    }
-    value
-        .as_object_mut()
-        .expect("automation object initialized")
 }
 
 fn parse_timestamp(value: &str) -> Option<i64> {

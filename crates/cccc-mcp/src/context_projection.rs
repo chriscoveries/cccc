@@ -203,10 +203,7 @@ fn take_object(snapshot: &mut Map<String, Value>, key: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn object(value: Value) -> Map<String, Value> {
-        value.as_object().cloned().expect("object")
-    }
+    use crate::test_support::object;
 
     #[test]
     fn coordination_projection_drops_the_task_list_and_unrelated_context() {
