@@ -286,6 +286,9 @@ async fn shared_windows_submit_independent_batches_while_viewers_capture() {
                 PromptSubmissionOutcome::Deferred(evidence) => {
                     panic!("independent send deferred: {evidence}")
                 }
+                PromptSubmissionOutcome::ModelPinHeld(evidence) => {
+                    panic!("independent send held: {evidence}")
+                }
             };
             assert_eq!(evidence["submission_evidence"], "message_echo");
         }

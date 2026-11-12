@@ -406,7 +406,7 @@ impl BrowserSurfaces {
         }
         if guarded_chatgpt {
             let authority = pin_authority.context("model pin authority required")?;
-            let health = match tokio::time::timeout(
+            let mut health = match tokio::time::timeout(
                 Duration::from_secs(3),
                 self.observe_model_pin(key, &session, authority),
             )
@@ -432,6 +432,9 @@ impl BrowserSurfaces {
                     .await
                     .is_err()
             {
+                health["state"] = json!("held");
+                health["reason"] = json!("model_pin_authority_changed");
+                self.record_model_pin(key, &session, &health).await;
                 return Ok(PromptSubmissionOutcome::ModelPinHeld(
                     json!({"submitted":false,"submission_evidence":"model_pin_unavailable","model_pin":health,"reason":"model_pin_authority_changed","draft_staged":true}),
                 ));
@@ -453,6 +456,11 @@ impl BrowserSurfaces {
             }
             .await;
             if matches!(&activation,Ok(result) if !result.invoked) {
+                health["state"] = json!("held");
+                health["reason"] = json!("final_model_or_draft_check_refused");
+                health["observed"] = Value::Null;
+                health["effective"] = Value::Null;
+                self.record_model_pin(key, &session, &health).await;
                 return Ok(PromptSubmissionOutcome::ModelPinHeld(
                     json!({"submitted":false,"submission_evidence":"model_pin_unavailable","model_pin":health,"reason":"final_model_or_draft_check_refused","draft_staged":true}),
                 ));
