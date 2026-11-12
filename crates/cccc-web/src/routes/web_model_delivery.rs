@@ -418,6 +418,16 @@ async fn deliver_once(
         .prompt_readiness(session_key)
         .await
         .map_err(|error| ApiError::bad(error.to_string()))?;
+    // cwf#821: a tab stranded on ChatGPT's load-error page (usually a 429)
+    // never recovers by itself. Reload it at most once per backoff window,
+    // honouring Retry-After; otherwise this clears any old recovery record.
+    if let Err(error) = state
+        .browser_surfaces
+        .recover_load_error(session_key, &readiness)
+        .await
+    {
+        tracing::warn!(group_id, actor_id, %error, "Web-model load error recovery failed");
+    }
     if readiness["ready"] != true || readiness["running"] == true {
         // Leave queued work unclaimed while the provider is still responding.
         return Ok(DeliveryOutcome::Idle);
