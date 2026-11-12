@@ -155,6 +155,8 @@ function getRuntimeStatusLabel(
   t: (key: string, options?: Record<string, unknown>) => string,
 ): string {
   if (!isRunning) return t("stopped", { defaultValue: "Stopped" });
+  if (workingState === "unknown")
+    return t("workingStateUnknown", { defaultValue: "Working state unknown" });
   if (workingState === "working") return t("working", { defaultValue: "Working" });
   if (workingState === "waiting") return t("waiting", { defaultValue: "Waiting" });
   if (workingState === "stuck") return t("stuck", { defaultValue: "Stuck" });

@@ -182,7 +182,7 @@ mod terminal_output {
     }
 
     fn assert_unknown_state(state: &Map<String, Value>) {
-        assert_eq!(state["effective_working_state"], "waiting", "{state:?}");
+        assert_eq!(state["effective_working_state"], "unknown", "{state:?}");
         assert_eq!(
             state["effective_working_reason"], "pty_running_state_unknown",
             "{state:?}"

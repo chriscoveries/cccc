@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { Actor } from "../types";
+import capturedActivity from "./__fixtures__/working-state-capture.json";
 import {
   computeGroupRuntimeFromActorActivityUpdates,
   getRuntimeStatusFallbackForGroup,
@@ -65,6 +66,31 @@ describe("SSE actor activity runtime projection", () => {
     expect(runtime.lifecycle_state).toBe("idle");
     expect(runtime.runtime_running).toBe(true);
     expect(runtime.running_actor_count).toBe(1);
+  });
+
+  it("keeps a captured untracked running actor from becoming an idle group", () => {
+    // Real actor.activity fields with actor IDs redacted. The new unknown
+    // value is a labeled consumer projection of the two prior fallbacks.
+    for (const captured of capturedActivity) {
+      const unknown = { ...captured, effective_working_state: "unknown" };
+      const runtime = computeGroupRuntimeFromActorActivityUpdates([], [unknown], {
+        lifecycle_state: "idle",
+      });
+      expect(runtime.runtime_running).toBe(true);
+      expect(runtime.lifecycle_state).toBe("active");
+    }
+  });
+
+  it("preserves authoritative working and paused states with an unknown actor", () => {
+    const unknown = { ...capturedActivity[0]!, effective_working_state: "unknown" };
+    const working = { ...capturedActivity[1]!, effective_working_state: "working" };
+    expect(
+      computeGroupRuntimeFromActorActivityUpdates([], [unknown, working]).lifecycle_state,
+    ).toBe("active");
+    expect(
+      computeGroupRuntimeFromActorActivityUpdates([], [unknown], { lifecycle_state: "paused" })
+        .lifecycle_state,
+    ).toBe("paused");
   });
 
   it("uses the event group runtime fallback instead of the selected groupDoc", () => {

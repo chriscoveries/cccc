@@ -114,7 +114,7 @@ pub(super) fn fields(
         )
     } else {
         (
-            "waiting".to_owned(),
+            "unknown".to_owned(),
             "pty_running_state_unknown".to_owned(),
             None,
             None,
