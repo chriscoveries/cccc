@@ -1495,7 +1495,7 @@ fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
         );
         // The next input wakes and claims normally.
         let fresh_source = f.source("fresh task");
-        let mut next_wake = f.delivery();
+        let next_wake = f.delivery();
         assert!(next_wake.is_object());
         if fault == "missing-execution-new-wake" {
             // Reuse the producer's real next wake, restoring only the previous
@@ -1525,9 +1525,10 @@ fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
                 private["dots"]["last_execution"]["event_id"],
                 next_wake["event_id"]
             );
-            let fenced_wake = next_wake;
-            next_wake = f.delivery();
-            assert_ne!(next_wake["event_id"], fenced_wake["event_id"]);
+            // The retained completion proves this is a distinct new wake.
+            // Expiry returns idle, then the next claim uses that same new ID.
+            assert_eq!(private["dots"]["wake"]["event_id"], next_wake["event_id"]);
+            assert_eq!(private["dots"]["wake"]["state"], "sending");
             claimed = f.claim(&f.captured(&next_wake, "cccc_runtime_wait_next_turn"));
         }
         assert_eq!(claimed["status"], "work_available");
