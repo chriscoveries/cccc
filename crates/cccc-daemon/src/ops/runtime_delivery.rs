@@ -12,6 +12,9 @@ use crate::dispatch::OpError;
 
 #[cfg(test)]
 mod legacy_read_watermark;
+#[cfg(test)]
+#[path = "runtime_delivery_model_pin_tests.rs"]
+mod model_pin_tests;
 mod stranded_claims;
 
 #[cfg(test)]
@@ -248,6 +251,18 @@ pub fn settle_stranded_claims(home: &HomeLayout, group: &GroupDoc) -> Result<usi
             let Some(actor) = group.actors.iter().find(|actor| actor.id == actor_id) else {
                 continue;
             };
+            if let Some(target) = group
+                .extra
+                .get("web_model_browser_targets")
+                .and_then(|targets| targets.get(&actor_id))
+                && transport == "web_model_browser"
+                && cccc_core::actors::model_pin_hold_is_current(group, actor, target)
+                && target["last_delivery_event_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.contains(&json!(source_event_id)))
+            {
+                continue;
+            }
             append_state(
                 home,
                 &group.group_id,

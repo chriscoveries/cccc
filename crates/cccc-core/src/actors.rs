@@ -110,6 +110,63 @@ pub fn normalize_web_model_pin(actor: &mut Actor) -> io::Result<()> {
     Ok(())
 }
 
+/// A known-unsent browser hold can preserve claims, never restore terminal ones.
+/// Callers must separately verify each source's current native claim state.
+pub fn model_pin_hold_is_current(group: &GroupDoc, actor: &Actor, target: &Value) -> bool {
+    let hold = &target["model_pin_hold"];
+    let Some(runtime) = group
+        .extra
+        .get("runtime_states")
+        .and_then(|states| states.get(&actor.id))
+    else {
+        return false;
+    };
+    let ids = &target["last_delivery_event_ids"];
+    actor.runtime == cccc_contracts::ActorRuntime::WebModel
+        && matches!(
+            target["last_delivery_status"].as_str(),
+            Some("model_pin_held" | "model_pin_resuming")
+        )
+        && hold["v"] == 1
+        && hold["legacy"] == false
+        && target["last_submission_evidence"]["submitted"] == false
+        && target["last_submission_evidence"]["submission_evidence"] == "model_pin_unavailable"
+        && hold["prompt_sha256"].as_str().is_some_and(|hash| {
+            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        && hold["actor_generation"] == generation_identity(actor)
+        && hold["policy_revision"].as_u64() == Some(actor.web_model_pin_revision)
+        && hold["binding_revision"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+        && hold["binding_revision"] == target["binding_revision"]
+        && hold["url"].as_str().is_some_and(|url| !url.is_empty())
+        && hold["url"] == target["url"]
+        && target["last_delivery_turn_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+        && target["last_delivery_turn_id"] == runtime["active_turn_id"]
+        && ids.as_array().is_some_and(|ids| {
+            !ids.is_empty()
+                && ids
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == ids.len()
+                && ids
+                    .iter()
+                    .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
+        })
+        && ids == &runtime["active_event_ids"]
+        && hold["turn_id"] == target["last_delivery_turn_id"]
+        && hold["event_ids"] == *ids
+        && hold["delivery_id"] == target["last_delivery_id"]
+        && hold["delivery_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+}
+
 pub fn visible(group: &GroupDoc) -> impl Iterator<Item = &Actor> {
     group
         .actors

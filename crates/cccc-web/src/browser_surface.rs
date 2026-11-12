@@ -2,6 +2,7 @@ mod chatgpt_dom;
 mod frame;
 mod input_events;
 mod interaction;
+mod model_pin;
 mod navigation;
 mod owner;
 mod page_recovery;
@@ -16,6 +17,7 @@ mod chrome_test_guard;
 pub(crate) use chrome_test_guard::chrome_test_guard;
 
 pub use interaction::{serve_socket, serve_vnc_socket};
+pub(crate) use model_pin::ModelPinAuthority;
 pub(crate) use prompt_submission::{
     BOUND_CONVERSATION_ERROR_MARKER, PromptSubmissionOutcome, conversation_target_matches,
     conversation_url_for_target, is_chatgpt_url, normalized_chatgpt_conversation_url,
@@ -1121,6 +1123,7 @@ fn state(session: &Session) -> Value {
         "active":true,"state":"ready","message":"Browser surface is ready.","strategy":session.strategy,
         "url":session.url,"width":session.width,"height":session.height,
         "started_at":session.started_at,"updated_at":session.updated_at,
+        "page_target_id":session.page.target_id(),
         "last_frame_seq":session.seq,"last_frame_at":session.updated_at,"controller_attached":false,
         "metadata":session.metadata,
         "viewer":session.viewer

@@ -23,6 +23,9 @@ export function WebModelConnectionStatus({
 }) {
   const { t, i18n } = useTranslation("settings");
   const { displayState, failed, bound, connecting } = webModelConnectionState(pairing, session);
+  const pin = session?.health_snapshot?.model_pin;
+  const selectionLabel = (value: { model: string; effort?: string | null } | null | undefined) =>
+    value ? `${value.model}${value.effort ? ` / ${value.effort}` : ""}` : "Unknown";
   return (
     <div
       className="min-w-0 space-y-1 text-sm"
@@ -56,6 +59,23 @@ export function WebModelConnectionStatus({
       )}
       {bound && (failed || connecting) && (
         <p className="text-[var(--color-text-secondary)]">{t("webModelActor.bindingRetained")}</p>
+      )}
+      {pin && (
+        <p
+          data-model-pin-state={pin.state}
+          className={
+            pin.state === "held"
+              ? "text-amber-700 dark:text-amber-300"
+              : "text-[var(--color-text-secondary)]"
+          }
+        >
+          Pinned: {pin.requested ? selectionLabel(pin.requested) : "Observe only"}; observed:{" "}
+          {selectionLabel(pin.observed)}.
+          {pin.state === "held" ? " Delivery held. Set the picker by hand, then resume." : ""}
+          {pin.effective?.source === "fallback"
+            ? ` Explicit fallback: ${selectionLabel(pin.effective.selection)}.`
+            : ""}
+        </p>
       )}
     </div>
   );

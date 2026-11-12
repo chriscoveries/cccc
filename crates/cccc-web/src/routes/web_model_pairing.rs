@@ -194,12 +194,23 @@ async fn connect(
     prompt: &str,
 ) -> Result<(), &'static str> {
     candidate(state, args)?;
+    let group = args["group_id"].as_str().ok_or("pairing_target_changed")?;
+    let actor = args["actor_id"].as_str().ok_or("pairing_target_changed")?;
+    // The in-flight control permit already belongs to this task. Take only
+    // its file lock while submitting, and release it before confirming a bind.
+    let lock = cccc_core::web_model_connectors::browser_work_lock(&state.home, group, actor);
+    let submission_lock = cccc_core::fs::try_exclusive_lock(&lock)
+        .map_err(|_| "pairing_browser_busy")?
+        .ok_or("pairing_browser_busy")?;
+    let authority = crate::browser_surface::ModelPinAuthority::load(&state.home, group, actor)
+        .map_err(|_| "model_pin_unavailable")?;
     match state
         .browser_surfaces
-        .submit_pairing_prompt(key, target, prompt)
+        .submit_pairing_prompt_with_pin(key, target, prompt, authority.as_ref())
         .await
     {
         Ok(PromptSubmissionOutcome::Verified(_)) => {}
+        Ok(PromptSubmissionOutcome::ModelPinHeld(_)) => return Err("model_pin_unavailable"),
         Ok(PromptSubmissionOutcome::Ambiguous(v) | PromptSubmissionOutcome::Deferred(v)) => {
             return Err(if v["submission_evidence"] == "composer_occupied" {
                 "pairing_composer_occupied"
@@ -215,6 +226,7 @@ async fn connect(
             });
         }
     }
+    drop(submission_lock);
     loop {
         let pair = candidate(state, args)?;
         let url = target

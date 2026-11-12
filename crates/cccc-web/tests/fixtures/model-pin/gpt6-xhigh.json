@@ -1,0 +1,52 @@
+{
+  "pre": {
+    "buttonText": "Thinking effort Extra High",
+    "buttonAttrs": {
+      "type": "button",
+      "aria-label": "Select ChatGPT model",
+      "aria-expanded": "false",
+      "aria-haspopup": "menu",
+      "data-state": "closed",
+      "data-selected-reasoning-effort": "max"
+    }
+  },
+  "menu": {
+    "menuAttrs": { "role": "menu", "aria-orientation": "vertical", "data-state": "open" },
+    "nodes": [
+      {
+        "tag": "div",
+        "attrs": { "role": "group" },
+        "text": "Extra High Extra High, 4 of 5. Use Left and Right arrow keys to adjust power Loc"
+      },
+      {
+        "tag": "div",
+        "attrs": { "role": "menuitem", "aria-label": "Select model" },
+        "text": "Extra High"
+      },
+      { "tag": "span", "attrs": { "role": "status" }, "text": "Extra High, 4 of 5." },
+      { "tag": "div", "attrs": { "role": "menuitem", "aria-label": "Power" }, "text": "" },
+      {
+        "tag": "span",
+        "attrs": {
+          "role": "slider",
+          "aria-valuenow": "3",
+          "aria-valuemin": "0",
+          "aria-valuemax": "4",
+          "aria-orientation": "horizontal"
+        },
+        "text": ""
+      },
+      {
+        "tag": "div",
+        "attrs": { "role": "menuitemradio", "aria-checked": "true" },
+        "text": "GPT-6"
+      },
+      {
+        "tag": "div",
+        "attrs": { "role": "menuitemradio", "aria-checked": "false" },
+        "text": "GPT-5.6 Sol"
+      }
+    ]
+  },
+  "after": { "menuOpen": false, "buttonText": "Thinking effort Extra High" }
+}

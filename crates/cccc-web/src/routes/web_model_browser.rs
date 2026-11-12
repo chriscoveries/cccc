@@ -265,7 +265,7 @@ async fn resume_delivery(State(state): State<AppState>, Json(body): Json<Value>)
     let group_id = required(&body, "group_id")?;
     let actor_id = required(&body, "actor_id")?;
     validate_actor(&state, &group_id, &actor_id)?;
-    let delivery_id = required(&body, "delivery_id")?;
+    let delivery_id = body["delivery_id"].as_str().unwrap_or_default().to_owned();
     super::web_model_delivery::resume_after_review(&state, &group_id, &actor_id, &delivery_id)
         .await?;
     super::web_model_delivery::ensure_worker(state.clone(), group_id.clone(), actor_id.clone())
@@ -390,6 +390,24 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
         .get("metadata")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let actor_doc = GroupStore::new(state.home.clone())
+        .map_err(io_error)?
+        .load(group_id)
+        .map_err(io_error)?;
+    let actor = cccc_core::actors::find(&actor_doc, actor_id)
+        .ok_or_else(|| ApiError::bad("Actor removed"))?;
+    let mut model_pin = metadata["model_pin"].clone();
+    if target["last_delivery_status"] == "model_pin_held" {
+        model_pin = target["model_pin_health"].clone();
+    }
+    if !active
+        || model_pin["page_target_id"] != surface["page_target_id"]
+        || model_pin["surface_started_at"] != surface["started_at"]
+        || model_pin["policy_revision"].as_u64() != Some(actor.web_model_pin_revision)
+        || model_pin["actor_generation"] != cccc_core::actors::generation_identity(actor)
+    {
+        model_pin = json!({"state":if target["last_delivery_status"]=="model_pin_held"{"held"}else{"unchecked"},"reason":"Fresh model check required before delivery","requested":actor.web_model_pin,"observed":null,"policy_revision":actor.web_model_pin_revision,"automatic_cross_family_switches":0});
+    }
     let ready = readiness["ready"].as_bool().unwrap_or(false);
     let login_required = readiness["login_required"].as_bool().unwrap_or(false);
     let verification_required = readiness["verification_required"]
@@ -635,6 +653,7 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
     };
     let health = json!({
         "schema":"cccc.web_model.health.v1","group_id":group_id,"actor_id":actor_id,
+        "model_pin":model_pin,
         "tone":tone,
         "summary":next_label,
         "browser":{
@@ -711,7 +730,8 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
             "last_delivery_started_at":target["last_delivery_started_at"],
             "last_delivery_id":target["last_delivery_id"],
             "last_delivery_status":delivery_status,
-            "can_resume_delivery":kind == "existing_chat" && internal_delivery_status == "submission_ambiguous",
+            "can_resume_delivery":(kind == "existing_chat" && internal_delivery_status == "submission_ambiguous")
+                || internal_delivery_status=="model_pin_held" || model_pin["state"]=="held",
             "last_submission_evidence":submission_evidence,
             "last_send_selector":send_selector,
             "last_turn_id":target["last_delivery_turn_id"],

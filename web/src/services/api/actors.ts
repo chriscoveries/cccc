@@ -1,4 +1,4 @@
-import type { Actor, ActorProfile, ActorProfileUsage } from "../../types";
+import type { Actor, ActorProfile, ActorProfileUsage, WebModelPin } from "../../types";
 import { actorProfileIdentityKey } from "../../utils/actorProfiles";
 import { getGroupBlobUrl } from "./groups";
 import {
@@ -199,6 +199,7 @@ export async function updateActor(
     capabilityAutoload?: string[];
     capabilityHidden?: string[];
     defaultScopeKey?: string;
+    webModelPin?: WebModelPin | null;
   },
 ) {
   invalidateGroupActorsReads(groupId);
@@ -215,6 +216,7 @@ export async function updateActor(
   if (Array.isArray(opts?.capabilityAutoload)) body.capability_autoload = opts.capabilityAutoload;
   if (Array.isArray(opts?.capabilityHidden)) body.capability_hidden = opts.capabilityHidden;
   if (opts?.defaultScopeKey !== undefined) body.default_scope_key = opts.defaultScopeKey;
+  if (opts?.webModelPin !== undefined) body.web_model_pin = opts.webModelPin;
   try {
     return await apiJson<ActorRuntimeActionResult>(
       `/api/v1/groups/${encodeURIComponent(groupId)}/actors/${encodeURIComponent(actorId)}`,

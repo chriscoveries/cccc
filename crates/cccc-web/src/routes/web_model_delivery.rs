@@ -57,6 +57,7 @@ pub(super) enum DeliveryOutcome {
     Deferred(String),
     Ambiguous,
     Stopped,
+    ModelPinHeld,
 }
 
 pub(super) async fn ensure_worker(state: AppState, group_id: String, actor_id: String) {
@@ -116,7 +117,7 @@ fn spawn_worker(state: AppState, group_id: String, actor_id: String) {
                         deferred_retries = 0;
                         IDLE_POLL_INTERVAL
                     }
-                    Ok(DeliveryOutcome::Stopped) => break,
+                    Ok(DeliveryOutcome::Stopped | DeliveryOutcome::ModelPinHeld) => break,
                     Err(error) => {
                         tracing::warn!(
                             group_id,
@@ -277,6 +278,9 @@ async fn deliver_once(
     }
     let target = load_target(state, group_id, actor_id)?;
     let target_url = target["url"].as_str().unwrap_or("");
+    if target["last_delivery_status"] == "model_pin_held" {
+        return Ok(DeliveryOutcome::ModelPinHeld);
+    }
     if target["last_delivery_status"] == "submitting" {
         let message = "browser delivery was interrupted after its at-most-once dispatch fence; the message will not be redelivered automatically";
         let evidence = json!({
@@ -424,7 +428,10 @@ async fn deliver_once(
     }
     if (readiness["composer_chars"].as_u64().unwrap_or(0) > 0
         || readiness["composer_has_attachments"] == true)
-        && target["last_delivery_status"] != "deferred"
+        && !matches!(
+            target["last_delivery_status"].as_str(),
+            Some("deferred" | "model_pin_resuming")
+        )
     {
         if target["last_delivery_status"] != "draft_blocked" {
             update_target(
@@ -477,7 +484,28 @@ async fn deliver_once(
         }
     }
     let mut wait_args = browser_wait_args(group_id, actor_id);
-    if target["last_delivery_status"] == "deferred" {
+    let pin_authority =
+        crate::browser_surface::ModelPinAuthority::load(&state.home, group_id, actor_id)
+            .map_err(|error| ApiError::bad(error.to_string()))?;
+    if let Some(authority) = &pin_authority {
+        let health = state
+            .browser_surfaces
+            .check_model_pin(session_key, authority)
+            .await
+            .map_err(|error| ApiError::bad(error.to_string()))?;
+        update_target(
+            state,
+            group_id,
+            actor_id,
+            json!({"model_pin_health":health}),
+        )?;
+        if health["state"] != "ready" {
+            return Ok(DeliveryOutcome::ModelPinHeld);
+        }
+    }
+    if target["last_delivery_status"] == "deferred"
+        || target["last_delivery_status"] == "model_pin_resuming"
+    {
         // The batch is staged in this composer; only the same batch matches it.
         wait_args.insert(
             "resume_turn_id".into(),
@@ -485,6 +513,19 @@ async fn deliver_once(
         );
     }
     let wait = daemon_call(state, "runtime_wait_next_turn", wait_args).await?;
+    if target["last_delivery_status"] == "model_pin_resuming"
+        && (wait["status"] != "work_available"
+            || wait["turn"]["turn_id"] != target["last_delivery_turn_id"]
+            || wait["turn"]["event_ids"] != target["last_delivery_event_ids"])
+    {
+        update_target(
+            state,
+            group_id,
+            actor_id,
+            json!({"last_delivery_status":"model_pin_held","last_error":"The held native turn no longer matches; review its ownership."}),
+        )?;
+        return Ok(DeliveryOutcome::ModelPinHeld);
+    }
     if wait["status"] == "turn_in_progress" && wait["browser_recovery_required"] == true {
         // The daemon settled this browser's old claims after a restart, or
         // inherited a failed turn from an older version. Keep the same batch
@@ -531,6 +572,17 @@ async fn deliver_once(
         &delivery_id,
         &event_label,
     )?;
+    if target["last_delivery_status"] == "model_pin_resuming"
+        && target["model_pin_hold"]["prompt_sha256"] != json!(prompt_digest(&browser_prompt))
+    {
+        update_target(
+            state,
+            group_id,
+            actor_id,
+            json!({"last_delivery_status":"model_pin_held","last_error":"The held prompt changed; review it without replaying."}),
+        )?;
+        return Ok(DeliveryOutcome::ModelPinHeld);
+    }
     // Keep the existing binding check after the awaited claim; only Grok's
     // browser credential injection has been removed.
     if super::web_model_connector_store::for_actor(state, group_id, actor_id).is_none() {
@@ -557,17 +609,22 @@ async fn deliver_once(
     .await;
     let submitted = state
         .browser_surfaces
-        .submit_prompt_with_attachment(
+        .submit_prompt_with_pin(
             session_key,
             target_url,
             &browser_prompt,
             attachment.as_deref(),
             &delivery_id,
             None,
+            pin_authority.as_ref(),
         )
         .await;
     let browser = match submitted {
         Ok(PromptSubmissionOutcome::Verified(browser)) => browser,
+        Ok(PromptSubmissionOutcome::ModelPinHeld(browser)) => {
+            hold_model_pin(state, group_id, actor_id, &browser_prompt, browser, false).await?;
+            return Ok(DeliveryOutcome::ModelPinHeld);
+        }
         Ok(PromptSubmissionOutcome::Deferred(browser)) => {
             let message = "browser model is not ready for a safe prompt submission";
             update_target(
@@ -909,6 +966,12 @@ pub(super) async fn resume_after_review(
     let _work = browser_work(state, group_id, actor_id)?
         .ok_or_else(|| ApiError::bad("Delivery is busy; try again after it settles."))?;
     let target = load_target(state, group_id, actor_id)?;
+    if target["last_delivery_status"] == "model_pin_held"
+        || (target["model_pin_health"]["state"] == "held"
+            && target["last_delivery_status"] != "submission_ambiguous")
+    {
+        return resume_model_pin(state, group_id, actor_id, delivery_id, &target).await;
+    }
     if target["kind"] != "existing_chat" || target["last_delivery_status"] != "submission_ambiguous"
     {
         return Err(ApiError::bad(
@@ -962,6 +1025,150 @@ pub(super) async fn resume_after_review(
         }),
     )?;
     Ok(())
+}
+
+fn prompt_digest(prompt: &str) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(
+            prompt
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .as_bytes()
+        )
+    )
+}
+
+async fn hold_model_pin(
+    state: &AppState,
+    group_id: &str,
+    actor_id: &str,
+    prompt: &str,
+    browser: Value,
+    legacy: bool,
+) -> Result<(), ApiError> {
+    let store = cccc_core::GroupStore::new(state.home.clone())
+        .map_err(|error| ApiError::bad(error.to_string()))?;
+    let group = store
+        .load(group_id)
+        .map_err(|error| ApiError::bad(error.to_string()))?;
+    let actor =
+        cccc_core::actors::find(&group, actor_id).ok_or_else(|| ApiError::bad("Actor removed"))?;
+    let target = load_target(state, group_id, actor_id)?;
+    let surface = state.browser_surfaces.info(&key(group_id, actor_id)).await;
+    update_target(
+        state,
+        group_id,
+        actor_id,
+        json!({
+            "last_delivery_status":"model_pin_held","last_submission_evidence":browser,
+            "last_error":"Model selection is unavailable or mismatched. Set it by hand, then explicitly resume this held turn.",
+            "model_pin_health":browser["model_pin"],
+            "model_pin_hold":{
+                "v":1,"legacy":legacy,"actor_generation":cccc_core::actors::generation_identity(actor),
+                "policy_revision":actor.web_model_pin_revision,"binding_revision":target["binding_revision"],"url":target["url"],
+                "turn_id":target["last_delivery_turn_id"],"event_ids":target["last_delivery_event_ids"],"delivery_id":target["last_delivery_id"],
+                "page_target_id":surface["page_target_id"],"surface_started_at":surface["started_at"],
+                "prompt_sha256":prompt_digest(prompt),"draft_staged":browser["draft_staged"]==true
+            }
+        }),
+    )
+}
+
+async fn resume_model_pin(
+    state: &AppState,
+    group_id: &str,
+    actor_id: &str,
+    delivery_id: &str,
+    target: &Value,
+) -> Result<(), ApiError> {
+    let group = cccc_core::GroupStore::new(state.home.clone())
+        .and_then(|store| store.load(group_id))
+        .map_err(|error| ApiError::bad(error.to_string()))?;
+    let actor =
+        cccc_core::actors::find(&group, actor_id).ok_or_else(|| ApiError::bad("Actor removed"))?;
+    let claimed = target["last_delivery_status"] == "model_pin_held";
+    if claimed {
+        if target["last_delivery_id"] != delivery_id
+            || !cccc_core::actors::model_pin_hold_is_current(&group, actor, target)
+        {
+            return Err(ApiError::bad(
+                "Held turn authority changed; review it without replaying.",
+            ));
+        }
+        for id in target["last_delivery_event_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            let current =
+                cccc_core::inbox::delivery_states(&state.home, &group, &[actor_id.into()], id)
+                    .map_err(|error| ApiError::bad(error.to_string()))?
+                    .remove(actor_id);
+            if current != Some(("claimed".into(), "web_model_browser".into())) {
+                return Err(ApiError::bad(
+                    "Held source was consumed or terminalized; it cannot be replayed.",
+                ));
+            }
+        }
+    } else if group.extra.get("runtime_states").unwrap_or(&Value::Null)[actor_id]["active_turn_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty())
+    {
+        return Err(ApiError::bad(
+            "Finish or review the native active turn first.",
+        ));
+    }
+    let session_key = key(group_id, actor_id);
+    let surface = state.browser_surfaces.info(&session_key).await;
+    if claimed
+        && (surface["page_target_id"] != target["model_pin_hold"]["page_target_id"]
+            || surface["started_at"] != target["model_pin_hold"]["surface_started_at"])
+    {
+        return Err(ApiError::bad(
+            "Held page owner changed; it cannot be replayed automatically.",
+        ));
+    }
+    let authority =
+        crate::browser_surface::ModelPinAuthority::load(&state.home, group_id, actor_id)
+            .map_err(|error| ApiError::bad(error.to_string()))?
+            .ok_or_else(|| ApiError::bad("ChatGPT Actor required"))?;
+    let health = state
+        .browser_surfaces
+        .check_model_pin(&session_key, &authority)
+        .await
+        .map_err(|error| ApiError::bad(error.to_string()))?;
+    if health["state"] != "ready" {
+        return Err(ApiError::bad(
+            "Set the pinned model by hand before resuming.",
+        ));
+    }
+    if claimed {
+        let draft = state
+            .browser_surfaces
+            .model_pin_draft(&session_key)
+            .await
+            .map_err(|error| ApiError::bad(error.to_string()))?;
+        if (target["model_pin_hold"]["draft_staged"] == true
+            && json!(prompt_digest(&draft)) != target["model_pin_hold"]["prompt_sha256"])
+            || (target["model_pin_hold"]["draft_staged"] != true && !draft.is_empty())
+        {
+            return Err(ApiError::bad(
+                "The held draft changed; it will not be overwritten.",
+            ));
+        }
+    }
+    if load_target(state, group_id, actor_id)? != *target {
+        return Err(ApiError::bad("Held target changed; refresh first."));
+    }
+    update_target(
+        state,
+        group_id,
+        actor_id,
+        json!({"model_pin_health":health,"last_delivery_status":if claimed{"model_pin_resuming"}else{target["last_delivery_status"].as_str().unwrap_or("")},"last_error":""}),
+    )
 }
 
 async fn recover_verified_ambiguous_submission(
@@ -1100,6 +1307,25 @@ async fn recover_legacy_pending_delivery(
     session_key: &str,
     target: &Value,
 ) -> Result<DeliveryOutcome, ApiError> {
+    let pin_authority =
+        crate::browser_surface::ModelPinAuthority::load(&state.home, group_id, actor_id)
+            .map_err(|error| ApiError::bad(error.to_string()))?;
+    if let Some(authority) = &pin_authority {
+        let health = state
+            .browser_surfaces
+            .check_model_pin(session_key, authority)
+            .await
+            .map_err(|error| ApiError::bad(error.to_string()))?;
+        update_target(
+            state,
+            group_id,
+            actor_id,
+            json!({"model_pin_health":health}),
+        )?;
+        if health["state"] != "ready" {
+            return Ok(DeliveryOutcome::ModelPinHeld);
+        }
+    }
     let event_ids = target["last_delivery_event_ids"].clone();
     let mut recover_args = args(group_id, actor_id);
     recover_args.insert("event_ids".into(), event_ids.clone());
@@ -1170,17 +1396,22 @@ async fn recover_legacy_pending_delivery(
     )?;
     let browser = match state
         .browser_surfaces
-        .submit_prompt_with_attachment(
+        .submit_prompt_with_pin(
             session_key,
             target_url,
             &browser_prompt,
             attachment.as_deref(),
             &delivery_id,
             Some(&old_prompt),
+            pin_authority.as_ref(),
         )
         .await
     {
         Ok(PromptSubmissionOutcome::Verified(browser)) => browser,
+        Ok(PromptSubmissionOutcome::ModelPinHeld(browser)) => {
+            hold_model_pin(state, group_id, actor_id, &browser_prompt, browser, true).await?;
+            return Ok(DeliveryOutcome::ModelPinHeld);
+        }
         Ok(PromptSubmissionOutcome::Deferred(browser)) => {
             let message = "legacy delivery was safely restaged, but ChatGPT did not expose an enabled Send control";
             update_target(

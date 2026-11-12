@@ -25,6 +25,7 @@ pub(crate) enum PromptSubmissionOutcome {
     Verified(Value),
     Deferred(Value),
     Ambiguous(Value),
+    ModelPinHeld(Value),
 }
 
 #[derive(Default, Deserialize)]
@@ -154,6 +155,7 @@ impl BrowserSurfaces {
         }))
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit_prompt_with_attachment(
         &self,
         key: &str,
@@ -171,17 +173,43 @@ impl BrowserSurfaces {
             delivery_id,
             expected_staged_draft,
             None,
+            None,
         )
         .await
     }
 
-    pub(crate) async fn submit_pairing_prompt(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn submit_prompt_with_pin(
+        &self,
+        key: &str,
+        target_url: &str,
+        prompt: &str,
+        attachment_path: Option<&Path>,
+        delivery_id: &str,
+        expected_staged_draft: Option<&str>,
+        pin: Option<&super::ModelPinAuthority>,
+    ) -> Result<PromptSubmissionOutcome> {
+        self.submit_prompt(
+            key,
+            target_url,
+            prompt,
+            attachment_path,
+            delivery_id,
+            expected_staged_draft,
+            None,
+            pin,
+        )
+        .await
+    }
+
+    pub(crate) async fn submit_pairing_prompt_with_pin(
         &self,
         key: &str,
         target: &super::PairingPage,
         prompt: &str,
+        pin: Option<&super::ModelPinAuthority>,
     ) -> Result<PromptSubmissionOutcome> {
-        self.submit_prompt(key, "", prompt, None, "", None, Some(target))
+        self.submit_prompt(key, "", prompt, None, "", None, Some(target), pin)
             .await
     }
 
@@ -195,11 +223,21 @@ impl BrowserSurfaces {
         delivery_id: &str,
         expected_staged_draft: Option<&str>,
         pairing: Option<&super::PairingPage>,
+        pin_authority: Option<&super::ModelPinAuthority>,
     ) -> Result<PromptSubmissionOutcome> {
         if prompt.trim().is_empty() {
             bail!("browser prompt is empty");
         }
-        let page = self.page(key).await?;
+        let operation = self.key_operation(key).await;
+        let _operation = operation.lock().await;
+        let session = self
+            .sessions
+            .lock()
+            .await
+            .get(key)
+            .cloned()
+            .context("browser surface closed")?;
+        let page = session.page.clone();
         if let Some(target) = pairing {
             target.check_before_send(self, key).await?;
         }
@@ -236,6 +274,42 @@ impl BrowserSurfaces {
                 &existing,
                 &existing,
             )));
+        }
+
+        let current_url = page.url().await?.unwrap_or_default();
+        let guarded_chatgpt =
+            pin_authority.is_some() || is_chatgpt_url(target_url) || is_chatgpt_url(&current_url);
+        if guarded_chatgpt {
+            if !is_chatgpt_url(&current_url) {
+                return Ok(PromptSubmissionOutcome::ModelPinHeld(
+                    json!({"submitted":false,"submission_evidence":"model_pin_unavailable","reason":"model_pin_page_changed"}),
+                ));
+            }
+            let Some(authority) = pin_authority else {
+                return Ok(PromptSubmissionOutcome::ModelPinHeld(
+                    json!({"submitted":false,"submission_evidence":"model_pin_unavailable","reason":"model_pin_authority_required"}),
+                ));
+            };
+            let health = match tokio::time::timeout(
+                Duration::from_secs(3),
+                self.observe_model_pin(key, &session, authority),
+            )
+            .await
+            {
+                Ok(Ok(health)) => health,
+                _ => json!({"state":"held","reason":"picker_unreadable_set_by_hand"}),
+            };
+            let _ = tokio::time::timeout(
+                Duration::from_millis(300),
+                page.evaluate(super::model_pin::CLOSE_MENU),
+            )
+            .await;
+            self.record_model_pin(key, &session, &health).await;
+            if health["state"] != "ready" {
+                return Ok(PromptSubmissionOutcome::ModelPinHeld(
+                    json!({"submitted":false,"submission_evidence":"model_pin_unavailable","model_pin":health,"draft_staged":existing.composer_exact}),
+                ));
+            }
         }
 
         let composer = wait_for_composer(&page).await?;
@@ -327,6 +401,77 @@ impl BrowserSurfaces {
                         baseline: &baseline,
                     },
                     "staged_draft_changed",
+                )
+                .await);
+        }
+        if guarded_chatgpt {
+            let authority = pin_authority.context("model pin authority required")?;
+            let health = match tokio::time::timeout(
+                Duration::from_secs(3),
+                self.observe_model_pin(key, &session, authority),
+            )
+            .await
+            {
+                Ok(Ok(health)) => health,
+                _ => json!({"state":"held","reason":"picker_unreadable_set_by_hand"}),
+            };
+            self.record_model_pin(key, &session, &health).await;
+            if health["state"] != "ready" {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(300),
+                    page.evaluate(super::model_pin::CLOSE_MENU),
+                )
+                .await;
+                return Ok(PromptSubmissionOutcome::ModelPinHeld(
+                    json!({"submitted":false,"submission_evidence":"model_pin_unavailable","model_pin":health,"draft_staged":true}),
+                ));
+            }
+            if authority.revalidate().is_err()
+                || self
+                    .require_pin_session(key, &session, authority)
+                    .await
+                    .is_err()
+            {
+                return Ok(PromptSubmissionOutcome::ModelPinHeld(
+                    json!({"submitted":false,"submission_evidence":"model_pin_unavailable","model_pin":health,"reason":"model_pin_authority_changed","draft_staged":true}),
+                ));
+            }
+            let script = super::model_pin::guarded_form_script(
+                prompt,
+                &needles,
+                &before_send.url,
+                &health["observed"],
+                INSPECT_SUBMISSION_SCRIPT,
+                super::chatgpt_dom::MESSAGES_SCRIPT,
+                REQUEST_SUBMIT_SCRIPT,
+            );
+            let activation: Result<RequestSubmitResult> = async {
+                Ok(page
+                    .evaluate(script)
+                    .await?
+                    .into_value::<RequestSubmitResult>()?)
+            }
+            .await;
+            if matches!(&activation,Ok(result) if !result.invoked) {
+                return Ok(PromptSubmissionOutcome::ModelPinHeld(
+                    json!({"submitted":false,"submission_evidence":"model_pin_unavailable","model_pin":health,"reason":"final_model_or_draft_check_refused","draft_staged":true}),
+                ));
+            }
+            let action = match &activation {
+                Ok(result) if result.error.is_empty() => result.action.as_str(),
+                _ => "form.requestSubmit:dispatch_unknown",
+            };
+            return Ok(self
+                .verify_attempt(
+                    key,
+                    &page,
+                    SubmissionAttempt {
+                        prompt,
+                        needles: &needles,
+                        input: &composer.descriptor,
+                        action,
+                        baseline: &baseline,
+                    },
                 )
                 .await);
         }
@@ -1259,6 +1404,9 @@ fn with_attachment_evidence(
         }
         PromptSubmissionOutcome::Ambiguous(value) => {
             PromptSubmissionOutcome::Ambiguous(attach(value))
+        }
+        PromptSubmissionOutcome::ModelPinHeld(value) => {
+            PromptSubmissionOutcome::ModelPinHeld(attach(value))
         }
     }
 }

@@ -95,6 +95,49 @@ function ActorSetup({
     };
   }, [fetchStatus, isVisible]);
   const pairing = result?.pairing;
+  const modelPin = result?.health_snapshot?.model_pin?.requested;
+  const preset = !modelPin
+    ? "none"
+    : modelPin.on_unavailable === "fallback" || modelPin.deny?.length
+      ? "custom"
+      : modelPin.model === "gpt-5.6-pro"
+        ? "pro"
+        : modelPin.effort === "extra_high"
+          ? "extra_high"
+          : "custom";
+  async function savePin(value: string) {
+    if (busy || value === "custom") return;
+    const identity = selection.current;
+    mutation.current += 1;
+    setBusy(true);
+    onBusyChange?.(true);
+    setError("");
+    try {
+      const pin =
+        value === "none"
+          ? null
+          : value === "pro"
+            ? { model: "gpt-5.6-pro" as const, effort: null }
+            : { model: "gpt-6" as const, effort: "extra_high" as const };
+      const saved = await api.updateActor(groupId, actorId, undefined, undefined, undefined, {
+        webModelPin: pin,
+      });
+      if (!saved.ok) throw new Error(saved.error.message);
+      const next = await fetchStatus();
+      if (selection.current === identity) {
+        if (next.ok) setResult(next.result);
+        else setError(next.error.message);
+      }
+    } catch (e) {
+      if (selection.current === identity) setError(String(e));
+    } finally {
+      if (selection.current === identity) {
+        mutation.current += 1;
+        setBusy(false);
+        onBusyChange?.(false);
+      }
+    }
+  }
   const enabled = pairing?.actor_enabled === true;
   const { state, bound, connecting, failed } = webModelConnectionState(
     pairing,
@@ -188,6 +231,25 @@ function ActorSetup({
           </p>
         )}
       </div>
+      <label className="block space-y-1 text-sm">
+        <span>Model pin</span>
+        <select
+          aria-label="Model pin"
+          className={inputClass()}
+          value={preset}
+          disabled={busy || !result}
+          onChange={(event) => void savePin(event.target.value)}
+        >
+          <option value="none">Observe only</option>
+          <option value="pro">GPT-5.6 Pro</option>
+          <option value="extra_high">GPT-6 Extra High</option>
+          {preset === "custom" && <option value="custom">Custom policy</option>}
+        </select>
+        <span className="block text-[var(--color-text-secondary)]">
+          A mismatch pauses delivery. Change ChatGPT's picker by hand, then resume. GPT-6 Pro is
+          blocked.
+        </span>
+      </label>
       {error && (
         <p role="alert" className="break-words text-sm text-red-600 dark:text-red-300">
           {error}
