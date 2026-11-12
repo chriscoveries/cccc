@@ -1394,6 +1394,7 @@ fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
     for fault in [
         "none",
         "receipt-only",
+        "receipt-done",
         "canonical-cleared",
         "missing-execution-new-wake",
     ] {
@@ -1414,11 +1415,16 @@ fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
             connector["dots"]["execution"]["claimed_at"] = json!("2000-01-01T00:00:00Z")
         })
         .expect("age fixture execution");
-        if matches!(fault, "receipt-only" | "canonical-cleared") {
+        if matches!(fault, "receipt-only" | "receipt-done" | "canonical-cleared") {
             let completion = super::super::runtime_completion::Completion {
                 turn_id: turn["turn_id"].as_str().expect("turn").to_owned(),
                 event_ids: vec![event_id.clone()],
-                status: "expired".into(),
+                status: if fault == "receipt-done" {
+                    "done"
+                } else {
+                    "expired"
+                }
+                .into(),
                 delivery_id: format!("runtime:{}", turn["turn_id"].as_str().expect("turn")),
             };
             // Stop at the durable receipt boundary, retaining the fixture's
@@ -1451,7 +1457,14 @@ fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
         assert_eq!(expired["status"], "idle");
         assert_eq!(expired["reason_code"], "dots_wake_already_completed");
         let status = f.call("dots_events_status", json!({}));
-        assert_eq!(status["last_execution"]["status"], "expired");
+        assert_eq!(
+            status["last_execution"]["status"],
+            if fault == "receipt-done" {
+                "done"
+            } else {
+                "expired"
+            }
+        );
         assert_eq!(status["active_turn_id"], "");
         assert!(status["active_turn_elapsed_seconds"].is_null());
         // The expired turn's inputs are never replayed.
@@ -1468,19 +1481,21 @@ fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
             .expect("delivery state")
             .is_some_and(|(state, _)| state != "claimed")
         );
-        // A zombie completion for the expired turn is rejected.
+        // A different zombie outcome is rejected. An already committed done
+        // receipt keeps its existing exact-completion retry semantics.
         let zombie = f.captured(&wake, "cccc_runtime_complete_turn");
-        assert!(
-            !f.response(
+        assert_eq!(
+            f.response(
                 "runtime_complete_turn",
                 json!({"by":"dot","turn_id":turn["turn_id"],"event_ids":turn["event_ids"],
                 "status":"done","_cccc_web_binding":zombie})
             )
-            .ok
+            .ok,
+            fault == "receipt-done"
         );
         // The next input wakes and claims normally.
         let fresh_source = f.source("fresh task");
-        let next_wake = f.delivery();
+        let mut next_wake = f.delivery();
         assert!(next_wake.is_object());
         if fault == "missing-execution-new-wake" {
             // Reuse the producer's real next wake, restoring only the previous
@@ -1497,10 +1512,10 @@ fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
             })
             .expect("drop interrupted execution projection");
         }
-        let claimed = f.claim(&f.captured(&next_wake, "cccc_runtime_wait_next_turn"));
-        assert_eq!(claimed["status"], "work_available");
-        assert_eq!(claimed["turn"]["event_ids"], json!([fresh_source]));
+        let mut claimed = f.claim(&f.captured(&next_wake, "cccc_runtime_wait_next_turn"));
         if fault == "missing-execution-new-wake" {
+            assert_eq!(claimed["status"], "idle");
+            assert!(claimed.get("actor_token").is_none());
             let private = f.private();
             assert_eq!(
                 private["dots"]["last_execution"]["turn_id"],
@@ -1510,7 +1525,13 @@ fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
                 private["dots"]["last_execution"]["event_id"],
                 next_wake["event_id"]
             );
+            let fenced_wake = next_wake;
+            next_wake = f.delivery();
+            assert_ne!(next_wake["event_id"], fenced_wake["event_id"]);
+            claimed = f.claim(&f.captured(&next_wake, "cccc_runtime_wait_next_turn"));
         }
+        assert_eq!(claimed["status"], "work_available");
+        assert_eq!(claimed["turn"]["event_ids"], json!([fresh_source]));
         assert!(claimed["actor_token"].is_string());
         let done = f.complete(
             &claimed["turn"],
@@ -1518,5 +1539,308 @@ fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
         );
         assert_eq!(done["status"], "done");
         assert_eq!(f.call("dots_events_status", json!({}))["phase"], "ready");
+    }
+}
+
+/// Produce the two real durable stores up to the inner claim, deliberately
+/// omitting only the outer connector commit. Timestamps are fault controls.
+fn interrupted_claim(f: &Fixture, phase: &str) -> (String, Value, Value) {
+    let source = f.source("interrupted task");
+    let wake = f.delivery();
+    match phase {
+        "pending" => {
+            f.received(&wake, 500);
+        }
+        "delivered" => {
+            f.received(&wake, 204);
+        }
+        "sending" => {}
+        _ => panic!("invalid fault phase"),
+    }
+    let request = DaemonRequest {
+        v: 1,
+        op: "dots_work_claim".into(),
+        args: json!({"group_id":f.group.group_id,"actor_id":"dot","by":"dot",
+            "transport":"web_model_pull","_cccc_web_binding":f.claim_capture()})
+        .as_object()
+        .expect("request")
+        .clone(),
+    };
+    let result = Value::Object(
+        super::super::runtime_state::wait_next_turn(&f.home, &request)
+            .expect("inner canonical claim before connector commit"),
+    );
+    assert_eq!(result["status"], "work_available");
+    assert_eq!(result["turn"]["event_ids"], json!([source]));
+    assert!(f.private()["dots"]["execution"].is_null());
+    assert_eq!(f.private()["dots"]["wake"]["state"], phase);
+    let busy = f.claim(&f.claim_capture());
+    assert_eq!(busy["status"], "turn_in_progress");
+    assert!(busy.get("actor_token").is_none());
+    let groups = GroupStore::new(f.home.clone()).expect("groups");
+    integration_state::group_update(&groups, &f.group.group_id, "runtime_states", |states| {
+        states["dot"]["updated_at"] = json!("2000-01-01T00:00:00Z");
+        Ok(())
+    })
+    .expect("age canonical turn only");
+    store::update_connector(&f.home, &f.connector_id, |connector| {
+        connector["dots"]["wake"]["created_at"] = json!("2000-01-01T00:00:00Z");
+    })
+    .expect("age produced wake only");
+    (source, wake, result["turn"].clone())
+}
+
+#[test]
+fn dots_interrupted_claim_fences_old_wake_before_any_new_source_admission() {
+    for phase in ["pending", "sending", "delivered"] {
+        for already_cleared in [false, true] {
+            for queued_before in [false, true] {
+                let f = Fixture::new();
+                f.start();
+                let (old_source, wake, _) = interrupted_claim(&f, phase);
+                let capture = f.claim_capture();
+                let old_token = f.wake_token(&wake);
+                let source = queued_before.then(|| f.source("queued task"));
+                if already_cleared {
+                    // A persisted gap produced by the earlier clear-before-save order.
+                    super::super::runtime_state::set_runtime_status(
+                        &f.home,
+                        &f.group,
+                        "dot",
+                        "waiting",
+                        "",
+                        "",
+                        &[],
+                    )
+                    .expect("old canonical cleanup without connector commit");
+                }
+                let expired = f.claim(&capture);
+                assert_eq!(expired["status"], "idle");
+                assert!(expired.get("actor_token").is_none());
+                assert_eq!(f.private()["dots"]["wake"]["state"], "completed");
+                assert!(f.private()["dots"]["execution"].is_null());
+                assert_eq!(
+                    f.claim(&capture)["status"],
+                    "idle",
+                    "expiry retry admitted work"
+                );
+                // A later pause and queued source cannot leave a delivered wake stranded.
+                let groups = GroupStore::new(f.home.clone()).expect("groups");
+                groups
+                    .mutate(&f.group.group_id, |group| {
+                        group.state = GroupState::Paused;
+                        Ok(())
+                    })
+                    .expect("pause before next delivery");
+                let source = source.unwrap_or_else(|| f.source("queued after expiry"));
+                assert!(f.delivery().is_null());
+                groups
+                    .mutate(&f.group.group_id, |group| {
+                        group.state = GroupState::Active;
+                        Ok(())
+                    })
+                    .expect("resume delivery");
+                let next = f.delivery();
+                assert!(next.is_object());
+                assert_ne!(next["event_id"], wake["event_id"]);
+                let fresh = f.private()["dots"]["wake"].clone();
+                assert_eq!(
+                    f.received(&wake, 204)["recorded"],
+                    false,
+                    "late callback revived old wake"
+                );
+                assert_eq!(f.private()["dots"]["wake"], fresh);
+                assert!(
+                    !f.response(
+                        "dots_work_claim",
+                        json!({"by":"dot","_cccc_web_binding":capture})
+                    )
+                    .ok
+                );
+                assert!(
+                    store::dots_binding_for_token(
+                        &f.private(),
+                        &old_token,
+                        "cccc_runtime_complete_turn"
+                    )
+                    .is_none()
+                );
+                let claimed = f.claim(&f.claim_capture());
+                assert_eq!(claimed["status"], "work_available");
+                assert_eq!(claimed["turn"]["event_ids"], json!([source]));
+                assert_eq!(
+                    f.private()["dots"]["execution"]["event_id"],
+                    next["event_id"]
+                );
+                let group = groups.load(&f.group.group_id).expect("group");
+                assert!(
+                    super::super::runtime_delivery::latest_state(
+                        &f.home,
+                        &group.group_id,
+                        "dot",
+                        &old_source
+                    )
+                    .expect("old delivery")
+                    .is_some_and(|(state, _)| state != "claimed")
+                );
+                f.complete(
+                    &claimed["turn"],
+                    &f.captured(&next, "cccc_runtime_complete_turn"),
+                );
+                assert!(f.delivery().is_null(), "source was delivered twice");
+            }
+        }
+    }
+}
+
+#[test]
+fn dots_expiry_retirement_commit_precedes_canonical_cleanup() {
+    for commit_private in [false, true] {
+        let f = Fixture::new();
+        f.start();
+        let (_, wake, turn) = interrupted_claim(&f, "delivered");
+        let source = f.source("queued across recovery interruption");
+        let groups = GroupStore::new(f.home.clone()).expect("groups");
+        let group = groups.load(&f.group.group_id).expect("group");
+        let actor = &group.actors[0];
+        let runtime = super::super::runtime_state::actor_state(&f.home, &group.group_id, "dot")
+            .expect("canonical state");
+        let result = store::dots_update(&f.home, &f.connector_id, |connector| {
+            super::work::expire_active_turn(&f.home, &group, actor, &runtime, connector)?;
+            if commit_private {
+                Ok(())
+            } else {
+                Err(io::Error::other("private commit fault"))
+            }
+        });
+        assert_eq!(result.is_ok(), commit_private);
+        // Neither a failed private commit nor interruption after a successful
+        // private commit is allowed to clear canonical ownership early.
+        assert_eq!(
+            super::super::runtime_state::actor_state(&f.home, &group.group_id, "dot")
+                .expect("canonical state")["active_turn_id"],
+            turn["turn_id"]
+        );
+        assert_eq!(
+            f.private()["dots"]["wake"]["state"],
+            if commit_private {
+                "completed"
+            } else {
+                "delivered"
+            }
+        );
+        assert_eq!(f.claim(&f.claim_capture())["status"], "idle");
+        assert_eq!(
+            f.call("dots_events_status", json!({}))["active_turn_id"],
+            ""
+        );
+        assert_eq!(f.claim(&f.claim_capture())["status"], "idle");
+        let next = f.delivery();
+        assert_ne!(next["event_id"], wake["event_id"]);
+        let claimed = f.claim(&f.claim_capture());
+        assert_eq!(claimed["turn"]["event_ids"], json!([source]));
+        f.complete(
+            &claimed["turn"],
+            &f.captured(&next, "cccc_runtime_complete_turn"),
+        );
+        assert!(f.delivery().is_null());
+    }
+}
+
+#[test]
+fn dots_expiry_preserves_a_provably_distinct_new_wake() {
+    let f = Fixture::new();
+    f.start();
+    f.source("old task");
+    let old_wake = f.delivery();
+    let old_capture = f.claim_capture();
+    let old_token = f.wake_token(&old_wake);
+    let old_turn = f.claim(&old_capture)["turn"].clone();
+    let execution = f.private()["dots"]["execution"].clone();
+    let source = f.source("new task");
+    // Produce a real distinct wake after a canonical/private recovery, then
+    // restore only the old ownership projections as the interrupted-state cut.
+    super::super::runtime_state::set_runtime_status(
+        &f.home,
+        &f.group,
+        "dot",
+        "waiting",
+        "",
+        "",
+        &[],
+    )
+    .expect("canonical recovery");
+    store::update_connector(&f.home, &f.connector_id, |connector| {
+        connector["dots"]["execution"] = Value::Null;
+    })
+    .expect("private recovery");
+    let next = f.delivery();
+    assert_ne!(next["event_id"], old_wake["event_id"]);
+    let groups = GroupStore::new(f.home.clone()).expect("groups");
+    integration_state::group_update(&groups, &f.group.group_id, "runtime_states", |states| {
+        states["dot"]["active_turn_id"] = old_turn["turn_id"].clone();
+        states["dot"]["active_event_ids"] = old_turn["event_ids"].clone();
+        states["dot"]["updated_at"] = json!("2000-01-01T00:00:00Z");
+        Ok(())
+    })
+    .expect("restore old canonical identity");
+    store::update_connector(&f.home, &f.connector_id, |connector| {
+        connector["dots"]["execution"] = execution.clone();
+        connector["dots"]["execution"]["claimed_at"] = json!("2000-01-01T00:00:00Z");
+    })
+    .expect("restore matching execution identity");
+    let capture = f.claim_capture();
+    let fresh = f.private()["dots"]["wake"].clone();
+    assert_eq!(f.claim(&capture)["status"], "idle");
+    assert_eq!(
+        f.private()["dots"]["wake"],
+        fresh,
+        "distinct wake was overwritten"
+    );
+    assert_eq!(f.received(&old_wake, 204)["recorded"], false);
+    assert_eq!(f.private()["dots"]["wake"], fresh);
+    assert!(
+        !f.response(
+            "dots_work_claim",
+            json!({"by":"dot","_cccc_web_binding":old_capture})
+        )
+        .ok
+    );
+    assert!(store::dots_binding_for_token(&f.private(), &old_token, "cccc_notify").is_none());
+    let claimed = f.claim(&capture);
+    assert_eq!(claimed["turn"]["event_ids"], json!([source]));
+    assert_eq!(
+        f.private()["dots"]["execution"]["event_id"],
+        next["event_id"]
+    );
+    f.complete(
+        &claimed["turn"],
+        &f.captured(&next, "cccc_runtime_complete_turn"),
+    );
+}
+
+#[test]
+fn dots_unclocked_unclaimed_wake_is_fenced_without_consuming_input() {
+    for stamp in [Value::Null, json!("invalid"), json!("2999-01-01T00:00:00Z")] {
+        let f = Fixture::new();
+        f.start();
+        let source = f.source("waiting input");
+        let wake = f.delivery();
+        store::update_connector(&f.home, &f.connector_id, |connector| {
+            connector["dots"]["wake"]["created_at"] = stamp.clone();
+        })
+        .expect("timestamp fault control");
+        assert_eq!(
+            f.claim(&f.claim_capture())["reason_code"],
+            "dots_wake_expired"
+        );
+        let next = f.delivery();
+        assert_ne!(next["event_id"], wake["event_id"]);
+        let claimed = f.claim(&f.claim_capture());
+        assert_eq!(claimed["turn"]["event_ids"], json!([source]));
+        f.complete(
+            &claimed["turn"],
+            &f.captured(&next, "cccc_runtime_complete_turn"),
+        );
     }
 }

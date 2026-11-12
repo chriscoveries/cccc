@@ -35,6 +35,7 @@ pub(super) fn claim(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     pulled
         .args
         .insert("transport".into(), json!("web_model_pull"));
+    let mut expired_turn = None;
     let result = store::dots_update(home, id, |c| {
         let Some(route) = binding(c, &group, &actor) else {
             return Err(denied("dots_binding_changed"));
@@ -51,9 +52,9 @@ pub(super) fn claim(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             .map_err(|_| denied("dots_runtime_state_unavailable"))?;
         // Canonical ownership wins even if a crash left the private execution
         // projection absent or only part of the source admission committed.
-        // Expiry precedes duplicate-wake checks. Interrupted projections can
-        // coexist with a pending new wake; resolve the old turn without
-        // consuming that wake or hiding unfinished canonical ownership.
+        // Expiry precedes duplicate-wake checks. The private wake fence must
+        // commit before canonical ownership is cleared, and this request must
+        // not claim another source under an interrupted wake's authority.
         let unfinished = runtime["active_turn_id"]
             .as_str()
             .is_some_and(|id| !id.is_empty())
@@ -84,7 +85,25 @@ pub(super) fn claim(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                     "reason_code":"dots_turn_unfinished",
                     "instructions":"No new work was claimed. Let the original run finish with its own claim result; do not retrieve credentials from another run or claim again. If that run cannot finish, have the owner review its work in ChatGPT and use End this turn in this Actor's CCCC pane. Ending a turn does not stop cloud work or replay its messages. A later claim can expire an abandoned turn after its lease elapses."})));
             }
-            expire_active_turn(home, &group, &actor, &runtime, c)?;
+            expired_turn = Some(expire_active_turn(home, &group, &actor, &runtime, c)?);
+            return Ok(Ok(json!({"status":"idle","turn":null,
+                "reason_code":if c["dots"]["wake"]["state"] == "completed" {
+                    "dots_wake_already_completed"
+                } else {
+                    "dots_turn_expired"
+                }})));
+        }
+        // Older binaries could clear canonical ownership before committing the
+        // private fence. Retire aged/unclocked unclaimed wakes as well; fresh,
+        // validly clocked wakes retain the ordinary first-claim path.
+        if c["dots"]["execution"].is_null()
+            && matches!(c["dots"]["wake"]["state"].as_str(), Some("pending" | "sending" | "delivered"))
+            && age_seconds(c["dots"]["wake"]["created_at"].as_str())
+                .is_none_or(|age| age >= TURN_LEASE_SECONDS)
+        {
+            c["dots"]["wake"]["state"] = json!("completed");
+            return Ok(Ok(json!({"status":"idle","turn":null,
+                "reason_code":"dots_wake_expired"})));
         }
         let dots = &c["dots"];
         // A repeated wake after completion is idle, including a turn just
@@ -129,6 +148,26 @@ pub(super) fn claim(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         }
     })
     .map_err(state_error)??;
+    if let Some((turn_id, event_ids)) = expired_turn {
+        // dots_update has durably fenced the wake. A crash before this point
+        // leaves canonical ownership intact; a crash here can safely retry the
+        // same committed completion without admitting a queued source.
+        let fresh = super::super::runtime_state::actor_state(home, &group.group_id, &actor.id)?;
+        if !turn_id.is_empty()
+            && fresh["active_turn_id"] == turn_id
+            && fresh["active_event_ids"] == json!(event_ids)
+        {
+            super::super::runtime_state::set_runtime_status(
+                home,
+                &group,
+                &actor.id,
+                "waiting",
+                "",
+                "",
+                &[],
+            )?;
+        }
+    }
     let result = object(result)?;
     if let Some(turn_id) = result
         .get("turn")
@@ -327,14 +366,15 @@ fn age_seconds(stamp: Option<&str>) -> Option<u64> {
 /// the same durable resolution an explicit user `resolve` produces — a
 /// completion receipt, inputs marked ambiguous so nothing replays, canonical
 /// ownership cleared — except it triggers on the lease instead of a user
-/// action and returns the actor to work in the same claim.
-fn expire_active_turn(
+/// action. The caller clears canonical ownership only after this private
+/// projection commits, and never admits new input in the expiry request.
+pub(super) fn expire_active_turn(
     home: &HomeLayout,
     group: &GroupDoc,
     actor: &Actor,
     runtime: &Value,
     c: &mut Value,
-) -> Result<(), io::Error> {
+) -> Result<(String, Vec<String>), io::Error> {
     let execution = &c["dots"]["execution"];
     let canonical = runtime["active_turn_id"]
         .as_str()
@@ -411,30 +451,26 @@ fn expire_active_turn(
         }
         super::super::runtime_completion::append(home, &group.group_id, &actor.id, &completion)
             .map_err(|_| io::Error::other("dots_expire_failed"))?;
-        // This clears canonical ownership only; the private projection below is
-        // updated on the same connector snapshot the claim already holds.
-        let fresh = super::super::runtime_state::actor_state(home, &group.group_id, &actor.id)
-            .map_err(|_| io::Error::other("dots_expire_failed"))?;
-        if fresh["active_turn_id"].as_str() == Some(turn_id.as_str()) {
-            super::super::runtime_state::set_runtime_status(
-                home,
-                group,
-                &actor.id,
-                "waiting",
-                "",
-                "",
-                &[],
-            )
-            .map_err(|_| io::Error::other("dots_expire_failed"))?;
-        }
     }
     let dots = &mut c["dots"];
-    let mut last = dots["execution"].clone();
-    if last.is_null() {
-        // Only the canonical turn identity is known here. Never borrow the
-        // pending wake: it can belong to new input and must remain claimable.
-        last = json!({"epoch":dots["epoch"],
-            "turn_id":turn_id,"event_ids":event_ids,"state":"interrupted"});
+    let known = [&dots["execution"], &dots["last_execution"]]
+        .into_iter()
+        .find(|record| {
+            record["turn_id"] == turn_id
+                && record["event_ids"] == json!(event_ids)
+                && record["event_id"].as_str().is_some_and(|id| !id.is_empty())
+        });
+    let mut last = if let Some(known) = known {
+        known.clone()
+    } else {
+        // The wake might precede the interrupted claim or follow an earlier
+        // recovery. Its provenance is unknown: retire it without assigning it
+        // to this execution. Pending sources will receive a fresh native wake.
+        json!({"epoch":dots["epoch"],
+            "turn_id":turn_id,"event_ids":event_ids,"state":"interrupted"})
+    };
+    if known.is_none() || last["event_id"] == dots["wake"]["event_id"] {
+        dots["wake"]["state"] = json!("completed");
     }
     last["state"] = json!("completed");
     last["status"] = json!(status);
@@ -442,7 +478,5 @@ fn expire_active_turn(
     last["epoch"] = dots["epoch"].clone();
     dots["last_execution"] = last;
     dots["execution"] = Value::Null;
-    // The pending wake belongs to new input, not the expired turn; it stays
-    // deliverable so this same claim can pick it up.
-    Ok(())
+    Ok((turn_id, event_ids))
 }
