@@ -58,6 +58,14 @@ impl BrowserSurfaces {
         let readiness = self.prompt_readiness(key).await?;
         // A page that is not ready, or still answering, is the reason to report:
         // nothing in its composer is touched then.
+        // cwf#821: say why the page is not ready when it is ChatGPT's
+        // rate-limit/load-error page. Nothing has been changed at this point.
+        if readiness["state"] == super::load_error::RATE_LIMITED_STATE {
+            bail!("pairing_browser_rate_limited");
+        }
+        if readiness["state"] == super::load_error::LOAD_FAILED_STATE {
+            bail!("pairing_browser_load_failed");
+        }
         if readiness["ready"] != true || readiness["running"] == true {
             bail!("pairing_browser_not_ready");
         }

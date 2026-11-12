@@ -161,6 +161,97 @@ fn automatic_pairing_requires_running_group_and_never_replaces_existing_binding(
     assert!(execute(&home, &request("web_model_pairing_begin", args)).is_err());
 }
 
+/// cwf#821: re-pairing a running Actor must never unpair it first. With
+/// `replace: true` the old binding stays in force through a failed or
+/// abandoned attempt and is only superseded by the new confirm.
+#[test]
+fn explicit_replace_repairs_without_removing_the_working_binding() {
+    let temp = tempfile::tempdir().expect("temp");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    home.initialize().expect("init");
+    let groups = GroupStore::new(home.clone()).expect("groups");
+    let mut group = groups.create("replace", " ").expect("group");
+    let mut actor = Actor::new("a");
+    actor.runtime = ActorRuntime::WebModel;
+    actor.enabled = true;
+    cccc_core::actors::add(&mut group, actor).expect("actor");
+    group.running = true;
+    group.state = GroupState::Active;
+    groups.save(&group).expect("save");
+    let configured = store::configure(&home).expect("configure");
+    let id = configured["connector"]["connector_id"].clone();
+    let args = json!({"by":"user","connector_id":id,"group_id":group.group_id,"actor_id":"a","automatic":true});
+    let pair_and_confirm = |args: &Value, session: &str, url: &str| {
+        let p = execute(&home, &request("web_model_pairing_begin", args.clone())).expect("begin");
+        execute(
+            &home,
+            &request(
+                "web_model_pairing_accept",
+                json!({"by":"user","connector_id":id,"code":p["code"],"session_key":session}),
+            ),
+        )
+        .expect("accept");
+        let mut confirm = args.clone();
+        confirm["pairing_id"] = p["pairing_id"].clone();
+        confirm["url"] = json!(url);
+        (p, confirm)
+    };
+    let (_, confirm) = pair_and_confirm(&args, "host-1", "https://chatgpt.com/c/first");
+    execute(&home, &request("web_model_pairing_confirm", confirm)).expect("first bind");
+    let bound_url = |home: &HomeLayout| {
+        store::binding_for_actor(
+            &store::load(home).expect("store")[0],
+            &group.group_id,
+            "a",
+            &cccc_core::actors::generation_identity(
+                &groups.load(&group.group_id).expect("group").actors[0],
+            ),
+        )
+        .map(|b| b["url"].clone())
+    };
+    assert_eq!(bound_url(&home), Some(json!("https://chatgpt.com/c/first")));
+
+    // Default behaviour is unchanged: automatic begin cannot replace.
+    let refused = execute(&home, &request("web_model_pairing_begin", args.clone()))
+        .expect_err("automatic begin without replace");
+    assert_eq!(refused.code, "already_paired");
+
+    // An explicit replace begins without touching the binding; a failed
+    // attempt (e.g. the browser hit a 429) leaves it exactly as it was.
+    let mut replace = args.clone();
+    replace["replace"] = json!(true);
+    let attempt = execute(&home, &request("web_model_pairing_begin", replace.clone()))
+        .expect("replace begin");
+    assert_eq!(bound_url(&home), Some(json!("https://chatgpt.com/c/first")));
+    let mut failed = replace.clone();
+    failed["pairing_id"] = attempt["pairing_id"].clone();
+    failed["error_code"] = json!("pairing_interrupted");
+    execute(&home, &request("web_model_pairing_fail", failed)).expect("fail attempt");
+    assert_eq!(
+        bound_url(&home),
+        Some(json!("https://chatgpt.com/c/first")),
+        "a failed re-pair must not unpair the Actor"
+    );
+
+    // A confirm without replace still cannot supersede the binding.
+    let (_, confirm) = pair_and_confirm(&replace, "host-2", "https://chatgpt.com/c/second");
+    let mut plain = confirm.clone();
+    plain.as_object_mut().expect("object").remove("replace");
+    assert_eq!(
+        execute(&home, &request("web_model_pairing_confirm", plain))
+            .expect_err("plain confirm")
+            .code,
+        "already_paired"
+    );
+    assert_eq!(bound_url(&home), Some(json!("https://chatgpt.com/c/first")));
+    // The replace confirm supersedes it in one write.
+    execute(&home, &request("web_model_pairing_confirm", confirm)).expect("replace confirm");
+    assert_eq!(
+        bound_url(&home),
+        Some(json!("https://chatgpt.com/c/second"))
+    );
+}
+
 #[test]
 fn legacy_actor_pairing_keeps_the_creation_identity() {
     let temp = tempfile::tempdir().expect("temp");

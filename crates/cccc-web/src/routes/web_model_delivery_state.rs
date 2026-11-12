@@ -60,6 +60,15 @@ pub(super) fn update_target(
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid browser target")
         })?;
         target.extend(patch.as_object().cloned().unwrap_or_default());
+        // cwf#821: keep the last confirmed submission time apart from
+        // last_delivery_at, which also moves on claims and failed attempts.
+        if matches!(
+            patch["last_delivery_status"].as_str(),
+            Some("submitted" | "bound")
+        ) && patch["last_submitted_at"].is_null()
+        {
+            target.insert("last_submitted_at".into(), json!(cccc_contracts::utc_now()));
+        }
         Ok(())
     })
     .map_err(io_error)
