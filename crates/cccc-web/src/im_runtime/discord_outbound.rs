@@ -1,5 +1,4 @@
-use super::inbound_attachments::MAX_ATTACHMENT_BYTES;
-use super::outbound_attachment::safe_filename;
+use super::outbound_attachment::{attachments, filename, load_blob};
 use super::outbound_chunks::{fits_message, split_message};
 use super::outbound_stream_state::{event_string, trim_active};
 use super::{AuthorizedChat, outbound_text};
@@ -74,12 +73,7 @@ impl DiscordOutbound {
         } else {
             split_message(&body, MAX_MESSAGE_CHARS, None)
         };
-        let values = event
-            .data
-            .get("attachments")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let values = attachments(event);
         if values.is_empty() {
             for chunk in chunks {
                 channel_id
@@ -239,28 +233,8 @@ impl DiscordOutbound {
     }
 
     async fn prepare(&self, value: &Value) -> Result<PreparedAttachment, String> {
-        let relative = value
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "attachment path is missing".to_owned())?;
-        let path = cccc_core::blobs::resolve(&self.home, &self.group_id, relative)
-            .map_err(|error| error.to_string())?;
-        if path.metadata().map_err(|error| error.to_string())?.len() > MAX_ATTACHMENT_BYTES {
-            return Err("attachment exceeds 10 MiB before read".into());
-        }
-        let raw = tokio::fs::read(&path)
-            .await
-            .map_err(|error| error.to_string())?;
-        if raw.len() as u64 > MAX_ATTACHMENT_BYTES {
-            return Err("attachment exceeds 10 MiB after read".into());
-        }
-        let title = value
-            .get("title")
-            .and_then(Value::as_str)
-            .and_then(safe_filename)
-            .or_else(|| path.file_name().and_then(|name| name.to_str()))
-            .unwrap_or("file")
-            .to_owned();
+        let (path, raw) = load_blob(&self.home, &self.group_id, value).await?;
+        let title = filename(value, &path).to_owned();
         Ok(PreparedAttachment { raw, title })
     }
 }

@@ -1,5 +1,4 @@
-use super::inbound_attachments::MAX_ATTACHMENT_BYTES;
-use super::outbound_attachment::safe_filename;
+use super::outbound_attachment::{attachments, filename, load_blob, mime_type};
 use super::outbound_chunks::{fits_message, split_message};
 use super::outbound_stream_state::{event_string, trim_active};
 use super::{AuthorizedChat, outbound_text};
@@ -81,12 +80,7 @@ impl FeishuOutbound {
     ) -> HashSet<String> {
         let mut delivered = HashSet::new();
         let body = outbound_text(event, false);
-        let attachments = event
-            .data
-            .get("attachments")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let attachments = attachments(event);
         if body.is_none() && attachments.is_empty() {
             return delivered;
         }
@@ -288,36 +282,9 @@ impl FeishuOutbound {
     }
 
     async fn prepare(&self, value: &Value) -> Result<PreparedAttachment, String> {
-        let relative = value
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "attachment path is missing".to_owned())?;
-        let path = cccc_core::blobs::resolve(&self.home, &self.group_id, relative)
-            .map_err(|error| error.to_string())?;
-        let size = path.metadata().map_err(|error| error.to_string())?.len();
-        if size > MAX_ATTACHMENT_BYTES {
-            return Err("attachment exceeds 10 MiB before read".into());
-        }
-        let raw = tokio::fs::read(&path)
-            .await
-            .map_err(|error| error.to_string())?;
-        if raw.len() as u64 > MAX_ATTACHMENT_BYTES {
-            return Err("attachment exceeds 10 MiB after read".into());
-        }
-        let title = value
-            .get("title")
-            .and_then(Value::as_str)
-            .and_then(safe_filename)
-            .or_else(|| path.file_name().and_then(|name| name.to_str()))
-            .unwrap_or("file")
-            .to_owned();
-        let mime = value
-            .get("mime_type")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| mime_guess::from_path(&title).first_raw())
-            .unwrap_or("application/octet-stream")
-            .to_owned();
+        let (path, raw) = load_blob(&self.home, &self.group_id, value).await?;
+        let title = filename(value, &path).to_owned();
+        let mime = mime_type(value, std::path::Path::new(&title)).to_owned();
         let is_image = mime.starts_with("image/");
         Ok(PreparedAttachment {
             raw,
