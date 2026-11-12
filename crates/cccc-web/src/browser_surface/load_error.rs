@@ -178,14 +178,21 @@ impl BrowserSurfaces {
             self.set_rate_limit_record(key, Some(record.clone())).await;
             return Ok(Some(record));
         }
+        let attempts = record["reload_attempts"].as_u64().unwrap_or(0) as u32 + 1;
+        // Book this attempt and the next window before reloading, so a reload
+        // that errors still waits a full backoff window: never a tight loop.
+        record["reload_attempts"] = json!(attempts);
+        record["next_reload_at_ms"] = json!(
+            now + next_reload_delay(attempts, record["retry_after_secs"].as_u64()).as_millis()
+                as i64
+        );
+        self.set_rate_limit_record(key, Some(record.clone())).await;
         let page = self.page(key).await?;
         let observed = reload_and_observe(&page).await?;
-        let attempts = record["reload_attempts"].as_u64().unwrap_or(0) as u32 + 1;
         let retry_after = observed
             .retry_after_secs
             .or_else(|| record["retry_after_secs"].as_u64());
         let delay = next_reload_delay(attempts, retry_after);
-        record["reload_attempts"] = json!(attempts);
         record["last_reload_at"] = json!(cccc_contracts::utc_now());
         record["retry_after_secs"] = json!(retry_after);
         if observed.status.is_some() {
