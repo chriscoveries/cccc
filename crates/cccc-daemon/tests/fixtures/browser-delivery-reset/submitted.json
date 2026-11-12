@@ -1,0 +1,12 @@
+{
+  "last_delivery_at": "2026-11-11T02:09:24.377385Z",
+  "last_delivery_started_at": "2026-11-11T02:09:22.562539Z",
+  "last_delivery_id": "webdelivery:browser-actor:<redacted-delivery-id>",
+  "last_delivery_turn_id": "webturn:browser-actor:<redacted-turn-id>",
+  "last_delivery_event_ids": ["<redacted-event-id>"],
+  "last_delivery_status": "submitted",
+  "last_delivery_reconcile_attempts": 0,
+  "last_error": "",
+  "kind": "existing_chat",
+  "next_delivery": "existing_chat"
+}
