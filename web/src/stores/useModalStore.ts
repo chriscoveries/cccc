@@ -62,6 +62,7 @@ interface ModalState {
     tab?: string;
     webModelProvider?: "chatgpt_web" | "grok_web" | "dots";
     webModelSection?: "login" | "connector";
+    webModelBrowserProfile?: string;
     voiceSection?: "secretary" | "realtime";
     voiceAudio?: boolean;
     voiceAnalyst?: boolean;
@@ -76,6 +77,7 @@ interface ModalState {
     tab?: string;
     webModelProvider?: "chatgpt_web" | "grok_web" | "dots";
     webModelSection?: "login" | "connector";
+    webModelBrowserProfile?: string;
     voiceSection?: "secretary" | "realtime";
     voiceAudio?: boolean;
     voiceAnalyst?: boolean;
@@ -143,6 +145,9 @@ export const useModalStore = create<ModalState>((set) => ({
         tab: typeof target.tab === "string" ? target.tab : undefined,
         webModelProvider: target.webModelProvider,
         webModelSection: target.webModelSection,
+        ...(target.webModelBrowserProfile
+          ? { webModelBrowserProfile: target.webModelBrowserProfile }
+          : {}),
         voiceSection: target.voiceSection,
         voiceAudio: target.voiceAudio,
         voiceAnalyst: target.voiceAnalyst,

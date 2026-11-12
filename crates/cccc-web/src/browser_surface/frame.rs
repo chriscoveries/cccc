@@ -18,6 +18,14 @@ struct ViewportSize {
 
 impl BrowserSurfaces {
     pub async fn frame(&self, key: &str) -> Result<Value> {
+        self.frame_for_identity(key, None).await
+    }
+
+    pub(super) async fn frame_for_identity(
+        &self,
+        key: &str,
+        identity: Option<&str>,
+    ) -> Result<Value> {
         let operation = self.key_operation(key).await;
         let _operation = operation.lock().await;
         let mut session = self
@@ -27,6 +35,9 @@ impl BrowserSurfaces {
             .get(key)
             .cloned()
             .context("browser surface is not active")?;
+        if identity.is_some_and(|id| session.metadata["actor_identity"] != id) {
+            anyhow::bail!("browser profile selection changed; reopen this viewer");
+        }
         let original_target = session.page.target_id().clone();
         let cached_viewport = (session.width, session.height);
         let (bytes, viewport) = match capture_frame(&session.page, cached_viewport).await {

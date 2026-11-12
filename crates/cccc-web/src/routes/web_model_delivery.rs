@@ -272,6 +272,10 @@ async fn deliver_once(
         return Ok(DeliveryOutcome::Stopped);
     }
     let surface = state.browser_surfaces.info(session_key).await;
+    let actor = super::web_model_browser::actor_config(state, group_id, actor_id)?;
+    if !super::web_model_browser::surface_matches(&actor, &surface) {
+        return Ok(DeliveryOutcome::Idle);
+    }
     if !surface["active"].as_bool().unwrap_or(false) {
         return Ok(DeliveryOutcome::Idle);
     }

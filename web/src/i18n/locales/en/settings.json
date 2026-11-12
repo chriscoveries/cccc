@@ -1,4 +1,11 @@
 {
+  "browserProfiles": {
+    "label": "Browser profile",
+    "accountLabel": "Browser profile / account label",
+    "unverified": "Account identity unverified",
+    "hint": "_shared keeps the existing login. A named profile has its own login window.",
+    "save": "Save browser profile"
+  },
   "saveFeedback": {
     "saved": "Settings saved.",
     "failed": "Could not save settings. Your changes are still here; try again."

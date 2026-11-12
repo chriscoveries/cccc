@@ -26,6 +26,10 @@ const RUNTIME_STATES_KEY: &str = "runtime_states";
 #[path = "actors_confirmation_tests.rs"]
 mod confirmation_tests;
 
+#[cfg(test)]
+#[path = "actors_browser_profile_tests.rs"]
+mod browser_profile_tests;
+
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "actor_list" => Operation::new(Read, list),
@@ -77,6 +81,11 @@ fn add(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group = store(home)?.load(&group_id).map_err(OpError::not_found)?;
     authorize(&group, request, ActorAction::Add, "")?;
     let mut actor = actor_from_args(request)?;
+    actor.browser_profile =
+        actors::validate_browser_profile(&actor.browser_profile).map_err(OpError::invalid)?;
+    if !actor.browser_profile.is_empty() {
+        super::profile_access::require_admin_user(request)?;
+    }
     let private_env = private_env_arg(request)?;
     let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
     if private_env.is_some() && !by.trim().is_empty() && by.trim() != "user" {
@@ -96,6 +105,12 @@ fn add(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         actor = actor_profile_runtime::link(home, &actor, &actor.profile_id)?;
     }
     actor.normalize_runtime_constraints();
+    if !actor.browser_profile.is_empty() && !actor.runtime.is_browser_web_model() {
+        return Err(OpError::new(
+            "unsupported_field",
+            "Browser profiles require the ChatGPT Web Model runtime",
+        ));
+    }
     actor.default_scope_key = normalize_default_scope_key(&group, &actor.default_scope_key)?;
     let added = store(home)?
         .mutate(&group_id, |doc| actors::add(doc, actor))
@@ -200,6 +215,7 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                             | "allowed_groups"
                             | "profile_id"
                             | "profile_action"
+                            | "expected_browser_identity"
                     )
                 })
                 .map(|(key, value)| (key.clone(), value.clone()))
@@ -216,6 +232,7 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         "allowed_groups",
         "profile_id",
         "profile_action",
+        "expected_browser_identity",
     ] {
         patch.remove(key);
     }
@@ -291,6 +308,21 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let _browser_work = route_changes
         .then(|| actor_runtime::hold_browser_work(home, &group_id, &actor_id))
         .transpose()?;
+    if original_actor.browser_profile_revision != final_preview.browser_profile_revision {
+        super::profile_access::require_admin_user(request)?;
+        if request
+            .args
+            .get("expected_browser_identity")
+            .and_then(Value::as_str)
+            != Some(actors::web_model_generation_identity(&original_actor).as_str())
+        {
+            return Err(OpError::new(
+                "browser_profile_changed",
+                "Browser profile selection changed; refresh before saving",
+            ));
+        }
+        require_browser_profile_edit(home, &group, &original_actor)?;
+    }
     if route_changes
         && super::runtime_state::actor_state(home, &group_id, &actor_id)?["active_turn_id"]
             .as_str()
@@ -343,6 +375,17 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 .position(|actor| actor.id == actor_id)
                 .ok_or_else(|| std::io::Error::other("actor not found"))?;
             doc.actors[index] = final_actor.clone();
+            if final_actor.browser_profile_revision != original_actor.browser_profile_revision
+                && let Some(target) = doc
+                    .extra
+                    .get_mut(WEB_MODEL_TARGETS_KEY)
+                    .and_then(|targets| targets.get_mut(&actor_id))
+                    .and_then(Value::as_object_mut)
+            {
+                // A saved setup destination belongs to the previous account.
+                // Keep all delivery history and source/turn fences intact.
+                target.remove("setup_url");
+            }
             if enabled_patched && !final_actor.enabled {
                 doc.running = doc.running && doc.actors.iter().any(|actor| actor.enabled);
             } else if enabling_native
@@ -543,6 +586,21 @@ fn rollback_actor_update(
                     .position(|actor| actor.id == original_actor.id)
                     .ok_or_else(|| std::io::Error::other("actor not found during rollback"))?;
                 doc.actors[index] = original_actor.clone();
+                if updated_group.is_some_and(|g| {
+                    g.actors.iter().any(|a| {
+                        a.id == original_actor.id
+                            && a.browser_profile_revision != original_actor.browser_profile_revision
+                    })
+                }) && let Some(target) = doc
+                    .extra
+                    .get_mut(WEB_MODEL_TARGETS_KEY)
+                    .and_then(|targets| targets.get_mut(&original_actor.id))
+                    .and_then(Value::as_object_mut)
+                    && let Some(setup_url) = web_model_target(original_group, &original_actor.id)
+                        .and_then(|target| target.get("setup_url"))
+                {
+                    target.insert("setup_url".into(), setup_url.clone());
+                }
                 doc.running = original_group.running;
                 doc.state = original_group.state;
                 Ok(())
@@ -919,9 +977,64 @@ fn remove_persisted_headless_state(
 /// wrong provider or delivery kind.
 pub(super) fn web_model_route_changes(before: &Actor, after: &Actor) -> bool {
     before.runtime.web_model_provider() != after.runtime.web_model_provider()
+        || before.browser_profile_revision != after.browser_profile_revision
         || (before.runtime != after.runtime
             && (before.runtime == ActorRuntime::ChatgptDots
                 || after.runtime == ActorRuntime::ChatgptDots))
+}
+
+fn require_browser_profile_edit(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+) -> Result<(), OpError> {
+    if !actor.runtime.is_browser_web_model() {
+        return Err(OpError::new(
+            "unsupported_field",
+            "Browser profiles require the ChatGPT Web Model runtime",
+        ));
+    }
+    let state = super::runtime_state::actor_state(home, &group.group_id, &actor.id)?;
+    let target = web_model_target(group, &actor.id)
+        .cloned()
+        .unwrap_or_default();
+    let unresolved = state["active_turn_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty())
+        || state["status"] == "working"
+        || matches!(
+            target["last_delivery_status"].as_str(),
+            Some(
+                "submitting"
+                    | "deferred"
+                    | "pending_new_chat_bind"
+                    | "legacy_recovery_submitting"
+                    | "submission_ambiguous"
+                    | "submission_ambiguous_completion_pending"
+                    | "completion_ambiguous"
+                    | "ambiguous"
+                    | "completion_conflict"
+                    | "legacy_submission_unverified"
+            )
+        );
+    let paired = web_model_connectors::load(home)
+        .map_err(OpError::io)?
+        .iter()
+        .any(|connector| {
+            let route = json!([group.group_id, actor.id]).to_string();
+            connector["bindings"][&route]["state"] == "bound"
+                || matches!(
+                    connector["pairings"][&route]["state"].as_str(),
+                    Some("waiting" | "awaiting_confirmation")
+                )
+        });
+    if actor.enabled || unresolved || paired {
+        return Err(OpError::new(
+            "browser_profile_busy",
+            "Stop and disconnect this Actor and resolve its delivery before changing browser profiles",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn lifecycle(home: &HomeLayout, request: &DaemonRequest, kind: &str) -> OpResult {
@@ -1245,6 +1358,17 @@ fn rollback_actor_lifecycle(
 }
 
 fn actor_from_args(request: &DaemonRequest) -> Result<Actor, OpError> {
+    if request.args.contains_key("browser_profile_revision")
+        || request
+            .args
+            .get("actor")
+            .is_some_and(|actor| actor.get("browser_profile_revision").is_some())
+    {
+        return Err(OpError::new(
+            "unsupported_field",
+            "browser_profile_revision is server-owned",
+        ));
+    }
     if request
         .args
         .get("external_session_id")

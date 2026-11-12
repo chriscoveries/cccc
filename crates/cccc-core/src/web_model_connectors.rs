@@ -355,7 +355,7 @@ pub fn validate_binding(home: &HomeLayout, expected: &Value) -> io::Result<()> {
         .iter()
         .find(|a| a.id == actor_id)
         .ok_or_else(|| error("paired_actor_unavailable"))?;
-    if generation.is_empty() || crate::actors::generation_identity(actor) != generation {
+    if generation.is_empty() || crate::actors::web_model_generation_identity(actor) != generation {
         return Err(error("paired_actor_identity_changed"));
     }
     if actor.runtime.web_model_provider() != connector["provider"].as_str()

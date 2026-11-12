@@ -159,7 +159,7 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 &id,
                 &group_id,
                 &actor_id,
-                &cccc_core::actors::generation_identity(actor),
+                &cccc_core::actors::web_model_generation_identity(actor),
                 &required_arg(request, "url")?,
             )
             .map_err(OpError::io)?;
@@ -218,7 +218,7 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             &connector,
             &group_id,
             &actor_id,
-            &cccc_core::actors::generation_identity(actor),
+            &cccc_core::actors::web_model_generation_identity(actor),
         )
         .is_some_and(|b| {
             request.op != "web_model_pairing_confirm"
@@ -281,7 +281,7 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             },
         ));
     }
-    let generation = cccc_core::actors::generation_identity(actor);
+    let generation = cccc_core::actors::web_model_generation_identity(actor);
     match request.op.as_str() {
         "web_model_pairing_begin" => object(
             store::begin_pairing(home, &id, &group_id, &actor_id, &generation, automatic)

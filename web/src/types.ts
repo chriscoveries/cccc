@@ -345,6 +345,8 @@ export type Actor = {
   internal_kind?: string | null;
   title?: string;
   model_label?: string;
+  browser_profile?: string;
+  browser_profile_revision?: number;
   avatar_asset_path?: string;
   avatar_url?: string | null;
   has_custom_avatar?: boolean;

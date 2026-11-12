@@ -104,7 +104,8 @@ pub(super) async fn ensure_open_for_actor(
         .ok_or_else(|| ApiError::not_found("This Actor is no longer a Web Model"))?;
     let target = super::web_model_delivery_state::target(state, group_id, actor_id)?;
     let open_url = browser_open_url(&target, provider_url(provider))?;
-    let profile = super::web_model_shared_browser::profile(state, provider);
+    let profile =
+        super::web_model_shared_browser::profile_named(state, provider, &actor.browser_profile)?;
     state
         .browser_surfaces
         .ensure_open_shared_actor(
@@ -302,6 +303,8 @@ async fn upgrade(
     let actor_id = required_identifier(&query.actor_id, "actor_id")?;
     validate_actor(&state, group_id, actor_id)?;
     let session_key = key(group_id, actor_id);
+    let identity =
+        crate::browser_surface::actor_identity(&actor_config(&state, group_id, actor_id)?);
     if query.mode.trim().eq_ignore_ascii_case("vnc") {
         return Err(ApiError::forbidden(
             "Use global Web Model settings for the shared browser desktop",
@@ -329,12 +332,13 @@ async fn upgrade(
             )
             .await;
         } else {
-            crate::browser_surface::serve_socket(
+            crate::browser_surface::serve_actor_socket(
                 socket,
                 &state.browser_surfaces,
                 &session_key,
                 &viewer_mode,
                 state.shutdown.subscribe(),
+                identity,
             )
             .await;
         }
@@ -345,6 +349,10 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
     let session_key = key(group_id, actor_id);
     let mut surface = state.browser_surfaces.info(&session_key).await;
     let store = GroupStore::new(state.home.clone()).map_err(io_error)?;
+    let actor = actor_config(state, group_id, actor_id)?;
+    if !surface_matches(&actor, &surface) {
+        surface = json!({"active":false});
+    }
     let mut target = super::web_model_delivery_state::target(state, group_id, actor_id)?;
     let preferences = integration_state::group_get(&store, group_id, DELIVERY_PREFERENCES_KEY)
         .map_err(io_error)?;
@@ -635,6 +643,8 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
     };
     let health = json!({
         "schema":"cccc.web_model.health.v1","group_id":group_id,"actor_id":actor_id,
+        "provider":provider,"browser_profile":cccc_core::actors::browser_profile(&actor),
+        "account_label":cccc_core::actors::browser_profile(&actor),"account_identity":"unverified",
         "tone":tone,
         "summary":next_label,
         "browser":{
@@ -643,7 +653,7 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
             "reason":readiness["message"].as_str().unwrap_or(if active {
                 "Check the conversation input in this browser."
             } else {
-                "Open the shared browser to sign in or inspect the page."
+                "Open this profile's browser to sign in or inspect the page."
             }),
             "active":active,"ready":ready,"logged_in_guess":ready,"url":url,
             "viewer_attached":surface["controller_attached"],
@@ -669,6 +679,10 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
         "next_action":{"recommended":next_action,"label":next_label,"reason":next_reason}
     });
     let mut browser = json!({
+        "provider":provider,"browser_profile":cccc_core::actors::browser_profile(&actor),
+        "browser_profile_revision":actor.browser_profile_revision,
+        "browser_identity":cccc_core::actors::web_model_generation_identity(&actor),
+        "account_label":cccc_core::actors::browser_profile(&actor),"account_identity":"unverified",
         "active":active,
         "ready":ready,
         "login_required":login_required,
@@ -725,6 +739,13 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
             .cloned()
             .expect("browser session details"),
         );
+    if crate::browser_surface::actor_identity(&actor_config(state, group_id, actor_id)?)
+        != crate::browser_surface::actor_identity(&actor)
+    {
+        return Err(ApiError::bad(
+            "Browser profile selection changed; refresh Actor status",
+        ));
+    }
     Ok(success(json!({
         "browser_session":browser,"browser_surface":surface,"health_snapshot":health,
         "pairing":pairing_state(state,group_id,actor_id)?
@@ -749,6 +770,23 @@ fn cached_readiness(surface: &Value) -> Value {
     })
 }
 
+pub(super) fn actor_config(
+    state: &AppState,
+    group: &str,
+    actor: &str,
+) -> Result<cccc_contracts::Actor, ApiError> {
+    GroupStore::new(state.home.clone())
+        .map_err(io_error)?
+        .load(group)
+        .map_err(io_error)?
+        .actors
+        .into_iter()
+        .find(|a| a.id == actor)
+        .ok_or_else(|| ApiError::not_found("Actor not found"))
+}
+pub(super) fn surface_matches(actor: &cccc_contracts::Actor, surface: &Value) -> bool {
+    surface["metadata"]["actor_identity"] == crate::browser_surface::actor_identity(actor)
+}
 fn actor_provider(state: &AppState, group: &str, actor: &str) -> Result<&'static str, ApiError> {
     GroupStore::new(state.home.clone())
         .map_err(io_error)?

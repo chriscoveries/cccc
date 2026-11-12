@@ -3853,6 +3853,7 @@ Args:
   actor_id?: string
   title?: string
   model_label?: string // optional operator-maintained declaration; at most 128 characters, no control characters
+  browser_profile?: string // ChatGPT web_model only; omitted/empty/_shared keeps the default login
   runtime?: string
   runtime_mode?: "default" | "acp" // optional headless ACP for Antigravity, Auggie, Copilot, Devin, Cursor, Kimi Code, Kiro, Hermes and Droid
   command?: string[]
@@ -3880,7 +3881,7 @@ Notes:
 - MCP `cccc_bootstrap.session.members` is a compact projection of the same authorized `actor_list` result already read by bootstrap: `{ actor_id, runtime, role, enabled, source_id? }[]`. `source_id` is present only for an external native membership. It MUST preserve that listing's Group boundary, internal-Actor visibility and effective roles, without exposing launch commands, environment, process details or credentials. It is a read-only membership snapshot, not receive/execution evidence or a grant of management authority. Ordinary member discovery and message addressing MUST NOT require enabling the Group runtime capability pack.
 - When `profile_id` is used, `env_private` is rejected (linked actor private env is profile-controlled).
 - The appended `actor.add` event starts that actor id's current generation. The daemon MUST initialize the new generation's read boundary at that append position, so events from before the add are not delivered as unread. Removing and later re-adding the same actor id starts a new generation at the later `actor.add` position.
-- Actor records also expose an opaque `generation` UUID for delayed remote recipient binding. Add assigns a fresh value, including when a supplied record came from an earlier Actor; update cannot overwrite it. Restart and ordinary edits preserve it. Existing records without this field use their original `created_at` identity (`legacy:<created_at>`) until they are recreated; browser ownership, pairing and tool routing MUST use that same identity and pairing MUST NOT assign a new generation after the browser opens. This does not replace the ledger-based inbox boundary above.
+- Actor records also expose an opaque `generation` UUID for delayed remote recipient binding. Add assigns a fresh value, including when a supplied record came from an earlier Actor; update cannot overwrite it. Restart and ordinary edits preserve it. Existing records without this field use their original `created_at` identity (`legacy:<created_at>`) until they are recreated; browser ownership, pairing and tool routing MUST use that registration identity, with the browser-profile selection/revision qualification defined under `actor_update`; pairing MUST NOT assign a new registration generation after the browser opens. This does not replace the ledger-based inbox boundary above.
 - Multiple ChatGPT (`web_model`) and Grok Bot (`grok_web_model`) Actors MAY coexist, including linked Profiles and Group imports/resets. Runtime configuration does not grant connector authority. Conversation bindings MUST identify the exact Group, Actor and generation; copied/imported Actors MUST be unpaired.
 - `chatgpt_dots` is a headless event-driven Runtime sharing the `chatgpt_web` connector. One Dot binding per connector MAY authorize exactly one Group/Actor/generation. Profiles, copies and imports carry Runtime configuration, never that binding or cloud-task authority. It MUST NOT use browser message delivery or browser receipt verification. Its host conversation is paired explicitly during native task setup.
 - A new actor generation MUST NOT inherit Web Model delivery preferences or persisted runner/turn status left by an earlier generation with the same actor id.
@@ -3910,6 +3911,7 @@ Args:
   patch: Record<string, unknown>
   profile_id?: string                      // attach/replace profile link
   profile_action?: "convert_to_custom"     // snapshot profile config + secrets, then unlink
+  expected_browser_identity?: string       // required for an effective browser_profile change
 }
 ```
 
@@ -3917,9 +3919,30 @@ Patch keys used by CCCC v0.4.x include:
 - Identity/UI: `title`, `model_label` (optional operator-maintained declaration; omission leaves it unchanged, an empty string clears it)
 - Runtime: `runtime`, `runtime_mode`, `command`, `submit`
 - Scope: `default_scope_key`
+- Browser login: `browser_profile` (ChatGPT `web_model` only; administrator operation)
 - Enable/disable: `enabled`
 - Environment (use with care): `env`
 - Capability startup baseline: `capability_autoload`
+
+`browser_profile` selects an instance-local browser login directory, independently
+of the runtime template `profile_id`. Absence, empty string and `_shared` mean the
+existing shared login. Named values match `[a-z0-9][a-z0-9_-]{0,47}`. Wrong types,
+path components and symlink aliases are refused. Creating a named selection or
+changing it requires an authenticated human administrator. An effective change
+also requires a stopped, unpaired Actor with no pending pairing or unresolved
+claimed/submitting/ambiguous delivery, and the current `expected_browser_identity`
+from Web browser-session status. Busy or stale changes are refused without replay.
+Callers cannot set `browser_profile_revision`; it is a persisted monotonic counter
+that changes only with the effective selection. Default records omit both fields
+and retain their original browser identity. Nondefault browser-route identities
+include the profile and revision; native source/turn and registration identities
+do not change. A change removes the old setup destination, preserves delivery
+history and queued inputs, and requires selecting/pairing a new conversation.
+Each named profile has one lazily launched Chrome owner with separate user-data
+directory/debugging port and login surface; same-name Actors deliberately share
+cookies, even across Groups. Removing its last Actor reference stops that named
+owner during resource cleanup while retaining cookies. Connector secrets and
+the legacy `_shared` directory/login key are unchanged.
 
 `model_label` is declared metadata only. Absence means undeclared, not a detected
 or default model. It neither configures launch nor verifies the serving model;

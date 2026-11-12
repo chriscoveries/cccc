@@ -690,7 +690,14 @@ impl BrowserSurfaces {
     }
 
     pub(crate) async fn prompt_readiness(&self, key: &str) -> Result<Value> {
-        let page = self.page(key).await?;
+        let original = self
+            .sessions
+            .lock()
+            .await
+            .get(key)
+            .cloned()
+            .context("browser surface is not active")?;
+        let page = original.page.clone();
         let readiness = Self::inspect_prompt_readiness(&page).await;
         let snapshot = match &readiness {
             Ok(value) => value.clone(),
@@ -702,7 +709,12 @@ impl BrowserSurfaces {
         };
         // An explicit failed check must invalidate the old successful snapshot,
         // otherwise the next cached GET would immediately resurrect "ready".
-        self.record_prompt_readiness(key, &page, &snapshot).await;
+        if !self
+            .record_prompt_readiness(key, &original, &snapshot)
+            .await
+        {
+            bail!("browser profile selection changed during readiness inspection");
+        }
         readiness
     }
 
@@ -745,7 +757,7 @@ impl BrowserSurfaces {
             } else if ready {
                 "Browser model composer is ready."
             } else if candidate.login_required {
-                "Sign in using the shared ChatGPT browser."
+                "Sign in using this profile's ChatGPT login window."
             } else {
                 "The conversation input is not available yet. Check the page before retrying."
             }
@@ -753,13 +765,21 @@ impl BrowserSurfaces {
         Ok(readiness)
     }
 
-    async fn record_prompt_readiness(&self, key: &str, page: &Page, readiness: &Value) {
+    async fn record_prompt_readiness(
+        &self,
+        key: &str,
+        original: &super::Session,
+        readiness: &Value,
+    ) -> bool {
         let mut sessions = self.sessions.lock().await;
         let Some(session) = sessions.get_mut(key) else {
-            return;
+            return false;
         };
-        if session.page.target_id() != page.target_id() {
-            return;
+        if session.page.target_id() != original.page.target_id()
+            || !std::sync::Arc::ptr_eq(&session.owner, &original.owner)
+            || session.metadata["actor_identity"] != original.metadata["actor_identity"]
+        {
+            return false;
         }
         if let Some(url) = readiness["tab_url"].as_str() {
             session.url = url.to_owned();
@@ -768,6 +788,7 @@ impl BrowserSurfaces {
             metadata.insert("prompt_readiness".into(), readiness.clone());
         }
         session.updated_at = cccc_contracts::utc_now();
+        true
     }
 
     async fn record_page_state(&self, key: &str, page: &Page) {

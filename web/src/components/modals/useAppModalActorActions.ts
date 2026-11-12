@@ -957,6 +957,7 @@ export function useAppModalActorActions(args: {
     runtimeMode?: "default" | "acp",
     defaultScopeKey = "",
     environment?: ActorSecretSaveChanges,
+    browserProfile?: string,
   ): Promise<boolean> => {
     if (!selectedGroupId) return false;
     const creationGroupId = selectedGroupId;
@@ -1010,10 +1011,12 @@ export function useAppModalActorActions(args: {
               profileId: String(selectedProfile?.id || "").trim(),
               profileScope: (selectedProfile?.scope || "global") as api.ProfileScope,
               profileOwner: String(selectedProfile?.owner_id || "").trim() || undefined,
+              browserProfile,
               capabilityAutoload,
               defaultScopeKey,
             }
           : {
+              browserProfile,
               capabilityAutoload,
               defaultScopeKey,
               ...(supportsAcpMode(newActorRuntime) ? { runtimeMode } : {}),

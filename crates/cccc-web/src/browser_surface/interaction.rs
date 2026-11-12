@@ -13,6 +13,15 @@ use super::BrowserSurfaces;
 
 impl BrowserSurfaces {
     pub async fn command(&self, key: &str, command: &Value) -> Result<()> {
+        self.command_for_identity(key, command, None).await
+    }
+
+    async fn command_for_identity(
+        &self,
+        key: &str,
+        command: &Value,
+        expected_identity: Option<&str>,
+    ) -> Result<()> {
         let operation = self.key_operation(key).await;
         let _operation = operation.lock().await;
         let mut session = self
@@ -22,6 +31,9 @@ impl BrowserSurfaces {
             .get(key)
             .cloned()
             .context("browser surface is not active")?;
+        if expected_identity.is_some_and(|id| session.metadata["actor_identity"] != id) {
+            bail!("browser profile selection changed; reopen this viewer");
+        }
         let original_target = session.page.target_id().clone();
         match command.get("t").and_then(Value::as_str).unwrap_or("") {
             "ping" => return Ok(()),
@@ -172,14 +184,49 @@ impl BrowserSurfaces {
 }
 
 pub async fn serve_socket(
+    socket: WebSocket,
+    surfaces: &BrowserSurfaces,
+    key: &str,
+    viewer_mode: &str,
+    shutdown: tokio::sync::broadcast::Receiver<()>,
+) {
+    serve_bound_socket(socket, surfaces, key, viewer_mode, shutdown, None).await;
+}
+
+pub async fn serve_actor_socket(
+    socket: WebSocket,
+    surfaces: &BrowserSurfaces,
+    key: &str,
+    viewer_mode: &str,
+    shutdown: tokio::sync::broadcast::Receiver<()>,
+    identity: String,
+) {
+    serve_bound_socket(socket, surfaces, key, viewer_mode, shutdown, Some(identity)).await;
+}
+
+async fn serve_bound_socket(
     mut socket: WebSocket,
     surfaces: &BrowserSurfaces,
     key: &str,
     viewer_mode: &str,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
+    expected_identity: Option<String>,
 ) {
     let stream_frames = viewer_mode_uses_frames(viewer_mode, surfaces.vnc_port(key).await.is_ok());
-    let initial = state_event(surfaces.info(key).await);
+    let surface = surfaces.info(key).await;
+    if expected_identity
+        .as_deref()
+        .is_some_and(|id| surface["metadata"]["actor_identity"] != id)
+    {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+    let identity = expected_identity.or_else(|| {
+        surface["metadata"]["actor_identity"]
+            .as_str()
+            .map(str::to_owned)
+    });
+    let initial = state_event(surface);
     if socket
         .send(Message::Text(initial.to_string().into()))
         .await
@@ -194,7 +241,7 @@ pub async fn serve_socket(
                 close_for_shutdown(&mut socket).await;
                 break;
             }
-            _ = interval.tick(), if stream_frames => match until_shutdown(&mut shutdown, surfaces.frame(key)).await {
+            _ = interval.tick(), if stream_frames => match until_shutdown(&mut shutdown, surfaces.frame_for_identity(key, identity.as_deref())).await {
                 None => {
                     close_for_shutdown(&mut socket).await;
                     break;
@@ -219,7 +266,7 @@ pub async fn serve_socket(
                 let Ok(command) = serde_json::from_str::<Value>(&text) else { continue };
                 let Some(result) = until_shutdown(
                     &mut shutdown,
-                    surfaces.command(key, &command),
+                    surfaces.command_for_identity(key, &command, identity.as_deref()),
                 ).await else {
                     close_for_shutdown(&mut socket).await;
                     break;

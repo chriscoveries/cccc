@@ -106,7 +106,7 @@ async fn start_connection(
     actor: &str,
     first_attempt: bool,
 ) -> Result<Value, ApiError> {
-    let control = super::web_model_delivery::control_guard(group, actor)?;
+    let control = super::web_model_delivery::control_work(state, group, actor)?;
     let connector = store::load(state)?
         .into_iter()
         .find(|c| c["revoked"] != true && c["provider"] == "chatgpt_web")
@@ -126,11 +126,12 @@ async fn start_connection(
                 &connector,
                 group,
                 actor,
-                &cccc_core::actors::generation_identity(config),
+                &cccc_core::actors::web_model_generation_identity(config),
             )
             .is_some()
-            || web_model_connectors::pairing_for_actor(&connector, group, actor)
-                .is_some_and(|p| p["generation"] == cccc_core::actors::generation_identity(config)))
+            || web_model_connectors::pairing_for_actor(&connector, group, actor).is_some_and(|p| {
+                p["generation"] == cccc_core::actors::web_model_generation_identity(config)
+            }))
     {
         return Ok(json!({}));
     }
@@ -140,6 +141,12 @@ async fn start_connection(
     .expect("literal JSON object")
     .clone();
     let key = super::web_model_browser::key(group, actor);
+    if !super::web_model_browser::surface_matches(config, &state.browser_surfaces.info(&key).await)
+    {
+        return Err(pairing_error(
+            "pairing_browser_not_ready: browser profile changed; reopen the Actor browser",
+        ));
+    }
     let target = state
         .browser_surfaces
         .pairing_page(&key)
@@ -296,7 +303,7 @@ fn candidate(state: &AppState, args: &Map<String, Value>) -> Result<Value, &'sta
                 !a.enabled
             })
             && a.runtime == cccc_contracts::ActorRuntime::WebModel
-            && cccc_core::actors::generation_identity(a) == pair["generation"]
+            && cccc_core::actors::web_model_generation_identity(a) == pair["generation"]
     }) {
         return Err("pairing_interrupted");
     }

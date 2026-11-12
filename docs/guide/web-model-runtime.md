@@ -37,9 +37,44 @@ batch, reset pairing or clear conversation history.
 
 Mental model: the ChatGPT Web Model agent is a normal CCCC agent whose model surface happens to be ChatGPT Web. It reuses the same `cccc_bootstrap`, `cccc_help`, messaging, coordination, capability, memory, and repository tool paths as Codex/Claude agents. Browser delivery and remote-MCP pull are transport adapters, not a separate help system.
 
-Connector model: one authenticated CCCC connector serves multiple verified ChatGPT conversations. All agents share one dedicated browser profile and login; each owns a persistent separate window and Page target. No active-tab scheduler chooses the delivery recipient. Rotating the global credential invalidates the old URL while preserving pairings. Revoking and recreating the connector requires new pairings.
+Connector model: one authenticated CCCC connector serves multiple verified ChatGPT conversations across browser profiles. By default all agents use the `_shared` browser profile and login; each owns a persistent separate window and Page target. No active-tab scheduler chooses the delivery recipient. Rotating the global credential invalidates the old URL while preserving pairings. Revoking and recreating the connector requires new pairings.
 
-Shared login means these agent conversations use the same configured ChatGPT account. Separate agent identities control CCCC routing and workspace permissions; they do not create separate provider accounts or subscription entitlements. Feature availability and usage limits remain those of that account. CCCC Connect accounts and Group connections are separate from this provider login.
+Agents using the same browser profile use the same configured ChatGPT account. Separate agent identities control CCCC routing and workspace permissions; they do not create separate provider accounts or subscription entitlements. Feature availability and usage limits remain those of each account. CCCC Connect accounts and Group connections are separate from this provider login.
+
+### A separate browser login for another account
+
+As an instance administrator, create a ChatGPT Web Model agent with **Browser
+profile / account label** set to a name such as `secondary`. Names use 1–48
+lowercase letters/digits, with `-` or `_` after the first character. `_shared`
+keeps the existing login and requires no migration. Named agents are created
+stopped so their login can be prepared first.
+
+In **Settings → This instance → Web Models**, select that **Browser profile**
+and choose **Open login window**. Use the existing Managed Remote Access viewer
+to sign into the intended account, then check login. No debugging-port commands
+or cookie copying are needed. In the agent's setup, choose the conversation,
+connect it, and enable the agent. Keep the same instance MCP connector/plugin:
+changing browser profiles neither rotates its secret nor creates another one.
+
+Status identifies the profile and its operator-declared account label. **Account
+identity unverified** means CCCC has not independently checked which ChatGPT
+account is signed in; confirm that in the login viewer. It does not infer an
+email address from the page.
+
+To change an existing agent's profile, stop and disconnect it and resolve any
+unfinished delivery first, then save the new name in agent setup. Select and
+pair a new conversation afterwards. Busy changes are refused; the edit does not
+replay queued inputs or erase delivery history. An old open viewer must be
+reopened after a selection change.
+
+Each used profile gets its own Chrome process owner, debugging port, login
+surface and cookies. Agents with the same name reuse that owner and share login,
+including across Groups; a profile name is not a Group security boundary. An
+extra Chrome and its renderer/display processes consume additional memory.
+Named owners start on demand and stop during resource cleanup after their last
+agent reference is removed; cookies remain for later reuse. Closing a login
+window alone leaves its agent pages running. Signing out affects only agents
+using that profile. Dots and Grok keep their existing setup paths.
 
 In global Web Model settings, **Open login window** reveals the login window and restores the ChatGPT entry page if that window is blank. It preserves an ongoing sign-in flow. **Check login** only inspects readiness; it does not reload the page. **Close login window** closes only that window; agent windows, queued work and the saved login remain intact. It does not require stopping agents. Signing out of ChatGPT still affects all agent windows sharing the login.
 
