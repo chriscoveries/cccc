@@ -19,7 +19,7 @@ interface Props {
   isActive?: boolean;
   currentGroupId?: string;
   onOpenWebAccess?: () => void;
-  focusTarget?: { section: "login" | "connector"; nonce: number };
+  focusTarget?: { section: "login" | "connector"; nonce: number; browserProfile?: string };
 }
 const PROVIDERS = [
   { value: "chatgpt_web" as const, label: "ChatGPT" },
@@ -108,6 +108,8 @@ function ProviderSettings({
   const [connector, setConnector] = useState<api.WebModelConnector | null>(null);
   // Undefined until read, or when an older Web server does not report it.
   const [connectorBase, setConnectorBase] = useState<string | undefined>();
+  const [browserProfile, setBrowserProfile] = useState(focusTarget?.browserProfile || "_shared");
+  const [browserProfiles, setBrowserProfiles] = useState<string[]>(["_shared"]);
   const [browser, setBrowser] = useState<api.WebModelBrowserSession>({});
   const [needsSetup, setNeedsSetup] = useState(false);
   const [error, setError] = useState("");
@@ -120,6 +122,11 @@ function ProviderSettings({
   const actionPending = useRef(false);
   const loginRef = useRef<HTMLDivElement>(null);
   const connectorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!isActive || !focusTarget || provider !== "chatgpt_web") return;
+    setBrowser({});
+    setBrowserProfile(focusTarget.browserProfile || "_shared");
+  }, [isActive, focusTarget, provider]);
   useEffect(() => {
     if (!isActive || !focusTarget) return;
     const frame = requestAnimationFrame(() => {
@@ -139,7 +146,9 @@ function ProviderSettings({
     void Promise.all([
       api.fetchWebModelConnectors(),
       provider === "chatgpt_web"
-        ? api.sharedWebModelBrowser("status", false, provider)
+        ? browserProfile === "_shared"
+          ? api.sharedWebModelBrowser("status", false, provider)
+          : api.sharedWebModelBrowser("status", false, provider, browserProfile)
         : Promise.resolve(null),
     ])
       .then(([c, b]) => {
@@ -161,8 +170,10 @@ function ProviderSettings({
           setLoadState("error");
           setError(c.error.message);
         }
-        if (b?.ok) setBrowser(b.result.browser_session);
-        else if (b && !b.ok) setError(b.error.message);
+        if (b?.ok) {
+          setBrowser(b.result.browser_session);
+          setBrowserProfiles(b.result.browser_profiles || ["_shared"]);
+        } else if (b && !b.ok) setError(b.error.message);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -172,10 +183,13 @@ function ProviderSettings({
     return () => {
       cancelled = true;
     };
-  }, [isActive, loadNonce, provider]);
+  }, [isActive, loadNonce, provider, browserProfile]);
   const loadBrowser = useCallback(
-    () => api.sharedWebModelBrowser("status", false, provider),
-    [provider],
+    () =>
+      browserProfile === "_shared"
+        ? api.sharedWebModelBrowser("status", false, provider)
+        : api.sharedWebModelBrowser("status", false, provider, browserProfile),
+    [provider, browserProfile],
   );
   const actionsDisabled = busy || !isActive || loadState !== "ready";
   async function action(kind: "configure" | "rotate" | "revoke" | "open" | "check" | "close") {
@@ -200,11 +214,10 @@ function ProviderSettings({
         setConnector(null);
         setConfirm(null);
       } else {
-        const r = await api.sharedWebModelBrowser(
-          kind === "check" ? "status" : (kind as "open" | "close"),
-          kind === "check",
-          provider,
-        );
+        const operation = kind === "check" ? "status" : (kind as "open" | "close");
+        const r = await (browserProfile === "_shared"
+          ? api.sharedWebModelBrowser(operation, kind === "check", provider)
+          : api.sharedWebModelBrowser(operation, kind === "check", provider, browserProfile));
         if (!r.ok) throw new Error(r.error.message);
         setBrowser(r.result.browser_session);
         if (kind === "open") setNonce((n) => n + 1);
@@ -332,17 +345,36 @@ function ProviderSettings({
                     {label(browserState)}
                   </span>
                 )}
+                <label className="flex items-center gap-2 text-sm">
+                  {t("browserProfiles.label")}
+                  <select
+                    aria-label={t("browserProfiles.label")}
+                    value={browserProfile}
+                    disabled={actionsDisabled}
+                    onChange={(event) => {
+                      setBrowser({});
+                      setBrowserProfile(event.target.value);
+                    }}
+                  >
+                    {browserProfiles.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                  <span>{t("browserProfiles.unverified")}</span>
+                </label>
                 {browser.active && isActive && (
                   <ProjectedBrowserSurfacePanel
                     isDark={isDark}
-                    key={nonce}
+                    key={`${browserProfile}:${nonce}`}
                     refreshNonce={0}
                     viewportClassName="h-[min(70dvh,720px)] min-h-[320px] w-full"
                     reuseActiveSession
-                    sessionIdentity={`web-model-login:${provider}`}
+                    sessionIdentity={`web-model-login:${provider}:${browserProfile}`}
                     defaultViewerMode="browser"
                     loadSession={loadBrowser}
-                    webSocketUrl={api.sharedWebModelBrowserWebSocketUrl(provider)}
+                    webSocketUrl={api.sharedWebModelBrowserWebSocketUrl(provider, browserProfile)}
                   />
                 )}
               </CardBlock>

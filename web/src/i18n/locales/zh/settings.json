@@ -1,4 +1,11 @@
 {
+  "browserProfiles": {
+    "label": "浏览器配置",
+    "accountLabel": "浏览器配置 / 账户标签",
+    "unverified": "账户身份未经验证",
+    "hint": "_shared 保留现有登录。命名配置使用独立的登录窗口。",
+    "save": "保存浏览器配置"
+  },
   "saveFeedback": { "saved": "设置已保存。", "failed": "未能保存设置。你的修改仍然保留，请重试。" },
   "title": "设置",
   "closeAriaLabel": "关闭设置",

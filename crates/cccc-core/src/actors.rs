@@ -95,6 +95,49 @@ pub fn validate_model_label(value: &str) -> io::Result<String> {
     Ok(label.to_owned())
 }
 
+/// A profile is an instance-local name, never an arbitrary filesystem path.
+pub fn validate_browser_profile(value: &str) -> io::Result<String> {
+    if value.is_empty() || value == "_shared" {
+        return Ok(String::new());
+    }
+    if value.len() > 48
+        || !value.as_bytes()[0].is_ascii_alphanumeric()
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    {
+        return Err(io::Error::other(
+            "browser_profile must be _shared or 1-48 lowercase letters/digits with '-' or '_'",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+pub fn browser_profile(actor: &Actor) -> &str {
+    if actor.browser_profile.is_empty() {
+        "_shared"
+    } else {
+        &actor.browser_profile
+    }
+}
+
+/// Opaque browser-route identity. Default routes keep their existing identity;
+/// native turn/source identities continue to use generation_identity unchanged.
+pub fn web_model_generation_identity(actor: &Actor) -> String {
+    let generation = generation_identity(actor);
+    if actor.runtime.is_browser_web_model()
+        && (!actor.browser_profile.is_empty() || actor.browser_profile_revision != 0)
+    {
+        format!(
+            "{generation}:browser:{}:{}",
+            browser_profile(actor),
+            actor.browser_profile_revision
+        )
+    } else {
+        generation
+    }
+}
+
 pub fn visible(group: &GroupDoc) -> impl Iterator<Item = &Actor> {
     group
         .actors
@@ -171,6 +214,8 @@ pub fn add(group: &mut GroupDoc, mut actor: Actor) -> io::Result<Actor> {
 
     actor.id = validate_actor_id(&actor.id)?;
     actor.model_label = validate_model_label(&actor.model_label)?;
+    actor.browser_profile = validate_browser_profile(&actor.browser_profile)?;
+    actor.browser_profile_revision = 0;
     if !actor.external_session_id.is_empty()
         && !matches!(
             actor.runtime,
@@ -218,6 +263,9 @@ pub fn update(
     actor_id: &str,
     patch: &Map<String, Value>,
 ) -> io::Result<Actor> {
+    if patch.contains_key("browser_profile_revision") {
+        return Err(io::Error::other("browser_profile_revision is server-owned"));
+    }
     let index = group
         .actors
         .iter()
@@ -264,6 +312,15 @@ pub fn update(
     }
     actor.role = None;
     actor.model_label = validate_model_label(&actor.model_label)?;
+    actor.browser_profile = validate_browser_profile(&actor.browser_profile)?;
+    actor.browser_profile_revision = if browser_profile(&actor) != browser_profile(current) {
+        current
+            .browser_profile_revision
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("browser profile revision exhausted"))?
+    } else {
+        current.browser_profile_revision
+    };
     actor
         .runtime_mode
         .validate(actor.runtime)
@@ -374,3 +431,7 @@ fn dedupe(values: Vec<String>) -> Vec<String> {
         .filter(|value| !value.is_empty() && seen.insert(value.clone()))
         .collect()
 }
+
+#[cfg(test)]
+#[path = "actors/browser_profile_tests.rs"]
+mod browser_profile_tests;

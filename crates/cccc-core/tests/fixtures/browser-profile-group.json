@@ -1,0 +1,39 @@
+{
+  "v": 1,
+  "group_id": "g_browser_profile_capture",
+  "title": "",
+  "created_at": "2026-09-21T16:45:28.956340Z",
+  "updated_at": "2026-11-12T11:03:10.481772Z",
+  "running": true,
+  "state": "active",
+  "actors": [
+    {
+      "id": "web1",
+      "runtime": "web_model",
+      "runner": "headless",
+      "enabled": true,
+      "created_at": "2026-11-10T14:16:15.628233Z",
+      "updated_at": "2026-11-12T04:22:07.914660Z",
+      "generation": "00000000-0000-4000-8000-000000000001"
+    },
+    {
+      "id": "peer1",
+      "runtime": "codex",
+      "runner": "pty",
+      "enabled": true,
+      "created_at": "2026-10-11T01:32:53.426115Z",
+      "updated_at": "2026-11-03T16:36:41.287721Z",
+      "generation": "00000000-0000-4000-8000-000000000002"
+    }
+  ],
+  "web_model_browser_targets": {
+    "web1": {
+      "kind": "existing_chat",
+      "last_delivery_status": "submitted",
+      "next_delivery": "existing_chat",
+      "saved_at": "2026-11-12T06:52:37.047275Z",
+      "state": "bound_existing_chat",
+      "url": "https://chatgpt.com/c/00000000-0000-4000-8000-000000000001"
+    }
+  }
+}

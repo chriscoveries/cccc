@@ -91,14 +91,42 @@ async fn update(
 ) -> ApiResult {
     let mut args = body_object(body)?;
     normalize_command(&mut args)?;
+    let profile_edit = args.contains_key("browser_profile")
+        || args
+            .get("patch")
+            .is_some_and(|p| p.get("browser_profile").is_some());
+    let before = profile_edit
+        .then(|| super::web_model_browser::actor_config(&state, &group_id, &actor_id))
+        .transpose()?;
+    let session_key = super::web_model_browser::key(&group_id, &actor_id);
     args.insert("group_id".into(), Value::String(group_id));
     args.insert("actor_id".into(), Value::String(actor_id));
-    call(
+    let mut response = call(
         &state,
         "actor_update",
         super::actor_profiles::auth_args(&principal, args),
     )
-    .await
+    .await?;
+    if let Some(before) = before.filter(|a| {
+        response.0["result"]["actor"]["browser_profile_revision"]
+            .as_u64()
+            .unwrap_or(0)
+            != a.browser_profile_revision
+    }) {
+        // The daemon committed the new revision. Cleanup failure must not turn
+        // that save into a failed response that invites replay of the edit.
+        if let Err(error) = state
+            .browser_surfaces
+            .close_actor_identity(
+                &session_key,
+                &crate::browser_surface::actor_identity(&before),
+            )
+            .await
+        {
+            response.0["result"]["browser_cleanup_warning"] = json!(error.to_string());
+        }
+    }
+    Ok(response)
 }
 async fn remove(
     State(state): State<AppState>,

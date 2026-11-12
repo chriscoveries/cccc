@@ -227,6 +227,12 @@ pub struct Actor {
     /// or a verified serving model. Empty means undeclared.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model_label: String,
+    /// Instance-local ChatGPT browser login; empty preserves the shared profile.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub browser_profile: String,
+    /// Server-owned selection epoch; registration generation fences recreation.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub browser_profile_revision: u64,
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
@@ -283,6 +289,8 @@ impl Actor {
             role: None,
             title: String::new(),
             model_label: String::new(),
+            browser_profile: String::new(),
+            browser_profile_revision: 0,
             command: Vec::new(),
             env: BTreeMap::new(),
             default_scope_key: String::new(),
@@ -324,6 +332,9 @@ impl Actor {
 
 const fn version() -> u8 {
     1
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 const fn enabled() -> bool {
     true

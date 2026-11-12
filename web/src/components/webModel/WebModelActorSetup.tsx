@@ -12,7 +12,7 @@ type Props = {
   isDark: boolean;
   isVisible?: boolean;
   canAccessConnection?: boolean;
-  onOpenSharedSettings?: () => void;
+  onOpenSharedSettings?: (browserProfile?: string) => void;
   onBusyChange?: (busy: boolean) => void;
   saving?: boolean;
 };
@@ -35,6 +35,7 @@ function ActorSetup({
   const label = (key: string) => t(`webModelActor.${key}`);
   const [result, setResult] = useState<api.WebModelBrowserSurfaceResult | null>(null);
   const [url, setUrl] = useState("");
+  const [browserProfile, setBrowserProfile] = useState("_shared");
   const [acting, setBusy] = useState(false);
   const busy = acting || saving;
   const [error, setError] = useState("");
@@ -94,6 +95,9 @@ function ActorSetup({
       window.clearInterval(timer);
     };
   }, [fetchStatus, isVisible]);
+  useEffect(() => {
+    setBrowserProfile(result?.browser_session.browser_profile || "_shared");
+  }, [result?.browser_session.browser_profile]);
   const pairing = result?.pairing;
   const enabled = pairing?.actor_enabled === true;
   const { state, bound, connecting, failed } = webModelConnectionState(
@@ -179,7 +183,11 @@ function ActorSetup({
           <WebModelConnectionStatus pairing={pairing} session={result?.browser_session} />
         </div>
         {onOpenSharedSettings ? (
-          <button type="button" className={secondaryButtonClass()} onClick={onOpenSharedSettings}>
+          <button
+            type="button"
+            className={secondaryButtonClass()}
+            onClick={() => onOpenSharedSettings(result?.browser_session.browser_profile)}
+          >
             {label("sharedSettings")}
           </button>
         ) : (
@@ -271,6 +279,48 @@ function ActorSetup({
           </div>
         </div>
       )}
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span>
+          {t("browserProfiles.accountLabel")}:{" "}
+          {result?.browser_session.browser_profile || "_shared"} · {t("browserProfiles.unverified")}
+        </span>
+        {!enabled && !bound && !connecting && (
+          <>
+            <input
+              aria-label={t("browserProfiles.label")}
+              value={browserProfile}
+              maxLength={48}
+              onChange={(event) => setBrowserProfile(event.target.value)}
+              disabled={busy}
+              className="glass-input rounded border p-2"
+            />
+            <button
+              type="button"
+              className={secondaryButtonClass()}
+              disabled={busy || !result}
+              onClick={() => {
+                setBusy(true);
+                void api
+                  .updateActor(groupId, actorId, undefined, undefined, undefined, {
+                    browserProfile,
+                    expectedBrowserIdentity: result?.browser_session.browser_identity,
+                  })
+                  .then(async (response) => {
+                    if (!response.ok) throw new Error(response.error.message);
+                    const next = await fetchStatus();
+                    if (next.ok) setResult(next.result);
+                  })
+                  .catch((error: unknown) =>
+                    setError(error instanceof Error ? error.message : String(error)),
+                  )
+                  .finally(() => setBusy(false));
+              }}
+            >
+              {t("browserProfiles.save")}
+            </button>
+          </>
+        )}
+      </div>
       {isVisible && showBrowser && result?.browser_session.active && (
         <ProjectedBrowserSurfacePanel
           isDark={isDark}

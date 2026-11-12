@@ -135,6 +135,7 @@ export function SettingsModal({
   const [webModelProvider, setWebModelProvider] = useState<api.WebModelView>("chatgpt_web");
   const [webModelFocusTarget, setWebModelFocusTarget] = useState<{
     section: "login" | "connector";
+    browserProfile?: string;
     nonce: number;
   }>();
   const settingsTarget = useModalStore((state) => state.settingsTarget);
@@ -508,7 +509,13 @@ export function SettingsModal({
     if (settingsTarget.webModelProvider) setWebModelProvider(settingsTarget.webModelProvider);
     setWebModelFocusTarget(
       settingsTarget.webModelSection
-        ? { section: settingsTarget.webModelSection, nonce: settingsTarget.nonce }
+        ? {
+            section: settingsTarget.webModelSection,
+            nonce: settingsTarget.nonce,
+            ...(settingsTarget.webModelBrowserProfile
+              ? { browserProfile: settingsTarget.webModelBrowserProfile }
+              : {}),
+          }
         : undefined,
     );
     clearSettingsTarget();

@@ -185,6 +185,7 @@ export interface CreateActorConfigProps extends ActorConfigBaseProps {
     runtimeMode?: RuntimeMode,
     defaultScopeKey?: string,
     environment?: ActorSecretSaveChanges,
+    browserProfile?: string,
   ) => Promise<boolean> | boolean;
   onSelectGroup?: (groupId: string) => void;
 }
@@ -323,6 +324,10 @@ function CreateActorConfigModal({
   const { modalRef } = useModalA11y(isOpen && !localDialogOpen, onCancel);
   useChatObscuringView(isOpen);
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("default");
+  const [browserProfile, setBrowserProfile] = useState("_shared");
+  useEffect(() => {
+    if (isOpen) setBrowserProfile("_shared");
+  }, [isOpen]);
   const createDrafts = useRef<
     Partial<
       Record<
@@ -445,11 +450,13 @@ function CreateActorConfigModal({
       const ok = await Promise.resolve(
         runtime === "deepseek" && !useProfile
           ? onCreate(avatarFile, "default", defaultScopeKey, deepSeekSaveChanges)
-          : onCreate(
-              avatarFile,
-              supportsAcpMode(runtime) ? runtimeMode : "default",
-              defaultScopeKey,
-            ),
+          : runtime === "web_model" && browserProfile !== "_shared"
+            ? onCreate(avatarFile, "default", defaultScopeKey, undefined, browserProfile)
+            : onCreate(
+                avatarFile,
+                supportsAcpMode(runtime) ? runtimeMode : "default",
+                defaultScopeKey,
+              ),
       );
       if (ok) setAvatarFile(null);
     } catch (e) {
@@ -598,6 +605,20 @@ function CreateActorConfigModal({
                 <Surface className={sectionCardClass}>
                   <div className={sectionTitleClass}>{t("sectionBasics")}</div>
 
+                  {runtime === "web_model" && (
+                    <label className="mt-4 block text-sm">
+                      {t("settings:browserProfiles.accountLabel")}
+                      <input
+                        aria-label={t("settings:browserProfiles.label")}
+                        value={browserProfile}
+                        maxLength={48}
+                        onChange={(event) => setBrowserProfile(event.target.value)}
+                        disabled={busy === "actor-add"}
+                        className="glass-input ml-2 rounded border p-2"
+                      />
+                      <span className="block text-xs">{t("settings:browserProfiles.hint")}</span>
+                    </label>
+                  )}
                   <div className="mt-4 space-y-4">
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-[88px_minmax(0,1fr)] sm:items-start">
                       <ActorAvatarField
@@ -1082,7 +1103,7 @@ function EditActorConfigModal({
       overlay?.removeEventListener("transitionend", onTransitionEnd);
     };
   }, [actorId, groupId, isOpen, modalRef, sharedSettingsRequested, suspended]);
-  const openSharedSettings = () => {
+  const openSharedSettings = (browserProfile?: string) => {
     const trigger = document.activeElement;
     sharedSettingsTriggerRef.current =
       trigger instanceof HTMLElement && modalRef.current?.contains(trigger) ? trigger : null;
@@ -1092,6 +1113,9 @@ function EditActorConfigModal({
       tab: "webModels",
       webModelProvider: conversationRuntime === "grok_web_model" ? "grok_web" : "chatgpt_web",
       webModelSection: conversationRuntime === "web_model" ? "login" : "connector",
+      ...(typeof browserProfile === "string" && browserProfile && browserProfile !== "_shared"
+        ? { webModelBrowserProfile: browserProfile }
+        : {}),
     });
   };
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
@@ -2429,7 +2453,11 @@ function EditActorConfigModal({
                         >
                           {t("settings:grokActor.runtimeSaveHint")}
                         </p>
-                        <Button type="button" variant="outline" onClick={openSharedSettings}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => openSharedSettings()}
+                        >
                           {t("settings:grokActor.shared")}
                         </Button>
                       </div>

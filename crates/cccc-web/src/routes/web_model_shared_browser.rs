@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Query, State, ws::WebSocketUpgrade},
+    extract::{Extension, Query, State, ws::WebSocketUpgrade},
     response::Response,
     routing::{get, post},
 };
@@ -20,6 +20,8 @@ struct QueryArgs {
     provider: String,
     #[serde(default)]
     viewer_mode: String,
+    #[serde(default)]
+    browser_profile: String,
     #[serde(default)]
     inspect: bool,
 }
@@ -47,58 +49,155 @@ pub(super) fn profile(state: &AppState, provider: &str) -> std::path::PathBuf {
         .join(provider)
         .join("chrome_profile")
 }
-async fn payload(state: &AppState, provider: &str, inspect: bool) -> ApiResult {
-    let mut surface = state.browser_surfaces.info(key(provider)).await;
+fn effective_name(name: &str) -> &str {
+    if name.is_empty() { "_shared" } else { name }
+}
+fn login_key(provider: &str, name: &str) -> String {
+    if name.is_empty() {
+        key(provider).to_owned()
+    } else {
+        format!("web-model-login::{provider}::{name}")
+    }
+}
+fn configured_profiles(state: &AppState) -> Result<std::collections::BTreeSet<String>, ApiError> {
+    let store =
+        cccc_core::GroupStore::new(state.home.clone()).map_err(|e| ApiError::bad(e.to_string()))?;
+    let mut names = std::collections::BTreeSet::from(["_shared".to_owned()]);
+    for row in store.list().map_err(|e| ApiError::bad(e.to_string()))? {
+        let group = store
+            .load(&row.group_id)
+            .map_err(|e| ApiError::bad(e.to_string()))?;
+        for actor in group
+            .actors
+            .iter()
+            .filter(|a| a.runtime.is_browser_web_model())
+        {
+            cccc_core::actors::validate_browser_profile(&actor.browser_profile)
+                .map_err(|e| ApiError::bad(e.to_string()))?;
+            names.insert(cccc_core::actors::browser_profile(actor).to_owned());
+        }
+    }
+    Ok(names)
+}
+fn selected_profile(
+    state: &AppState,
+    principal: &crate::auth::Principal,
+    value: &str,
+) -> Result<String, ApiError> {
+    if !principal.current_admin(&state.home).unwrap_or(false) {
+        return Err(ApiError::forbidden(
+            "Browser login requires the instance administrator",
+        ));
+    }
+    let name = cccc_core::actors::validate_browser_profile(value)
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    if !name.is_empty() && !configured_profiles(state)?.contains(&name) {
+        return Err(ApiError::not_found(
+            "Browser profile has no configured Web Model Actor",
+        ));
+    }
+    Ok(name)
+}
+pub(super) fn profile_named(
+    state: &AppState,
+    provider: &str,
+    value: &str,
+) -> Result<std::path::PathBuf, ApiError> {
+    let name = cccc_core::actors::validate_browser_profile(value)
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    if name.is_empty() {
+        return Ok(profile(state, provider));
+    }
+    let mut path = state.home.root().to_path_buf();
+    for component in [
+        "state",
+        "web_model_browser",
+        name.as_str(),
+        provider,
+        "chrome_profile",
+    ] {
+        path.push(component);
+        match std::fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(ApiError::bad(e.to_string())),
+        }
+        let metadata =
+            std::fs::symlink_metadata(&path).map_err(|e| ApiError::bad(e.to_string()))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(ApiError::bad(
+                "Named browser profile must use owned directories, not symlinks",
+            ));
+        }
+    }
+    Ok(path)
+}
+async fn payload(state: &AppState, provider: &str, inspect: bool, name: &str) -> ApiResult {
+    let key = login_key(provider, name);
+    let mut surface = state.browser_surfaces.info(&key).await;
     let readiness = if inspect && surface["active"] == true {
         state
             .browser_surfaces
-            .prompt_readiness(key(provider))
+            .prompt_readiness(&key)
             .await
             .map_err(|e| ApiError::bad(e.to_string()))?
     } else {
         surface["metadata"]["prompt_readiness"].clone()
     };
     if inspect {
-        surface = state.browser_surfaces.info(key(provider)).await;
+        surface = state.browser_surfaces.info(&key).await;
     }
     Ok(success(
-        json!({"browser_surface":surface,"browser_session":{"active":surface["active"],"ready":readiness["ready"],"login_required":readiness["login_required"],"verification_required":readiness["verification_required"],"state":readiness["state"],"checked_at":readiness["checked_at"],"tab_url":surface["url"]}}),
+        json!({"browser_profiles":configured_profiles(state)?,"browser_surface":surface,"browser_session":{"browser_profile":effective_name(name),"account_label":effective_name(name),"account_identity":"unverified","active":surface["active"],"ready":readiness["ready"],"login_required":readiness["login_required"],"verification_required":readiness["verification_required"],"state":readiness["state"],"checked_at":readiness["checked_at"],"tab_url":surface["url"]}}),
     ))
 }
-async fn info(State(state): State<AppState>, Query(query): Query<QueryArgs>) -> ApiResult {
-    payload(&state, provider(&query.provider)?, query.inspect).await
+async fn info(
+    Extension(principal): Extension<crate::auth::Principal>,
+    State(state): State<AppState>,
+    Query(query): Query<QueryArgs>,
+) -> ApiResult {
+    let name = selected_profile(&state, &principal, &query.browser_profile)?;
+    payload(&state, provider(&query.provider)?, query.inspect, &name).await
 }
 async fn open(
+    Extension(principal): Extension<crate::auth::Principal>,
     State(state): State<AppState>,
     Query(query): Query<QueryArgs>,
     Json(_body): Json<Value>,
 ) -> ApiResult {
     let provider = provider(&query.provider)?;
+    let name = selected_profile(&state, &principal, &query.browser_profile)?;
     state
         .browser_surfaces
         .ensure_open_shared_system(
-            key(provider),
-            &profile(&state, provider),
+            &login_key(provider, &name),
+            &profile_named(&state, provider, &name)?,
             "https://chatgpt.com/",
             1366,
             900,
         )
         .await
         .map_err(|e| ApiError::bad(format!("{e:#}")))?;
-    payload(&state, provider, false).await
+    payload(&state, provider, false, &name).await
 }
-async fn close(State(state): State<AppState>, Query(query): Query<QueryArgs>) -> ApiResult {
+async fn close(
+    Extension(principal): Extension<crate::auth::Principal>,
+    State(state): State<AppState>,
+    Query(query): Query<QueryArgs>,
+) -> ApiResult {
     let provider = provider(&query.provider)?;
+    let name = selected_profile(&state, &principal, &query.browser_profile)?;
     // The settings action closes the owned login window, not the shared
     // process. Actor windows and authenticated profile remain available.
     state
         .browser_surfaces
-        .close(key(provider))
+        .close(&login_key(provider, &name))
         .await
         .map_err(|e| ApiError::bad(e.to_string()))?;
-    payload(&state, provider, false).await
+    payload(&state, provider, false, &name).await
 }
 async fn upgrade(
+    Extension(principal): Extension<crate::auth::Principal>,
     State(state): State<AppState>,
     Query(query): Query<QueryArgs>,
     ws: WebSocketUpgrade,
@@ -109,12 +208,14 @@ async fn upgrade(
         ));
     }
     let provider = provider(&query.provider)?;
+    let name = selected_profile(&state, &principal, &query.browser_profile)?;
+    let key = login_key(provider, &name);
     Ok(ws.on_upgrade(move |socket| async move {
         if query.mode == "vnc" {
             crate::browser_surface::serve_vnc_socket(
                 socket,
                 &state.browser_surfaces,
-                key(provider),
+                &key,
                 state.shutdown.subscribe(),
             )
             .await;
@@ -122,7 +223,7 @@ async fn upgrade(
             crate::browser_surface::serve_socket(
                 socket,
                 &state.browser_surfaces,
-                key(provider),
+                &key,
                 &query.viewer_mode,
                 state.shutdown.subscribe(),
             )
@@ -130,6 +231,10 @@ async fn upgrade(
         }
     }))
 }
+
+#[cfg(test)]
+#[path = "web_model_shared_browser_profile_tests.rs"]
+mod profile_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
@@ -207,6 +312,12 @@ mod tests {
         page.evaluate("document.cookie='fixture_login=shared;Path=/';document.querySelector('textarea').value='keep Actor draft'").await.expect("fixture login and draft");
         let before = state.browser_surfaces.info("actor").await;
         let result = close(
+            Extension(crate::auth::Principal {
+                user_id: "local".into(),
+                allowed_groups: vec![],
+                is_admin: true,
+                raw_token: String::new(),
+            }),
             State(state.clone()),
             Query(QueryArgs {
                 provider: provider.into(),

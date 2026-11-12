@@ -51,7 +51,7 @@ pub(super) fn for_actor(state: &AppState, group_id: &str, actor_id: &str) -> Opt
         &connector,
         group_id,
         actor_id,
-        &cccc_core::actors::generation_identity(actor),
+        &cccc_core::actors::web_model_generation_identity(actor),
     )?;
     binding["connector_id"] = connector["connector_id"].clone();
     binding["provider"] = connector["provider"].clone();
@@ -116,7 +116,7 @@ pub(super) fn resolve(
         .ok_or_else(|| {
             ApiError::forbidden("paired_actor_unavailable: The paired Actor no longer exists")
         })?;
-    if binding["generation"] != cccc_core::actors::generation_identity(actor) {
+    if binding["generation"] != cccc_core::actors::web_model_generation_identity(actor) {
         return Err(ApiError::forbidden(
             "paired_actor_identity_changed: The paired Actor was replaced; explicitly reconnect the intended Actor",
         ));

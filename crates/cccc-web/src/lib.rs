@@ -419,7 +419,14 @@ fn spawn_group_resource_reaper(
                     tracing::warn!(%error,"failed to close stale actor browser surfaces");
                     0
                 });
-            let closed = closed_groups + closed_actors;
+            let closed_profiles = browser_surfaces
+                .close_unused_web_model_profiles(&store)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "failed to close unused named browser profiles");
+                    0
+                });
+            let closed = closed_groups + closed_actors + closed_profiles;
             if stopped > 0 || closed > 0 {
                 tracing::info!(stopped, closed, "cleaned resources for deleted groups");
             }

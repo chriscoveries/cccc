@@ -145,6 +145,7 @@ export async function addActor(
   envPrivate?: Record<string, string>,
   options?: {
     runtimeMode?: "default" | "acp";
+    browserProfile?: string;
     profileId?: string;
     profileScope?: ProfileScope;
     profileOwner?: string;
@@ -160,12 +161,18 @@ export async function addActor(
       method: "POST",
       body: JSON.stringify({
         actor_id: actorId,
+        enabled:
+          options?.browserProfile && options.browserProfile !== "_shared" ? false : undefined,
         role,
         runtime,
         ...(options?.runtimeMode ? { runtime_mode: options.runtimeMode } : {}),
         command,
         env: {},
         env_private: envPrivate && Object.keys(envPrivate).length ? envPrivate : undefined,
+        browser_profile:
+          options?.browserProfile && options.browserProfile !== "_shared"
+            ? options.browserProfile
+            : undefined,
         profile_id: options?.profileId || undefined,
         profile_scope: options?.profileScope || undefined,
         profile_owner: options?.profileOwner || undefined,
@@ -191,6 +198,8 @@ export async function updateActor(
   title?: string,
   opts?: {
     runtimeMode?: "default" | "acp";
+    browserProfile?: string;
+    expectedBrowserIdentity?: string;
     profileId?: string;
     profileScope?: ProfileScope;
     profileOwner?: string;
@@ -207,6 +216,9 @@ export async function updateActor(
   if (command !== undefined) body.command = command.trim();
   if (opts?.runtimeMode) body.runtime_mode = opts.runtimeMode;
   if (title !== undefined) body.title = title.trim();
+  if (opts?.expectedBrowserIdentity !== undefined)
+    body.expected_browser_identity = opts.expectedBrowserIdentity;
+  if (opts?.browserProfile !== undefined) body.browser_profile = opts.browserProfile;
   if (opts?.profileId !== undefined) body.profile_id = String(opts.profileId || "");
   if (opts?.profileScope !== undefined) body.profile_scope = String(opts.profileScope || "");
   if (opts?.profileOwner !== undefined) body.profile_owner = String(opts.profileOwner || "");

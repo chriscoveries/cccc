@@ -1114,12 +1114,17 @@ export function AgentTab({
                   canAccessConnection={canAccessGlobalSettings}
                   onOpenSharedSettings={
                     canControl && canAccessGlobalSettings
-                      ? () =>
+                      ? (browserProfile?: string) =>
                           openSettingsTarget({
                             scope: "global",
                             tab: "webModels",
                             webModelProvider: "chatgpt_web",
                             webModelSection: "login",
+                            ...(typeof browserProfile === "string" &&
+                            browserProfile &&
+                            browserProfile !== "_shared"
+                              ? { webModelBrowserProfile: browserProfile }
+                              : {}),
                           })
                       : undefined
                   }

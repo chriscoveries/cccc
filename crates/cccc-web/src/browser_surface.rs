@@ -15,7 +15,7 @@ mod chrome_test_guard;
 #[cfg(test)]
 pub(crate) use chrome_test_guard::chrome_test_guard;
 
-pub use interaction::{serve_socket, serve_vnc_socket};
+pub use interaction::{serve_actor_socket, serve_socket, serve_vnc_socket};
 pub(crate) use prompt_submission::{
     BOUND_CONVERSATION_ERROR_MARKER, PromptSubmissionOutcome, conversation_target_matches,
     conversation_url_for_target, is_chatgpt_url, normalized_chatgpt_conversation_url,
@@ -54,7 +54,7 @@ pub(crate) fn actor_identity(actor: &cccc_contracts::Actor) -> String {
     format!(
         "{:?}:{}",
         actor.runtime,
-        cccc_core::actors::generation_identity(actor)
+        cccc_core::actors::web_model_generation_identity(actor)
     )
 }
 
@@ -155,7 +155,7 @@ impl BrowserSurfaces {
             .map(|(key, s)| {
                 (
                     key.clone(),
-                    Some(s.page.target_id().clone()),
+                    Some((Arc::clone(&s.owner), s.page.target_id().clone())),
                     s.metadata["actor_identity"].as_str().map(str::to_owned),
                 )
             })
@@ -193,18 +193,69 @@ impl BrowserSurfaces {
             let operation = self.key_operation(&key).await;
             let _guard = operation.lock().await;
             // A replacement opened after the snapshot owns its own lifecycle.
-            let same_owner = if let Some(target) = target {
-                self.sessions
-                    .lock()
-                    .await
-                    .get(&key)
-                    .is_some_and(|s| s.page.target_id() == &target)
+            let same_owner = if let Some((owner, target)) = target {
+                self.sessions.lock().await.get(&key).is_some_and(|s| {
+                    s.page.target_id() == &target
+                        && Arc::ptr_eq(&s.owner, &owner)
+                        && s.metadata["actor_identity"].as_str() == generation.as_deref()
+                })
             } else {
                 !self.sessions.lock().await.contains_key(&key)
                     && self.closed_pages.lock().await.get(&key) == Some(&generation)
             };
             if same_owner {
                 closed += usize::from(self.close_key_locked(&key).await?);
+            }
+        }
+        Ok(closed)
+    }
+
+    /// Reuse the resource reaper for named Web Model owners. Legacy shared
+    /// login remains warm; profile cookies are never deleted.
+    pub async fn close_unused_web_model_profiles(
+        &self,
+        store: &cccc_core::GroupStore,
+    ) -> Result<usize> {
+        let root = store.home().root().join("state/web_model_browser");
+        let root = match std::fs::canonicalize(root) {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error.into()),
+        };
+        let profiles = self.owners.lock().await.keys().cloned().collect::<Vec<_>>();
+        let mut closed = 0;
+        for profile in profiles {
+            let Ok(relative) = profile.strip_prefix(&root) else {
+                continue;
+            };
+            let parts = relative.iter().collect::<Vec<_>>();
+            if parts.len() != 3
+                || parts[0] == "_shared"
+                || parts[1] != "chatgpt_web"
+                || parts[2] != "chrome_profile"
+            {
+                continue;
+            }
+            let Some(name) = parts[0].to_str() else {
+                continue;
+            };
+            let operation = self.profile_operations.lock().await.get(&profile).cloned();
+            let Some(operation) = operation else {
+                continue;
+            };
+            let _guard = operation.lock().await;
+            let mut referenced = false;
+            for row in store.list()? {
+                let group = store.load(&row.group_id)?;
+                referenced |= group.actors.iter().any(|a| {
+                    a.runtime.is_browser_web_model()
+                        && cccc_core::actors::browser_profile(a) == name
+                });
+            }
+            if !referenced {
+                // Actor writes retire work before deletion; new opens on this
+                // directory serialize behind the same operation guard.
+                closed += self.close_owner_locked(&profile).await?;
             }
         }
         Ok(closed)
@@ -843,6 +894,21 @@ impl BrowserSurfaces {
     pub async fn close(&self, key: &str) -> Result<bool> {
         let key_operation = self.key_operation(key).await;
         let _key_operation_guard = key_operation.lock().await;
+        self.close_key_locked(key).await
+    }
+
+    pub async fn close_actor_identity(&self, key: &str, identity: &str) -> Result<bool> {
+        let operation = self.key_operation(key).await;
+        let _guard = operation.lock().await;
+        if !self
+            .sessions
+            .lock()
+            .await
+            .get(key)
+            .is_some_and(|s| s.metadata["actor_identity"] == identity)
+        {
+            return Ok(false);
+        }
         self.close_key_locked(key).await
     }
 

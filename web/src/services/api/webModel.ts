@@ -147,6 +147,11 @@ export type WebModelDeliveryPreference = {
 };
 
 export type WebModelBrowserSession = {
+  browser_profile?: string;
+  browser_profile_revision?: number;
+  browser_identity?: string;
+  account_label?: string;
+  account_identity?: "unverified";
   active?: boolean;
   ready?: boolean;
   login_required?: boolean;
@@ -215,6 +220,10 @@ export type WebModelBrowserSession = {
 };
 
 export type WebModelHealthSnapshot = {
+  provider?: WebModelProvider;
+  browser_profile?: string;
+  account_label?: string;
+  account_identity?: "unverified";
   schema?: string;
   group_id?: string;
   actor_id?: string;
@@ -269,6 +278,7 @@ export type WebModelDeliveryTarget = {
 };
 
 export type WebModelBrowserSurfaceResult = {
+  browser_profiles?: string[];
   browser_session: WebModelBrowserSession;
   browser_surface: PresentationBrowserSurfaceState;
   health_snapshot?: WebModelHealthSnapshot;
@@ -376,13 +386,14 @@ export async function sharedWebModelBrowser(
   action: "status" | "open" | "close" = "status",
   inspect = false,
   provider: WebModelProvider = "chatgpt_web",
+  browserProfile = "_shared",
 ): Promise<ApiResponse<WebModelBrowserSurfaceResult>> {
   const path =
     action === "status"
       ? `?inspect=${inspect}&provider=${provider}`
       : `/${action}?provider=${provider}`;
   const response = await apiJson<WebModelBrowserSurfaceResult>(
-    `/api/v1/web-model/shared-browser${path}`,
+    `/api/v1/web-model/shared-browser${path}${browserProfile === "_shared" ? "" : `&browser_profile=${encodeURIComponent(browserProfile)}`}`,
     action === "status" ? undefined : { method: "POST", body: "{}" },
   );
   if (!response.ok) return response;
@@ -395,9 +406,13 @@ export async function sharedWebModelBrowser(
   };
 }
 
-export function sharedWebModelBrowserWebSocketUrl(provider: WebModelProvider = "chatgpt_web") {
+export function sharedWebModelBrowserWebSocketUrl(
+  provider: WebModelProvider = "chatgpt_web",
+  browserProfile = "_shared",
+) {
   const url = new URL(withAuthToken("/api/v1/web-model/shared-browser/ws"), window.location.href);
   url.searchParams.set("provider", provider);
+  if (browserProfile !== "_shared") url.searchParams.set("browser_profile", browserProfile);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }
