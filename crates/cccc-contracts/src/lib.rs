@@ -16,6 +16,7 @@ pub mod message_pins;
 pub mod reply_question;
 pub mod voice_notifications;
 pub mod voice_secretary;
+pub mod web_model_pin;
 
 pub use actor::{
     Actor, ActorRole, ActorRuntime, ActorSubmit, GroupState, RunnerKind, RuntimeMode,

@@ -1,0 +1,6 @@
+{
+  "id": "browser",
+  "runtime": "web_model",
+  "runner": "headless",
+  "enabled": true
+}

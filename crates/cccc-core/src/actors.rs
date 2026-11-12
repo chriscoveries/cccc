@@ -95,6 +95,21 @@ pub fn validate_model_label(value: &str) -> io::Result<String> {
     Ok(label.to_owned())
 }
 
+/// Validate after runtime/profile resolution as well as before persistence.
+pub fn normalize_web_model_pin(actor: &mut Actor) -> io::Result<()> {
+    if let Some(pin) = &mut actor.web_model_pin {
+        if actor.runtime != cccc_contracts::ActorRuntime::WebModel {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "web_model_pin requires the ChatGPT web_model runtime",
+            ));
+        }
+        pin.normalize()
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+    }
+    Ok(())
+}
+
 pub fn visible(group: &GroupDoc) -> impl Iterator<Item = &Actor> {
     group
         .actors
@@ -171,6 +186,14 @@ pub fn add(group: &mut GroupDoc, mut actor: Actor) -> io::Result<Actor> {
 
     actor.id = validate_actor_id(&actor.id)?;
     actor.model_label = validate_model_label(&actor.model_label)?;
+    normalize_web_model_pin(&mut actor)?;
+    if actor.web_model_pin_revision != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "web_model_pin_revision is server-owned",
+        ));
+    }
+    actor.web_model_pin_revision = u64::from(actor.web_model_pin.is_some());
     if !actor.external_session_id.is_empty()
         && !matches!(
             actor.runtime,
@@ -218,6 +241,12 @@ pub fn update(
     actor_id: &str,
     patch: &Map<String, Value>,
 ) -> io::Result<Actor> {
+    if patch.contains_key("web_model_pin_revision") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "web_model_pin_revision is server-owned",
+        ));
+    }
     let index = group
         .actors
         .iter()
@@ -264,6 +293,13 @@ pub fn update(
     }
     actor.role = None;
     actor.model_label = validate_model_label(&actor.model_label)?;
+    normalize_web_model_pin(&mut actor)?;
+    if actor.web_model_pin != current.web_model_pin {
+        actor.web_model_pin_revision = current
+            .web_model_pin_revision
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("web_model_pin_revision exhausted"))?;
+    }
     actor
         .runtime_mode
         .validate(actor.runtime)
