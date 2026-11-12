@@ -1,4 +1,6 @@
+#[cfg(test)]
 use super::outbound_attachment::safe_filename;
+use super::outbound_attachment::{attachments, filename, load_blob, mime_type};
 use super::outbound_chunks::{fits_message, split_message};
 use super::outbound_stream_state::{event_string, trim_active};
 use super::{AuthorizedChat, outbound_text};
@@ -10,7 +12,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const API: &str = "https://slack.com/api";
-const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_MESSAGE_CHARS: usize = 4_000;
 const STREAM_THROTTLE: Duration = Duration::from_millis(300);
 
@@ -59,12 +60,7 @@ impl SlackOutbound {
             return;
         }
         let body = outbound_text(event, false).unwrap_or_default();
-        let attachments = event
-            .data
-            .get("attachments")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let attachments = attachments(event);
         let mut prepared = Vec::new();
         for attachment in attachments {
             let item = match self.prepare(attachment).await {
@@ -196,35 +192,9 @@ impl SlackOutbound {
     }
 
     async fn prepare(&self, value: &Value) -> Result<PreparedAttachment, String> {
-        let relative = value
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "attachment path is missing".to_owned())?;
-        let path = cccc_core::blobs::resolve(&self.home, &self.group_id, relative)
-            .map_err(|error| error.to_string())?;
-        if path.metadata().map_err(|error| error.to_string())?.len() > MAX_ATTACHMENT_BYTES {
-            return Err("attachment exceeds 10 MiB before read".into());
-        }
-        let raw = tokio::fs::read(&path)
-            .await
-            .map_err(|error| error.to_string())?;
-        if raw.len() as u64 > MAX_ATTACHMENT_BYTES {
-            return Err("attachment exceeds 10 MiB after read".into());
-        }
-        let title = value
-            .get("title")
-            .and_then(Value::as_str)
-            .and_then(safe_filename)
-            .or_else(|| path.file_name().and_then(|name| name.to_str()))
-            .unwrap_or("file")
-            .to_owned();
-        let mime = value
-            .get("mime_type")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| mime_guess::from_path(&path).first_raw())
-            .unwrap_or("application/octet-stream")
-            .to_owned();
+        let (path, raw) = load_blob(&self.home, &self.group_id, value).await?;
+        let title = filename(value, &path).to_owned();
+        let mime = mime_type(value, &path).to_owned();
         Ok(PreparedAttachment { raw, title, mime })
     }
 
