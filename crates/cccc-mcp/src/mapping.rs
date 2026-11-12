@@ -19,6 +19,7 @@ pub fn daemon_call(
         "cccc_message_history" => "message_history",
         "cccc_message_send" => {
             reject_reply_target(&mut args)?;
+            alias(&mut args, "idempotency_key", "client_id");
             normalize_message_author(&mut args);
             let default = default_new_message_mode(&args, false);
             let mode = message_mode(&mut args, default)?;
@@ -91,6 +92,15 @@ pub fn daemon_call(
         "cccc_actor_notes" => return action(args, actions::actor_notes),
         "cccc_coordination" => return context_action(args, "coordination"),
         "cccc_task" => return context_action(args, "task"),
+        "cccc_backlog" => {
+            let (op, mut args) = action(args, actions::backlog)?;
+            // One entry is cut from the whole snapshot here (backlog_projection.rs);
+            // the daemon reads the file as a whole.
+            if op == "backlog_get" {
+                args.remove("entry");
+            }
+            return Ok((op, args));
+        }
         "cccc_agent_state" => return context_action(args, "agent_state"),
         "cccc_automation" => return action(args, actions::automation),
         "cccc_notify" => {
@@ -168,22 +178,8 @@ fn context_action(
     if action_name == "get" || action_name == "list" {
         return Ok(("context_get".into(), args));
     }
-    if namespace == "coordination" {
-        match action_name.as_str() {
-            "add_decision" => {
-                args.insert("kind".into(), Value::String("decision".into()));
-            }
-            "add_handoff" => {
-                args.insert("kind".into(), Value::String("handoff".into()));
-            }
-            _ => {}
-        }
-    }
     let op_name = match (namespace, action_name.as_str()) {
         ("coordination", "update_brief" | "brief") => "coordination.brief.update",
-        ("coordination", "add_decision" | "add_handoff" | "add_note" | "note") => {
-            "coordination.note.add"
-        }
         ("agent_state", "update" | "clear") => {
             if action_name == "update" {
                 "agent_state.update"
@@ -264,6 +260,7 @@ fn task_action(
                     "client_request_id",
                     "parent_ref",
                     "blocked_by_refs",
+                    "source",
                 ],
             );
             args.insert("op".into(), Value::String("task.create".into()));
@@ -292,6 +289,7 @@ fn task_action(
                     "notes",
                     "checklist",
                     "if_task_rev",
+                    "source",
                 ],
             );
             let has_patch = args
@@ -506,6 +504,7 @@ mod tests {
                 &["dst_instance_id"][..],
                 MessageWrite::SendCrossGroup,
             ),
+            ("cccc_message_send", &[][..], MessageWrite::ConnectSend),
             // `event_id` is the same field as `reply_to`.
             ("cccc_message_reply", &["event_id"][..], MessageWrite::Reply),
             ("cccc_tracked_send", &[][..], MessageWrite::TrackedSend),
@@ -535,6 +534,32 @@ mod tests {
                 "{tool} reaches {op} with {:?}",
                 unknown(operation, mapped.keys())
             );
+        }
+    }
+
+    #[test]
+    fn local_message_routes_forward_the_retry_key_to_the_daemon() {
+        for (destination, expected_operation) in
+            [(None, "send"), (Some("other"), "send_cross_group")]
+        {
+            let mut input = json!({
+                "group_id": "source",
+                "actor_id": "worker",
+                "to": ["peer"],
+                "text": "one logical message",
+                "mode": "send",
+                "idempotency_key": "stable-message"
+            })
+            .as_object()
+            .expect("arguments")
+            .clone();
+            if let Some(destination) = destination {
+                input.insert("dst_group_id".into(), json!(destination));
+            }
+            let (operation, mapped) = daemon_call("cccc_message_send", input).expect("mapping");
+            assert_eq!(operation, expected_operation);
+            assert_eq!(mapped["client_id"], "stable-message");
+            assert!(!mapped.contains_key("idempotency_key"));
         }
     }
 
@@ -842,6 +867,76 @@ mod tests {
         assert_eq!(args["ops"][0]["client_request_id"], "publish");
         assert_eq!(args["ops"][0]["parent_ref"], "release");
         assert_eq!(args["ops"][0]["blocked_by_refs"], json!(["build"]));
+    }
+
+    #[test]
+    fn task_mapping_forwards_the_backlog_source_on_create_and_update() {
+        let source = json!({"scope_key":"s_1","path":"BACKLOG.md","entry_id":"0123456789ab"});
+        let create = json!({
+            "action":"create","group_id":"g_test","by":"lead","title":"t","source":source
+        })
+        .as_object()
+        .cloned()
+        .expect("create args");
+        let (_, args) = daemon_call("cccc_task", create).expect("create mapping");
+        assert_eq!(args["ops"][0]["source"], source);
+
+        let update = json!({
+            "action":"update","group_id":"g_test","by":"lead","task_id":"T1","source":source,
+            "status":"archived"
+        })
+        .as_object()
+        .cloned()
+        .expect("update args");
+        let (_, args) = daemon_call("cccc_task", update).expect("update mapping");
+        assert_eq!(args["ops"][0]["op"], "task.update");
+        assert_eq!(args["ops"][0]["source"], source);
+        assert_eq!(args["ops"][1]["op"], "task.move");
+    }
+
+    #[test]
+    fn backlog_actions_map_to_daemon_operations_and_reads_send_no_entry() {
+        for (action, expected) in [
+            ("get", "backlog_get"),
+            ("use", "backlog_use"),
+            ("create", "backlog_create"),
+            ("exclude", "backlog_exclude"),
+            ("add", "backlog_add"),
+            ("edit", "backlog_edit"),
+            ("move", "backlog_move"),
+            ("close", "backlog_close"),
+            ("promote", "backlog_promote"),
+        ] {
+            let args = json!({
+                "action":action,"group_id":"g_test","by":"lead",
+                "entry":{"id":"0123456789ab"},"if_file_sha256":"a"
+            })
+            .as_object()
+            .cloned()
+            .expect("args");
+            let (op, args) = daemon_call("cccc_backlog", args).expect(action);
+            assert_eq!(op, expected);
+            assert!(args.get("action").is_none());
+            assert_eq!(args.contains_key("entry"), action != "get", "{action}");
+        }
+        let (op, _) = daemon_call(
+            "cccc_backlog",
+            json!({"group_id":"g_test"})
+                .as_object()
+                .cloned()
+                .expect("args"),
+        )
+        .expect("default action");
+        assert_eq!(op, "backlog_get");
+        let error = daemon_call(
+            "cccc_backlog",
+            json!({"action":"delete","group_id":"g_test"})
+                .as_object()
+                .cloned()
+                .expect("args"),
+        )
+        .expect_err("unsupported");
+        assert!(error.contains("delete"), "{error}");
     }
 
     #[test]

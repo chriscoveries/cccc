@@ -105,10 +105,16 @@ pub(super) fn fields(
             ),
         }
     } else if runner_effective == "headless" {
-        ("idle".to_owned(), "headless_running".to_owned(), None, None)
+        // A running process alone proves neither an idle turn nor its age.
+        (
+            "unknown".to_owned(),
+            "headless_running_state_unknown".to_owned(),
+            None,
+            None,
+        )
     } else {
         (
-            "waiting".to_owned(),
+            "unknown".to_owned(),
             "pty_running_state_unknown".to_owned(),
             None,
             None,

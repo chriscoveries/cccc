@@ -173,6 +173,7 @@ cccc actor add <id> --runtime <r>  # Add agent
 cccc actor start <id>              # Start agent
 cccc actor stop <id>               # Stop agent
 cccc actor restart <id>            # Restart agent
+cccc actor new-session <id>        # Restart with a new session
 cccc actor remove <id>             # Remove agent
 ```
 
@@ -188,6 +189,7 @@ cccc reply <event_id> "response"   # Reply to message
 cccc inbox --actor-id assistant    # Read and consume an agent's unread Mail
 cccc tail -n 50                    # Recent events
 cccc tail -f                       # Follow events
+cccc ledger search --by assistant  # Search events by sender
 ```
 
 ### Daemon Control

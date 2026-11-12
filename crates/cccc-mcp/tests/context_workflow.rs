@@ -61,33 +61,37 @@ async fn declared_context_tools_preserve_authority_recovery_and_query_semantics(
                 "missing {name}"
             );
         }
-        for (action, field) in [
-            ("add_decision", "recent_decisions"),
-            ("add_handoff", "recent_handoffs"),
-        ] {
-            payload(
-                &tool(
-                    &home,
-                    id,
-                    "peer",
-                    "cccc_coordination",
-                    json!({"action":action,"summary":"reviewed fixture"}),
-                )
-                .await,
-            );
-            let response = tool(
+        // Coordination notes were removed: the old actions fail as unsupported instead of
+        // turning into another operation, and `get` no longer carries note lists.
+        for action in ["add_decision", "add_handoff"] {
+            let removed = tool(
                 &home,
                 id,
                 "peer",
                 "cccc_coordination",
-                json!({"action":"get"}),
+                json!({"action":action,"summary":"reviewed fixture"}),
             )
             .await;
+            assert_eq!(removed["result"]["isError"], true, "{action}: {removed}");
             assert_eq!(
-                payload(&response)["coordination"][field][0]["summary"],
-                "reviewed fixture"
+                removed["result"]["structuredContent"]["error"]["message"],
+                format!("unsupported coordination action: {action}")
             );
         }
+        let response = tool(
+            &home,
+            id,
+            "peer",
+            "cccc_coordination",
+            json!({"action":"get"}),
+        )
+        .await;
+        let coordination = &payload(&response)["coordination"];
+        assert!(
+            coordination.get("recent_decisions").is_none()
+                && coordination.get("recent_handoffs").is_none(),
+            "{coordination}"
+        );
         payload(
             &tool(
                 &home,
@@ -242,7 +246,8 @@ async fn declared_context_tools_preserve_authority_recovery_and_query_semantics(
 }
 
 /// A slice of one of our real boards, anonymized: a run of consecutive tasks
-/// with the board's brief, recent decisions and all its Actor states. Every
+/// with the board's brief, its stored decision notes (a removed feature, kept
+/// in the file and never returned) and all its Actor states. Every
 /// letter and digit of free text is replaced (`x`, `X`, `0`), Actor and task
 /// ids are renumbered, and the clock is shifted to start on 2000-01-01;
 /// statuses, fields, checklists, line breaks, punctuation, the byte length of
@@ -303,7 +308,15 @@ async fn context_get_pages_a_captured_board_within_its_byte_bound() {
     let home = HomeLayout::from_path(temp.path()).expect("home");
     let groups = GroupStore::new(home.clone()).expect("groups");
     let mut group = groups.create("captured context", "").expect("group");
-    for id in ["lead", "peer"] {
+    // The Actors whose states the board captured are in the Group: a read returns
+    // states only for current members.
+    let captured: Value = serde_json::from_str(CAPTURED_CONTEXT).expect("captured context");
+    let members = captured["agent_states"]
+        .as_array()
+        .expect("captured states")
+        .iter()
+        .map(|state| state["actor_id"].as_str().expect("state owner"));
+    for id in ["lead", "peer"].into_iter().chain(members) {
         cccc_core::actors::add(&mut group, cccc_contracts::Actor::new(id)).expect("actor");
     }
     groups.save(&group).expect("save group");

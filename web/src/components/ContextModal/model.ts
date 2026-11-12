@@ -1,7 +1,6 @@
 import type {
   AgentState,
   CoordinationBrief,
-  CoordinationNote,
   GroupContext,
   Task,
   TaskBoardEntry,
@@ -50,11 +49,6 @@ export interface TaskDraft extends TaskDraftFields {
  */
 export type TaskStale = "" | "changed" | "unconfirmed";
 
-export interface NoteDraft {
-  summary: string;
-  taskId: string;
-}
-
 export interface BoardColumns {
   planned: Task[];
   active: Task[];
@@ -63,7 +57,7 @@ export interface BoardColumns {
 }
 
 export type BoardStatus = keyof BoardColumns;
-export type ContextModalView = "tasks" | "instructions" | "agents" | "log" | "self_evolving_skills";
+export type ContextModalView = "tasks" | "instructions" | "agents" | "self_evolving_skills";
 export type TaskFilterValue = "all" | "blocked" | "waiting_user" | "handoff" | "unassigned";
 export type ContextTranslator = (
   key: string,
@@ -548,6 +542,9 @@ function coerceBoardTask(entry: TaskBoardEntry, taskMap: Map<string, Task>): Tas
       blocked_by: Array.isArray(entry.blocked_by)
         ? entry.blocked_by.map((item) => String(item))
         : [],
+      open_blocked_by: Array.isArray(entry.open_blocked_by)
+        ? entry.open_blocked_by.map((item) => String(item))
+        : undefined,
       waiting_on: typeof entry.waiting_on === "string" ? entry.waiting_on : undefined,
       handoff_to: typeof entry.handoff_to === "string" ? entry.handoff_to : null,
       task_type: typeof entry.task_type === "string" ? entry.task_type : null,
@@ -596,13 +593,9 @@ export function waitingLabel(value: string, tr: ContextTranslator): string {
   return match ? match.label : value || tr("context.none", "None");
 }
 
-export function noteTimestamp(note: CoordinationNote, language: string | undefined): string {
+export function noteTimestamp(note: { at?: string | null }, language: string | undefined): string {
   const at = String(note.at || "").trim();
   return at ? formatTime(at, language) : "";
-}
-
-export function emptyNoteDraft(): NoteDraft {
-  return { summary: "", taskId: "" };
 }
 
 export function briefDraftMatches(

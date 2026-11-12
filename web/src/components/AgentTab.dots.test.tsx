@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import type { Actor, GroupDoc } from "../types";
+import capturedActivity from "../hooks/__fixtures__/working-state-capture.json";
 
 const mocks = vi.hoisted(() => ({
   pause: vi.fn(),
@@ -240,6 +241,18 @@ it("keeps distinct LCD status shapes and their accessible Actor labels", async (
   await render(true, { ...managed, running: false }, "g_managed");
   expect(status()?.getAttribute("aria-label")).toBe("stopped");
   expect(status()?.getAttribute("data-lcd-shape")).toBe("stop");
+});
+
+it("exposes the captured headless fallback as an unknown working state", async () => {
+  const captured = capturedActivity[1]!;
+  await render(
+    true,
+    { ...captured, runtime: "custom", enabled: true, effective_working_state: "unknown" },
+    "g_capture",
+  );
+  expect(
+    host.querySelector('[data-terminal-title-bar] [role="img"]')?.getAttribute("aria-label"),
+  ).toBe("workingStateUnknown");
 });
 
 it.each([false, true])(

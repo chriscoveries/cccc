@@ -57,6 +57,8 @@ pub enum ActorAction {
     Stop(ActorTarget),
     /// Restart a managed agent.
     Restart(ActorTarget),
+    /// Restart an agent on a new session instead of resuming its saved one.
+    NewSession(ActorTarget),
     /// Update agent settings; running managed sessions apply launch settings on restart.
     Update {
         /// Agent ID within the Group.

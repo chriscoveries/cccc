@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import type { Actor, LedgerEvent } from "../../types";
 import { RuntimeDock } from "./RuntimeDock";
+import capturedActivity from "../../hooks/__fixtures__/working-state-capture.json";
 import type { LiveWorkCard } from "./liveWorkCards";
 import { getRuntimeRingTone } from "./runtimeDockRingTone";
 
@@ -152,6 +153,15 @@ it("names a closed confirmation only when the daemon reports the pause", async (
     await render({ running: false, runtime_confirmation_paused: paused });
     expect(host.textContent).not.toContain("actors:runtimeConfirmationPaused");
     expect(host.querySelector('button[data-tone="attention"]')).toBeNull();
+  }
+});
+
+it("labels captured untracked runners as unknown rather than idle or waiting", async () => {
+  for (const captured of capturedActivity) {
+    // The state is the corrected projection of a real captured activity row.
+    await render({ ...captured, effective_working_state: "unknown" });
+    expect(host.textContent).toContain("Working state unknown");
+    expect(activity()).toBeNull();
   }
 });
 

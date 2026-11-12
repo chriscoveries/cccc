@@ -131,7 +131,7 @@ fn actor_lifecycle_controls_terminal_process() {
     assert_eq!(working.result["actors"][0]["running"], true);
     assert_eq!(
         working.result["actors"][0]["effective_working_state"],
-        "waiting"
+        "unknown"
     );
     assert_eq!(
         working.result["actors"][0]["effective_working_reason"],
