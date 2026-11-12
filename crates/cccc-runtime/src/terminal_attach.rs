@@ -64,6 +64,22 @@ impl TerminalInput {
             data,
         )
     }
+
+    /// Admit a bounded local control only while this attachment owns the writer.
+    /// Passive connections and replaced writers cannot cancel a managed turn.
+    /// Never wait for provider I/O here: this closure holds the registry mutex.
+    pub fn with_writer(
+        &self,
+        operation: impl FnOnce() -> Result<(), RuntimeError>,
+    ) -> Result<bool, RuntimeError> {
+        crate::terminal_manager::control_from_attachment(
+            &self.group_id,
+            &self.actor_id,
+            &self.registry,
+            self.attachment_id,
+            operation,
+        )
+    }
 }
 
 pub struct TerminalAttachment {

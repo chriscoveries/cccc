@@ -33,6 +33,8 @@ mod launch_secretary;
 pub(crate) use launch_antigravity::login_antigravity;
 pub(crate) mod lifecycle_timing;
 mod native_input;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use tests::live_kilo::local_model as lazy_viewer_test_model;
 mod opencode;
 mod pi_rpc;
 #[cfg(test)]
@@ -153,6 +155,9 @@ pub struct TurnReceipt {
     pub thread_id: String,
     pub turn_id: String,
 }
+
+/// Local admission of a terminal cancel; waiting never owns terminal locks.
+pub(crate) type CancelReceipt = tokio::sync::oneshot::Receiver<io::Result<Option<String>>>;
 
 #[derive(Debug)]
 enum DelegationState {

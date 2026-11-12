@@ -50,6 +50,10 @@ pub(super) async fn run(
     let mut loading_request_id = None;
     let mut active: Option<ActiveTurn> = None;
     let mut cancelling_turn_id: Option<String> = None;
+    // Terminal cancellation is session-scoped on the wire. Hold new managed
+    // admission until this exact prompt confirms cancellation; a mere pipe
+    // write, local idle event or receipt timeout cannot authorize a later turn.
+    let mut terminal_cancel: Option<super::TerminalCancel> = None;
     // Cancellation can reach this serial command loop just before its pending
     // prompt. Retire exactly that input without sending it to the provider.
     let mut cancelled_pending_input: Option<String> = None;
@@ -127,7 +131,7 @@ pub(super) async fn run(
                         )));
                         continue;
                     }
-                    if active.is_some() {
+                    if active.is_some() || terminal_cancel.is_some() {
                         let _ = request.response.send(Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
                             "managed Agent already has an active turn",
@@ -171,8 +175,19 @@ pub(super) async fn run(
                         }
                     }
                 }
-                Some(AcpCommand::Cancel { session_id: requested, delegation_id, response }) => {
+                Some(AcpCommand::Cancel { session_id: requested, delegation_id, expected_turn_id, response }) => {
+                    if response.is_closed() {
+                        continue;
+                    }
                     let active_turn_id = active.as_ref().map(|turn| turn.turn_id.clone());
+                    if expected_turn_id.as_ref().is_some_and(|expected| Some(expected) != active_turn_id.as_ref()) {
+                        let _ = response.send(Err(io::Error::new(io::ErrorKind::NotFound, "terminal cancel turn has completed or changed")));
+                        continue;
+                    }
+                    if expected_turn_id.is_some() && terminal_cancel.is_some() {
+                        let _ = response.send(Err(io::Error::new(io::ErrorKind::WouldBlock, "terminal cancellation remains unconfirmed")));
+                        continue;
+                    }
                     let result = if requested != session_id || session_id.is_empty() {
                         Err(io::Error::new(io::ErrorKind::InvalidInput, "ACP cancel targets a different session"))
                     } else if active.is_none() && delegation_id.is_some() {
@@ -198,6 +213,10 @@ pub(super) async fn run(
                     };
                     if let Ok(Some(turn_id)) = &result {
                         cancelling_turn_id = Some(turn_id.clone());
+                        if expected_turn_id.is_some() {
+                            terminal_cancel = Some(super::TerminalCancel { turn_id: turn_id.clone(), response });
+                            continue;
+                        }
                     }
                     let failed = result.as_ref().err().map(ToString::to_string);
                     let _ = response.send(result);
@@ -566,6 +585,15 @@ pub(super) async fn run(
                         response,
                         ..
                     } => {
+                        if terminal_cancel.as_ref().is_some_and(|cancel| cancel.turn_id == turn_id) {
+                            let receipt = terminal_cancel.take().expect("matched terminal cancel").response;
+                            if result.as_ref().is_ok_and(|reply| reply["stopReason"] == "cancelled") {
+                                let _ = receipt.send(Ok(Some(turn_id.clone())));
+                            } else {
+                                let _ = receipt.send(Err(io::Error::other("terminal cancellation was not confirmed; managed session retired")));
+                                break "terminal cancellation was not confirmed; managed session retired".to_owned();
+                            }
+                        }
                         match result {
                             Err(error) if response.is_some() => {
                                 clear_unadmitted_turn(&mut active, &turn_id);
@@ -1079,13 +1107,24 @@ fn rpc_error(runtime: &str, method: &str, error: &Value, private_values: &[Strin
     } else {
         format!("{prefix}: {message}")
     };
-    io::Error::new(
-        kind,
-        diagnostic
-            .chars()
-            .take(super::diagnostic::LIMIT)
-            .collect::<String>(),
-    )
+    let diagnostic = diagnostic
+        .chars()
+        .take(super::diagnostic::LIMIT)
+        .collect::<String>();
+    if method == "session/prompt" {
+        io::Error::new(
+            kind,
+            super::PromptReplyError {
+                diagnostic,
+                rejected: matches!(
+                    error.get("code").and_then(Value::as_i64),
+                    Some(-32602..=-32600)
+                ),
+            },
+        )
+    } else {
+        io::Error::new(kind, diagnostic)
+    }
 }
 
 #[cfg(test)]
@@ -1132,6 +1171,19 @@ mod tests {
             &[],
         );
         assert_eq!(busy.kind(), io::ErrorKind::WouldBlock);
+        assert!(super::super::prompt_reply_error(&busy));
+        assert!(!super::super::prompt_was_rejected(&busy));
+        assert!(!super::super::prompt_reply_error(&io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "local admission backpressure",
+        )));
+        let rejected = rpc_error(
+            "kilo",
+            "session/prompt",
+            &json!({"code":-32602,"message":"invalid params"}),
+            &[],
+        );
+        assert!(super::super::prompt_was_rejected(&rejected));
     }
 
     #[test]

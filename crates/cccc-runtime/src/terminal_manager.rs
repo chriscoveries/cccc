@@ -128,3 +128,26 @@ pub(crate) fn write_from_attachment(
     };
     crate::pty_input::write_input_interruptibly(&writer, data, &revoked)
 }
+
+pub(crate) fn control_from_attachment(
+    group_id: &str,
+    actor_id: &str,
+    registry: &AttachmentRegistry,
+    attachment_id: u64,
+    operation: impl FnOnce() -> Result<(), RuntimeError>,
+) -> Result<bool, RuntimeError> {
+    let busy = || {
+        RuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "terminal session registry is busy",
+        ))
+    };
+    // Pin the current terminal incarnation through bounded local admission.
+    // Every lock is a try-lock; no provider I/O may occur in operation.
+    let sessions = crate::registry::sessions().try_read().map_err(|_| busy())?;
+    let session = sessions
+        .get(&(group_id.to_owned(), actor_id.to_owned()))
+        .ok_or_else(|| RuntimeError::NotFound(group_id.into(), actor_id.into()))?;
+    let session = session.try_lock().map_err(|_| busy())?;
+    session.control_from_attachment(registry, attachment_id, operation)
+}

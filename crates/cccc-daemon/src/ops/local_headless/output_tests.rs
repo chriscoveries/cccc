@@ -32,6 +32,7 @@ impl Fixture {
             managed: Arc::new(AnalystSession::for_output_test(
                 &config, structured, private,
             )),
+            lazy_viewer: None,
             has_terminal: AtomicBool::new(false),
             viewer: Mutex::new(None),
             status: Mutex::new(super::super::HeadlessStatus {

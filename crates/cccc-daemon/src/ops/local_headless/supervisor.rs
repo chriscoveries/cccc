@@ -162,6 +162,7 @@ pub(super) fn attach_managed(
         actor_id: actor.id.clone(),
         workspace,
         managed: Arc::clone(&app),
+        lazy_viewer: super::lazy_viewer::LazyViewer::for_actor(actor),
         has_terminal: AtomicBool::new(false),
         viewer: Mutex::new(app.tui_ready().then(|| super::ViewerLaunch {
             command: app.actor_tui_command(),
@@ -184,7 +185,7 @@ pub(super) fn attach_managed(
     if let Err(error) = managed_reader::spawn(Arc::clone(&item), app.subscribe()) {
         return Err(cleanup_failed_start(&item, error));
     }
-    if app.tui_ready() {
+    if app.tui_ready() && item.lazy_viewer.is_none() {
         let history = match super::super::actor_runtime::terminal_history::config(
             home,
             &group.group_id,
@@ -296,6 +297,7 @@ pub fn ensure_viewer(group_id: &str, actor_id: &str) -> io::Result<()> {
     let _start = StartGuard::acquire(&key)?;
     if let Some(item) = lookup(&key)
         && item.running()
+        && item.lazy_viewer.is_none()
     {
         item.reattach_viewer()?;
     }
@@ -532,7 +534,8 @@ fn submit_admitted(
     // OpenCode V2's terminal is a view of the owned HTTP session. Admit CCCC
     // input through that session's durable queue, including during TUI startup.
     // Writing the terminal can be acknowledged before its composer is ready.
-    if item.managed.structured_only()
+    if item.lazy_viewer.is_some()
+        || item.managed.structured_only()
         || item.managed.runtime() == cccc_contracts::ActorRuntime::Opencode
     {
         let id = format!(
@@ -548,11 +551,19 @@ fn submit_admitted(
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
                 return false;
             }
-            started.store(true, Ordering::Release);
+            if item.lazy_viewer.is_none() {
+                started.store(true, Ordering::Release);
+            }
             match super::block_on_managed(async {
                 tokio::select! {
                     biased;
-                    result = item.managed.start_turn(item.managed.generation(), &id, prepared) => result,
+                    result = async {
+                        if item.lazy_viewer.is_some() {
+                            super::lazy_viewer::submit(item, &id, source_events, prepared, started).await
+                        } else {
+                            item.managed.start_turn(item.managed.generation(), &id, prepared).await.map(|_| ())
+                        }
+                    } => result,
                     _ = async {
                         while !cancelled.load(Ordering::Acquire) {
                             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -680,8 +691,20 @@ fn render_turn(event: &Event) -> Option<(String, String)> {
     )
 }
 
-fn lookup(key: &Key) -> Option<Arc<Session>> {
+pub(super) fn lookup(key: &Key) -> Option<Arc<Session>> {
     sessions().read().ok()?.get(key).cloned()
+}
+
+pub(super) fn try_lookup(key: &Key) -> io::Result<Option<Arc<Session>>> {
+    sessions()
+        .try_read()
+        .map(|items| items.get(key).cloned())
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "managed session registry is busy",
+            )
+        })
 }
 
 pub(crate) fn structured_state(group: &str, actor: &str) -> Option<serde_json::Value> {

@@ -17,6 +17,9 @@ use tokio::sync::{Mutex, broadcast, watch};
 
 mod events;
 #[cfg(test)]
+#[path = "v2/lazy_delivery_tests.rs"]
+mod lazy_delivery_tests;
+#[cfg(test)]
 mod tests;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);

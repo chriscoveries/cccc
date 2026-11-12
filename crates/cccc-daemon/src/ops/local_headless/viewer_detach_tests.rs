@@ -98,6 +98,7 @@ async fn a_reaped_viewer_detaches_without_stopping_the_provider_job() {
             Vec::new(),
             true,
         )),
+        lazy_viewer: None,
         has_terminal: AtomicBool::new(true),
         viewer: Mutex::new(Some(viewer.clone())),
         status: Mutex::new(HeadlessStatus {

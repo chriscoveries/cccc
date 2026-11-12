@@ -53,6 +53,36 @@ impl AnalystSession {
         delegation_id: &str,
         text: &str,
     ) -> io::Result<TurnReceipt> {
+        self.start_turn_with_limit(expected_generation, delegation_id, text, None)
+            .await
+    }
+
+    pub(crate) async fn start_delivery(
+        &self,
+        id: &str,
+        text: &str,
+        started: &std::sync::atomic::AtomicBool,
+    ) -> io::Result<TurnReceipt> {
+        self.start_turn_with_limit(self.generation(), id, text, Some((256, started)))
+            .await
+    }
+
+    pub(crate) async fn forget_delivery(&self, id: &str) {
+        self.delegations.lock().await.remove(id);
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn delivery_receipt_count(&self) -> usize {
+        self.delegations.lock().await.len()
+    }
+
+    async fn start_turn_with_limit(
+        &self,
+        expected_generation: &str,
+        delegation_id: &str,
+        text: &str,
+        capacity: Option<(usize, &std::sync::atomic::AtomicBool)>,
+    ) -> io::Result<TurnReceipt> {
         self.require_generation(expected_generation)?;
         let delegation_id = required_value(delegation_id, "delegation_id")?;
         let text = required_value(text, "text")?;
@@ -67,6 +97,17 @@ impl AnalystSession {
                     ),
                 )),
             };
+        }
+        if capacity.is_some_and(|(limit, _)| delegations.len() >= limit) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "pending delivery receipts are full",
+            ));
+        }
+        // Both local capacity checks precede this remote-admission boundary.
+        // Cancellation from here onward must conservatively retain uncertainty.
+        if let Some((_, started)) = capacity {
+            started.store(true, std::sync::atomic::Ordering::Release);
         }
         let turn_result = match &self.protocol {
             ManagedProtocol::Codex(protocol) => protocol
@@ -111,12 +152,31 @@ impl AnalystSession {
         };
         let turn_id = match turn_result {
             Ok(turn_id) => turn_id,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    && !(capacity.is_some() && acp::prompt_reply_error(&error)) =>
+            {
+                if let Some((_, started)) = capacity {
+                    started.store(false, std::sync::atomic::Ordering::Release);
+                }
                 return Err(error);
             }
             Err(error) => {
-                let kind = error.kind();
-                let message = error.to_string();
+                // Remote busy can arrive after execution; only local admission
+                // backpressure above is safe to retry. Keep legacy turns intact.
+                let kind = if capacity.is_some()
+                    && (error.kind() == io::ErrorKind::WouldBlock
+                        || acp::prompt_was_rejected(&error))
+                {
+                    io::ErrorKind::Other
+                } else {
+                    error.kind()
+                };
+                let message = if capacity.is_some() {
+                    error.to_string().chars().take(4096).collect()
+                } else {
+                    error.to_string()
+                };
                 delegations.insert(
                     delegation_id.to_owned(),
                     DelegationState::Unresolved(message.clone()),

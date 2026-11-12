@@ -21,6 +21,7 @@ fn session(temp: &std::path::Path) -> (Session, super::control_fixture::ControlD
             Vec::new(),
             false,
         )),
+        lazy_viewer: None,
         has_terminal: AtomicBool::new(true),
         viewer: Mutex::new(None),
         status: Mutex::new(HeadlessStatus {

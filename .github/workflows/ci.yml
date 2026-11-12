@@ -292,6 +292,23 @@ jobs:
           cargo test --workspace --lib --locked \
             live_kilo -- --test-threads=1
 
+      - name: Verify native lazy viewer lifetime
+        timeout-minutes: 3
+        env:
+          CCCC_LAUNCHER_PATH: ${{ github.workspace }}/target/debug/cccc
+          CCCC_KILO_MANAGED_LIVE: "1"
+          CCCC_LAZY_VIEWER_REPORT: ${{ runner.temp }}/lazy-viewer.json
+        run: >-
+          cargo test --workspace --lib --locked
+          live_native_lazy_viewer_when_enabled -- --test-threads=1 --nocapture
+
+      - name: Retain native viewer observations
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-lazy-viewer
+          path: ${{ runner.temp }}/lazy-viewer.json
+          if-no-files-found: error
+
   ci-required:
     if: always()
     needs:

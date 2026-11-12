@@ -6,6 +6,7 @@ mod events;
 mod events_migration;
 #[cfg(test)]
 mod events_migration_tests;
+pub(crate) mod lazy_viewer;
 mod managed_reader;
 mod notice_gate;
 mod output;
@@ -154,6 +155,7 @@ struct Session {
     // workspace belongs to this owner, independently of terminal attachment.
     workspace: super::actor_runtime::LaunchWorkspace,
     managed: std::sync::Arc<super::codex_voice_analyst::AnalystSession>,
+    lazy_viewer: Option<lazy_viewer::LazyViewer>,
     has_terminal: AtomicBool,
     viewer: Mutex<Option<ViewerLaunch>>,
     status: Mutex<HeadlessStatus>,
