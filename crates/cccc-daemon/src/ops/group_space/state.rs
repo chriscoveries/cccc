@@ -1,5 +1,6 @@
 use super::*;
 use cccc_core::fs::{read_json, with_exclusive_lock, write_json};
+use cccc_core::json::object_mut as object;
 use std::path::PathBuf;
 
 pub(super) fn load(home: &HomeLayout, group_id: &str) -> Result<Value, OpError> {
@@ -321,13 +322,6 @@ fn read_doc_io(path: &std::path::Path) -> io::Result<Value> {
     } else {
         Ok(json!({}))
     }
-}
-
-fn object(value: &mut Value) -> &mut Map<String, Value> {
-    if !value.is_object() {
-        *value = json!({});
-    }
-    value.as_object_mut().expect("space object initialized")
 }
 
 pub(super) fn root(value: &mut Value) -> &mut Map<String, Value> {

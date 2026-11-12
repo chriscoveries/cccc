@@ -4,6 +4,7 @@ use axum::{Json, Router};
 use cccc_contracts::utc_now;
 use cccc_core::GroupStore;
 use cccc_core::im_state;
+use cccc_core::json::object_mut as object;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::io;
@@ -548,13 +549,6 @@ fn ensure_access(principal: &Principal, group_id: &str) -> Result<(), ApiError> 
         .ok_or_else(|| ApiError::forbidden("group access denied"))
 }
 
-fn object(value: &mut Value) -> &mut Map<String, Value> {
-    if !value.is_object() {
-        *value = json!({});
-    }
-    value.as_object_mut().expect("object initialized")
-}
-
 fn array_mut<'a>(state: &'a mut Map<String, Value>, key: &str) -> &'a mut Vec<Value> {
     let value = state.entry(key).or_insert_with(|| json!([]));
     if !value.is_array() {
@@ -659,7 +653,7 @@ mod tests {
                 "Mattermost site URL is invalid",
             ),
             (
-                json!({"bot_token":"test-token","mattermost_url":"https://user:secret@mm.example.test"}),
+                json!({"bot_token":"test-token","mattermost_url":"https://user:secret@127.0.0.1"}),
                 "Mattermost site URL is invalid",
             ),
             (
