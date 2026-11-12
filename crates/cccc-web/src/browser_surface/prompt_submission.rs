@@ -406,6 +406,13 @@ impl BrowserSurfaces {
         }
         if guarded_chatgpt {
             let authority = pin_authority.context("model pin authority required")?;
+            if has_chatgpt_conversation_route(target_url)
+                && !conversation_target_matches(target_url, &before_send.url)
+            {
+                return Ok(PromptSubmissionOutcome::ModelPinHeld(
+                    json!({"submitted":false,"submission_evidence":"model_pin_unavailable","reason":"bound_conversation_changed","draft_staged":true}),
+                ));
+            }
             let mut health = match tokio::time::timeout(
                 Duration::from_secs(3),
                 self.observe_model_pin(key, &session, authority),
