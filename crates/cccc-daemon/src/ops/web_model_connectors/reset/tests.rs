@@ -174,6 +174,31 @@ impl Case {
         .unwrap()["browser-actor"]
             .clone()
     }
+    fn stop_for_manual_pairing(&self) {
+        // Restart leaves access enabled. Manual pairing must still refuse it;
+        // only the explicit stopped-state control below permits a fresh bind.
+        let refused = super::super::execute(
+            &self.home,
+            &DaemonRequest {
+                v: 1,
+                op: "web_model_pairing_begin".into(),
+                args: json!({"by":"user","connector_id":self.connector,
+                    "group_id":self.group,"actor_id":"browser-actor"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "actor_must_be_stopped");
+        GroupStore::new(self.home.clone())
+            .unwrap()
+            .mutate(&self.group, |group| {
+                group.actors[0].enabled = false;
+                Ok(())
+            })
+            .unwrap();
+    }
 }
 
 #[test]
@@ -602,6 +627,7 @@ fn automatic_restart_is_guarded_once_and_keeps_old_and_new_source_fences() {
     assert_eq!(execute(&c.home, &req).unwrap()["reset"]["applied"], true);
     assert_eq!(c.target_now(), c.target); // no automatic authority retirement
     assert_eq!(execute(&c.home, &req).unwrap()["already_applied"], true);
+    c.stop_for_manual_pairing();
     c.native_bind("fresh");
     assert_queue_fences(&c);
 }
@@ -653,6 +679,7 @@ fn automatic_restart_refuses_stops_pauses_healthy_routes_and_unknown_outcomes() 
             execute(&c.home, &req).unwrap_err().code,
             "reset_outcome_unknown"
         );
+        c.stop_for_manual_pairing();
         c.native_bind("replacement");
         assert_eq!(
             execute(&c.home, &automatic(&c, None)).unwrap()["reset"]["can_apply"],
