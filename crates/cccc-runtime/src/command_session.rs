@@ -62,6 +62,6 @@ impl CommandSession {
             .input_writer()?;
         // Never hold the lifecycle lock across input: timeout/stop must be able
         // to terminate a child that is not reading its PTY.
-        crate::pty_input::write_input(&writer, data)
+        writer.write(data)
     }
 }

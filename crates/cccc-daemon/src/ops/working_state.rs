@@ -2,6 +2,11 @@ use cccc_contracts::{Actor, ActorRuntime, RunnerKind};
 use cccc_core::HomeLayout;
 use serde_json::{Map, Value, json};
 
+pub(super) fn devin_state(actor: &Actor, group_id: &str) -> Option<cccc_runtime::DevinPtyState> {
+    let observed = cccc_runtime::devin_pty_state(group_id, &actor.id)?;
+    (observed.actor_generation == cccc_core::actors::generation_identity(actor)).then_some(observed)
+}
+
 /// When a live terminal session last wrote output, for display only. Output
 /// does not establish whether the process is working: a model can compute
 /// silently, and a spinner or a waiting prompt can keep printing. The working
@@ -51,6 +56,16 @@ pub(super) fn fields(
     let local_state = running
         .then(|| super::local_headless::status(group_id, &actor.id))
         .flatten();
+    let devin = (running && runner_effective == "pty" && local_state.is_none())
+        .then(|| devin_state(actor, group_id))
+        .flatten();
+    let devin_pty = running
+        && runner_effective == "pty"
+        && cccc_runtime::status(group_id, &actor.id).is_ok_and(|status| {
+            status
+                .launch
+                .is_some_and(|launch| launch.runtime == ActorRuntime::Devin)
+        });
     let (state, reason, updated_at, active_task_id) = if !running {
         (
             "stopped".to_owned(),
@@ -70,6 +85,20 @@ pub(super) fn fields(
             }),
             Some(local_state.updated_at),
             local_state.task_id,
+        )
+    } else if let Some(observed) = devin {
+        (
+            observed.state.to_owned(),
+            "devin_native_transcript".to_owned(),
+            Some(observed.updated_at),
+            None,
+        )
+    } else if devin_pty {
+        (
+            "unknown".to_owned(),
+            "devin_native_state_unknown".to_owned(),
+            None,
+            None,
         )
     } else if managed_session {
         (

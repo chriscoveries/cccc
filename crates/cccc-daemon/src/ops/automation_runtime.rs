@@ -65,7 +65,7 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
     } else {
         HashSet::new()
     };
-    let idle_actor_ids = idle_actor_ids(group_id, &delivery_actor_ids);
+    let idle_actor_ids = idle_actor_ids(home, group_id, &delivery_actor_ids);
     match cccc_core::automation::tick_group_with_idle_actors(
         home,
         group_id,
@@ -100,14 +100,28 @@ pub fn tick_group(home: &HomeLayout, group_id: &str, include_unread: bool, cance
     }
 }
 
-/// Actors whose managed session is idle. Waiting Mail reaches them promptly;
+/// Actors with managed idle state or a fenced native Devin completion. Mail reaches them promptly;
 /// actors that are working, waiting on approval, or whose state is unknown (no
-/// managed session) keep the longer interruption-avoiding delay. Delivery
+/// matching completion evidence) keep the longer interruption-avoiding delay. Delivery
 /// rechecks this at admission, since the Actor may start work in between.
-fn idle_actor_ids(group_id: &str, actor_ids: &HashSet<String>) -> HashSet<String> {
+fn idle_actor_ids(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_ids: &HashSet<String>,
+) -> HashSet<String> {
+    let group = GroupStore::new(home.clone())
+        .and_then(|store| store.load(group_id))
+        .ok();
     actor_ids
         .iter()
-        .filter(|actor_id| super::local_headless::ready_for_mail_notice(group_id, actor_id))
+        .filter(|actor_id| {
+            super::local_headless::ready_for_mail_notice(group_id, actor_id)
+                || group
+                    .as_ref()
+                    .and_then(|group| actors::find(group, actor_id))
+                    .and_then(|actor| super::working_state::devin_state(actor, group_id))
+                    .is_some_and(|state| state.state == "idle")
+        })
         .cloned()
         .collect()
 }
@@ -119,6 +133,9 @@ fn idle_actor_ids(group_id: &str, actor_ids: &HashSet<String>) -> HashSet<String
 pub fn notify_idle_mail_recipients(home: &HomeLayout, group: &GroupDoc, mail: &Event) {
     notify_idle_mail_recipients_with(home, group, mail, |actor_id| {
         super::local_headless::ready_for_mail_notice(&group.group_id, actor_id)
+            || actors::find(group, actor_id)
+                .and_then(|actor| super::working_state::devin_state(actor, &group.group_id))
+                .is_some_and(|state| state.state == "idle")
     });
 }
 
@@ -606,7 +623,14 @@ mod tests {
     fn actors_without_a_managed_session_are_never_treated_as_idle() {
         // No session reports a finished turn, so Mail keeps the longer delay.
         let actors = HashSet::from(["pty-peer".to_owned(), "stopped-peer".to_owned()]);
-        assert!(idle_actor_ids("g_no_sessions", &actors).is_empty());
+        assert!(
+            idle_actor_ids(
+                &HomeLayout::from_path(tempfile::tempdir().expect("home").path()).expect("home"),
+                "g_no_sessions",
+                &actors
+            )
+            .is_empty()
+        );
     }
     use serde_json::json;
 

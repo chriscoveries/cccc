@@ -13,7 +13,8 @@ use std::time::Duration;
 
 mod submission;
 pub use submission::{
-    PtyHandoff, PtyHandoffReason, submit_sequence_for_session_interruptible,
+    PtyHandoff, PtyHandoffReason, submit_delivery_for_session,
+    submit_sequence_for_session_interruptible,
     submit_sequence_for_session_with_evidence_interruptible, submit_sequence_interruptible,
 };
 
@@ -121,6 +122,32 @@ fn remove_exited_before_start(key: &Key) -> Result<(), RuntimeError> {
 
 pub fn status(group_id: &str, actor_id: &str) -> Result<SessionStatus, RuntimeError> {
     with_session(group_id, actor_id, |session| Ok(session.status()))
+}
+
+/// Native TUI observations never cross a registration or a concurrent input.
+/// Busy input and unavailable provider evidence both remain unknown.
+pub fn devin_pty_state(group_id: &str, actor_id: &str) -> Option<crate::DevinPtyState> {
+    let session = lookup(group_id, actor_id).ok()?;
+    let (expected, gate, observer) = {
+        let mut current = session.lock().ok()?;
+        (
+            current.status(),
+            current.input_gate(),
+            current.devin_tracker.clone()?,
+        )
+    };
+    if !expected.running {
+        return None;
+    }
+    let _input = gate.try_lock().ok()?;
+    let state = observer.observe()?;
+    let actual = lookup(group_id, actor_id).ok()?;
+    if !Arc::ptr_eq(&session, &actual) {
+        return None;
+    }
+    let observed = actual.lock().ok()?.status();
+    (observed.running && observed.pid == expected.pid && observed.started_at == expected.started_at)
+        .then_some(state)
 }
 
 pub fn stop(group_id: &str, actor_id: &str) -> Result<SessionStatus, RuntimeError> {
@@ -279,10 +306,8 @@ fn write_locked(
     // The input gate preserves ordering; blocking IO must not hold the Session
     // lock required by status, stop and process cleanup. Pin this generation.
     match cancelled {
-        Some(cancelled) => crate::pty_input::write_input_interruptibly(&writer, data, &|| {
-            cancelled.load(Ordering::Acquire)
-        }),
-        None => crate::pty_input::write_input(&writer, data).map(|()| true),
+        Some(cancelled) => writer.write_interruptibly(data, &|| cancelled.load(Ordering::Acquire)),
+        None => writer.write(data).map(|()| true),
     }
 }
 

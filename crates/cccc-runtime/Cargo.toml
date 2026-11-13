@@ -10,6 +10,8 @@ publish = false
 
 [dependencies]
 cccc-contracts = { package = "cccc-pair-contracts", version = "=0.4.55", path = "../cccc-contracts" }
+chrono.workspace = true
+rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled", "hooks"] }
 dunce.workspace = true
 portable-pty.workspace = true
 retach.workspace = true
@@ -25,7 +27,7 @@ filedescriptor = "=0.8.3"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", features = ["event", "fs", "process"] }
-nix.workspace = true
+nix = { workspace = true, features = ["feature"] }
 sha2.workspace = true
 uuid.workspace = true
 

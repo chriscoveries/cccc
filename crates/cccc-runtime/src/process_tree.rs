@@ -1,4 +1,5 @@
 //! Process resources reachable independently of session/protocol shutdown locks.
+pub(crate) mod devin_binding;
 #[cfg(unix)]
 pub(crate) mod guard;
 #[cfg(unix)]

@@ -1,7 +1,7 @@
 //! Format terminal input once for managed viewers and generation-bound ordinary workers.
 use super::{TERMINAL_REPEAT_SUBMIT_DELAY, TERMINAL_SUBMIT_DELAY, terminal_submit_sequence};
 use crate::ops::local_headless;
-use cccc_contracts::Actor;
+use cccc_contracts::{Actor, ActorRuntime};
 use cccc_runtime::{PtyHandoff, PtyHandoffReason, SessionStatus};
 use std::sync::atomic::AtomicBool;
 
@@ -33,21 +33,35 @@ pub(in crate::ops) fn submit_terminal_text_for_session(
     expected: &SessionStatus,
     actor: &Actor,
     text: &str,
+    source_ids: &[String],
     cancelled: &AtomicBool,
 ) -> PtyHandoff {
     if actor.id != expected.actor_id {
         return PtyHandoff::NotWritten(PtyHandoffReason::SessionChanged);
     }
+    // System notices do not otherwise carry their event IDs. Native completion
+    // must name this exact source tuple even across a resumed process/session.
+    let marked;
+    let text = if actor.runtime == ActorRuntime::Devin && !source_ids.is_empty() {
+        marked = format!(
+            "{text}\n\n[CCCC delivery sources: {}]",
+            source_ids.join(",")
+        );
+        marked.as_str()
+    } else {
+        text
+    };
     let Some(input) = terminal_input(&expected.group_id, actor, text, cancelled) else {
         return PtyHandoff::NotWritten(PtyHandoffReason::Cancelled);
     };
-    cccc_runtime::submit_sequence_for_session_with_evidence_interruptible(
+    cccc_runtime::submit_delivery_for_session(
         expected,
         input.payload.as_bytes(),
         input.submits,
         input.delay,
         TERMINAL_REPEAT_SUBMIT_DELAY,
         cancelled,
+        source_ids,
     )
 }
 

@@ -2,6 +2,7 @@
 use crate::cancellation::{lock_interruptibly, wait_interruptibly};
 use crate::registry::{SharedSession, lookup};
 use crate::{RuntimeError, SessionStatus};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -47,8 +48,11 @@ pub fn submit_sequence_interruptible(
     cancelled: &AtomicBool,
 ) -> Result<bool, RuntimeError> {
     submit_sequence(
-        (group_id, actor_id),
-        None,
+        SubmissionTarget {
+            identity: (group_id, actor_id),
+            expected: None,
+            source_ids: None,
+        },
         payload,
         submits,
         initial_delay,
@@ -89,8 +93,11 @@ pub fn submit_sequence_for_session_with_evidence_interruptible(
     cancelled: &AtomicBool,
 ) -> PtyHandoff {
     submit_sequence(
-        (&expected.group_id, &expected.actor_id),
-        Some(expected),
+        SubmissionTarget {
+            identity: (&expected.group_id, &expected.actor_id),
+            expected: Some(expected),
+            source_ids: None,
+        },
         payload,
         submits,
         initial_delay,
@@ -99,9 +106,39 @@ pub fn submit_sequence_for_session_with_evidence_interruptible(
     )
 }
 
+/// Ordinary daemon delivery supplies stable source identities; generic input
+/// APIs can invalidate readiness but cannot establish a completion epoch.
+pub fn submit_delivery_for_session(
+    expected: &SessionStatus,
+    payload: &[u8],
+    submits: &[&[u8]],
+    initial_delay: Duration,
+    repeat_delay: Duration,
+    cancelled: &AtomicBool,
+    source_ids: &[String],
+) -> PtyHandoff {
+    submit_sequence(
+        SubmissionTarget {
+            identity: (&expected.group_id, &expected.actor_id),
+            expected: Some(expected),
+            source_ids: Some(source_ids),
+        },
+        payload,
+        submits,
+        initial_delay,
+        repeat_delay,
+        cancelled,
+    )
+}
+
+struct SubmissionTarget<'a> {
+    identity: (&'a str, &'a str),
+    expected: Option<&'a SessionStatus>,
+    source_ids: Option<&'a [String]>,
+}
+
 fn submit_sequence(
-    target: (&str, &str),
-    expected: Option<&SessionStatus>,
+    target: SubmissionTarget<'_>,
     payload: &[u8],
     submits: &[&[u8]],
     initial_delay: Duration,
@@ -111,7 +148,7 @@ fn submit_sequence(
     if cancelled.load(Ordering::Acquire) {
         return PtyHandoff::NotWritten(PtyHandoffReason::Cancelled);
     }
-    let session = match lookup(target.0, target.1) {
+    let session = match lookup(target.identity.0, target.identity.1) {
         Ok(session) => session,
         Err(error) => return PtyHandoff::NotWritten(PtyHandoffReason::Runtime(error)),
     };
@@ -124,17 +161,59 @@ fn submit_sequence(
         Ok(None) => return PtyHandoff::NotWritten(PtyHandoffReason::Cancelled),
         Err(error) => return PtyHandoff::NotWritten(PtyHandoffReason::Runtime(error)),
     };
+    let observer = match session.lock() {
+        Ok(current) => current.devin_tracker.clone(),
+        Err(_) => return PtyHandoff::NotWritten(PtyHandoffReason::Runtime(RuntimeError::Poisoned)),
+    };
+    let mut observation = SubmissionObservation::new(observer, payload, target.source_ids);
     if cancelled.load(Ordering::Acquire) {
         return PtyHandoff::NotWritten(PtyHandoffReason::Cancelled);
     }
-    submit_writes(
+    let handoff = submit_writes(
         payload,
         submits,
         initial_delay,
         repeat_delay,
         cancelled,
-        |data| write_tracked(&session, data, cancelled, expected),
-    )
+        |data| write_tracked(&session, data, cancelled, target.expected),
+    );
+    observation.accepted = matches!(handoff, PtyHandoff::Accepted);
+    handoff
+}
+
+/// Once the input lane is acquired, any failed or partial attempt retires authority.
+struct SubmissionObservation {
+    observer: Option<Arc<crate::devin_pty::Tracker>>,
+    accepted: bool,
+}
+
+impl SubmissionObservation {
+    fn new(
+        observer: Option<Arc<crate::devin_pty::Tracker>>,
+        payload: &[u8],
+        source_ids: Option<&[String]>,
+    ) -> Self {
+        if let Some(observer) = &observer {
+            match source_ids {
+                Some(ids) => observer.begin_submission(payload, ids),
+                None => observer.invalidate(),
+            }
+        }
+        Self {
+            observer,
+            accepted: false,
+        }
+    }
+}
+
+impl Drop for SubmissionObservation {
+    fn drop(&mut self) {
+        if !self.accepted
+            && let Some(observer) = &self.observer
+        {
+            observer.invalidate();
+        }
+    }
 }
 
 struct Attempt {
@@ -174,9 +253,7 @@ fn write_tracked(
         }
     };
     // The input gate preserves ordering while this pins the exact PTY writer.
-    match crate::pty_input::write_input_interruptibly_tracked(&writer, data, &|| {
-        cancelled.load(Ordering::Acquire)
-    }) {
+    match writer.write_submission_part(data, &|| cancelled.load(Ordering::Acquire)) {
         Ok(progress) => attempt_from_progress(progress),
         Err(error) => Attempt {
             written: 0,
@@ -392,8 +469,11 @@ mod tests {
     fn cancellation_before_session_lookup_does_not_write() {
         let cancelled = AtomicBool::new(true);
         let result = submit_sequence(
-            ("absent-group", "absent-actor"),
-            None,
+            SubmissionTarget {
+                identity: ("absent-group", "absent-actor"),
+                expected: None,
+                source_ids: None,
+            },
             b"payload",
             &[b"\r"],
             Duration::ZERO,

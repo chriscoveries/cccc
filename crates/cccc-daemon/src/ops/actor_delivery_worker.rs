@@ -225,6 +225,7 @@ pub fn process_batch_tracked(
                         &current_group,
                         &current_actor
                     ),
+                    &[],
                     cancelled,
                 ),
                 PtyHandoff::Accepted
@@ -239,6 +240,17 @@ pub fn process_batch_tracked(
     }
 
     let events = jobs.iter().map(|job| job.event.clone()).collect::<Vec<_>>();
+    if current_actor.runtime == ActorRuntime::Devin
+        && crate::ops::local_headless::early_mail_batch(&events, chrono::Utc::now())
+        && !crate::ops::working_state::devin_state(&current_actor, &current_group.group_id)
+            .is_some_and(|state| state.state == "idle")
+    {
+        super::actor_delivery::withdraw_jobs(
+            jobs,
+            "early Mail notice withheld while native readiness is unknown; unread tick re-issues it",
+        );
+        return BatchOutcome::Delivered;
+    }
     let Some(mut payload) = super::actor_delivery_render::render_batch_with_mail_context(
         &job.home,
         &current_group,
@@ -274,6 +286,10 @@ pub fn process_batch_tracked(
         &current_actor,
         &status,
         &payload,
+        &events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>(),
         cancelled,
     ) {
         PtyHandoff::Accepted => {
@@ -824,6 +840,7 @@ fn submit_text(
     actor: &Actor,
     expected: &cccc_runtime::SessionStatus,
     text: &str,
+    source_ids: &[String],
     cancelled: &AtomicBool,
 ) -> PtyHandoff {
     // Configuration and terminal ownership can change while this batch is waiting.
@@ -831,7 +848,9 @@ fn submit_text(
     if super::local_headless::uses_managed_delivery(group_id, actor) {
         return PtyHandoff::NotWritten(cccc_runtime::PtyHandoffReason::SessionChanged);
     }
-    super::actor_delivery::submit_terminal_text_for_session(expected, actor, text, cancelled)
+    super::actor_delivery::submit_terminal_text_for_session(
+        expected, actor, text, source_ids, cancelled,
+    )
 }
 
 #[cfg(test)]

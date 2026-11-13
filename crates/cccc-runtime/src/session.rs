@@ -2,7 +2,7 @@ use crate::RuntimeError;
 use crate::output::HistoryPage;
 use crate::output_reader::OutputReader;
 use crate::process_tree::{CommandError, OwnedProcessTree};
-use crate::pty_input::SharedPtyWriter;
+use crate::pty_input::{PreparedInput, SharedPtyWriter};
 use crate::session_history::SessionHistory;
 use crate::terminal_attach::{
     AttachmentRegistry, TerminalAttachMode, TerminalAttachOptions, TerminalAttachment,
@@ -87,6 +87,7 @@ pub struct Session {
     attachments: AttachmentRegistry,
     history: SessionHistory,
     reader: Option<OutputReader>,
+    pub(crate) devin_tracker: Option<Arc<crate::devin_pty::Tracker>>,
 }
 
 impl Session {
@@ -206,11 +207,23 @@ impl Session {
             attachments: AttachmentRegistry::default(),
             history,
             reader: Some(reader),
+            devin_tracker: None,
         })
     }
 
     pub(crate) fn attribute_launch(&mut self, launch: ActorLaunch) {
         self.status.launch = Some(launch);
+        if launch.runtime == ActorRuntime::Devin
+            && let Some(pid) = self.status.pid
+        {
+            self.devin_tracker = Some(Arc::new(crate::devin_pty::Tracker::new(
+                pid,
+                self.status.cwd.clone(),
+                self.status.group_id.clone(),
+                self.status.actor_id.clone(),
+                self.status.actor_generation.clone(),
+            )));
+        }
     }
 
     pub fn status(&mut self) -> SessionStatus {
@@ -243,12 +256,15 @@ impl Session {
         Ok(self.status.clone())
     }
 
-    pub(crate) fn input_writer(&mut self) -> Result<SharedPtyWriter, RuntimeError> {
+    pub(crate) fn input_writer(&mut self) -> Result<PreparedInput, RuntimeError> {
         let status = self.status();
         if !status.running {
             return Err(RuntimeError::NotFound(status.group_id, status.actor_id));
         }
-        Ok(Arc::clone(&self.writer))
+        Ok(PreparedInput::new(
+            Arc::clone(&self.writer),
+            self.devin_tracker.clone(),
+        ))
     }
 
     pub(crate) fn input_gate(&self) -> Arc<Mutex<()>> {
@@ -293,7 +309,7 @@ impl Session {
         &mut self,
         registry: &AttachmentRegistry,
         attachment_id: u64,
-    ) -> Result<Option<SharedPtyWriter>, RuntimeError> {
+    ) -> Result<Option<PreparedInput>, RuntimeError> {
         if !self.attachments.same_session(registry) || !registry.is_writer(attachment_id)? {
             return Ok(None);
         }

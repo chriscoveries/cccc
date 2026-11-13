@@ -75,6 +75,54 @@ impl PtyInput for NativeInput {}
 
 pub(crate) type SharedPtyWriter = Arc<Mutex<Box<dyn PtyInput>>>;
 
+/// Actor input, unlike a terminal's protocol responses, retires native turn
+/// observations before writing. Kept outside Session/lifecycle synchronization.
+pub(crate) struct PreparedInput {
+    writer: SharedPtyWriter,
+    observer: Option<Arc<crate::devin_pty::Tracker>>,
+}
+
+impl PreparedInput {
+    pub(crate) fn new(
+        writer: SharedPtyWriter,
+        observer: Option<Arc<crate::devin_pty::Tracker>>,
+    ) -> Self {
+        Self { writer, observer }
+    }
+
+    fn before(&self, data: &[u8]) {
+        if !data.is_empty()
+            && let Some(observer) = &self.observer
+        {
+            observer.invalidate();
+        }
+    }
+
+    pub(crate) fn write(&self, data: &[u8]) -> Result<(), RuntimeError> {
+        self.before(data);
+        write_input(&self.writer, data)
+    }
+
+    pub(crate) fn write_interruptibly(
+        &self,
+        data: &[u8],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<bool, RuntimeError> {
+        self.before(data);
+        write_input_interruptibly(&self.writer, data, cancelled)
+    }
+
+    // Only manager::submission may use this: its input gate and logical epoch
+    // cover every payload/key fragment, and uncertain completion invalidates it.
+    pub(crate) fn write_submission_part(
+        &self,
+        data: &[u8],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<WriteProgress, RuntimeError> {
+        write_input_interruptibly_tracked(&self.writer, data, cancelled)
+    }
+}
+
 pub(crate) fn write_input(writer: &SharedPtyWriter, data: &[u8]) -> Result<(), RuntimeError> {
     let mut writer = writer.lock().map_err(|_| RuntimeError::Poisoned)?;
     writer.write_all(data)?;
