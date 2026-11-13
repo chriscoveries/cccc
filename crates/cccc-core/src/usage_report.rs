@@ -39,9 +39,12 @@ fn time(value: &Value) -> Option<DateTime<Utc>> {
 
 fn task_id(value: &Value) -> Option<&str> {
     let id = value.as_str()?;
-    let digits = id.strip_prefix('T')?;
-    (!digits.is_empty() && digits.len() <= 20 && digits.bytes().all(|b| b.is_ascii_digit()))
-        .then_some(id)
+    (!id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    .then_some(id)
 }
 
 fn active(state: &Value) -> bool {
@@ -490,9 +493,10 @@ mod tests {
         second["data"]["runtime"] = json!("pi");
         second["data"]["started_at"] = first["data"]["started_at"].clone();
         second["data"]["ended_at"] = first["data"]["ended_at"].clone();
-        let snapshots: Vec<Value> =
+        let mut snapshots: Vec<Value> =
             serde_json::from_str(include_str!("context/captured_tasks.json"))
                 .expect("captured test data and setup");
+        snapshots[0]["id"] = json!("task-a");
         let report = project(
             "g_example",
             &[opened, first, second, done],
@@ -555,6 +559,9 @@ mod tests {
         let mut snapshots: Vec<Value> =
             serde_json::from_str(include_str!("context/captured_tasks.json"))
                 .expect("captured task snapshots");
+        snapshots[0]["id"] = json!("task-a");
+        snapshots[1]["id"] = json!("task-b");
+        snapshots[2]["id"] = json!("task-c");
         snapshots[2]["status"] = json!("active");
         let price_input = json!({"version":"example-1","currency":"USD","minor_scale":2,"entries":[{
             "model":"claude-opus-5-5","effective_from":"2026-01-01T00:00:00Z",
