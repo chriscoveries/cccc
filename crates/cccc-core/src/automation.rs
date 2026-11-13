@@ -977,55 +977,62 @@ fn unread_notices(
         }
 
         if mail_delays.busy > 0 && !mail_pending.is_empty() {
-            let pending_ids = mail_pending
-                .iter()
-                .map(|event| event.id.clone())
-                .collect::<HashSet<_>>();
-            let active_claim = mail_claims
-                .get(&(actor.id.clone(), actor.created_at.clone()))
-                .into_iter()
-                .flatten()
-                .rev()
-                .filter(|(notice_id, claimed_at, _)| {
-                    match deliveries
-                        .get(&(notice_id.clone(), actor.id.clone()))
-                        .map(|(state, _, _)| state.as_str())
-                    {
-                        Some("withdrawn") => false,
-                        Some("accepted" | "ambiguous") => {
-                            mail_repeat <= 0 || now - claimed_at < mail_repeat
+            let first_at = mail_pending.iter().find(|source| {
+                !mail_claims
+                    .get(&(actor.id.clone(), actor.created_at.clone()))
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .filter(|(notice_id, claimed_at, _)| {
+                        match deliveries
+                            .get(&(notice_id.clone(), actor.id.clone()))
+                            .map(|(state, _, _)| state.as_str())
+                        {
+                            Some("withdrawn") => false,
+                            Some("accepted" | "ambiguous") => {
+                                mail_repeat <= 0 || now - claimed_at < mail_repeat
+                            }
+                            _ => true,
                         }
-                        _ => true,
-                    }
-                })
-                .any(|(_, _, claimed)| {
-                    let claimed = claimed
-                        .iter()
-                        .filter(|source| positions.contains_key(*source))
-                        .collect::<Vec<_>>();
-                    if claimed.is_empty() {
-                        return true;
-                    }
-                    let resolutions = claimed
-                        .iter()
-                        .map(|source| resolution_position(&actor.id, source))
-                        .collect::<Vec<_>>();
-                    if resolutions.iter().any(Option::is_none) {
-                        return true;
-                    }
-                    let closure_position = resolutions.into_iter().flatten().max().unwrap_or(0);
-                    pending_ids.iter().any(|source| {
+                    })
+                    .any(|(notice_id, _, claimed)| {
+                        if !deliveries
+                            .get(&(notice_id.clone(), actor.id.clone()))
+                            .is_some_and(|(state, _, _)| {
+                                matches!(state.as_str(), "accepted" | "ambiguous")
+                            })
+                            || claimed.contains(&source.id)
+                        {
+                            return true;
+                        }
+                        let claimed = claimed
+                            .iter()
+                            .filter(|source| positions.contains_key(*source))
+                            .collect::<Vec<_>>();
+                        if claimed.is_empty() {
+                            return true;
+                        }
+                        let resolutions = claimed
+                            .iter()
+                            .map(|source| resolution_position(&actor.id, source))
+                            .collect::<Vec<_>>();
+                        if resolutions.iter().any(Option::is_none) {
+                            return false;
+                        }
+                        let closure_position = resolutions.into_iter().flatten().max().unwrap_or(0);
                         positions
-                            .get(source)
+                            .get(&source.id)
                             .is_some_and(|position| *position <= closure_position)
                     })
-                });
-            let first_at = timestamp(&mail_pending[0].ts, now);
-            let first_at = resume_at.map_or(first_at, |resume| first_at.max(resume));
-            let first_at = actor_resumes
-                .get(&actor.id)
-                .map_or(first_at, |resume| first_at.max(*resume));
-            if !active_claim && now - first_at >= mail_after {
+            });
+            let first_at = first_at.map(|source| {
+                let first_at = timestamp(&source.ts, now);
+                let first_at = resume_at.map_or(first_at, |resume| first_at.max(resume));
+                actor_resumes
+                    .get(&actor.id)
+                    .map_or(first_at, |resume| first_at.max(*resume))
+            });
+            if let Some(first_at) = first_at.filter(|first| now - *first >= mail_after) {
                 let mut event = notice_event(
                     group,
                     actor,
