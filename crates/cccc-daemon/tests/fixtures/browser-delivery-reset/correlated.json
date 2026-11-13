@@ -1,0 +1,65 @@
+[
+  {
+    "v": 1,
+    "id": "captured-source",
+    "ts": "2026-11-11T02:09:01.352799Z",
+    "kind": "system.notify",
+    "group_id": "captured-group",
+    "by": "system",
+    "data": {
+      "to": [
+        "browser-actor"
+      ],
+      "target_actor_id": "browser-actor"
+    }
+  },
+  {
+    "v": 1,
+    "id": "captured-web_model-browser_delivery-submitting",
+    "ts": "2026-11-11T02:09:22.585555Z",
+    "kind": "web_model.browser_delivery.submitting",
+    "group_id": "captured-group",
+    "by": "system",
+    "data": {
+      "actor_id": "browser-actor",
+      "event_ids": [
+        "captured-source"
+      ],
+      "turn_id": "webturn:browser-actor:captured-turn",
+      "delivery_id": "webdelivery:browser-actor:captured-delivery"
+    }
+  },
+  {
+    "v": 1,
+    "id": "captured-runtime-delivery",
+    "ts": "2026-11-11T02:09:24.321491Z",
+    "kind": "runtime.delivery",
+    "group_id": "captured-group",
+    "by": "system",
+    "data": {
+      "actor_id": "browser-actor",
+      "source_event_id": "captured-source",
+      "delivery_id": "delivery:browser-actor:captured-transport",
+      "state": "accepted",
+      "transport": "web_model_browser"
+    }
+  },
+  {
+    "v": 1,
+    "id": "captured-runtime-turn-completed",
+    "ts": "2026-11-11T02:09:24.342431Z",
+    "kind": "runtime.turn.completed",
+    "group_id": "captured-group",
+    "by": "browser-actor",
+    "data": {
+      "actor_id": "browser-actor",
+      "event_id": "captured-source",
+      "event_ids": [
+        "captured-source"
+      ],
+      "turn_id": "webturn:browser-actor:captured-turn",
+      "delivery_id": "webdelivery:browser-actor:captured-delivery",
+      "status": "done"
+    }
+  }
+]

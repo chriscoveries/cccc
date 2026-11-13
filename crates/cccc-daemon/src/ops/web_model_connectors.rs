@@ -6,10 +6,13 @@ use cccc_contracts::{DaemonRequest, GroupState, RunnerKind};
 use cccc_core::{GroupStore, HomeLayout, integration_state, web_model_connectors as store};
 use serde_json::json;
 
+mod reset;
+
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     matches!(
         request.op.as_str(),
         "web_model_connector_configure"
+            | "web_model_delivery_reset"
             | "web_model_connector_revoke"
             | "web_model_pairing_begin"
             | "web_model_pairing_accept"
@@ -30,6 +33,9 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             "permission_denied",
             "Web Model pairing is user-controlled",
         ));
+    }
+    if request.op == "web_model_delivery_reset" {
+        return reset::execute(home, request);
     }
     if request.op == "web_model_connector_configure" {
         let provider = match request.args.get("provider") {
