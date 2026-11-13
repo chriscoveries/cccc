@@ -657,7 +657,10 @@ impl NoticeState {
                 }
             }
             if mail_delays.busy > 0 && !mail.is_empty() {
-                let active = self
+                let mut covered = HashSet::new();
+                let mut covered_through: Option<usize> = None;
+                let mut pending = false;
+                for claim in self
                     .mail_claims
                     .get(&(actor.id.clone(), actor.created_at.clone()))
                     .into_iter()
@@ -670,32 +673,47 @@ impl NoticeState {
                             .get(&(claim.id.clone(), actor.id.clone()))
                             .is_none_or(|v| v.0 != "withdrawn")
                     })
-                    .any(|claim| {
-                        let claimed = claim
-                            .sources
-                            .iter()
-                            .filter(|id| self.positions.contains_key(*id))
-                            .collect::<Vec<_>>();
-                        if claimed.is_empty() {
-                            return true;
-                        }
-                        let resolved = claimed
-                            .iter()
-                            .map(|id| resolution(&actor.id, id))
-                            .collect::<Vec<_>>();
-                        if resolved.iter().any(Option::is_none) {
-                            return true;
-                        }
-                        let closure = resolved.into_iter().flatten().max().unwrap_or(0);
-                        mail.iter().any(|source| source.position <= closure)
-                    });
-                let first = timestamp(&mail[0].ts, now);
-                let first = resume_at.map_or(first, |resume| first.max(resume));
-                let first = self
-                    .actor_resumes
-                    .get(&actor.id)
-                    .map_or(first, |resume| first.max(timestamp(resume, now)));
-                if !active && now - first >= after {
+                {
+                    // Coalesce new Mail while its notice is still being handed
+                    // off. A completed handoff covers its sources, not future
+                    // Mail that arrives while an older source remains unread.
+                    if !self
+                        .deliveries
+                        .get(&(claim.id.clone(), actor.id.clone()))
+                        .is_some_and(|v| matches!(v.0.as_str(), "accepted" | "ambiguous"))
+                    {
+                        pending = true;
+                        break;
+                    }
+                    let claimed = claim
+                        .sources
+                        .iter()
+                        .filter(|id| self.positions.contains_key(*id))
+                        .collect::<Vec<_>>();
+                    if claimed.is_empty() {
+                        pending = true;
+                        break;
+                    }
+                    covered.extend(claimed.iter().map(|id| id.as_str()));
+                    if let Some(closure) = claimed.iter().try_fold(0usize, |last, id| {
+                        resolution(&actor.id, id).map(|position| last.max(position))
+                    }) {
+                        covered_through = Some(covered_through.unwrap_or(0).max(closure));
+                    }
+                }
+                let first = mail.iter().find(|source| {
+                    !pending
+                        && !covered.contains(source.id.as_str())
+                        && covered_through.is_none_or(|closure| source.position > closure)
+                });
+                let first = first.map(|source| {
+                    let first = timestamp(&source.ts, now);
+                    let first = resume_at.map_or(first, |resume| first.max(resume));
+                    self.actor_resumes
+                        .get(&actor.id)
+                        .map_or(first, |resume| first.max(timestamp(resume, now)))
+                });
+                if let Some(first) = first.filter(|first| now - *first >= after) {
                     let mut event = notice_event(
                         group,
                         actor,

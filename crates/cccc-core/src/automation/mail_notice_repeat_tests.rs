@@ -142,15 +142,24 @@ impl Replay {
     }
 
     fn due(&self) -> Vec<Event> {
+        self.due_with_idle(false)
+    }
+
+    fn due_with_idle(&self, idle: bool) -> Vec<Event> {
         // This is the production projection, plus the cfg(test)-only ordered
         // reference reducer assertion in due_unread_notices.
         let recipients = HashSet::from(["recipient".to_owned()]);
+        let idle_recipients = if idle {
+            recipients.clone()
+        } else {
+            HashSet::new()
+        };
         due_unread_notices(
             &self.home,
             &self.store,
             &self.group,
             Some(&recipients),
-            &HashSet::new(),
+            &idle_recipients,
             UnreadPass::Scheduled,
         )
         .expect("projection / reference equivalence")
@@ -193,17 +202,113 @@ fn mail_notice_repeat_carries_both_captured_pending_mail() {
 
 #[test]
 fn mail_notice_repeat_does_not_fire_before_its_interval() {
-    let replay = Replay::captured(3590, Some(3600));
-    assert_eq!(replay.mail_ids.len(), 2);
+    let replay = Replay::captured_records(3590, Some(3600), false);
+    assert_eq!(replay.mail_ids.len(), 1);
     assert!(replay.due().is_empty());
 }
 
 #[test]
 fn mail_notice_repeat_default_and_zero_keep_one_shot_behavior() {
     for setting in [None, Some(0)] {
-        let replay = Replay::captured(3610, setting);
+        let replay = Replay::captured_records(3610, setting, false);
         assert!(replay.due().is_empty(), "setting {setting:?}");
     }
+}
+
+#[test]
+fn a_later_captured_mail_has_its_own_one_shot_notice() {
+    for (age, fixture) in [
+        (
+            3610,
+            include_str!("../../tests/fixtures/mail_notice_history.json"),
+        ),
+        (
+            6000,
+            include_str!("../../tests/fixtures/mail_notice_new_source_history.json"),
+        ),
+    ] {
+        for setting in [None, Some(0), Some(7200)] {
+            let replay = Replay::captured_fixture(age, setting, true, fixture);
+            let due = replay.due();
+            assert_eq!(due.len(), 1, "new Mail is not a repeat: {setting:?}");
+            assert_eq!(
+                due[0].data["context"]["source_event_ids"],
+                json!(replay.mail_ids)
+            );
+            replay.issue_accepted_expired(due.into_iter().next().expect("new Mail notice"));
+            assert!(replay.due().is_empty(), "both sources are now covered");
+        }
+    }
+}
+
+#[test]
+fn a_new_source_waits_its_own_busy_or_idle_delay() {
+    // The captured later Mail is 1737 seconds after the accepted notice.
+    // Translate the real timeline; old unread Mail must not age the new wake.
+    for (age, busy_due, idle_due) in [
+        (1750, false, false),
+        (1800, false, true),
+        (2100, true, true),
+    ] {
+        let mut replay = Replay::captured(age, None);
+        replay.group.extra.get_mut("delivery").unwrap()["mail_notice_after_seconds"] = json!(300);
+        replay.group.extra.get_mut("delivery").unwrap()["mail_notice_idle_after_seconds"] =
+            json!(60);
+        assert_eq!(!replay.due().is_empty(), busy_due, "busy at age {age}");
+        assert_eq!(
+            !replay.due_with_idle(true).is_empty(),
+            idle_due,
+            "idle at age {age}"
+        );
+    }
+}
+
+#[test]
+fn captured_pending_handoff_still_coalesces_new_mail() {
+    let mut records: Vec<Event> = serde_json::from_str(include_str!(
+        "../../tests/fixtures/mail_notice_history.json"
+    ))
+    .expect("captured history");
+    // Derived crash cut: omit the accepted fact, leaving the captured claim.
+    records.retain(|event| event.data.get("state") != Some(&json!("accepted")));
+    let fixture = serde_json::to_string(&records).unwrap();
+    assert!(
+        Replay::captured_fixture(3610, None, true, &fixture)
+            .due()
+            .is_empty()
+    );
+}
+
+#[test]
+fn ambiguous_and_legacy_claim_controls_remain_conservative() {
+    let captured: Vec<Event> = serde_json::from_str(include_str!(
+        "../../tests/fixtures/mail_notice_history.json"
+    ))
+    .expect("captured history");
+    // Explicit derived controls, not claims about the captured handoff outcome.
+    let mut ambiguous = captured.clone();
+    ambiguous[3].data.insert("state".into(), json!("ambiguous"));
+    let fixture = serde_json::to_string(&ambiguous).unwrap();
+    assert_eq!(
+        Replay::captured_fixture(3610, None, true, &fixture)
+            .due()
+            .len(),
+        1
+    );
+    assert!(
+        Replay::captured_fixture(3610, None, false, &fixture)
+            .due()
+            .is_empty()
+    );
+
+    let mut legacy = captured;
+    legacy[1].data.get_mut("context").unwrap()["source_event_ids"] = json!([]);
+    let fixture = serde_json::to_string(&legacy).unwrap();
+    assert!(
+        Replay::captured_fixture(3610, None, true, &fixture)
+            .due()
+            .is_empty()
+    );
 }
 
 #[test]

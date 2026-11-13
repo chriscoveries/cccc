@@ -1,0 +1,78 @@
+[
+  {
+    "v": 1,
+    "id": "source-before",
+    "ts": "2026-11-13T01:24:39.897844Z",
+    "kind": "chat.message",
+    "group_id": "captured-notice",
+    "by": "sender",
+    "data": {
+      "message_mode": "mail",
+      "to": [
+        "recipient"
+      ]
+    }
+  },
+  {
+    "v": 1,
+    "id": "notice-before",
+    "ts": "2026-11-13T01:30:29.068244Z",
+    "kind": "system.notify",
+    "group_id": "captured-notice",
+    "by": "system",
+    "data": {
+      "kind": "mail_notice",
+      "target_actor_id": "recipient",
+      "context": {
+        "actor_id": "recipient",
+        "actor_created_at": "2026-11-09T04:40:07.782325Z",
+        "source_event_ids": [
+          "source-before"
+        ],
+        "count": 1
+      }
+    }
+  },
+  {
+    "v": 1,
+    "id": "claim-before",
+    "ts": "2026-11-13T01:30:32.516870Z",
+    "kind": "runtime.delivery",
+    "group_id": "captured-notice",
+    "by": "system",
+    "data": {
+      "actor_id": "recipient",
+      "source_event_id": "notice-before",
+      "state": "claimed",
+      "transport": "pty"
+    }
+  },
+  {
+    "v": 1,
+    "id": "accepted-before",
+    "ts": "2026-11-13T01:30:34.041399Z",
+    "kind": "runtime.delivery",
+    "group_id": "captured-notice",
+    "by": "system",
+    "data": {
+      "actor_id": "recipient",
+      "source_event_id": "notice-before",
+      "state": "accepted",
+      "transport": "pty"
+    }
+  },
+  {
+    "v": 1,
+    "id": "source-after",
+    "ts": "2026-11-13T03:01:31.372615Z",
+    "kind": "chat.message",
+    "group_id": "captured-notice",
+    "by": "sender",
+    "data": {
+      "message_mode": "mail",
+      "to": [
+        "recipient"
+      ]
+    }
+  }
+]
