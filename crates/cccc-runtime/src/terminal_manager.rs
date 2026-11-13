@@ -126,5 +126,5 @@ pub(crate) fn write_from_attachment(
     let Some(writer) = writer else {
         return Ok(false);
     };
-    crate::pty_input::write_input_interruptibly(&writer, data, &revoked)
+    writer.write_interruptibly(data, &revoked)
 }

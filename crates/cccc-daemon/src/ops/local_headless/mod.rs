@@ -8,6 +8,7 @@ mod events_migration;
 mod events_migration_tests;
 mod managed_reader;
 mod notice_gate;
+pub(in crate::ops) use notice_gate::held_batch as early_mail_batch;
 mod output;
 mod provider_cli;
 mod session;

@@ -1,0 +1,395 @@
+{
+  "session": "captured-session",
+  "created": 1794543370,
+  "before_tip": 143,
+  "after_tip": 155,
+  "before_transcript": {
+    "schema_version": "ATIF-v1.7",
+    "session_id": "captured-session",
+    "steps": [
+      {
+        "step_id": 48,
+        "timestamp": "2026-11-13T04:24:23.073514694+00:00",
+        "source": "agent",
+        "message": "[redacted message 11]",
+        "tool_calls": [],
+        "metrics": {
+          "completion_tokens": 309
+        }
+      }
+    ]
+  },
+  "after_transcript": {
+    "schema_version": "ATIF-v1.7",
+    "session_id": "captured-session",
+    "steps": [
+      {
+        "step_id": 53,
+        "timestamp": "2026-11-13T04:27:15.130975672+00:00",
+        "source": "agent",
+        "message": "[redacted message 16]",
+        "tool_calls": [],
+        "metrics": {
+          "completion_tokens": 351
+        }
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "node_id": 113,
+      "parent_node_id": 112,
+      "created_at": 1794543714,
+      "chat_message": {
+        "message_id": "message-1",
+        "role": "user",
+        "content": "[redacted message 1]"
+      }
+    },
+    {
+      "node_id": 115,
+      "parent_node_id": 113,
+      "created_at": 1794543732,
+      "chat_message": {
+        "message_id": "message-2",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          },
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 116,
+      "parent_node_id": 115,
+      "created_at": 1794543732,
+      "chat_message": {
+        "message_id": "message-3",
+        "role": "tool",
+        "content": "[redacted message 2]"
+      }
+    },
+    {
+      "node_id": 117,
+      "parent_node_id": 116,
+      "created_at": 1794543732,
+      "chat_message": {
+        "message_id": "message-4",
+        "role": "tool",
+        "content": "[redacted message 3]"
+      }
+    },
+    {
+      "node_id": 119,
+      "parent_node_id": 117,
+      "created_at": 1794543734,
+      "chat_message": {
+        "message_id": "message-5",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 120,
+      "parent_node_id": 119,
+      "created_at": 1794543734,
+      "chat_message": {
+        "message_id": "message-6",
+        "role": "tool",
+        "content": "[redacted message 4]"
+      }
+    },
+    {
+      "node_id": 122,
+      "parent_node_id": 120,
+      "created_at": 1794543765,
+      "chat_message": {
+        "message_id": "message-7",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 123,
+      "parent_node_id": 122,
+      "created_at": 1794543765,
+      "chat_message": {
+        "message_id": "message-8",
+        "role": "tool",
+        "content": "[redacted message 2]"
+      }
+    },
+    {
+      "node_id": 125,
+      "parent_node_id": 123,
+      "created_at": 1794543766,
+      "chat_message": {
+        "message_id": "message-9",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 126,
+      "parent_node_id": 125,
+      "created_at": 1794543766,
+      "chat_message": {
+        "message_id": "message-10",
+        "role": "tool",
+        "content": "[redacted message 5]"
+      }
+    },
+    {
+      "node_id": 128,
+      "parent_node_id": 126,
+      "created_at": 1794543781,
+      "chat_message": {
+        "message_id": "message-11",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 129,
+      "parent_node_id": 128,
+      "created_at": 1794543781,
+      "chat_message": {
+        "message_id": "message-12",
+        "role": "tool",
+        "content": "[redacted message 6]"
+      }
+    },
+    {
+      "node_id": 131,
+      "parent_node_id": 129,
+      "created_at": 1794543831,
+      "chat_message": {
+        "message_id": "message-13",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 132,
+      "parent_node_id": 131,
+      "created_at": 1794543831,
+      "chat_message": {
+        "message_id": "message-14",
+        "role": "tool",
+        "content": "[redacted message 7]"
+      }
+    },
+    {
+      "node_id": 134,
+      "parent_node_id": 132,
+      "created_at": 1794543846,
+      "chat_message": {
+        "message_id": "message-15",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 135,
+      "parent_node_id": 134,
+      "created_at": 1794543846,
+      "chat_message": {
+        "message_id": "message-16",
+        "role": "tool",
+        "content": "[redacted message 8]"
+      }
+    },
+    {
+      "node_id": 137,
+      "parent_node_id": 135,
+      "created_at": 1794543858,
+      "chat_message": {
+        "message_id": "message-17",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 138,
+      "parent_node_id": 137,
+      "created_at": 1794543858,
+      "chat_message": {
+        "message_id": "message-18",
+        "role": "tool",
+        "content": "[redacted message 9]"
+      }
+    },
+    {
+      "node_id": 140,
+      "parent_node_id": 138,
+      "created_at": 1794543863,
+      "chat_message": {
+        "message_id": "message-19",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 141,
+      "parent_node_id": 140,
+      "created_at": 1794543863,
+      "chat_message": {
+        "message_id": "message-20",
+        "role": "tool",
+        "content": "[redacted message 10]"
+      }
+    },
+    {
+      "node_id": 143,
+      "parent_node_id": 141,
+      "created_at": 1794543865,
+      "chat_message": {
+        "message_id": "message-21",
+        "role": "assistant",
+        "content": "[redacted message 11]",
+        "tool_calls": []
+      }
+    },
+    {
+      "node_id": 144,
+      "parent_node_id": 143,
+      "created_at": 1794544020,
+      "chat_message": {
+        "message_id": "message-22",
+        "role": "user",
+        "content": "[redacted message 12]"
+      }
+    },
+    {
+      "node_id": 146,
+      "parent_node_id": 144,
+      "created_at": 1794544026,
+      "chat_message": {
+        "message_id": "message-23",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 147,
+      "parent_node_id": 146,
+      "created_at": 1794544026,
+      "chat_message": {
+        "message_id": "message-24",
+        "role": "tool",
+        "content": "[redacted message 13]"
+      }
+    },
+    {
+      "node_id": 149,
+      "parent_node_id": 147,
+      "created_at": 1794544028,
+      "chat_message": {
+        "message_id": "message-25",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 150,
+      "parent_node_id": 149,
+      "created_at": 1794544028,
+      "chat_message": {
+        "message_id": "message-26",
+        "role": "tool",
+        "content": "[redacted message 14]"
+      }
+    },
+    {
+      "node_id": 152,
+      "parent_node_id": 150,
+      "created_at": 1794544035,
+      "chat_message": {
+        "message_id": "message-27",
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "redacted"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": 153,
+      "parent_node_id": 152,
+      "created_at": 1794544035,
+      "chat_message": {
+        "message_id": "message-28",
+        "role": "tool",
+        "content": "[redacted message 15]"
+      }
+    },
+    {
+      "node_id": 155,
+      "parent_node_id": 153,
+      "created_at": 1794544038,
+      "chat_message": {
+        "message_id": "message-29",
+        "role": "assistant",
+        "content": "[redacted message 16]",
+        "tool_calls": []
+      }
+    }
+  ]
+}

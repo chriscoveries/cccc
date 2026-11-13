@@ -2,7 +2,9 @@ mod cancellation;
 mod command;
 mod command_output;
 mod command_session;
+mod devin_pty;
 mod diagnostic;
+pub use devin_pty::DevinPtyState;
 pub use diagnostic::{DiagnosticLog, diagnostic, log_diagnostics_to};
 pub mod deepseek_acp;
 pub mod deepseek_supervisor;
@@ -67,9 +69,10 @@ pub use history_access::{
     history_since, last_output, retained_history, retained_history_tail,
 };
 pub use manager::{
-    PtyHandoff, PtyHandoffReason, reap, resize, start, start_actor_with_history,
+    PtyHandoff, PtyHandoffReason, devin_pty_state, reap, resize, start, start_actor_with_history,
     start_with_history, start_with_history_isolated_environment, status, stop, stop_all,
-    stop_if_started_at, submit, submit_interruptible, submit_sequence_for_session_interruptible,
+    stop_if_started_at, submit, submit_delivery_for_session, submit_interruptible,
+    submit_sequence_for_session_interruptible,
     submit_sequence_for_session_with_evidence_interruptible, submit_sequence_interruptible,
     wait_for_input_ready, write,
 };
