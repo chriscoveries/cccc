@@ -1845,3 +1845,160 @@ fn dots_unclocked_unclaimed_wake_is_fenced_without_consuming_input() {
         );
     }
 }
+
+fn poll_token(f: &Fixture, claimed: &Value) -> Value {
+    let token = claimed["actor_token"]
+        .as_str()
+        .expect("poll claim execution credential");
+    store::dots_binding_for_token(&f.private(), token, "cccc_runtime_complete_turn")
+        .expect("poll claim credential authorizes its own turn")
+}
+
+#[test]
+fn dots_unsubscribed_poll_is_idle_unless_poll_mode_is_enabled() {
+    let f = Fixture::new();
+    f.call("actor_start", json!({}));
+    f.source("queued while the Dot has no event subscription");
+    let status = f.call("dots_events_status", json!({}));
+    assert_eq!(status["subscribed"], false);
+    assert_eq!(status["poll_mode"], false);
+    assert_eq!(status["phase"], "waiting_subscription");
+    let idle = f.claim(&f.claim_capture());
+    assert_eq!(idle["status"], "idle");
+    assert!(idle.get("actor_token").is_none());
+    assert!(f.private()["dots"]["execution"].is_null());
+    // Only the user may change poll mode.
+    let denied = f.response("dots_events_poll_mode", json!({"by":"dot","enabled":true}));
+    assert_eq!(denied.error.expect("user only").code, "permission_denied");
+    let bad = f.response("dots_events_poll_mode", json!({"enabled":"yes"}));
+    assert_eq!(bad.error.expect("boolean only").code, "invalid_enabled");
+}
+
+#[test]
+fn dots_poll_mode_claims_queued_work_through_the_native_turn_path() {
+    let f = Fixture::new();
+    f.call("actor_start", json!({}));
+    let set = f.call("dots_events_poll_mode", json!({"enabled":true}));
+    assert_eq!(set["poll_when_unsubscribed"], true);
+    assert_eq!(set["poll_mode"], true);
+
+    // Nothing queued: idle, and no wake is minted.
+    let idle = f.claim(&f.claim_capture());
+    assert_eq!(idle["status"], "idle");
+    assert_eq!(idle["reason_code"], "dots_poll_idle");
+    assert!(f.private()["dots"]["wake"].is_null());
+
+    let source = f.source("delivered to a timed-poll Dot");
+    assert_eq!(f.call("dots_events_status", json!({}))["phase"], "pending");
+    let capture = f.claim_capture();
+    let claimed = f.claim(&capture);
+    assert_eq!(claimed["status"], "work_available");
+    assert_eq!(claimed["turn"]["event_ids"], json!([source]));
+    let wake = f.private()["dots"]["wake"].clone();
+    assert_eq!(wake["origin"], "poll");
+    assert_eq!(wake["state"], "claimed");
+    // The claim credential still cannot run business tools.
+    assert!(
+        !f.response(
+            "message_send",
+            json!({"by":"dot","to":["user"],"text":"no","_cccc_web_binding":capture})
+        )
+        .ok
+    );
+    // A second caller during the turn gets no work and no credential.
+    let duplicate = f.claim(&f.claim_capture());
+    assert_eq!(duplicate["status"], "turn_in_progress");
+    assert!(duplicate.get("actor_token").is_none());
+
+    let live = poll_token(&f, &claimed);
+    assert_eq!(live["dots_stage"], "execution");
+    f.complete(&claimed["turn"], &live);
+    let first_token = claimed["actor_token"].as_str().expect("token").to_owned();
+    assert!(
+        store::dots_binding_for_token(&f.private(), &first_token, "cccc_message_send").is_none()
+    );
+
+    // Completed wake does not block the next poll; nothing new means idle.
+    let again = f.claim(&f.claim_capture());
+    assert_eq!(again["status"], "idle");
+    assert_eq!(again["reason_code"], "dots_poll_idle");
+
+    let second = f.source("second poll task");
+    let next = f.claim(&f.claim_capture());
+    assert_eq!(next["status"], "work_available");
+    assert_eq!(next["turn"]["event_ids"], json!([second]));
+    assert_ne!(f.private()["dots"]["wake"]["event_id"], wake["event_id"]);
+    assert_ne!(next["actor_token"], claimed["actor_token"]);
+    f.complete(&next["turn"], &poll_token(&f, &next));
+}
+
+#[test]
+fn dots_poll_mode_respects_stop_and_can_be_turned_off() {
+    let f = Fixture::new();
+    f.call("dots_events_poll_mode", json!({"enabled":true}));
+    f.source("queued while the Dot Actor is stopped");
+    let stopped = f.claim(&f.claim_capture());
+    assert_eq!(stopped["status"], "idle");
+    assert!(stopped.get("actor_token").is_none());
+    assert!(f.private()["dots"]["wake"].is_null());
+
+    f.call("actor_start", json!({}));
+    f.call("dots_events_poll_mode", json!({"enabled":false}));
+    let status = f.call("dots_events_status", json!({}));
+    assert_eq!(status["poll_mode"], false);
+    assert_eq!(status["phase"], "waiting_subscription");
+    let off = f.claim(&f.claim_capture());
+    assert_eq!(off["status"], "idle");
+    assert!(off.get("actor_token").is_none());
+}
+
+#[test]
+fn dots_subscribed_dot_ignores_poll_mode_and_keeps_callback_wakes() {
+    let f = Fixture::new();
+    f.start();
+    f.call("dots_events_poll_mode", json!({"enabled":true}));
+    assert_eq!(f.call("dots_events_status", json!({}))["poll_mode"], false);
+    f.source("subscribed path unchanged");
+    // No callback wake yet: a poll claim with a null snapshot stays idle.
+    let early = f.claim(&f.claim_capture());
+    assert_eq!(early["status"], "idle");
+    let delivery = f.delivery();
+    let claimed = f.claim(&f.captured(&delivery, "cccc_runtime_wait_next_turn"));
+    assert_eq!(claimed["status"], "work_available");
+    assert_eq!(
+        f.private()["dots"]["wake"]["event_id"],
+        delivery["event_id"]
+    );
+    assert!(f.private()["dots"]["wake"]["origin"].is_null());
+    f.complete(
+        &claimed["turn"],
+        &f.captured(&delivery, "cccc_runtime_complete_turn"),
+    );
+}
+
+#[test]
+fn dots_poll_mode_recovers_work_left_by_a_lapsed_subscription() {
+    let f = Fixture::new();
+    f.start();
+    let source = f.source("woken while subscribed, never claimed");
+    let delivery = f.delivery();
+    f.call("dots_events_unsubscribe", f.subscription_args("unused"));
+    assert_eq!(
+        f.call("dots_events_status", json!({}))["phase"],
+        "waiting_subscription"
+    );
+    f.call("dots_events_poll_mode", json!({"enabled":true}));
+    let claimed = f.claim(&f.claim_capture());
+    assert_eq!(claimed["status"], "work_available");
+    assert_eq!(claimed["turn"]["event_ids"], json!([source]));
+    assert_ne!(
+        f.private()["dots"]["wake"]["event_id"],
+        delivery["event_id"]
+    );
+    // The old callback wake never becomes an execution credential.
+    assert!(
+        store::dots_binding_for_token(&f.private(), &f.wake_token(&delivery), "cccc_message_send")
+            .is_none()
+    );
+    f.complete(&claimed["turn"], &poll_token(&f, &claimed));
+}
