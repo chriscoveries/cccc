@@ -27,6 +27,7 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         "dots_events_delivery_record" => Operation::new(GlobalWrite, delivery::record),
         "dots_work_claim" => Operation::new(Write, work::claim),
         "dots_work_control" => Operation::new(Write, work::control),
+        "dots_events_poll_mode" => Operation::new(GlobalWrite, poll_mode),
         _ => return None,
     })
 }
@@ -122,6 +123,45 @@ fn subscribed(subscription: &Value, now: i64) -> bool {
                 .is_some_and(|expiry| expiry > now))
 }
 
+/// Environment override for hosts whose ChatGPT UI cannot save a native
+/// event task (cwf#772). Read per call, so the daemon must be started with it.
+const POLL_ENV: &str = "CCCC_DOTS_POLL_UNSUBSCRIBED";
+
+/// Poll mode lets a paired Dot with no live event subscription claim queued
+/// work when its own timed task calls in. It grants no new credential: the
+/// claim still needs the paired host session, and business calls still need
+/// the per-turn execution token minted by that claim.
+fn poll_allowed(dots: &Value) -> bool {
+    dots["poll_when_unsubscribed"] == true
+        || std::env::var(POLL_ENV).is_ok_and(|v| matches!(v.trim(), "1" | "true" | "on"))
+}
+
+fn poll_mode(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    user(request)?;
+    let (group, actor) = group_actor(home, request)?;
+    let enabled = request
+        .args
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| OpError::new("invalid_enabled", "enabled must be true or false"))?;
+    let c = connector(home, &group, &actor)?
+        .ok_or_else(|| OpError::new("dots_binding_unavailable", "Connect Dots first"))?;
+    let id = c["connector_id"].as_str().ok_or_else(|| {
+        OpError::new(
+            "dots_binding_unavailable",
+            "The Dots binding is unavailable",
+        )
+    })?;
+    store::dots_update(home, id, |c| {
+        c["dots"]["poll_when_unsubscribed"] = json!(enabled);
+        Ok(())
+    })
+    .map_err(state_error)?;
+    object(
+        json!({"poll_when_unsubscribed":enabled,"poll_mode":project(home, &group, &actor)?["poll_mode"]}),
+    )
+}
+
 fn status(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor) = group_actor(home, request)?;
     object(project(home, &group, &actor)?)
@@ -165,7 +205,7 @@ pub(super) fn project(
         "unconfigured"
     } else if !paired {
         "waiting_pairing"
-    } else if !subscribed {
+    } else if !subscribed && !poll_allowed(dots) {
         "waiting_subscription"
     } else if !active(group, actor) {
         "stopped"
@@ -182,7 +222,7 @@ pub(super) fn project(
     let last = &dots["last_execution"];
     Ok(
         json!({"group_id":group.group_id,"actor_id":actor.id,"enabled":actor.enabled,
-        "connected":connector.is_some(),"paired":paired,"subscribed":subscribed,"phase":phase,"pending_count":pending,
+        "connected":connector.is_some(),"paired":paired,"subscribed":subscribed,"poll_mode":!subscribed && poll_allowed(dots),"phase":phase,"pending_count":pending,
         "active_turn_id":runtime["active_turn_id"].as_str().unwrap_or(""),
         "active_turn_elapsed_seconds":elapsed,
         "active_event_ids":runtime["active_event_ids"].as_array().cloned().unwrap_or_default(),

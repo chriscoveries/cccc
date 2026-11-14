@@ -54,6 +54,14 @@ async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
     let op = match action.as_str() {
         "connect" => "dots_events_connect",
         "disconnect" => "dots_events_disconnect",
+        "poll_mode" => {
+            let enabled = body
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| ApiError::bad("enabled must be true or false"))?;
+            args.insert("enabled".into(), json!(enabled));
+            "dots_events_poll_mode"
+        }
         "resolve" => {
             args.insert("action".into(), json!("resolve"));
             args.insert(
