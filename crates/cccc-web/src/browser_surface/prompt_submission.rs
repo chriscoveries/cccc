@@ -797,7 +797,7 @@ impl BrowserSurfaces {
             "state":if loading {"loading"} else if candidate.verification_required {"verification_required"}
                 else if candidate.login_required {"sign_in_required"} else if ready {"ready"}
                 else if conversation_full {super::conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE}
-                else if let Some(state) = load_error {state} else {"page_not_ready"},
+                else {load_error.unwrap_or("page_not_ready")},
             "conversation_limit":conversation_limit.as_ref().map(super::conversation_limit::ConversationLimitProbe::to_json),
             "tab_url":url,
             "input_selector":candidate.descriptor,
