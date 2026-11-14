@@ -129,6 +129,10 @@ impl BrowserSurfaces {
         {
             return Ok(None);
         }
+        // cwf#853: a bubble under the maximum-length banner was refused.
+        if conversation_limit_after_submit(&page).await.is_some() {
+            return Ok(None);
+        }
         Ok(Some(json!({
             "submitted":true, "submission_evidence":"message_echo",
             "send_selector":"", "observed":observed,
@@ -226,6 +230,16 @@ impl BrowserSurfaces {
             submission_needles(prompt)
         };
         let existing = inspect_submission(&page, prompt, &needles).await?;
+        // cwf#853: never type into a conversation ChatGPT has closed for length.
+        if let Some(limit) = conversation_limit_after_submit(&page).await {
+            self.record_page_state(key, &page).await;
+            if pairing.is_some() {
+                bail!(super::conversation_limit::PAIRING_CONVERSATION_FULL);
+            }
+            return Ok(conversation_limit_outcome(
+                "", "", &existing, &existing, &limit,
+            ));
+        }
         if existing.echo_found && expected_staged_draft.is_none() {
             self.record_page_state(key, &page).await;
             return Ok(PromptSubmissionOutcome::Verified(evidence(
@@ -504,6 +518,15 @@ impl BrowserSurfaces {
             }
         };
         self.record_page_state(key, page).await;
+        if let Some(limit) = conversation_limit_after_submit(page).await {
+            return conversation_limit_outcome(
+                attempt.action,
+                attempt.input,
+                attempt.baseline,
+                &observed,
+                &limit,
+            );
+        }
         if observed.echo_found {
             return PromptSubmissionOutcome::Verified(evidence(
                 true,
@@ -551,9 +574,22 @@ impl BrowserSurfaces {
         let mut latest = baseline.clone();
         let mut weak_evidence = None;
         loop {
+            // cwf#853: ChatGPT may render the user bubble and then refuse the
+            // turn with its maximum-length banner. An echo is not a receipt
+            // then; report it unverified with a distinct reason.
+            if let Some(limit) = conversation_limit_after_submit(page).await {
+                self.record_page_state(key, page).await;
+                return conversation_limit_outcome(action, input, baseline, &latest, &limit);
+            }
             match inspect_submission(page, prompt, needles).await {
                 Ok(snapshot) => {
                     if snapshot.echo_found {
+                        if let Some(limit) = conversation_limit_after_submit(page).await {
+                            self.record_page_state(key, page).await;
+                            return conversation_limit_outcome(
+                                action, input, baseline, &snapshot, &limit,
+                            );
+                        }
                         self.record_page_state(key, page).await;
                         return PromptSubmissionOutcome::Verified(evidence(
                             true,
@@ -738,6 +774,19 @@ impl BrowserSurfaces {
                     .ok()
                     .and_then(|probe| super::load_error::classify_load_error(&probe))
             };
+        // cwf#853: ChatGPT keeps the composer on a conversation that hit its
+        // maximum length, but refuses every turn. Treat it as not ready so
+        // delivery never claims queued work for a dead conversation.
+        let conversation_limit = if ready {
+            super::conversation_limit::probe_conversation_limit(page)
+                .await
+                .ok()
+                .filter(super::conversation_limit::ConversationLimitProbe::exceeded)
+        } else {
+            None
+        };
+        let conversation_full = conversation_limit.is_some();
+        let ready = ready && !conversation_full;
         let readiness = json!({
             "ready":ready,
             "composer_chars":snapshot.composer_chars,
@@ -747,7 +796,9 @@ impl BrowserSurfaces {
             "verification_required":candidate.verification_required,
             "state":if loading {"loading"} else if candidate.verification_required {"verification_required"}
                 else if candidate.login_required {"sign_in_required"} else if ready {"ready"}
-                else if let Some(state) = load_error {state} else {"page_not_ready"},
+                else if conversation_full {super::conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE}
+                else {load_error.unwrap_or("page_not_ready")},
+            "conversation_limit":conversation_limit.as_ref().map(super::conversation_limit::ConversationLimitProbe::to_json),
             "tab_url":url,
             "input_selector":candidate.descriptor,
             "checked_at":cccc_contracts::utc_now(),
@@ -757,6 +808,8 @@ impl BrowserSurfaces {
                 "Complete the website's security verification in this browser. Delivery is waiting."
             } else if ready {
                 "Browser model composer is ready."
+            } else if conversation_full {
+                super::conversation_limit::conversation_limit_message()
             } else if candidate.login_required {
                 "Sign in using the shared ChatGPT browser."
             } else if let Some(state) = load_error {
@@ -1222,6 +1275,36 @@ fn chatgpt_conversation_id(url: &reqwest::Url) -> Option<String> {
 pub(super) fn provisional_conversation_id(value: &str) -> bool {
     let value = value.trim().to_ascii_uppercase();
     value.starts_with("WEB:") || value.starts_with("WEB%3A")
+}
+
+/// The maximum-length banner, if the page shows it now (cwf#853). Inspection
+/// errors count as "not seen": the caller's own checks still apply.
+async fn conversation_limit_after_submit(
+    page: &Page,
+) -> Option<super::conversation_limit::ConversationLimitProbe> {
+    super::conversation_limit::probe_conversation_limit(page)
+        .await
+        .ok()
+        .filter(super::conversation_limit::ConversationLimitProbe::exceeded)
+}
+
+fn conversation_limit_outcome(
+    action: &str,
+    input: &str,
+    baseline: &SubmissionSnapshot,
+    current: &SubmissionSnapshot,
+    limit: &super::conversation_limit::ConversationLimitProbe,
+) -> PromptSubmissionOutcome {
+    let mut value = evidence(
+        false,
+        action,
+        super::conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE,
+        input,
+        baseline,
+        current,
+    );
+    value["conversation_limit"] = limit.to_json();
+    PromptSubmissionOutcome::Ambiguous(value)
 }
 
 fn submission_needles(prompt: &str) -> Vec<String> {

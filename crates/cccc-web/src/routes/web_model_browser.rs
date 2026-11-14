@@ -478,6 +478,7 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
         | "legacy_submission_unverified"
         | "ambiguous" => "ambiguous",
         "draft_blocked" => "blocked",
+        "conversation_length_exceeded" => "conversation_full",
         "failed" | "completion_conflict" => "failed",
         "submitted" => "submitted",
         "bound" => "bound",
@@ -520,6 +521,14 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
         }
     };
     let (delivery_label, delivery_reason) = match delivery_state {
+        "conversation_full" => (
+            "Conversation full",
+            if last_error.is_empty() {
+                "ChatGPT says this conversation has reached its maximum length. Queued messages stay unread until the Actor is re-paired to a fresh chat."
+            } else {
+                last_error
+            },
+        ),
         "blocked" => (
             "Unsent draft",
             "The conversation has an unsent draft. Send or clear it in the browser; queued CCCC messages will then continue.",
@@ -588,6 +597,18 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
             "Sign in using the shared browser for this provider.",
         )
     } else if !ready
+        && readiness["state"] == crate::browser_surface::CONVERSATION_LENGTH_EXCEEDED_STATE
+    {
+        // cwf#853: retries and reloads cannot fix this; the Actor needs a
+        // fresh chat (Start new chat, then connect with replace:true).
+        (
+            "start_new_chat",
+            "Conversation full: start a new chat",
+            readiness["message"].as_str().unwrap_or(
+                "ChatGPT says this conversation has reached its maximum length. Re-pair the Actor to a fresh chat.",
+            ),
+        )
+    } else if !ready
         && crate::browser_surface::is_load_error_state(readiness["state"].as_str().unwrap_or(""))
     {
         (
@@ -641,7 +662,7 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
         "summary":next_label,
         "browser":{
             "state":if active {browser_state} else {"closed"},
-            "label":if verification_required{"Needs verification"}else if ready{"Ready"}else if login_required{"Needs sign-in"}else if active{"Open"}else{"Not open"},
+            "label":if verification_required{"Needs verification"}else if ready{"Ready"}else if browser_state==crate::browser_surface::CONVERSATION_LENGTH_EXCEEDED_STATE{"Conversation full"}else if login_required{"Needs sign-in"}else if active{"Open"}else{"Not open"},
             "reason":readiness["message"].as_str().unwrap_or(if active {
                 "Check the conversation input in this browser."
             } else {
@@ -650,7 +671,8 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
             "active":active,"ready":ready,"logged_in_guess":ready,"url":url,
             "viewer_attached":surface["controller_attached"],
             "last_frame_at":surface["last_frame_at"],
-            "rate_limit":metadata.get("rate_limit").cloned().unwrap_or(Value::Null)
+            "rate_limit":metadata.get("rate_limit").cloned().unwrap_or(Value::Null),
+            "conversation_limit":readiness.get("conversation_limit").cloned().unwrap_or(Value::Null)
         },
         "target":{
             "state":target_state,"label":target_label,"reason":target_reason,

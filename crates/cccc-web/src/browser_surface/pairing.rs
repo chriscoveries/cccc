@@ -1,5 +1,7 @@
 //! A pairing receipt must return to the same owned Page that received the code.
-//! No navigation, active-tab lookup, browser recovery, or content conversion.
+//! No navigation, active-tab lookup, browser recovery, or content conversion,
+//! except one: a conversation that reached ChatGPT's maximum length is moved
+//! to a fresh chat before pairing starts (cwf#853).
 use super::BrowserSurfaces;
 use anyhow::{Context, Result, bail};
 use chromiumoxide::Page;
@@ -20,6 +22,19 @@ impl BrowserSurfaces {
             .get(key)
             .map(|s| s.page.clone())
             .context("pairing_browser_required")?;
+        // cwf#853: a conversation ChatGPT closed for length can never take the
+        // handshake (or any later turn). Pairing is an explicit request to
+        // bind this Actor, so move the tab to a fresh chat first and pair
+        // there. This is the only navigation pairing does, and it happens
+        // before anything is typed or sent.
+        // A draft in the composer is never discarded by this navigation.
+        let full_and_empty = self.prompt_readiness(key).await.ok().is_some_and(|r| {
+            r["state"] == super::conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE
+                && r["composer_chars"].as_u64().unwrap_or(0) == 0
+        });
+        if full_and_empty {
+            self.open_fresh_chat_for_pairing(key).await?;
+        }
         let initial_url = page.url().await?.unwrap_or_default();
         let conversation = cccc_core::web_model_connectors::conversation_url(&initial_url).ok();
         if conversation.is_none() && !new_chat_url(&initial_url) {
@@ -42,12 +57,57 @@ impl BrowserSurfaces {
         if readiness["state"] == super::load_error::LOAD_FAILED_STATE {
             bail!("pairing_browser_load_failed");
         }
+        // cwf#853: still full after the fresh-chat attempt (or a new chat
+        // that is somehow full): say so instead of a generic not-ready.
+        if readiness["state"] == super::conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE {
+            bail!(super::conversation_limit::PAIRING_CONVERSATION_FULL);
+        }
         if readiness["ready"] != true || readiness["running"] == true {
             bail!("pairing_browser_not_ready");
         }
         target.check_before_send(self, key).await?;
         Ok(target)
     }
+}
+
+impl BrowserSurfaces {
+    async fn open_fresh_chat_for_pairing(&self, key: &str) -> Result<()> {
+        let page = self.page(key).await.context("pairing_browser_required")?;
+        let current = page.url().await?.unwrap_or_default();
+        let Some(fresh) = fresh_chat_url(&current) else {
+            bail!(super::conversation_limit::PAIRING_CONVERSATION_FULL);
+        };
+        tracing::info!(
+            key,
+            "ChatGPT conversation reached its maximum length; opening a fresh chat for pairing"
+        );
+        super::navigation::goto_dom_content_loaded(&page, &fresh)
+            .await
+            .context("pairing_browser_not_ready")?;
+        // The composer mounts after DOMContentLoaded; wait a bounded time.
+        let deadline = tokio::time::Instant::now() + FRESH_CHAT_READY_TIMEOUT;
+        loop {
+            let readiness = self.prompt_readiness(key).await?;
+            if readiness["ready"] == true
+                || tokio::time::Instant::now() >= deadline
+                || readiness["state"] == "sign_in_required"
+                || readiness["state"] == "verification_required"
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+}
+
+const FRESH_CHAT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The new-chat page on the same ChatGPT origin as a full conversation.
+/// Never a project (`/g/...`) page: moving an Actor into a project changes
+/// the bound URL shape.
+pub(super) fn fresh_chat_url(current: &str) -> Option<String> {
+    chatgpt_page_url(current)
+        .map(|url| format!("https://{}/", url.host_str().unwrap_or("chatgpt.com")))
 }
 
 impl PairingPage {
@@ -166,6 +226,28 @@ const RECEIPT_SCRIPT: &str = r#"({prompt,receipt}, messages) => {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn full_conversation_rotates_to_the_same_origin_new_chat_page() {
+        assert_eq!(
+            super::fresh_chat_url("https://chatgpt.com/c/6af6b34c-1234"),
+            Some("https://chatgpt.com/".to_owned())
+        );
+        assert_eq!(
+            super::fresh_chat_url("https://chatgpt.com/g/g-p-abc/c/6af6b34c-1234"),
+            Some("https://chatgpt.com/".to_owned()),
+            "never a project page"
+        );
+        assert_eq!(
+            super::fresh_chat_url("https://chat.openai.com/c/x"),
+            Some("https://chat.openai.com/".to_owned())
+        );
+        assert_eq!(super::fresh_chat_url("https://example.com/c/x"), None);
+        assert_eq!(super::fresh_chat_url("http://chatgpt.com/c/x"), None);
+        assert!(super::new_chat_url(
+            &super::fresh_chat_url("https://chatgpt.com/c/x").unwrap_or_default()
+        ));
+    }
+
     use super::*;
 
     #[tokio::test]
