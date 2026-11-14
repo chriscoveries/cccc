@@ -102,34 +102,78 @@ pub(super) fn claim(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 .is_none_or(|age| age >= TURN_LEASE_SECONDS)
         {
             c["dots"]["wake"]["state"] = json!("completed");
-            return Ok(Ok(json!({"status":"idle","turn":null,
-                "reason_code":"dots_wake_expired"})));
+            // In poll mode the caller is live now, so retire the stale wake
+            // and fall through to mint a fresh one instead of idling.
+            if subscribed(&c["dots"]["subscription"], chrono::Utc::now().timestamp_millis())
+                || !poll_allowed(&c["dots"])
+            {
+                return Ok(Ok(json!({"status":"idle","turn":null,
+                    "reason_code":"dots_wake_expired"})));
+            }
+        }
+        // Poll mode (cwf#772): no live subscription means no callback will
+        // ever mint a wake. A paired Dot calling in from its own timed task
+        // mints one here, under the same lock, and claims through the same
+        // native turn path. Ownership checks above already ran; credentials
+        // are unchanged (paired session to claim, per-turn token to work).
+        let polled = !subscribed(&c["dots"]["subscription"], chrono::Utc::now().timestamp_millis())
+            && poll_allowed(&c["dots"])
+            && !matches!(
+                c["dots"]["wake"]["state"].as_str(),
+                Some("pending" | "sending" | "delivered" | "claimed")
+            );
+        if polled {
+            if !active(&group, &actor) {
+                return Ok(Ok(json!({"status":"idle","turn":null,"reason_code":"dots_actor_stopped"})));
+            }
+            if super::super::runtime_delivery::pending_sources(home, &group, &actor, 1)
+                .map_err(|_| denied("dots_runtime_state_unavailable"))?
+                .is_empty()
+            {
+                return Ok(Ok(json!({"status":"idle","turn":null,"reason_code":"dots_poll_idle"})));
+            }
+            c["dots"]["wake"] = json!({"event_id":format!("evt_{}", uuid::Uuid::new_v4().simple()),
+                "epoch":c["dots"]["epoch"],"state":"pending","origin":"poll","attempt":0,
+                "created_at":cccc_contracts::utc_now()});
         }
         let dots = &c["dots"];
         // A repeated wake after completion is idle, including a turn just
         // expired above. Canonical/private ownership was checked first.
-        if !captured_wake.is_null() && dots["last_execution"]["event_id"] == *captured_wake {
+        if !polled && !captured_wake.is_null() && dots["last_execution"]["event_id"] == *captured_wake {
             return Ok(Ok(json!({
                 "status":"idle",
                 "turn":null,
                 "reason_code":"dots_wake_already_completed"
             })));
         }
-        let Some(event_id) = captured_wake.as_str() else {
-            return Ok(Ok(json!({"status":"idle","turn":null})));
+        let event_id = if polled {
+            dots["wake"]["event_id"].as_str().unwrap_or_default().to_owned()
+        } else {
+            let Some(event_id) = captured_wake.as_str() else {
+                return Ok(Ok(json!({"status":"idle","turn":null})));
+            };
+            if !active(&group, &actor)
+                || !matches!(
+                    dots["wake"]["state"].as_str(),
+                    Some("pending" | "sending" | "delivered")
+                )
+                || !(subscribed(&dots["subscription"], chrono::Utc::now().timestamp_millis())
+                    || poll_allowed(dots))
+            {
+                return Ok(Ok(json!({"status":"idle","turn":null})));
+            }
+            event_id.to_owned()
         };
-        if !active(&group, &actor)
-            || !matches!(
-                dots["wake"]["state"].as_str(),
-                Some("pending" | "sending" | "delivered")
-            )
-            || !subscribed(&dots["subscription"], chrono::Utc::now().timestamp_millis())
-        {
-            return Ok(Ok(json!({"status":"idle","turn":null})));
-        }
+        let event_id = event_id.as_str();
         let result = super::super::runtime_state::wait_next_turn(home, &pulled);
         match result {
-            Err(error) => Ok(Err(error)),
+            Err(error) => {
+                if polled {
+                    // Never leave a self-minted wake behind a failed claim.
+                    c["dots"]["wake"]["state"] = json!("completed");
+                }
+                Ok(Err(error))
+            }
             Ok(result) => {
                 let mut result = Value::Object(result);
                 if result["status"] == "work_available" {
