@@ -163,6 +163,11 @@ pub(super) const CONVERSATION_LIMIT_SCRIPT: &str = r#"() => {
 mod tests {
     use super::*;
 
+    /// Test pages are served for the whole test; leaking one string is fine.
+    fn leak(page: String) -> &'static str {
+        Box::leak(page.into_boxed_str())
+    }
+
     const BANNER: &str = "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat.";
 
     #[test]
@@ -244,11 +249,11 @@ mod tests {
         }
         let _chrome_guard = super::super::chrome_test_guard().await;
         let temp = tempfile::tempdir().expect("fixture");
-        let (url, server) = super::super::browser_surface_tests::local_page(&format!(
+        let (url, server) = super::super::browser_surface_tests::local_page(leak(format!(
             "<main><div data-message-author-role=\"user\">quoting: {BANNER}</div>\
              <div role=\"alert\"><span>{BANNER}</span><button>Start new chat</button></div>\
              <div contenteditable=\"true\" id=\"prompt-textarea\"></div></main>"
-        ))
+        )))
         .await;
         let surfaces = super::super::BrowserSurfaces::default();
         surfaces
@@ -264,9 +269,9 @@ mod tests {
         surfaces.close("maxlen").await.expect("close");
         server.abort();
 
-        let (quoted_url, quoted_server) = super::super::browser_surface_tests::local_page(
-            &format!("<main><div data-message-author-role=\"user\">{BANNER}</div></main>"),
-        )
+        let (quoted_url, quoted_server) = super::super::browser_surface_tests::local_page(leak(
+            format!("<main><div data-message-author-role=\"user\">{BANNER}</div></main>"),
+        ))
         .await;
         surfaces
             .open(
