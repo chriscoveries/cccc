@@ -42,6 +42,11 @@ impl BrowserSurfaces {
         if readiness["state"] == super::load_error::LOAD_FAILED_STATE {
             bail!("pairing_browser_load_failed");
         }
+        // cwf#853: a conversation ChatGPT closed for length cannot be paired;
+        // the doctor must move the Actor to a fresh chat instead of retrying.
+        if readiness["state"] == super::conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE {
+            bail!(super::conversation_limit::PAIRING_CONVERSATION_FULL);
+        }
         if readiness["ready"] != true || readiness["running"] == true {
             bail!("pairing_browser_not_ready");
         }

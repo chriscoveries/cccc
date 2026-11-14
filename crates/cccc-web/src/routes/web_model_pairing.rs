@@ -330,6 +330,7 @@ fn pairing_error(code: &str) -> ApiError {
         "pairing_browser_not_ready" => "pairing_browser_not_ready",
         "pairing_browser_rate_limited" => "pairing_browser_rate_limited",
         "pairing_browser_load_failed" => "pairing_browser_load_failed",
+        "pairing_browser_conversation_full" => "pairing_browser_conversation_full",
         "pairing_composer_occupied" => "pairing_composer_occupied",
         "pairing_target_changed" => "pairing_target_changed",
         _ => "pairing_failed",

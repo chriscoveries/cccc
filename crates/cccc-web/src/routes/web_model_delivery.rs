@@ -428,6 +428,42 @@ async fn deliver_once(
     {
         tracing::warn!(group_id, actor_id, %error, "Web-model load error recovery failed");
     }
+    // cwf#853: the bound chat hit ChatGPT's maximum length. Nothing is
+    // claimed, so queued messages stay unread until the Actor is re-paired to
+    // a fresh chat. Record it once so status/health stop looking healthy.
+    if readiness["state"] == crate::browser_surface::CONVERSATION_LENGTH_EXCEEDED_STATE {
+        if target["last_delivery_status"] != "conversation_length_exceeded" {
+            update_target(
+                state,
+                group_id,
+                actor_id,
+                json!({
+                    "last_delivery_status":"conversation_length_exceeded",
+                    "conversation_limit":readiness["conversation_limit"].clone(),
+                    "last_error":readiness["message"].as_str().unwrap_or(
+                        "ChatGPT says this conversation has reached its maximum length."
+                    )
+                }),
+            )?;
+            tracing::warn!(
+                group_id,
+                actor_id,
+                "Web-model conversation reached ChatGPT's maximum length; delivery paused, queue left unclaimed"
+            );
+        }
+        return Ok(DeliveryOutcome::Idle);
+    }
+    if target["last_delivery_status"] == "conversation_length_exceeded"
+        && readiness["ready"] == true
+    {
+        // The tab no longer shows the banner (re-paired or rotated).
+        update_target(
+            state,
+            group_id,
+            actor_id,
+            json!({"last_delivery_status":"resolved","last_error":"","conversation_limit":Value::Null}),
+        )?;
+    }
     if readiness["ready"] != true || readiness["running"] == true {
         // Leave queued work unclaimed while the provider is still responding.
         return Ok(DeliveryOutcome::Idle);
@@ -590,7 +626,11 @@ async fn deliver_once(
             return Ok(DeliveryOutcome::Deferred(turn_id.to_owned()));
         }
         Ok(PromptSubmissionOutcome::Ambiguous(browser)) => {
-            let message = if browser["submission_evidence"] == "composer_occupied" {
+            let message = if browser["submission_evidence"]
+                == crate::browser_surface::CONVERSATION_LENGTH_EXCEEDED_STATE
+            {
+                "ChatGPT refused this batch: the conversation has reached its maximum length. It was not accepted by the model. Re-pair the Actor to a fresh chat; this batch will not be replayed automatically (see last_event_ids)."
+            } else if browser["submission_evidence"] == "composer_occupied" {
                 "The conversation has a different unsent draft; CCCC preserved it without sending this batch. Check the browser and resume delivery explicitly; this batch will not be replayed automatically."
             } else {
                 "browser submission was attempted but could not be verified; delivery is paused until you check the conversation and resume explicitly. This message will not be redelivered automatically"
