@@ -1,0 +1,1 @@
+[{"kind":"actor.stop","ts":"2026-10-26T20:00:39.036946Z","data":{"actor_id":"receiver","runner":"pty"}},{"kind":"actor.start","ts":"2026-10-26T20:10:11.280139Z","data":{"actor_id":"receiver","runner":"pty"}}]

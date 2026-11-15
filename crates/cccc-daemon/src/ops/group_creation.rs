@@ -130,6 +130,9 @@ fn finish_create(
         let group = steps
             .attach(store, &group_id, detected)
             .map_err(OpError::io)?;
+        if let Err(error) = super::mail_wake::initialize_created_group(home, &group) {
+            tracing::warn!(%error, group_id = %group.group_id, "Mail wake group initialization held");
+        }
         steps.append(home, request, &group)?;
         steps.activate(home, &group_id).map_err(OpError::io)?;
         Ok(group)

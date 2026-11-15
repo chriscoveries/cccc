@@ -82,6 +82,21 @@ impl SnapshotCursor {
     }
 }
 
+/// Match a record only after validating every record in one committed snapshot.
+/// A later malformed record or source read failure must not be hidden by an
+/// earlier match. This retains no history vector and never changes the ledger.
+pub fn contains_validated(
+    path: &Path,
+    mut matches: impl FnMut(&Event) -> bool,
+) -> io::Result<bool> {
+    let mut found = false;
+    snapshot::Snapshot::open(path)?.visit_validated(&[], |event, _| {
+        found |= matches(&event);
+        ControlFlow::Continue(())
+    })?;
+    Ok(found)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceRevision {
     pub(crate) path: PathBuf,

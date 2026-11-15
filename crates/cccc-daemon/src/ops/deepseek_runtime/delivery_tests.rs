@@ -413,6 +413,7 @@ done"#;
         &actor,
         temp.path(),
         vec!["fixture_private_model".into()],
+        None,
     )
     .expect("start fake ACP");
     crate::ops::actor_secrets::replace(

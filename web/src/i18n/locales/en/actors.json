@@ -522,6 +522,8 @@
     "command": "Launch command",
     "notAdmin": "Only an administrator can switch runtime sessions."
   },
+  "wakeOnMail": "Wake on addressed Mail",
+  "wakeOnMailHelp": "Starts this enabled actor when its process is stopped. Manual Stop disables it. Broadcast Mail does not start actors.",
   "workingDirectory": "Working directory",
   "followGroupDirectory": "Follow Group",
   "fixedDirectory": "Fixed directory",

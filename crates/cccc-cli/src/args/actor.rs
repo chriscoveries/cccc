@@ -24,6 +24,9 @@ pub enum ActorAction {
         /// Optional operator-maintained model declaration; does not configure launch.
         #[arg(long, default_value = "")]
         model_label: String,
+        /// Start this enabled managed agent for explicitly addressed waiting Mail.
+        #[arg(long)]
+        wake_on_mail: bool,
         /// Agent runtime to configure or launch.
         #[arg(long, default_value = "codex")]
         runtime: String,
@@ -93,6 +96,9 @@ pub enum ActorAction {
         /// Enable or disable this agent.
         #[arg(long)]
         enabled: Option<bool>,
+        /// Start this enabled managed agent for explicitly addressed waiting Mail.
+        #[arg(long)]
+        wake_on_mail: Option<bool>,
         /// Author identity: user or an agent ID.
         #[arg(long, default_value = "user")]
         by: String,
@@ -148,6 +154,8 @@ pub enum ActorAction {
         ])]
         finish: bool,
     },
+    /// Verify and durably recover existing Mail-wake state; never reset it.
+    WakeRecover,
     /// Manage runtime-only secrets without writing them to agent configuration.
     Secrets {
         /// Agent ID within the Group.

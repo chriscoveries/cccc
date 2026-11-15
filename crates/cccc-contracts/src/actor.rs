@@ -241,6 +241,9 @@ pub struct Actor {
     pub capability_hidden: Vec<String>,
     #[serde(default = "enabled")]
     pub enabled: bool,
+    /// Start this enabled managed actor for explicitly addressed waiting Mail.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wake_on_mail: bool,
     #[serde(default)]
     pub runner: RunnerKind,
     #[serde(default)]
@@ -290,6 +293,7 @@ impl Actor {
             capability_autoload: Vec::new(),
             capability_hidden: Vec::new(),
             enabled: true,
+            wake_on_mail: false,
             runner: RunnerKind::default(),
             runtime: ActorRuntime::default(),
             runtime_mode: RuntimeMode::default(),
@@ -325,6 +329,10 @@ impl Actor {
 const fn version() -> u8 {
     1
 }
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 const fn enabled() -> bool {
     true
 }

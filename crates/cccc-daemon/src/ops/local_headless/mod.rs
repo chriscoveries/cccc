@@ -27,10 +27,15 @@ pub(crate) use events::{
 pub(crate) use supervisor::{
     cancel_turn, respond_interaction, respond_permission, structured_state,
 };
-pub(crate) use supervisor::{registered_generation, registered_running, registered_workspace};
+pub(super) use supervisor::{
+    confirmed_running, retire_confirmed_stopped, start_for_wake, with_confirmed_wake,
+};
+pub(crate) use supervisor::{
+    owner_or_starting, registered_generation, registered_running, registered_workspace,
+};
 
 use cccc_core::HomeLayout;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -146,6 +151,17 @@ struct ViewerLaunch {
     submit: cccc_contracts::ActorSubmit,
 }
 
+/// Owned by the registered managed session, never supplied to the provider.
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct WakeOwner {
+    group_id: String,
+    actor_id: String,
+    actor_created_at: String,
+    owner_generation: String,
+    origin: cccc_core::wake_origin::WakeOrigin,
+}
+
 struct Session {
     home: HomeLayout,
     group_id: String,
@@ -161,6 +177,7 @@ struct Session {
     stop_lock: Mutex<()>,
     startup_prompt: Mutex<Option<String>>,
     active_turn: Mutex<Option<ActiveTurn>>,
+    wake_owner: Option<WakeOwner>,
 }
 
 fn poisoned() -> std::io::Error {

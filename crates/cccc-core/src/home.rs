@@ -24,6 +24,36 @@ pub struct HomeLayout {
     root: PathBuf,
 }
 
+/// A capability held only by the caller that exclusively created this Home.
+/// It cannot be deserialized or reconstructed from a path or request.
+pub struct FreshHome {
+    root: PathBuf,
+    directory: fs::File,
+}
+
+impl FreshHome {
+    pub fn verify_identity(&self, home: &HomeLayout) -> std::io::Result<String> {
+        if home.root() != self.root.as_path() {
+            return Err(std::io::Error::other("fresh home mismatch"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let held = self.directory.metadata()?;
+            let current = fs::metadata(&self.root)?;
+            if !held.is_dir() || held.dev() != current.dev() || held.ino() != current.ino() {
+                return Err(std::io::Error::other("fresh home identity changed"));
+            }
+            Ok(format!("unix:{}:{}", held.dev(), held.ino()))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.directory.metadata();
+            Err(std::io::Error::other("fresh home identity unavailable"))
+        }
+    }
+}
+
 impl HomeLayout {
     pub fn resolve() -> Result<Self, HomeError> {
         let base = BaseDirs::new().ok_or(HomeError::MissingUserHome)?;
@@ -42,6 +72,23 @@ impl HomeLayout {
     fn from_path_with_user_home(path: PathBuf, user_home: &Path) -> Result<Self, HomeError> {
         let root = absolute(expand_tilde(path, user_home))?;
         Ok(Self { root })
+    }
+
+    /// Only succeeds for an actually new directory. Existing empty directories
+    /// and reopened homes never produce this capability.
+    pub fn try_create_fresh(&self) -> std::io::Result<Option<FreshHome>> {
+        match fs::create_dir(&self.root) {
+            Ok(()) => {
+                let fresh = FreshHome {
+                    root: self.root.clone(),
+                    directory: fs::File::open(&self.root)?,
+                };
+                fresh.verify_identity(self)?;
+                Ok(Some(fresh))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn initialize(&self) -> Result<(), HomeError> {

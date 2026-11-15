@@ -312,6 +312,8 @@ export function useAppModalActorActions(args: {
       : String(editActorCommand || "").trim();
     const nextTitle = String(editActorTitle || "").trim();
     const currentDefaultScopeKey = savedActor.default_scope_key || "";
+    const nextWakeOnMail = payload.wakeOnMail ?? Boolean(savedActor.wake_on_mail);
+    const wakeOnMailChanged = nextWakeOnMail !== Boolean(savedActor.wake_on_mail);
     const nextDefaultScopeKey = savedActor.external_session_id
       ? currentDefaultScopeKey
       : (payload.defaultScopeKey ?? currentDefaultScopeKey);
@@ -348,6 +350,7 @@ export function useAppModalActorActions(args: {
       titleChanged ||
       autoloadChanged ||
       scopeChanged ||
+      wakeOnMailChanged ||
       profileChanged;
 
     if (
@@ -531,7 +534,8 @@ export function useAppModalActorActions(args: {
       }
 
       if (mode === "profile") {
-        const needProfilePatch = profileChanged || titleChanged || autoloadChanged || scopeChanged;
+        const needProfilePatch =
+          profileChanged || titleChanged || autoloadChanged || scopeChanged || wakeOnMailChanged;
         if (needProfilePatch) {
           const profileResp = await api.updateActor(
             targetGroupId,
@@ -544,6 +548,7 @@ export function useAppModalActorActions(args: {
               profileScope: (selectedProfile?.scope || "global") as api.ProfileScope,
               profileOwner: String(selectedProfile?.owner_id || "").trim() || undefined,
               capabilityAutoload: nextCapabilityAutoload,
+              ...(wakeOnMailChanged ? { wakeOnMail: nextWakeOnMail } : {}),
               ...(scopeChanged ? { defaultScopeKey: nextDefaultScopeKey } : {}),
             },
           );
@@ -575,6 +580,7 @@ export function useAppModalActorActions(args: {
           nextCommand !== snapshotCommand ||
           nextTitle !== snapshotTitle ||
           snapshotScopeChanged ||
+          nextWakeOnMail !== Boolean(actorSnapshot.wake_on_mail) ||
           autoloadChanged;
         if (needCustomPatch) {
           const customResp = await api.updateActor(
@@ -585,6 +591,9 @@ export function useAppModalActorActions(args: {
             nextTitle,
             {
               capabilityAutoload: nextCapabilityAutoload,
+              ...(nextWakeOnMail !== Boolean(actorSnapshot.wake_on_mail)
+                ? { wakeOnMail: nextWakeOnMail }
+                : {}),
               ...(snapshotScopeChanged ? { defaultScopeKey: nextDefaultScopeKey } : {}),
               ...(supportsAcpMode(nextRuntime) || actorSnapshot.runtime_mode === "acp"
                 ? { runtimeMode: nextRuntimeMode }

@@ -38,10 +38,17 @@ async fn run_with_restore(
     restore: RuntimeRestoreSpawner,
     diagnostics: bool,
 ) -> Result<()> {
-    home.initialize().context("initialize Rust home")?;
+    if let Err(error) = crate::ops::mail_wake::bootstrap(&home) {
+        tracing::warn!(%error, "Mail wake bootstrap held");
+        home.initialize().context("initialize Rust home")?;
+    }
     let paths = DaemonPaths::new(home);
     std::fs::create_dir_all(&paths.daemon_dir)?;
     let lock = claim_home(&paths)?;
+    // This daemon owns the Home and has not exposed IPC or the scheduler yet.
+    if let Err(error) = crate::ops::mail_wake::recover_on_start(&paths.home) {
+        tracing::debug!(%error, "Mail wake activation remains unverified");
+    }
     if diagnostics {
         crate::diagnostic_log::install(&paths.daemon_dir);
     }
