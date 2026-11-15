@@ -183,9 +183,8 @@ async fn start_connection(
     let code = pair["code"]
         .as_str()
         .ok_or_else(|| ApiError::bad("Invalid pairing response"))?;
-    let prompt = format!(
-        "Connect this conversation to the Actor selected in CCCC. Send this temporary CCCC pairing code to cccc_pair through the same CCCC connector: {{\"code\":\"{code}\"}}. This records a pending link; reply with the returned receipt exactly as plain text so CCCC can verify this window and activate the link. Subsequent CCCC tool calls will use that Actor's configured permissions. This setup does not read workspace files or run tasks; wait for the next task message. If ChatGPT requires my approval, ask me. If the call is blocked or fails, report the error."
-    );
+    let plugin = super::web_model_instance::plugin_name();
+    let prompt = super::web_model_instance::pairing_prompt(code, plugin.as_deref());
     args.insert("pairing_id".into(), json!(id));
     let connecting = Connecting::new(state, &id);
     let mut shutdown = state.shutdown.subscribe();
@@ -196,19 +195,43 @@ async fn start_connection(
     let group = group.to_owned();
     let actor = actor.to_owned();
     tokio::spawn(async move {
-        let result = tokio::select! {
-            _ = shutdown.recv() => Err("pairing_interrupted"),
-            result = tokio::time::timeout(PAIRING_TIMEOUT, connect(&state, &args, &key, &target, &prompt)) => {
-                result.unwrap_or(Err("pairing_timeout"))
-            }
-        };
-        if let Err(reason) = result {
+        let mut args = args;
+        let mut prompt = prompt;
+        let mut connecting = connecting;
+        let mut retried = false;
+        let result = loop {
+            let result = tokio::select! {
+                _ = shutdown.recv() => Err("pairing_interrupted"),
+                result = tokio::time::timeout(PAIRING_TIMEOUT, connect(&state, &args, &key, &target, &prompt)) => {
+                    result.unwrap_or(Err("pairing_timeout"))
+                }
+            };
+            let Err(reason) = result else { break result };
             let mut failed = args.clone();
             failed.insert("error_code".into(), json!(reason));
             // A cancelled/replaced/removed candidate deliberately rejects this
             // late update. Never change another attempt or an established route.
             let _ = call(&state, "web_model_pairing_fail", failed).await;
-        }
+            // cwf#863: a timed-out handshake (usually the wrong instance's
+            // plugin, or an unanswered approval) gets ONE fresh attempt with a
+            // new code, still under this task's control permit.
+            if !super::web_model_instance::retry_after(reason, retried) {
+                break result;
+            }
+            retried = true;
+            let begin = super::web_model_instance::retry_begin_args(&args);
+            let Ok(pair) = call(&state, "web_model_pairing_begin", begin.clone()).await else {
+                break result;
+            };
+            let (Some(id), Some(code)) = (pair["pairing_id"].as_str(), pair["code"].as_str()) else {
+                break result;
+            };
+            tracing::info!(%group, %actor, "Web Model pairing timed out; retrying once with a new code");
+            prompt = super::web_model_instance::pairing_prompt(code, plugin.as_deref());
+            args = begin;
+            args.insert("pairing_id".into(), json!(id));
+            connecting = Connecting::new(&state, id);
+        };
         drop(control);
         drop(connecting);
         if result.is_ok() && automatic {
