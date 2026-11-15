@@ -441,12 +441,49 @@ async fn deliver_once(
     // cwf#821: a tab stranded on ChatGPT's load-error page (usually a 429)
     // never recovers by itself. Reload it at most once per backoff window,
     // honouring Retry-After; otherwise this clears any old recovery record.
-    if let Err(error) = state
+    let rate_limit = match state
         .browser_surfaces
         .recover_load_error(session_key, &readiness)
         .await
     {
-        tracing::warn!(group_id, actor_id, %error, "Web-model load error recovery failed");
+        Ok(record) => record,
+        Err(error) => {
+            tracing::warn!(group_id, actor_id, %error, "Web-model load error recovery failed");
+            None
+        }
+    };
+    // cwf#825/#821: the tab left its bound conversation (Saved chat
+    // unavailable / could not load on another URL). Reopen the bound URL at
+    // most once per 10 minutes, never inside the Retry-After backoff.
+    let bound_chat_mismatch = target["kind"] == "existing_chat"
+        && is_chatgpt_url(target_url)
+        && !crate::browser_surface::conversation_target_matches(
+            target_url,
+            readiness["tab_url"].as_str().unwrap_or(""),
+        )
+        && super::web_model_reopen::state_allows_reopen(
+            readiness["state"].as_str().unwrap_or(""),
+        );
+    if bound_chat_mismatch {
+        if !super::web_model_reopen::try_book(session_key, rate_limit.as_ref()) {
+            return Ok(DeliveryOutcome::Idle);
+        }
+        if readiness["ready"] != true {
+            tracing::info!(group_id, actor_id, "Web-model tab is off its bound conversation; reopening it");
+            if let Err(error) = state
+                .browser_surfaces
+                .align_chatgpt_conversation_target(
+                    session_key,
+                    target_url,
+                    std::time::Duration::from_secs(10),
+                )
+                .await
+            {
+                tracing::warn!(group_id, actor_id, %error, "Web-model bound conversation reopen failed; next try in 10 minutes");
+            }
+            return Ok(DeliveryOutcome::Idle);
+        }
+        // A ready tab on another chat: the alignment below navigates once.
     }
     // cwf#853: the bound chat hit ChatGPT's maximum length. Nothing is
     // claimed, so queued messages stay unread until the Actor is re-paired to
@@ -542,7 +579,10 @@ async fn deliver_once(
                 }),
             )?;
             record_connector(state, group_id, actor_id, "failed", "", &message)?;
-            return Ok(DeliveryOutcome::Stopped);
+            // cwf#825: keep the worker alive; the reopen gate above retries
+            // the bound URL once per 10 minutes instead of a dead lane.
+            super::web_model_reopen::try_book(session_key, rate_limit.as_ref());
+            return Ok(DeliveryOutcome::Idle);
         }
     }
     let mut wait_args = browser_wait_args(group_id, actor_id);
