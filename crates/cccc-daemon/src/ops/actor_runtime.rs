@@ -1,6 +1,8 @@
 use cccc_contracts::{Actor, ActorRuntime, RunnerKind};
 use cccc_core::{GroupDoc, GroupStore, HomeLayout};
 use cccc_runtime::{LaunchSpec, SessionStatus};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use crate::dispatch::OpError;
@@ -175,6 +177,24 @@ fn external_lifecycle(kind: &str) -> Result<Option<SessionStatus>, OpError> {
 }
 
 fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<(), OpError> {
+    start_local_headless_with_wake(home, group, actor, None)
+}
+
+pub(super) fn start_managed_wake(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    origin: &cccc_core::wake_origin::WakeOrigin,
+) -> Result<(), OpError> {
+    start_local_headless_with_wake(home, group, actor, Some(origin))
+}
+
+fn start_local_headless_with_wake(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    origin: Option<&cccc_core::wake_origin::WakeOrigin>,
+) -> Result<(), OpError> {
     let mut actor = environment::resolve_launch_actor(home, group, actor)?;
     let cwd = working_directory(group, &actor)?;
     let mut env = environment::launch_env(home, group, &actor);
@@ -184,7 +204,11 @@ fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> R
     actor.env = env;
     let _start_permit = crate::runtime_start_gate::permit(home)
         .map_err(|message| OpError::new("runtime_shutting_down", message))?;
-    super::local_headless::start(home, group, &actor).map_err(launch_error)
+    match origin {
+        Some(origin) => super::local_headless::start_for_wake(home, group, &actor, origin),
+        None => super::local_headless::start(home, group, &actor),
+    }
+    .map_err(launch_error)
 }
 
 fn launch_error(error: std::io::Error) -> OpError {
@@ -216,6 +240,32 @@ pub(super) fn same_untrusted_workspace(original: &OpError, restart: &OpError) ->
 }
 
 fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionStatus, OpError> {
+    start_pty_with_wake(home, group, actor, None)
+}
+
+pub(super) fn start_pty_wake(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    origin: &cccc_core::wake_origin::WakeOrigin,
+) -> Result<SessionStatus, OpError> {
+    start_pty_with_wake(home, group, actor, Some(origin))
+}
+
+fn start_pty_with_wake(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    origin: Option<&cccc_core::wake_origin::WakeOrigin>,
+) -> Result<SessionStatus, OpError> {
+    if origin.is_some_and(|origin| {
+        origin.actor_generation != cccc_core::actors::generation_identity(actor)
+    }) {
+        return Err(OpError::new(
+            "wake_owner_unknown",
+            "PTY actor generation changed",
+        ));
+    }
     let actor = environment::resolve_launch_actor(home, group, actor)?;
     let command = if actor.command.is_empty() {
         cccc_runtime::default_command(actor.runtime)
@@ -246,23 +296,44 @@ fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionSt
     // Read before the launch: a change made while the runtime starts is then
     // reported instead of being taken as what it loaded.
     let instructions = super::instruction_files::Snapshot::read(&cwd);
-    let status = cccc_runtime::start_actor_with_history(
-        LaunchSpec {
-            group_id: group.group_id.clone(),
-            actor_id: actor.id.clone(),
-            runner: RunnerKind::Pty,
-            command,
-            cwd,
-            env,
-            cols: 120,
-            rows: 40,
-        },
-        history,
-        cccc_runtime::ActorLaunch {
-            runtime: actor.runtime,
-            submit: actor.submit,
-        },
-    )
+    let spec = LaunchSpec {
+        group_id: group.group_id.clone(),
+        actor_id: actor.id.clone(),
+        runner: RunnerKind::Pty,
+        command,
+        cwd,
+        env,
+        cols: 120,
+        rows: 40,
+    };
+    let launch = cccc_runtime::ActorLaunch {
+        runtime: actor.runtime,
+        submit: actor.submit,
+    };
+    let status = match origin {
+        None => cccc_runtime::start_actor_with_history(spec, history, launch),
+        Some(origin) => {
+            origin.validate().map_err(OpError::io)?;
+            let owner = PtyWakeOwner {
+                group_id: group.group_id.clone(),
+                actor_id: actor.id.clone(),
+                actor_created_at: actor.created_at.clone(),
+                owner_nonce: uuid::Uuid::new_v4().simple().to_string(),
+                origin: origin.clone(),
+            };
+            let path =
+                pty_wake_owner_path(home, &group.group_id, &actor.id).map_err(OpError::io)?;
+            let digest = pty_wake_owner_digest(&owner).map_err(OpError::io)?;
+            cccc_runtime::start_with_history_for_wake(spec, history, &digest, launch, || {
+                cccc_core::fs::write_json(&path, &owner)?;
+                let recorded: PtyWakeOwner = cccc_core::fs::read_json(&path)?;
+                if recorded != owner {
+                    return Err(std::io::Error::other("PTY wake owner record mismatch"));
+                }
+                Ok(())
+            })
+        }
+    }
     .map_err(runtime_error)?;
     if let Some(snapshot) = instructions {
         super::instruction_files::record(
@@ -280,6 +351,69 @@ fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionSt
 /// same key.
 pub(super) fn pty_instruction_session(status: &SessionStatus) -> String {
     format!("pty:{}", status.started_at)
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PtyWakeOwner {
+    group_id: String,
+    actor_id: String,
+    actor_created_at: String,
+    owner_nonce: String,
+    origin: cccc_core::wake_origin::WakeOrigin,
+}
+
+fn pty_wake_owner_path(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+) -> std::io::Result<PathBuf> {
+    let actor_id = cccc_core::actors::validate_actor_id(actor_id)?;
+    Ok(GroupStore::new(home.clone())?
+        .state_dir(group_id)?
+        .join("pty")
+        .join("owners")
+        .join(format!("{actor_id}.json")))
+}
+
+fn pty_wake_owner_digest(owner: &PtyWakeOwner) -> std::io::Result<String> {
+    let bytes = serde_json::to_vec(owner).map_err(std::io::Error::other)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+pub(super) fn with_confirmed_pty_wake<T>(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    origin: &cccc_core::wake_origin::WakeOrigin,
+    confirmed: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<Option<T>> {
+    if origin.actor_generation != cccc_core::actors::generation_identity(actor) {
+        return Ok(None);
+    }
+    let path = pty_wake_owner_path(home, &group.group_id, &actor.id)?;
+    let owner: PtyWakeOwner = cccc_core::fs::read_json(&path)?;
+    if owner.group_id != group.group_id
+        || owner.actor_id != actor.id
+        || owner.actor_created_at != actor.created_at
+        || owner.origin != *origin
+        || owner.owner_nonce.len() != 32
+        || !owner
+            .owner_nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Ok(None);
+    }
+    let digest = pty_wake_owner_digest(&owner)?;
+    cccc_runtime::with_confirmed_wake(&group.group_id, &actor.id, &digest, || {
+        let recorded: PtyWakeOwner = cccc_core::fs::read_json(&path)?;
+        if recorded != owner {
+            return Err(std::io::Error::other("PTY wake owner record changed"));
+        }
+        confirmed()
+    })
+    .map_err(std::io::Error::other)
 }
 
 pub(super) fn stop(group: &GroupDoc, actor_id: &str) -> Result<Option<SessionStatus>, OpError> {

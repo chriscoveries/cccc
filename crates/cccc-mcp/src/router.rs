@@ -172,6 +172,9 @@ pub(crate) async fn call_with_context(
             let mut result = daemon(client, &op, args).await?;
             crate::context_projection::apply(name, &mut result, &arguments);
             crate::history_projection::apply(name, &mut result, &arguments);
+            if name == "cccc_backlog" {
+                crate::backlog_projection::apply(&mut result, &arguments)?;
+            }
             if name == "cccc_task" {
                 postprocess_task_result(&mut result, &arguments)?;
                 if is_task_mail_boundary(&arguments) {
@@ -906,10 +909,9 @@ fn is_repo_tool(name: &str) -> bool {
 }
 
 fn current_mcp_identity() -> Value {
-    json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "source_id": cccc_core::build_info::current()["source_id"],
-    })
+    let mut identity = cccc_core::build_info::current();
+    identity["version"] = json!(env!("CARGO_PKG_VERSION"));
+    identity
 }
 
 /// Diagnostic metadata describes this request's native MCP, not Actor authority.

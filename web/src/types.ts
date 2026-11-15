@@ -349,6 +349,7 @@ export type Actor = {
   avatar_url?: string | null;
   has_custom_avatar?: boolean;
   enabled?: boolean;
+  wake_on_mail?: boolean;
   running?: boolean; // Actual process running status
   idle_seconds?: number | null; // Legacy idle duration, independent of terminal output activity.
   effective_working_state?: "stopped" | "idle" | "working" | "waiting" | "stuck" | string;
@@ -370,6 +371,8 @@ export type Actor = {
   runtime_session_status?: string | null;
   runtime_session_resume_eligible?: boolean | null;
   runtime_session_last_resume_error?: string | null;
+  runtime_session_replaced_at?: string | null;
+  runtime_session_replaced_reasons?: string[] | null;
   /** The original PTY is waiting for the user before managed runtime admission. */
   runtime_confirmation_required?: boolean;
   /** That confirmation ended before admission: automatic retries are paused in the current
@@ -485,17 +488,6 @@ export type CapabilityOverviewItem = {
 };
 
 export type CapabilitySourceState = { source_id: string; record_count?: number };
-
-export type CapabilitySourceInstance = {
-  source_instance_key: string;
-  source_id: string;
-  label?: string;
-  source_uri?: string;
-  record_count?: number;
-  capability_ids?: string[];
-  last_synced_at?: string;
-  sync_state?: string;
-};
 
 export type CapabilityBlockEntry = {
   capability_id: string;
@@ -640,7 +632,6 @@ export type ReplyTarget = {
   connectInstanceId?: string;
   remoteDstGroupId?: string;
   remoteDstTo?: string[];
-  remoteReplyToEventId?: string;
 } | null;
 
 export type TaskStep = {
@@ -670,6 +661,8 @@ export type Task = {
   assignee?: string | null;
   priority?: string | null;
   blocked_by?: string[];
+  /** Read-only dependencies not yet completed, including missing task IDs. */
+  open_blocked_by?: string[];
   waiting_on?: TaskWaitingOn | null;
   handoff_to?: string | null;
   task_type?: string | null;
@@ -681,6 +674,57 @@ export type Task = {
   current_step?: string | null;
   progress?: number | null;
   children?: Task[];
+  /** The backlog entry this task came from. */
+  source?: BacklogSource | null;
+};
+
+/** A task's link to an entry in the project's backlog file. */
+export type BacklogSource = { scope_key: string; path: string; entry_id: string };
+
+export type BacklogProblem = { code: string; line: number; message: string };
+
+export type BacklogTaskLink = {
+  id: string;
+  title: string;
+  status: string;
+  assignee?: string | null;
+};
+
+export type BacklogEntry = {
+  /** Null until a write adds one; such an entry is addressed by its heading line. */
+  id: string | null;
+  title: string;
+  line: number;
+  /** The exact text after the heading line, as the file holds it. */
+  body: string;
+  problems: BacklogProblem[];
+  tasks: BacklogTaskLink[];
+};
+
+export type BacklogSection = {
+  /** Empty for the text before the first section heading. */
+  name: string;
+  line: number;
+  closed: boolean;
+  entries: BacklogEntry[];
+};
+
+export type BacklogSnapshot = {
+  configured: boolean;
+  scope_key: string;
+  scope_url: string;
+  path: string;
+  exists: boolean;
+  sha256: string;
+  git: { repository: boolean; tracked: boolean; ignored: boolean } | null;
+  problems: BacklogProblem[];
+  sections: BacklogSection[];
+};
+
+export type BacklogWriteResult = BacklogSnapshot & {
+  entry_id?: string;
+  task_id?: string;
+  reused?: boolean;
 };
 
 export type CoordinationBrief = {
@@ -691,13 +735,6 @@ export type CoordinationBrief = {
   project_brief_stale?: boolean;
   updated_by?: string | null;
   updated_at?: string | null;
-};
-
-export type CoordinationNote = {
-  at?: string | null;
-  by?: string | null;
-  summary?: string | null;
-  task_id?: string | null;
 };
 
 export type GroupTasksSummary = {
@@ -792,12 +829,7 @@ export type ContextDetailLevel = "overview" | "summary" | "full";
 export type GroupContext = {
   version?: string;
   tasks_version?: string;
-  coordination?: {
-    brief?: CoordinationBrief | null;
-    tasks?: Task[];
-    recent_decisions?: CoordinationNote[];
-    recent_handoffs?: CoordinationNote[];
-  };
+  coordination?: { brief?: CoordinationBrief | null; tasks?: Task[] };
   agent_states?: AgentState[];
   actors_runtime?: ActorRuntimeState[];
   attention?: ContextAttention | null;

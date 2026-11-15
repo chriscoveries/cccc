@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::actors::validate_actor_id;
 use crate::fs::{read_json, with_exclusive_lock, write_json};
+pub use crate::wake_origin::WakeOrigin;
 use crate::{GroupStore, HomeLayout};
 
 const STATE_VERSION: u8 = 1;
@@ -20,6 +21,8 @@ struct RestartGateState {
     manual_restart_required: bool,
     reason_code: String,
     updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wake_origin: Option<WakeOrigin>,
 }
 
 pub fn record_running_generation(
@@ -29,9 +32,32 @@ pub fn record_running_generation(
     actor_created_at: &str,
     generation: &str,
 ) -> io::Result<()> {
+    record_running_generation_with_wake(
+        home,
+        group_id,
+        actor_id,
+        actor_created_at,
+        generation,
+        None,
+    )
+}
+
+/// The runtime owner calls this only after its own launch is registered.
+/// Ordinary starts pass no origin and cannot inherit an earlier wake attempt.
+pub fn record_running_generation_with_wake(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    actor_created_at: &str,
+    generation: &str,
+    wake_origin: Option<&WakeOrigin>,
+) -> io::Result<()> {
     let generation = generation.trim();
     if generation.is_empty() {
         return Err(io::Error::other("DeepSeek launch generation is required"));
+    }
+    if let Some(origin) = wake_origin {
+        origin.validate()?;
     }
     let (state_path, lock_path) = paths(home, group_id, actor_id)?;
     with_exclusive_lock(&lock_path, || {
@@ -46,8 +72,35 @@ pub fn record_running_generation(
                 manual_restart_required: false,
                 reason_code: String::new(),
                 updated_at: utc_now(),
+                wake_origin: wake_origin.cloned(),
             },
         )
+    })
+}
+
+/// Read the persisted half of the join. A true result does not establish a
+/// live process or permit settlement without matching the registered owner.
+pub fn wake_origin_matches(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    actor_created_at: &str,
+    generation: &str,
+    expected: &WakeOrigin,
+) -> io::Result<bool> {
+    expected.validate()?;
+    let (state_path, lock_path) = paths(home, group_id, actor_id)?;
+    with_exclusive_lock(&lock_path, || {
+        let Some(state) = read_optional(&state_path)? else {
+            return Ok(false);
+        };
+        Ok(state.v == STATE_VERSION
+            && state.group_id == group_id
+            && state.actor_id == actor_id
+            && state.actor_created_at == actor_created_at.trim()
+            && state.generation == generation
+            && !state.manual_restart_required
+            && state.wake_origin.as_ref() == Some(expected))
     })
 }
 

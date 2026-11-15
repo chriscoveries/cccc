@@ -20,6 +20,7 @@ mod automation_config;
 mod automation_manage;
 mod automation_rule_access;
 pub(crate) mod automation_runtime;
+mod backlog;
 mod capabilities;
 mod chet_history;
 mod codex_mcp;
@@ -56,6 +57,7 @@ pub(crate) mod instruction_files;
 mod isolated_test;
 pub(crate) mod local_headless;
 pub(crate) mod local_sessions;
+pub(crate) mod mail_wake;
 mod maintenance;
 mod membership;
 mod owned_process_recovery;
@@ -113,6 +115,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         group_space::resolve_operation,
         actors::resolve_operation,
         actor_switch::resolve_operation,
+        mail_wake::resolve_operation,
         local_sessions::resolve_operation,
         automation_config::resolve_operation,
         assistants::resolve_operation,
@@ -137,6 +140,7 @@ pub(crate) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         owned_process_recovery::resolve_operation,
         im::resolve_operation,
         context::resolve_operation,
+        backlog::resolve_operation,
         settings::resolve_operation,
         web_model_connectors::resolve_operation,
         voice_notifications::resolve_operation,

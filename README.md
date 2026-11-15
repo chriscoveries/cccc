@@ -47,16 +47,18 @@ When several coding agents share work, you need to know who owns a task, whether
 - **CCCC Connect** links Groups across machines and teams; each instance keeps its own state.
 - **Local-first.** Runtime state stays in `CCCC_HOME` (default `~/.cccc/`), outside your repository.
 
-## What's new in 0.4.53
+## What's new in 0.4.55
 
-- **Mistyped message arguments fail at once.** A message call with an argument CCCC does not recognize, such as `mdoe` for the mode or a question's options in the wrong place, used to report success while the argument was stored or ignored. It now fails with `unknown_arguments`, names the argument and changes nothing. New messages and files sent through CCCC Connect are not covered yet.
-- **Message origin stays with the bridge.** Ordinary Web and MCP message calls can no longer supply the IM origin fields that record a platform and sender, which a caller could use to show a recipient a false origin. Forwarding a message in the Web requires access to the Group it comes from.
-- **Start-up examples a native session can call.** The calls `cccc_bootstrap` suggests to a connected native session now name its Group, which that session's tools require.
-- **A starter pair and an AGENTS.md template.** The guide walks through a builder and reviewer pair from registering the two agents to integration, with a short template to copy into your project's instructions. It also explains where a Claude Code agent that CCCC starts edits files, and the Claude Code setting that changes it.
+- **A backlog next to your tasks.** A Markdown file in your project, such as `BACKLOG.md`, holds long-lived topics and ideas. Tasks shows its entries under a **Tasks | Backlog** switch, edits them in place and links each entry to the tasks made from it; agents use the new `cccc_backlog` tool. The file stays the only copy.
+- **Fewer new conversations after a `PATH` change.** When only the launch `PATH` changed, eligible managed agents can resume their saved conversation; the release notes give the conditions.
+- **Group rules only when due.** When a native session reads one message by its ID, the full Group rules come with it only when they are due, not every time.
+- **Coordination notes removed.** The Coordination log tab, the note actions of `cccc_coordination` and the note lists of the recovery pack are gone. Notes saved earlier stay in the Group's stored context.
+- **Fixes.** A task no longer stays blocked after the tasks it waited for are done (#201). Interrupting a managed Claude Code agent sends the request fields that Claude Code 2.1.317 requires; that version refused the previous request. A delivery that used up its retries no longer runs them again after every restart. Configuring a Web model connector no longer replaces its credential unless you ask to rotate it (#216).
+- **Two contributed commands.** `cccc ledger search` (#217) and `cccc actor new-session` (#207).
 
-**Upgrade notes.** Before upgrading, let sends and recordings finish, restore or discard waiting sends, then send or copy every unsent draft and save unsaved edits in Files: all of these live only in the open page. Check whether a message already arrived before sending it again. Then restart the daemon and Web and reload open pages. Agent sessions started before the upgrade keep the MCP server they started with: they keep working, but the MCP-side origin check and the new start-up examples reach a session only when its MCP server is started again, for example by restarting the agent.
+**Upgrade notes.** Before upgrading, let sends and recordings finish, restore or discard waiting sends, then send or copy every unsent draft and save unsaved edits in Files: all of these live only in the open page. Check whether a message already arrived before sending it again. Then restart the daemon and Web and reload open pages: a page opened before the upgrade sends a removed field with some replies across Groups, and those replies are refused until it is reloaded. A native session keeps the MCP server it started with, and that server's previous tools, until the server is started again, for example by restarting the session. Coordination notes are no longer shown: to keep a copy that is easy to read, copy their text from the Coordination log tab before upgrading.
 
-Details: [0.4.53 release notes](https://chesterra.github.io/cccc/release/v0.4.53_release_notes).
+Details: [0.4.55 release notes](https://chesterra.github.io/cccc/release/v0.4.55_release_notes).
 
 ## Quick start
 
@@ -186,7 +188,7 @@ Use Mail for updates that can wait, Send when the recipient should know now, and
 - **Messages.** `@` mentions agents and `#` mentions Groups. Point at a message for **Reply**, **Forward** and copy; its **More** menu adds quick replies, **Pin message** and **Copy link**. On touch screens, **More** holds every action.
 - **Tabs.** **Waiting for you** (requests you can answer in place), **All**, **Pinned** and **User-related**. In a filtered view, **Show in chat** opens a message in the whole conversation.
 - **Messages** and **Terminals** in the Group header switch views. The terminal view shows up to four agents per page and takes keyboard input.
-- **Files**, **Presentation** (four pinned slots) and **Project Context** (**Tasks**, **AGENTS.md**, **Coordination log**, **Agent State**, **Skills**).
+- **Files**, **Presentation** (four pinned slots) and **Project Context** (**Tasks**, **AGENTS.md**, **Agent State**, **Skills**).
 - **Settings and more**, then **All settings**: **This group** includes Guidance, Automation, Delivery, Messaging and IM Bridge; **This instance** includes Account, Web Access, Notifications and Voice.
 - **Appearance.** **Theme** is Light, Dark or Auto (follows the light or dark setting of your system), and the language is English, Chinese or Japanese. **More appearance settings** has **Body font**, **Message area width** (Medium, Wide or Full, on screens 768px and wider), **Motion**, **‘Waiting for you’ indicators** and **Text Size** (70%, 90%, 100% or 125%).
 - **Notifications.** **Settings → This instance → Notifications → Enable notifications**, in each browser, over HTTPS or on localhost. On iPhone or iPad (iOS or iPadOS 16.4 or later), add CCCC to the Home Screen first.

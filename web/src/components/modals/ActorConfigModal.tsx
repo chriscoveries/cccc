@@ -78,6 +78,7 @@ type AdvancedTabId = "connection" | "environment" | "capabilities" | "profile";
 
 export interface EditActorSavePayload {
   mode: ConfigMode;
+  wakeOnMail?: boolean;
   runtimeMode?: RuntimeMode;
   setVars: Record<string, string>;
   unsetKeys: string[];
@@ -501,7 +502,8 @@ function CreateActorConfigModal({
             </div>
           ) : null}
 
-          <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+          {/* Top-aligned: the submit column may carry a hint line, which must not stretch Cancel. */}
+          <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-start sm:justify-end">
             <Button
               type="button"
               variant="secondary"
@@ -1120,6 +1122,7 @@ function EditActorConfigModal({
   const [webSetupRuntime, setWebSetupRuntime] = useState("");
   const savedDefaultScopeKey = savedActor?.default_scope_key || "";
   const [defaultScopeKey, setDefaultScopeKey] = useState(savedDefaultScopeKey);
+  const [wakeOnMail, setWakeOnMail] = useState(Boolean(savedActor?.wake_on_mail));
   const [directoryBusy, setDirectoryBusy] = useState(false);
   const attachedScopes = scopes.filter((scope) => scope.scope_key && scope.url);
   const scopeUnavailable = Boolean(
@@ -1266,6 +1269,7 @@ function EditActorConfigModal({
     (baseline.current.notesLoaded && actorNotes.trim() !== baseline.current.actorNotes.trim());
   const otherChanges =
     scopeUnavailable ||
+    wakeOnMail !== Boolean(savedActor?.wake_on_mail) ||
     hasSecretChanges ||
     defaultScopeKey !== savedDefaultScopeKey ||
     JSON.stringify(parseCapabilityIdInput(capabilityAutoloadText)) !==
@@ -1496,6 +1500,7 @@ function EditActorConfigModal({
     setManagedSwitchDone(false);
     setWebSetupRuntime("");
     setDefaultScopeKey(savedDefaultScopeKey);
+    setWakeOnMail(Boolean(savedActor?.wake_on_mail));
     secretFetchSeqRef.current += 1;
     setEditMode(hasLinked ? "profile" : "custom");
     setPendingConvertToCustom(false);
@@ -1523,6 +1528,7 @@ function EditActorConfigModal({
     linkedProfileOwner,
     linkedProfileScope,
     savedActor?.runtime_mode,
+    savedActor?.wake_on_mail,
     savedDefaultScopeKey,
   ]);
 
@@ -1799,6 +1805,7 @@ function EditActorConfigModal({
       try {
         await invoke({
           mode: "profile",
+          ...(wakeOnMail !== Boolean(savedActor?.wake_on_mail) ? { wakeOnMail } : {}),
           setVars: {},
           unsetKeys: [],
           clear: false,
@@ -1835,6 +1842,7 @@ function EditActorConfigModal({
     try {
       await invoke({
         mode: "custom",
+        ...(wakeOnMail !== Boolean(savedActor?.wake_on_mail) ? { wakeOnMail } : {}),
         runtimeMode: supportsAcpMode(runtime) ? runtimeMode : "default",
         setVars: secretSaveChanges.setVars,
         unsetKeys: secretSaveChanges.unsetKeys,
@@ -2106,6 +2114,26 @@ function EditActorConfigModal({
               <div className={sectionTitleClass}>{t("sectionBasics", "Basics")}</div>
 
               <div className="mt-4 space-y-4">
+                {(!isWebModelRuntime(conversationRuntime) && !savedActor?.external_session_id) ||
+                wakeOnMail ? (
+                  <label className="flex items-start gap-2 text-sm text-[var(--color-text-primary)]">
+                    <input
+                      type="checkbox"
+                      checked={wakeOnMail}
+                      onChange={(event) => setWakeOnMail(event.target.checked)}
+                      disabled={busy === "actor-update"}
+                    />
+                    <span>
+                      {t("wakeOnMail", { defaultValue: "Wake on addressed Mail" })}
+                      <span className="block text-xs text-[var(--color-text-muted)]">
+                        {t("wakeOnMailHelp", {
+                          defaultValue:
+                            "Starts this enabled actor when its process is stopped. Manual Stop disables it. Broadcast Mail does not start actors.",
+                        })}
+                      </span>
+                    </span>
+                  </label>
+                ) : null}
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-[88px_minmax(0,1fr)] sm:items-start">
                   <div className="justify-self-start">
                     <ActorAvatarField

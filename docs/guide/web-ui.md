@@ -1271,7 +1271,8 @@ from another scope, where the same path would mean a different file.
 ### Message diagrams
 
 In Chat and Inbox messages, a fenced code block labeled `mermaid` is rendered as a diagram after
-the message is complete. Use **View source** to inspect or copy the original definition. Invalid or
+the message is complete. Markdown opened in the Files preview or shown in Presentation renders these
+blocks the same way. Use **View source** to inspect or copy the original definition. Invalid or
 oversized diagrams fall back to the source automatically; other Markdown surfaces continue to show
 Mermaid fences as ordinary code blocks. Flowchart image shapes (`@{ img: ... }`) also remain as
 source because Mermaid waits on browser image decoding before completing the diagram and can
@@ -1318,14 +1319,15 @@ the messages first, because a retry can send the reply twice.
 Open **Project Context** from the clipboard button in the Group header. The
 header identifies the Group being viewed.
 
-A single navigation row opens **Tasks**, **AGENTS.md**, **Agent State**,
-**Coordination log**, or **Skills**. On narrow screens, scroll the row horizontally;
+A single navigation row opens **Tasks**, **AGENTS.md**, **Agent State**, or
+**Skills**. On narrow screens, scroll the row horizontally;
 keyboard users can move focus with Left/Right or Home/End and activate with
-Enter/Space. Switching sections retains summary/file drafts and task filters.
+Enter/Space. Switching sections retains brief and file drafts as well as task filters.
 
 - **Tasks** is the default section. The goal, current focus and warnings stay
-  visible above the board. Expand **Working summary** for background and
-  constraints, or use Edit directly. The disclosure stays open while editing.
+  visible above the board, except while editing, when the form holds them.
+  Expand **Coordination brief** for the project background and constraints, or
+  use Edit directly. The disclosure stays open while editing.
   While there are tasks to show, Planned, Active and Done stay as columns, empty
   ones included, so each remains a drop target; when there are none, or none
   match the search and attention filters, the board says so instead. Dragging a
@@ -1371,6 +1373,41 @@ Enter/Space. Switching sections retains summary/file drafts and task filters.
   together with its unexecuted subtasks; for other tasks the editor says why,
   and archiving is the alternative. A deletion is refused, deleting nothing, if
   any of it changed after you confirmed.
+
+  Above the board, **Tasks | Backlog** switches to the project's backlog, and
+  each Group keeps the view you left it on in this browser. The backlog is a
+  Markdown file in the Group's project folder for long-lived topics and ideas;
+  tasks made from a topic track the work on it. It stays an ordinary file: CCCC
+  reads and edits it in place, never exports or commits it, and any editor can
+  change it too. A Group without a project folder has no backlog. Until a file is
+  chosen, the view offers to create `BACKLOG.md`, which in a Git repository can
+  be listed in the clone's local exclude file so `git add -A` leaves it out
+  (`.gitignore` is not changed), or to use an existing file. Tasks work without
+  one.
+
+  `##` headings are sections, in your own names and order; only a section named
+  exactly `Closed` holds finished topics. `###` headings are topics, and headings
+  inside a topic use `####` or deeper. A topic is a row like a task's, with its
+  linked tasks under the title; open the row to read the topic, or a linked task
+  to open that task. **Create task…** makes a Planned task from it, or opens
+  the topic's unfinished task if it has one. **Edit**, **Move to…** and
+  **Close…** change the topic; closing asks for a one-line outcome, adds it with
+  the date and moves the topic to Closed, where **Reopen…** moves it back. The
+  first change here gives a topic a hidden ID comment in its heading, so it can
+  be renamed or moved and stay linked; task IDs are never written into the file.
+
+  A task made from a topic shows the topic's title in its editor. **Update the
+  entry…** takes the task's outcome to the topic, as a dated paragraph or by
+  closing it. **Put back in the backlog** adds the outcome to the topic, or saves
+  a task from no topic as a new topic and links them, then asks whether to
+  archive the task. Finishing a task never closes its topic.
+
+  Each change applies only to the file as this page read it. If the file changed
+  elsewhere, nothing is written and your text stays; reload and save again. A
+  draft whose topic itself changed is kept to copy, never written over the
+  change. The backlog is read when Project Context opens and again when shown
+  after a change made through CCCC; edits from another editor appear on
+  **Reload**. The read-only exhibit page has no backlog.
 - **AGENTS.md** views and edits the file in the current workspace root, showing
   its actual path. A missing file can be created explicitly; existing documents
   are not renamed, merged, or overwritten as part of setup. Each runtime controls
@@ -1382,7 +1419,6 @@ Enter/Space. Switching sections retains summary/file drafts and task filters.
   staleness. Focus, next action and blockers remain visible. Expand working context
   or recovery cues when needed. A task named in a report does not prove that its
   Runtime is currently working on it.
-- **Coordination log** has a dedicated page for recent decisions and handoffs.
   Viewing repository instructions or records does not keep a task board beneath them.
 - **Skills** shows self-evolving candidates originating in this Group. Instance
   capability governance has a wider scope; the two views do not replace each other.

@@ -96,6 +96,9 @@ fn add(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         actor = actor_profile_runtime::link(home, &actor, &actor.profile_id)?;
     }
     actor.normalize_runtime_constraints();
+    if actor.wake_on_mail {
+        super::mail_wake::require_activation(home)?;
+    }
     actor.default_scope_key = normalize_default_scope_key(&group, &actor.default_scope_key)?;
     let added = store(home)?
         .mutate(&group_id, |doc| actors::add(doc, actor))
@@ -301,6 +304,9 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             "This member has an unfinished turn. Wait for it to finish, or switch its runtime.",
         ));
     }
+    if final_preview.wake_on_mail && !original_actor.wake_on_mail {
+        super::mail_wake::require_activation(home)?;
+    }
     let original_secrets = if profile_action == "convert_to_custom" {
         Some(actor_secrets::values(home, &group_id, &actor_id)?)
     } else {
@@ -494,6 +500,12 @@ fn update(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         // A Web conversation can read the newly selected workspace in its
         // current turn, before any further message reaches the Actor.
         super::runtime_state::record_web_instruction_baseline(home, &updated_group, &actor);
+    }
+    if !original_actor.wake_on_mail
+        && actor.wake_on_mail
+        && let Err(error) = super::mail_wake::rearm(home, &group_id, &actor)
+    {
+        tracing::warn!(%error, %group_id, %actor_id, "Mail wake rearm held");
     }
     if enabling_native {
         actor_delivery::dispatch_unread(home, &updated_group, &actor_id);
@@ -1095,6 +1107,14 @@ pub(super) fn lifecycle_leading(
             ));
         }
     };
+    if enabled
+        && kind == "actor.start"
+        && actor.wake_on_mail
+        && super::mail_wake::confirmed_running(&group, &actor)
+        && let Err(error) = super::mail_wake::rearm(home, &group_id, &actor)
+    {
+        tracing::warn!(%error, %group_id, %actor_id, "Mail wake rearm held");
+    }
     if enabled {
         match GroupStore::new(home.clone()).and_then(|store| store.load(&group_id)) {
             Ok(current_group) => {

@@ -76,23 +76,73 @@ fn waiting_on_actor_or_external_is_blocked_without_a_blocked_by_list() {
 }
 
 #[test]
-fn overview_omits_task_collections_but_keeps_coordination_notes() {
+fn overview_omits_task_collections_and_stored_coordination_notes() {
     let mut document = document();
     document.tasks_revision = 7;
+    // Coordination notes were removed; notes left in an older context file stay
+    // stored but are never projected.
     document
         .coordination
-        .insert("recent_decisions".into(), json!([{"summary":"keep this"}]));
+        .insert("recent_decisions".into(), json!([{"summary":"old note"}]));
 
-    let result = project(document, "v2".into(), "overview");
+    let result = project(document.clone(), "v2".into(), "overview");
 
     assert_eq!(result["version"], "v2");
     assert_eq!(result["tasks_version"], "tasksv:7");
-    assert_eq!(
-        result["coordination"]["recent_decisions"][0]["summary"],
-        "keep this"
-    );
+    assert!(result["coordination"].get("brief").is_some());
+    for detail in ["overview", "summary", "full"] {
+        let projected = project(document.clone(), "v2".into(), detail);
+        assert!(
+            projected["coordination"].get("recent_decisions").is_none(),
+            "{detail}: {projected}"
+        );
+    }
     assert!(result["coordination"].get("tasks").is_none());
     assert!(result.get("board").is_none());
     assert!(result.get("tasks_summary").is_none());
     assert!(result.get("attention").is_none());
+}
+
+#[test]
+fn resolved_dependencies_use_the_full_document_before_paging() {
+    let tasks = [
+        json!({"id":"T001","status":"done"}),
+        json!({"id":"T002","status":"planned","blocked_by":["T001"]}),
+    ]
+    .map(|task| task.as_object().expect("task").clone())
+    .to_vec();
+    let doc = ContextDoc {
+        tasks,
+        ..ContextDoc::default()
+    };
+    let before = doc.clone();
+    for detail in ["summary", "full"] {
+        let result = project(doc.clone(), "v1".into(), detail);
+        let task = &result["coordination"]["tasks"][1];
+        assert_eq!(task["blocked_by"], json!(["T001"]));
+        assert_eq!(task["open_blocked_by"], json!([]));
+        assert_eq!(result["tasks_summary"]["blocked"], 0);
+        if detail == "full" {
+            assert_eq!(result["attention"]["blocked"], json!([]));
+        }
+        let page = project_page(
+            doc.clone(),
+            "v1".into(),
+            detail,
+            &Page {
+                limit: 1,
+                after: 1,
+                max_bytes: None,
+                include_archived: false,
+            },
+        )
+        .expect("page");
+        assert_eq!(page["coordination"]["tasks"][0]["id"], "T002");
+        assert_eq!(
+            page["coordination"]["tasks"][0]["open_blocked_by"],
+            json!([])
+        );
+        assert_eq!(page["tasks_summary"]["blocked"], 0);
+    }
+    assert_eq!(doc.tasks, before.tasks);
 }
