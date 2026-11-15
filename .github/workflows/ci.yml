@@ -203,7 +203,7 @@ jobs:
 
   tui-macos-smoke:
     needs: web
-    runs-on: macos-15
+    runs-on: ${{ github.head_ref == 'patch/dotsweb-v0.4.54' && 'macos-15-intel' || 'macos-15' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -230,6 +230,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref == 'patch/dotsweb-v0.4.54' && github.event.pull_request.head.sha || github.sha }}
       - uses: actions/download-artifact@v8
         with:
           name: bundled-web
@@ -292,6 +294,52 @@ jobs:
           cargo test --workspace --lib --locked \
             live_kilo -- --test-threads=1
 
+  patch-release:
+    if: github.head_ref == 'patch/dotsweb-v0.4.54'
+    needs: [web, rust-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container: quay.io/pypa/manylinux_2_28_x86_64:latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: bundled-web
+          path: web/dist
+      - name: Install native build dependencies
+        run: dnf install -y cmake perl-core
+      - name: Select Python 3.14
+        run: echo "/opt/python/cp314-cp314/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dotsweb-manylinux_2_28-release
+      - name: Build the patch release artifact
+        env:
+          PATCH_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git -c "safe.directory=$GITHUB_WORKSPACE" rev-parse HEAD)" = "$PATCH_EXPECTED_HEAD"
+          touch web/dist/index.html
+          cargo build --release --locked --features standalone -p cccc --bin cccc
+          strip target/release/cccc
+          python scripts/check_release_versions.py --rust-binary target/release/cccc
+          python scripts/verify_standalone_binary.py --platform linux target/release/cccc
+          mkdir -p patch-dist
+          python scripts/build_standalone_archive.py \
+            target/release/cccc --target x86_64-unknown-linux-gnu --output-dir patch-dist
+          install -m 755 target/release/cccc patch-dist/cccc
+          git -c "safe.directory=$GITHUB_WORKSPACE" rev-parse HEAD > patch-dist/SOURCE_COMMIT
+          (cd patch-dist && sha256sum cccc ./*.tar.gz > SHA256SUMS)
+      - name: Upload the exact-head patch release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dotsweb-patch-linux-x86_64-${{ github.event.pull_request.head.sha }}
+          path: patch-dist/
+          if-no-files-found: error
+          retention-days: 7
+
   ci-required:
     if: always()
     needs:
@@ -301,18 +349,21 @@ jobs:
       - windows-smoke
       - tui-macos-smoke
       - rust-linux
+      - patch-release
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Verify required CI jobs
         env:
           NEEDS_CONTEXT: ${{ toJSON(needs) }}
+          PATCH_REQUIRED: ${{ github.head_ref == 'patch/dotsweb-v0.4.54' }}
         shell: bash
         run: |
           failures="$(
-            jq -r '
+            jq -r --argjson patch_required "$PATCH_REQUIRED" '
               to_entries[]
               | select(.value.result != "success")
+              | select(.key != "patch-release" or $patch_required or .value.result != "skipped")
               | "\(.key)=\(.value.result)"
             ' <<<"$NEEDS_CONTEXT"
           )"
