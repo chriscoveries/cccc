@@ -216,6 +216,45 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     let gid = &group.group_id;
     let (a, ah) = offline_page(&state, gid, "alpha", &temp.path().join("alpha"), &root_url).await;
     let (b, bh) = offline_page(&state, gid, "beta", &temp.path().join("beta"), &root_url).await;
+    let alpha_key = super::super::web_model_browser::key(gid, "alpha");
+    let stale_prompt = super::pairing_prompt("wm_pair_0123456789abcdef");
+    page_value(
+        &a,
+        &format!(
+            "document.querySelector('textarea').value={}",
+            json!(stale_prompt.as_str())
+        ),
+    )
+    .await;
+    state
+        .browser_surfaces
+        .pairing_page(&alpha_key)
+        .await
+        .expect("an earlier pairing prompt is not a human draft");
+    assert_eq!(
+        page_value(&a, "document.querySelector('textarea').value").await,
+        ""
+    );
+    assert_eq!(page_value(&a, "window.submits").await, 0);
+    let stale_with_note = format!("{stale_prompt} Keep my note");
+    page_value(
+        &a,
+        &format!(
+            "document.querySelector('textarea').value={}",
+            json!(stale_with_note.as_str())
+        ),
+    )
+    .await;
+    let error = match state.browser_surfaces.pairing_page(&alpha_key).await {
+        Ok(_) => panic!("a stale prompt with appended text is not ours"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("pairing_composer_occupied"));
+    assert_eq!(
+        page_value(&a, "document.querySelector('textarea').value").await,
+        stale_with_note
+    );
+    page_value(&a, "document.querySelector('textarea').value=''").await;
     page_value(
         &a,
         "document.querySelector('textarea').value='Keep my private draft'",
@@ -250,11 +289,31 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         .to_string()
         .contains("pairing_composer_occupied")
     );
+    // A pending attachment is checked before the stale-prompt clear. The
+    // attachment and the text must both survive the refusal.
+    page_value(
+        &a,
+        &format!(
+            "document.querySelector('textarea').value={}",
+            json!(stale_prompt.as_str())
+        ),
+    )
+    .await;
+    let error = match state.browser_surfaces.pairing_page(&alpha_key).await {
+        Ok(_) => panic!("a pending attachment is not a stale draft"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("pairing_composer_occupied"));
+    assert_eq!(
+        page_value(&a, "document.querySelector('textarea').value").await,
+        stale_prompt
+    );
     page_value(
         &a,
         "document.querySelector('[data-testid=attachment]').remove()",
     )
     .await;
+    page_value(&a, "document.querySelector('textarea').value=''").await;
     // A connector icon and the upload button are not unsent user attachments.
     page_value(&a, "document.querySelector('form').insertAdjacentHTML('beforeend','<img alt=CCCC width=24 height=24 src=/connector-icon.png><button type=button data-testid=attachment-button>Add files</button>')").await;
     let started = connect_actor(&state, gid, "alpha").await;
@@ -722,6 +781,32 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     assert_eq!(failed["error_code"], "pairing_interrupted");
     assert!(store::for_actor(&state, gid, "beta").is_none());
     assert_eq!(store::for_actor(&state, gid, "alpha"), alpha_binding);
+    // The same stale-prompt clear also supports a contenteditable composer.
+    let (gamma, gh) =
+        offline_page(&state, gid, "gamma", &temp.path().join("gamma"), &root_url).await;
+    let gamma_key = super::super::web_model_browser::key(gid, "gamma");
+    page_value(
+        &gamma,
+        &format!(
+            "() => {{ const t=document.querySelector('textarea'); t.outerHTML='<div id=prompt-textarea contenteditable=true role=textbox style=\"width:400px;height:80px\"></div>'; document.querySelector('#prompt-textarea').textContent={}; }}",
+            json!(stale_prompt.as_str())
+        ),
+    )
+    .await;
+    state
+        .browser_surfaces
+        .pairing_page(&gamma_key)
+        .await
+        .expect("contenteditable stale prompt is cleared");
+    assert_eq!(
+        page_value(
+            &gamma,
+            "document.querySelector('#prompt-textarea').innerText"
+        )
+        .await,
+        ""
+    );
+    gh.abort();
     state
         .browser_surfaces
         .shutdown_all()

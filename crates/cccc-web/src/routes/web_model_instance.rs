@@ -32,18 +32,16 @@ pub(super) fn sanitize(value: Option<&str>) -> Option<String> {
     Some(value.to_owned())
 }
 
-/// The pairing message typed into the ChatGPT conversation.
+/// The pairing message typed into the ChatGPT conversation. Without a
+/// configured name it is exactly the stock prompt. The named form keeps the
+/// stock head and tail so the stale-pairing-draft cleaner recognises both
+/// (browser_surface/pairing.rs CLEAR_STALE_PAIRING_DRAFT_SCRIPT).
 pub(super) fn pairing_prompt(code: &str, plugin: Option<&str>) -> String {
-    let connector = match plugin {
-        Some(name) => format!(
-            "Use ONLY the ChatGPT plugin named \"{name}\" (this CCCC instance). Send this temporary CCCC pairing code to that plugin's cccc_pair tool: {{\"code\":\"{code}\"}}. Other CCCC plugins in this account belong to different CCCC instances and cannot accept this code: do not call them, and if ChatGPT asks to approve a CCCC plugin with any other name, deny it and use \"{name}\" instead."
-        ),
-        None => format!(
-            "Send this temporary CCCC pairing code to cccc_pair through the same CCCC connector: {{\"code\":\"{code}\"}}. If several CCCC plugins are installed, use only the one this setup message came from; the code is valid on one CCCC instance only."
-        ),
+    let Some(name) = plugin else {
+        return super::web_model_pairing::pairing_prompt(code);
     };
     format!(
-        "Connect this conversation to the Actor selected in CCCC. {connector} This records a pending link; reply with the returned receipt exactly as plain text so CCCC can verify this window and activate the link. Subsequent CCCC tool calls will use that Actor's configured permissions. This setup does not read workspace files or run tasks; wait for the next task message. If ChatGPT requires my approval, ask me. If the call is blocked or fails, report the error."
+        "Connect this conversation to the Actor selected in CCCC. Use ONLY the ChatGPT plugin named \"{name}\" (this CCCC instance). Send this temporary CCCC pairing code to that plugin's cccc_pair tool: {{\"code\":\"{code}\"}}. Other CCCC plugins in this account belong to different CCCC instances and cannot accept this code: do not call them, and if ChatGPT asks to approve a CCCC plugin with any other name, deny it and use \"{name}\" instead. This records a pending link; reply with the returned receipt exactly as plain text so CCCC can verify this window and activate the link. Subsequent CCCC tool calls will use that Actor's configured permissions. This setup does not read workspace files or run tasks; wait for the next task message. If ChatGPT requires my approval, ask me. If the call is blocked or fails, report the error."
     )
 }
 
@@ -85,11 +83,23 @@ mod tests {
     }
 
     #[test]
-    fn without_a_name_still_warns_about_multiple_plugins() {
-        let prompt = pairing_prompt("XYZ", None);
-        assert!(prompt.contains("{\"code\":\"XYZ\"}"));
-        assert!(prompt.contains("valid on one CCCC instance only"));
-        assert!(prompt.contains("reply with the returned receipt exactly"));
+    fn without_a_name_is_exactly_the_stock_prompt() {
+        assert_eq!(
+            pairing_prompt("wm_pair_ab12", None),
+            super::super::web_model_pairing::pairing_prompt("wm_pair_ab12")
+        );
+    }
+
+    #[test]
+    fn named_prompt_keeps_the_stock_head_and_tail() {
+        let stock = super::super::web_model_pairing::pairing_prompt("wm_pair_ab12");
+        let named = pairing_prompt("wm_pair_ab12", Some("CCCC macdad"));
+        let head = "Connect this conversation to the Actor selected in CCCC. ";
+        let tail = " This records a pending link;";
+        assert!(stock.starts_with(head) && named.starts_with(head));
+        let stock_tail = &stock[stock.find(tail).expect("stock tail")..];
+        let named_tail = &named[named.find(tail).expect("named tail")..];
+        assert_eq!(stock_tail, named_tail);
     }
 
     #[test]

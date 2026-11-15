@@ -922,22 +922,35 @@ it("offers no creation when a connector exists or the Web address is not public 
   expect(host.textContent).toContain("webModelShared.publicUrlInvalid");
 });
 
-it("leaves a connector created elsewhere untouched when the page was stale", async () => {
-  mocks.connectors.mockResolvedValue({
-    ok: true,
-    result: { connectors: [], connector_base_url: "https://cccc.example.test" },
-  });
-  mocks.create.mockResolvedValue({
-    ok: false,
-    error: { code: "connector_exists", message: "exists" },
-  });
-  await render({ onOpenSharedSettings: vi.fn() });
-  await act(async () => button("dotsActor.setup.createConnector").click());
-  expect(host.textContent).toContain("dotsActor.setup.connectorExists");
-  expect(host.querySelector("[data-chatgpt-plugin-setup]")).toBeNull();
-  expect(button("dotsActor.setup.createConnector")).toBeUndefined();
-  expect(button("dotsActor.sharedSettings")).toBeTruthy();
-});
+// Response-projection controls over the retained stale-page fixture.
+it.each(["existing", "legacy-error"])(
+  "leaves an existing connector untouched (%s)",
+  async (outcome) => {
+    mocks.connectors.mockResolvedValue({
+      ok: true,
+      result: { connectors: [], connector_base_url: "https://cccc.example.test" },
+    });
+    mocks.create.mockResolvedValue(
+      outcome === "existing"
+        ? {
+            ok: true,
+            result: {
+              outcome: "existing",
+              connector: { connector_id: "shared", provider: "chatgpt_web" },
+            },
+          }
+        : { ok: false, error: { code: "connector_exists", message: "exists" } },
+    );
+    await render({ onOpenSharedSettings: vi.fn() });
+    await act(async () => button("dotsActor.setup.createConnector").click());
+    expect(host.textContent).toContain("dotsActor.setup.connectorExists");
+    expect(host.querySelector("[data-chatgpt-plugin-setup]")).toBeNull();
+    expect(button("dotsActor.setup.createConnector")).toBeUndefined();
+    expect(button("dotsActor.sharedSettings")).toBeTruthy();
+    expect(host.textContent).not.toContain("/token/");
+    expect(mocks.copy).not.toHaveBeenCalled();
+  },
+);
 
 it("keeps a host dialog open while the one-time connector URL is being created", async () => {
   mocks.connectors.mockResolvedValue({
