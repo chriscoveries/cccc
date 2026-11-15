@@ -89,6 +89,8 @@ fn home_identity(home: &HomeLayout) -> io::Result<String> {
 /// Use the native source identity compiled into the running process. It binds
 /// the implementation source set, not an executable or artifact checksum.
 fn implementation_digest() -> io::Result<String> {
+    #[cfg(test)]
+    ensure_test_source_identity();
     let info = cccc_core::build_info::current();
     let identity = info
         .get("source_id")
@@ -98,6 +100,18 @@ fn implementation_digest() -> io::Result<String> {
         return Err(io::Error::other("invalid compiled source identity"));
     }
     Ok(identity.to_owned())
+}
+
+/// The test harness is the embedding program for unit tests: it registers a
+/// labeled, obviously synthetic identity the way an executable `main` registers
+/// the compiled source id. Idempotent — `initialize` accepts the same value
+/// from concurrent tests.
+#[cfg(test)]
+fn ensure_test_source_identity() {
+    const TEST_SOURCE_ID: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    if cccc_core::build_info::source_id().is_none() {
+        cccc_core::build_info::initialize(TEST_SOURCE_ID);
+    }
 }
 
 fn fresh_proof_digest(identity: &str, implementation: &str, activation_id: &str) -> String {
