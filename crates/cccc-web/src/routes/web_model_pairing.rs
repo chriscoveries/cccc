@@ -115,6 +115,17 @@ pub(super) async fn ensure_automatic(state: &AppState, group: &str, actor: &str)
     let _ = start_connection(state, group, actor, true, false).await;
 }
 
+/// cwf#853: the delivery worker's fresh-chat self-heal. Same path as an
+/// explicit user `connect` with `replace: true`: the old binding stays in
+/// force until the new conversation is confirmed.
+pub(super) async fn start_replacement(
+    state: &AppState,
+    group: &str,
+    actor: &str,
+) -> Result<Value, ApiError> {
+    start_connection(state, group, actor, false, true).await
+}
+
 async fn start_connection(
     state: &AppState,
     group: &str,
