@@ -231,14 +231,15 @@ const CLEAR_STALE_PAIRING_DRAFT_SCRIPT: &str = r#"() => {
   if (!el) return { cleared: false };
   const read = node => String(('value' in node) ? node.value : (node.innerText || node.textContent || ''))
     .replace(/\s+/g, ' ').trim();
-  const prefix = 'Connect this conversation to the Actor selected in CCCC. Send this temporary CCCC pairing code to cccc_pair through the same CCCC connector: {"code":"';
-  const suffix = '"}. This records a pending link; reply with the returned receipt exactly as plain text so CCCC can verify this window and activate the link. Subsequent CCCC tool calls will use that Actor\'s configured permissions. This setup does not read workspace files or run tasks; wait for the next task message. If ChatGPT requires my approval, ask me. If the call is blocked or fails, report the error.';
+  // Stock prompt, or the named-instance prompt (cwf#863): same head and tail.
+  const head = 'Connect this conversation to the Actor selected in CCCC. ';
+  const tail = ' This records a pending link; reply with the returned receipt exactly as plain text so CCCC can verify this window and activate the link. Subsequent CCCC tool calls will use that Actor\'s configured permissions. This setup does not read workspace files or run tasks; wait for the next task message. If ChatGPT requires my approval, ask me. If the call is blocked or fails, report the error.';
+  const stockMid = /^Send this temporary CCCC pairing code to cccc_pair through the same CCCC connector: \{"code":"wm_pair_[a-f0-9]+"\}\.$/;
+  const namedMid = /^Use ONLY the ChatGPT plugin named "([^"{}`\\]{1,64})" \(this CCCC instance\)\. Send this temporary CCCC pairing code to that plugin's cccc_pair tool: \{"code":"wm_pair_[a-f0-9]+"\}\. Other CCCC plugins in this account belong to different CCCC instances and cannot accept this code: do not call them, and if ChatGPT asks to approve a CCCC plugin with any other name, deny it and use "\1" instead\.$/;
   const text = read(el);
-  const start = text.indexOf(prefix);
-  const end = text.lastIndexOf(suffix);
-  const code = end >= prefix.length ? text.slice(prefix.length, end) : '';
-  const own = start === 0 && end >= prefix.length && end + suffix.length === text.length
-    && /^wm_pair_[a-f0-9]+$/.test(code);
+  const mid = text.startsWith(head) && text.endsWith(tail) && text.length > head.length + tail.length
+    ? text.slice(head.length, text.length - tail.length) : '';
+  const own = stockMid.test(mid) || namedMid.test(mid);
   if (!own) return { cleared: false };
   if ('value' in el) {
     el.value = '';
