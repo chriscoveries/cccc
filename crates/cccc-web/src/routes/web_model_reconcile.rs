@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn automatic_resume_waits_and_respects_a_review() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-11-15T08:00:00Z")
-            .unwrap()
+            .expect("valid RFC 3339 time")
             .with_timezone(&chrono::Utc);
         let after = Some(Duration::from_secs(20 * 60));
         assert!(auto_resume_due(&ambiguous("2026-11-15T07:30:00Z"), after, now));
