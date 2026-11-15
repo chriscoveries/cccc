@@ -102,15 +102,21 @@ fn implementation_digest() -> io::Result<String> {
     Ok(identity.to_owned())
 }
 
-/// The test harness is the embedding program for unit tests: it registers a
-/// labeled, obviously synthetic identity the way an executable `main` registers
-/// the compiled source id. Idempotent — `initialize` accepts the same value
-/// from concurrent tests.
+/// The test harness is the embedding program for unit tests: it registers the
+/// real workspace fingerprint — the same value executable `main`s compile in —
+/// the way `cccc-core`'s own identity tests do. Idempotent for the same value.
+#[cfg(test)]
+#[path = "../../../../cccc-core/build_support/source.rs"]
+mod build_source;
+
 #[cfg(test)]
 fn ensure_test_source_identity() {
-    const TEST_SOURCE_ID: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     if cccc_core::build_info::source_id().is_none() {
-        cccc_core::build_info::initialize(TEST_SOURCE_ID);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let inputs = build_source::inputs(&root).expect("workspace source inputs");
+        let fingerprint =
+            build_source::fingerprint(&root, &inputs).expect("workspace source fingerprint");
+        cccc_core::build_info::initialize(Box::leak(fingerprint.into_boxed_str()));
     }
 }
 
