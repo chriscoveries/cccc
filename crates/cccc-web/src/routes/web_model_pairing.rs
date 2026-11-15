@@ -84,7 +84,21 @@ async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
         ));
     }
     if action == "remove" {
-        let _control = super::web_model_delivery::control_guard(&group, &actor)?;
+        // cwf#825: an ambiguous ("delivery busy") lane is reconciled first with
+        // the resume-delivery checks, so remove is not refused with
+        // delivery_unresolved when the tab shows nothing pending. If the tab
+        // is not safe to resume, remove reports the daemon's refusal as before.
+        if let Err(error) =
+            super::web_model_delivery::reconcile_before_remove(&state, &group, &actor).await
+        {
+            tracing::info!(%group, %actor, %error, "Web Model remove: ambiguous delivery left for review");
+        }
+        let _control = super::web_model_delivery::control_guard_wait(
+            &group,
+            &actor,
+            super::web_model_reconcile::REMOVE_BUSY_WAIT,
+        )
+        .await?;
         // cwf#821: an opt-in guard for scripted repair (remove then connect).
         // Refuse the remove while the browser could not pair again, so a
         // working binding is not traded for an unpaired Actor.
