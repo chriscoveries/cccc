@@ -451,6 +451,9 @@ async fn deliver_once(
                 "Web-model conversation reached ChatGPT's maximum length; delivery paused, queue left unclaimed"
             );
         }
+        // Self-heal: fresh chat in the same tab, then re-pair (replace).
+        // Nothing was claimed for this conversation, so nothing is replayed.
+        super::web_model_rotation::maybe_rotate(state, group_id, actor_id, &readiness, &target);
         return Ok(DeliveryOutcome::Idle);
     }
     if target["last_delivery_status"] == "conversation_length_exceeded"
