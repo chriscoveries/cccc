@@ -347,6 +347,26 @@ async fn deliver_once(
         if target["kind"] == "new_chat" {
             return resolve_pending_new_chat(state, group_id, actor_id, session_key, &target).await;
         }
+        // cwf#825 (opt-in): after CCCC_WEB_MODEL_AUTO_RESUME_AMBIGUOUS_MIN
+        // minutes, resume it with the manual route's checks. Never replays.
+        let after = super::web_model_reconcile::auto_resume_after(
+            std::env::var(super::web_model_reconcile::ENV_AUTO_RESUME_MIN)
+                .ok()
+                .as_deref(),
+        );
+        if super::web_model_reconcile::auto_resume_due(&target, after, chrono::Utc::now())
+            && let Some(delivery_id) = super::web_model_reconcile::reconcilable(&target)
+        {
+            match resume_reviewed_locked(state, group_id, actor_id, &delivery_id).await {
+                Ok(()) => {
+                    tracing::info!(group_id, actor_id, %delivery_id, "Web-model ambiguous delivery resumed automatically");
+                    return Ok(DeliveryOutcome::Idle);
+                }
+                Err(error) => {
+                    tracing::debug!(group_id, actor_id, %error, "Web-model automatic resume not safe yet");
+                }
+            }
+        }
         return Ok(DeliveryOutcome::Ambiguous);
     }
     if is_legacy_pending_delivery(&target) {
@@ -958,9 +978,52 @@ pub(super) async fn resume_after_review(
     actor_id: &str,
     delivery_id: &str,
 ) -> Result<(), ApiError> {
-    let session_key = key(group_id, actor_id);
     let _work = browser_work(state, group_id, actor_id)?
         .ok_or_else(|| ApiError::bad("Delivery is busy; try again after it settles."))?;
+    resume_reviewed_locked(state, group_id, actor_id, delivery_id).await
+}
+
+/// cwf#825: resume an ambiguous delivery before `pairing remove`, with the
+/// same checks as the manual route. Returns whether it resumed.
+pub(super) async fn reconcile_before_remove(
+    state: &AppState,
+    group_id: &str,
+    actor_id: &str,
+) -> Result<bool, ApiError> {
+    let target = load_target(state, group_id, actor_id)?;
+    let Some(delivery_id) = super::web_model_reconcile::reconcilable(&target) else {
+        return Ok(false);
+    };
+    resume_after_review(state, group_id, actor_id, &delivery_id).await?;
+    tracing::info!(group_id, actor_id, %delivery_id, "Web-model ambiguous delivery resumed before remove");
+    Ok(true)
+}
+
+/// Wait (bounded) for the worker's poll to release the Actor's control
+/// permit instead of refusing a control at the first busy moment.
+pub(super) async fn control_guard_wait(
+    group: &str,
+    actor: &str,
+    wait: std::time::Duration,
+) -> Result<SessionGuard, ApiError> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match control_guard(group, actor) {
+            Ok(guard) => return Ok(guard),
+            Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        }
+    }
+}
+
+/// The body of resume-delivery; the caller holds the Actor's browser work.
+async fn resume_reviewed_locked(
+    state: &AppState,
+    group_id: &str,
+    actor_id: &str,
+    delivery_id: &str,
+) -> Result<(), ApiError> {
+    let session_key = key(group_id, actor_id);
     let target = load_target(state, group_id, actor_id)?;
     if target["kind"] != "existing_chat" || target["last_delivery_status"] != "submission_ambiguous"
     {
@@ -990,10 +1053,7 @@ pub(super) async fn resume_after_review(
             "Open the saved conversation and finish signing in before resuming.",
         ));
     }
-    if readiness["composer_chars"].as_u64().unwrap_or(0) > 0
-        || readiness["composer_has_attachments"] == true
-        || readiness["running"] == true
-    {
+    if !super::web_model_reconcile::tab_safe_to_resume(&readiness, matches) {
         return Err(ApiError::bad(
             "Check the conversation, send or clear its unsent draft, and wait for its response to finish before resuming.",
         ));
