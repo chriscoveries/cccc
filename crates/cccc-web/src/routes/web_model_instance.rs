@@ -7,7 +7,7 @@
 //! the pairing timed out. When the operator tells CCCC the display name of
 //! its own plugin (`CCCC_WEB_MODEL_PLUGIN_NAME`), the prompt names it and
 //! tells the model to refuse every other CCCC plugin.
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 const ENV_PLUGIN_NAME: &str = "CCCC_WEB_MODEL_PLUGIN_NAME";
 const MAX_NAME_CHARS: usize = 64;
@@ -70,6 +70,7 @@ pub(super) fn retry_begin_args(args: &Map<String, Value>) -> Map<String, Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn names_this_instance_and_refuses_other_cccc_plugins() {
