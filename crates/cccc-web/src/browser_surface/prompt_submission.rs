@@ -591,7 +591,7 @@ impl BrowserSurfaces {
         ))
     }
 
-    async fn page(&self, key: &str) -> Result<Page> {
+    pub(super) async fn page(&self, key: &str) -> Result<Page> {
         self.sessions
             .lock()
             .await
@@ -726,6 +726,18 @@ impl BrowserSurfaces {
         } else {
             SubmissionSnapshot::default()
         };
+        // cwf#821: a page with no composer may be ChatGPT's "Could not load
+        // this conversation" page (often an account-wide 429). Report it
+        // distinctly so delivery can wait and recover instead of stalling.
+        let load_error =
+            if loading || ready || candidate.login_required || candidate.verification_required {
+                None
+            } else {
+                super::load_error::probe_load_error(page)
+                    .await
+                    .ok()
+                    .and_then(|probe| super::load_error::classify_load_error(&probe))
+            };
         let readiness = json!({
             "ready":ready,
             "composer_chars":snapshot.composer_chars,
@@ -734,7 +746,8 @@ impl BrowserSurfaces {
             "login_required":candidate.login_required,
             "verification_required":candidate.verification_required,
             "state":if loading {"loading"} else if candidate.verification_required {"verification_required"}
-                else if candidate.login_required {"sign_in_required"} else if ready {"ready"} else {"page_not_ready"},
+                else if candidate.login_required {"sign_in_required"} else if ready {"ready"}
+                else if let Some(state) = load_error {state} else {"page_not_ready"},
             "tab_url":url,
             "input_selector":candidate.descriptor,
             "checked_at":cccc_contracts::utc_now(),
@@ -746,6 +759,8 @@ impl BrowserSurfaces {
                 "Browser model composer is ready."
             } else if candidate.login_required {
                 "Sign in using the shared ChatGPT browser."
+            } else if let Some(state) = load_error {
+                super::load_error::load_error_message(state)
             } else {
                 "The conversation input is not available yet. Check the page before retrying."
             }
