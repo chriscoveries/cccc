@@ -25,6 +25,16 @@ pub(super) fn extend_catalog(response: &mut Value) {
                 "annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
             }),
         ]);
+        // cwf#863: name this instance's plugin where the model reads it.
+        let suffix = super::web_model_instance::tool_description_suffix(
+            super::web_model_instance::plugin_name().as_deref(),
+        );
+        if !suffix.is_empty()
+            && let Some(pair) = tools.iter_mut().find(|t| t["name"] == "cccc_pair")
+            && let Some(text) = pair["description"].as_str().map(str::to_owned)
+        {
+            pair["description"] = json!(format!("{text}{suffix}"));
+        }
     }
 }
 

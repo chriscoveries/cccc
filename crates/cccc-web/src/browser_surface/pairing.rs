@@ -8,14 +8,18 @@ use chromiumoxide::Page;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
-// CCCC's setup message, around the one-time code. The route sends it; the guard
-// below recognizes a copy that an interrupted attempt left unsent in the composer.
-const PROMPT_HEAD: &str = "Connect this conversation to the Actor selected in CCCC. Send this temporary CCCC pairing code to cccc_pair through the same CCCC connector: {\"code\":\"";
-const PROMPT_TAIL: &str = "\"}. This records a pending link; reply with the returned receipt exactly as plain text so CCCC can verify this window and activate the link. Subsequent CCCC tool calls will use that Actor's configured permissions. This setup does not read workspace files or run tasks; wait for the next task message. If ChatGPT requires my approval, ask me. If the call is blocked or fails, report the error.";
+// CCCC's setup message. The route sends it; the guard below recognizes a copy
+// that an interrupted attempt left unsent in the composer. Every variant shares
+// this head and tail; only the connector sentence between them differs (cwf#863
+// names this instance's ChatGPT plugin when one is configured).
+const PROMPT_HEAD: &str = "Connect this conversation to the Actor selected in CCCC. ";
+const PROMPT_TAIL: &str = " This records a pending link; reply with the returned receipt exactly as plain text so CCCC can verify this window and activate the link. Subsequent CCCC tool calls will use that Actor's configured permissions. This setup does not read workspace files or run tasks; wait for the next task message. If ChatGPT requires my approval, ask me. If the call is blocked or fails, report the error.";
+const STOCK_CONNECTOR: &str =
+    "Send this temporary CCCC pairing code to cccc_pair through the same CCCC connector: ";
 const CLEAR_READBACK: Duration = Duration::from_secs(2);
 
 pub(crate) fn pairing_prompt(code: &str) -> String {
-    format!("{PROMPT_HEAD}{code}{PROMPT_TAIL}")
+    format!("{PROMPT_HEAD}{STOCK_CONNECTOR}{{\"code\":\"{code}\"}}.{PROMPT_TAIL}")
 }
 
 /// The whole setup message with exactly one code, as the composer shows it, and
@@ -26,10 +30,53 @@ fn is_stale_pairing_prompt(text: &str) -> bool {
         .join(" ")
         .strip_prefix(PROMPT_HEAD)
         .and_then(|rest| rest.strip_suffix(PROMPT_TAIL))
-        .and_then(|code| code.strip_prefix("wm_pair_"))
-        .is_some_and(|hex| {
-            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        .is_some_and(|mid| stale_prompt_code(mid).is_some())
+}
+
+/// The one-time code inside a connector sentence that is exactly one of the
+/// pairing prompts CCCC sends: the stock prompt, or the cwf#863 named-instance
+/// prompt whose plugin name must match itself.
+fn stale_prompt_code(mid: &str) -> Option<&str> {
+    let (before, rest) = mid.split_once("{\"code\":\"")?;
+    let (code, after) = rest.split_once("\"}")?;
+    if !is_pairing_code(code) {
+        return None;
+    }
+    if before == STOCK_CONNECTOR {
+        return (after == ".").then_some(code);
+    }
+    let Some((name, tail)) = before
+        .strip_prefix("Use ONLY the ChatGPT plugin named \"")
+        .and_then(|rest| {
+            rest.split_once(
+                "\" (this CCCC instance). Send this temporary CCCC pairing code to that plugin's cccc_pair tool: ",
+            )
         })
+    else {
+        return None;
+    };
+    if !tail.is_empty() || !plugin_name_shape(name) {
+        return None;
+    }
+    let expected = format!(
+        ". Other CCCC plugins in this account belong to different CCCC instances and cannot accept this code: do not call them, and if ChatGPT asks to approve a CCCC plugin with any other name, deny it and use \"{name}\" instead."
+    );
+    (after == expected).then_some(code)
+}
+
+fn is_pairing_code(code: &str) -> bool {
+    code.strip_prefix("wm_pair_").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// The plugin-name shape routes::web_model_instance::sanitize accepts.
+fn plugin_name_shape(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 64
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '"' | '`' | '{' | '}' | '\\'))
 }
 
 pub(crate) struct PairingPage {
@@ -465,6 +512,19 @@ mod tests {
         ] {
             assert!(!is_stale_pairing_prompt(&draft), "{draft}");
         }
+    }
+
+    #[test]
+    fn the_named_instance_prompt_is_stale_too() {
+        let code = format!("wm_pair_{}", "0123456789abcdef".repeat(4));
+        let named = format!(
+            "Connect this conversation to the Actor selected in CCCC. Use ONLY the ChatGPT plugin named \"CCCC FIRESTAR\" (this CCCC instance). Send this temporary CCCC pairing code to that plugin's cccc_pair tool: {{\"code\":\"{code}\"}}. Other CCCC plugins in this account belong to different CCCC instances and cannot accept this code: do not call them, and if ChatGPT asks to approve a CCCC plugin with any other name, deny it and use \"CCCC FIRESTAR\" instead. This records a pending link; reply with the returned receipt exactly as plain text so CCCC can verify this window and activate the link. Subsequent CCCC tool calls will use that Actor's configured permissions. This setup does not read workspace files or run tasks; wait for the next task message. If ChatGPT requires my approval, ask me. If the call is blocked or fails, report the error."
+        );
+        assert!(is_stale_pairing_prompt(&named));
+        // The plugin name must match itself; a different second name is not
+        // one of our prompts.
+        let mismatched = named.replace("use \"CCCC FIRESTAR\" instead", "use \"Other\" instead");
+        assert!(!is_stale_pairing_prompt(&mismatched));
     }
 
     #[test]
