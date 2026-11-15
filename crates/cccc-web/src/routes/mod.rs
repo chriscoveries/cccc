@@ -63,6 +63,7 @@ mod web_model_connector_session;
 mod web_model_connector_store;
 mod web_model_connectors;
 mod web_model_delivery;
+mod web_model_rotation;
 mod web_model_delivery_completion;
 mod web_model_delivery_state;
 mod web_model_dots;

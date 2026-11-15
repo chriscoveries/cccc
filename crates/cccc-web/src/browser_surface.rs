@@ -1,4 +1,5 @@
 mod chatgpt_dom;
+mod conversation_limit;
 mod frame;
 mod input_events;
 mod interaction;
@@ -33,6 +34,7 @@ use futures_util::future::join_all;
 use navigation::goto_dom_content_loaded;
 use owner::BrowserOwner;
 mod pairing;
+pub(crate) use conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE;
 pub(crate) use load_error::is_load_error_state;
 use page_recovery::{candidate_page_url, close_internal_pages, is_internal_page};
 pub(crate) use pairing::PairingPage;
