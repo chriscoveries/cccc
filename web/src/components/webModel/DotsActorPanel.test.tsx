@@ -938,6 +938,25 @@ it("leaves a connector created elsewhere untouched when the page was stale", asy
   expect(button("dotsActor.setup.createConnector")).toBeUndefined();
   expect(button("dotsActor.sharedSettings")).toBeTruthy();
 });
+// Response-projection controls over the retained stale-page fixture.
+it("leaves an existing connector untouched", async () => {
+  mocks.connectors.mockResolvedValue({
+    ok: true,
+    result: { connectors: [], connector_base_url: "https://cccc.example.test" },
+  });
+  mocks.create.mockResolvedValue({
+    ok: true,
+    result: { outcome: "existing", connector: { connector_id: "shared", provider: "chatgpt_web" } },
+  });
+  await render({ onOpenSharedSettings: vi.fn() });
+  await act(async () => button("dotsActor.setup.createConnector").click());
+  expect(host.textContent).toContain("dotsActor.setup.connectorExists");
+  expect(host.querySelector("[data-chatgpt-plugin-setup]")).toBeNull();
+  expect(button("dotsActor.setup.createConnector")).toBeUndefined();
+  expect(button("dotsActor.sharedSettings")).toBeTruthy();
+  expect(host.textContent).not.toContain("/token/");
+  expect(mocks.copy).not.toHaveBeenCalled();
+});
 
 it("keeps a host dialog open while the one-time connector URL is being created", async () => {
   mocks.connectors.mockResolvedValue({
