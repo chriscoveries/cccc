@@ -4,7 +4,7 @@ use cccc_core::settings;
 use serde_json::{Value, json};
 
 use crate::AppState;
-use crate::api::{ApiError, ApiResult, success};
+use crate::api::{ApiError, ApiResult, call, success};
 
 use super::web_model_connector_store as store;
 
@@ -50,12 +50,13 @@ pub(super) async fn create(State(state): State<AppState>, Json(body): Json<Value
             .ok_or_else(|| ApiError::bad("confirmation is required to rotate"))?;
         args["confirmation"] = json!(confirmation);
     }
-    let result = super::web_model_delivery_completion::call(
+    let response = call(
         &state,
         "web_model_connector_configure",
         args.as_object().expect("literal JSON object").clone(),
     )
     .await?;
+    let result = &response.0["result"];
     let outcome = result["outcome"].as_str().unwrap_or("existing");
     let base_url = connector_base_url(&state)?;
     let mut connector = public(&result["connector"], &base_url);
