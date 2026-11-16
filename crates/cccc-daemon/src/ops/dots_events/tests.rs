@@ -1520,3 +1520,114 @@ fn dots_expired_turn_resolves_itself_and_the_next_wake_claims_normally() {
         assert_eq!(f.call("dots_events_status", json!({}))["phase"], "ready");
     }
 }
+
+fn dots(f: &Fixture) -> Value {
+    store::load(&f.home)
+        .expect("connectors")
+        .into_iter()
+        .find(|c| c["connector_id"] == f.connector_id)
+        .map(|c| c["dots"].clone())
+        .expect("Dots connector")
+}
+
+/// Paired and started with the subscription retired: the state a Dot is in
+/// when no event subscription can be created.
+fn unsubscribed(f: &Fixture, poll: bool) {
+    store::dots_update(&f.home, &f.connector_id, |c| {
+        c["dots"]["subscription"]["enabled"] = json!(false);
+        if poll {
+            c["dots"]["poll_mode"] = json!(true);
+        }
+        Ok(())
+    })
+    .expect("retire the subscription");
+}
+
+#[test]
+fn dots_poll_mode_claims_queued_work_without_a_subscription() {
+    let f = Fixture::new();
+    f.start();
+    unsubscribed(&f, true);
+    let source = f.source("queued while no subscription exists");
+    let claimed = f.claim(&f.claim_capture());
+    assert_eq!(claimed["status"], "work_available");
+    assert_eq!(claimed["turn"]["event_ids"], json!([source]));
+    let token = claimed["actor_token"]
+        .as_str()
+        .expect("poll claim capability");
+    let live = store::dots_binding_for_token(&f.private(), token, "cccc_message_send")
+        .expect("claimed task authority");
+    assert_eq!(live["dots_stage"], "execution");
+    assert_eq!(live["dots_turn_id"], claimed["turn"]["turn_id"]);
+    assert_eq!(dots(&f)["wake"]["source"], "poll");
+    // One claim per turn: a second poll gets no credential.
+    let second = f.claim(&f.claim_capture());
+    assert_eq!(second["status"], "turn_in_progress");
+    assert!(second.get("actor_token").is_none());
+}
+
+#[test]
+fn dots_poll_mode_idle_poll_changes_no_state() {
+    let f = Fixture::new();
+    f.start();
+    unsubscribed(&f, true);
+    let before = dots(&f);
+    let idle = f.claim(&f.claim_capture());
+    assert_eq!(idle["status"], "idle");
+    assert!(idle.get("actor_token").is_none());
+    let after = dots(&f);
+    assert_eq!(after["wake"], before["wake"]);
+    assert_eq!(after["execution"], before["execution"]);
+}
+
+#[test]
+fn dots_without_poll_mode_stays_idle_when_unsubscribed() {
+    let f = Fixture::new();
+    f.start();
+    unsubscribed(&f, false);
+    f.source("queued while no subscription exists");
+    let idle = f.claim(&f.claim_capture());
+    assert_eq!(idle["status"], "idle");
+    assert!(idle.get("actor_token").is_none());
+}
+
+#[test]
+fn dots_poll_mode_leaves_a_subscribed_dot_on_the_native_wake_path() {
+    let f = Fixture::new();
+    f.start();
+    store::dots_update(&f.home, &f.connector_id, |c| {
+        c["dots"]["poll_mode"] = json!(true);
+        Ok(())
+    })
+    .expect("poll mode on a subscribed Dot");
+    f.source("delivered by the native wake");
+    f.delivery();
+    let claimed = f.claim(&f.claim_capture());
+    assert_eq!(claimed["status"], "work_available");
+    assert!(dots(&f)["wake"]["source"].is_null());
+}
+
+#[test]
+fn dots_poll_mode_completed_turn_token_cannot_run_the_next_turn() {
+    let f = Fixture::new();
+    f.start();
+    unsubscribed(&f, true);
+    f.source("first poll turn");
+    let first = f.claim(&f.claim_capture());
+    let token = first["actor_token"]
+        .as_str()
+        .expect("first poll token")
+        .to_owned();
+    let captured =
+        store::dots_binding_for_token(&f.private(), &token, "cccc_runtime_complete_turn")
+            .expect("first turn authority");
+    f.complete(&first["turn"], &captured);
+    f.source("second poll turn");
+    let second = f.claim(&f.claim_capture());
+    assert_eq!(second["status"], "work_available");
+    assert_ne!(second["actor_token"], first["actor_token"]);
+    assert!(
+        store::dots_binding_for_token(&f.private(), &token, "cccc_message_send").is_none(),
+        "a completed poll turn's token must not authorize the next turn"
+    );
+}

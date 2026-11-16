@@ -148,6 +148,7 @@ pub(super) fn project(
         .as_str()
         .is_some_and(|id| !id.is_empty());
     let subscribed = subscribed(&dots["subscription"], chrono::Utc::now().timestamp_millis());
+    let poll_mode = dots["poll_mode"] == true;
     let paired = connector
         .as_ref()
         .and_then(|c| binding(c, group, actor))
@@ -165,10 +166,13 @@ pub(super) fn project(
         "unconfigured"
     } else if !paired {
         "waiting_pairing"
-    } else if !subscribed {
+    } else if !subscribed && !poll_mode {
         "waiting_subscription"
     } else if !active(group, actor) {
         "stopped"
+    } else if !subscribed {
+        // Poll mode: no wake is delivered; the Dot's own timed call claims.
+        if pending > 0 { "pending" } else { "ready" }
     } else {
         match dots["wake"]["state"].as_str() {
             Some("pending") => "pending",
@@ -182,7 +186,7 @@ pub(super) fn project(
     let last = &dots["last_execution"];
     Ok(
         json!({"group_id":group.group_id,"actor_id":actor.id,"enabled":actor.enabled,
-        "connected":connector.is_some(),"paired":paired,"subscribed":subscribed,"phase":phase,"pending_count":pending,
+        "connected":connector.is_some(),"paired":paired,"subscribed":subscribed,"poll_mode":poll_mode,"phase":phase,"pending_count":pending,
         "active_turn_id":runtime["active_turn_id"].as_str().unwrap_or(""),
         "active_turn_elapsed_seconds":elapsed,
         "active_event_ids":runtime["active_event_ids"].as_array().cloned().unwrap_or_default(),
