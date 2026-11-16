@@ -86,6 +86,35 @@ pub(super) fn claim(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             }
             expire_active_turn(home, &group, &actor, &runtime, c)?;
         }
+        // Poll admission. With the owner's per-binding poll mode on and no
+        // live subscription, no wake is ever delivered, so the paired
+        // session's own timed call claims queued work. The wake is minted
+        // only when work is claimed: an idle poll changes nothing. Every
+        // check above (binding, session, epoch, one unfinished turn) applies.
+        let poll = c["dots"]["poll_mode"] == true
+            && !subscribed(&c["dots"]["subscription"], chrono::Utc::now().timestamp_millis());
+        if poll {
+            if !active(&group, &actor) {
+                return Ok(Ok(json!({"status":"idle","turn":null})));
+            }
+            return match super::super::runtime_state::wait_next_turn(home, &pulled) {
+                Err(error) => Ok(Err(error)),
+                Ok(result) => {
+                    let mut result = Value::Object(result);
+                    if result["status"] == "work_available" {
+                        let event_id = format!("evt_{}", uuid::Uuid::new_v4().simple());
+                        c["dots"]["wake"] = json!({"event_id":event_id,"epoch":c["dots"]["epoch"],
+                            "state":"claimed","attempt":0,"source":"poll",
+                            "created_at":cccc_contracts::utc_now()});
+                        c["dots"]["execution"] = json!({"event_id":event_id,"epoch":c["dots"]["epoch"],
+                            "turn_id":result["turn"]["turn_id"],"event_ids":result["turn"]["event_ids"],
+                            "state":"active","claimed_at":cccc_contracts::utc_now()});
+                        result["actor_token"] = json!(store::dots_wake_token(c, &route, &event_id)?);
+                    }
+                    Ok(Ok(result))
+                }
+            };
+        }
         let dots = &c["dots"];
         // A repeated wake after completion is idle, not an unfinished turn.
         // Check canonical ownership above first: private completion may have
