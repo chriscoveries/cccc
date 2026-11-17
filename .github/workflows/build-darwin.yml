@@ -1,0 +1,81 @@
+name: Darwin package
+run-name: Darwin package ${{ inputs.sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Exact 40-character source commit"
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: macos-15
+    permissions:
+      contents: read
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      SHA: ${{ inputs.sha }}
+      CARGO_TARGET_DIR: target
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "1"
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - name: Fail fast on native tools and network egress
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          rustc --version
+          cargo --version
+          node --version
+          for url in https://index.crates.io/config.json https://registry.npmjs.org/ https://uploads.github.com/; do
+            # uploads / has no resource: 404 still proves DNS/TLS/HTTP egress.
+            code=$(curl --silent --show-error --location --connect-timeout 10 --max-time 20 --output /dev/null --write-out '%{http_code}' "$url")
+            case "$code" in 200|301|302|401|403|404) printf '%s %s\n' "$url" "$code" ;; *) exit 1 ;; esac
+          done
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Validate source and candidate version
+        run: |
+          set -euo pipefail
+          echo "$SHA" | grep -Eqx '[0-9a-f]{40}'
+          test "$(git rev-parse HEAD)" = "$SHA"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.19.0"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: aarch64-apple-darwin
+      - name: Build the same embedded web product, then the Darwin executable
+        run: |
+          set -euo pipefail
+          npm ci --prefix web
+          npm -C web run build
+          test -s web/dist/index.html
+          touch web/dist/index.html
+          cargo build --release --locked --features standalone --target aarch64-apple-darwin -p cccc --bin cccc
+          strip target/aarch64-apple-darwin/release/cccc
+          python3 scripts/check_release_versions.py --rust-binary target/aarch64-apple-darwin/release/cccc
+          python3 scripts/verify_standalone_binary.py --platform macos target/aarch64-apple-darwin/release/cccc
+          python3 scripts/build_standalone_archive.py target/aarch64-apple-darwin/release/cccc --target aarch64-apple-darwin --output-dir darwin-dist
+          test -f darwin-dist/cccc-v0.4.58-aarch64-apple-darwin.tar.gz
+          (cd darwin-dist && shasum -a 256 cccc-v0.4.58-aarch64-apple-darwin.tar.gz > SHA256SUMS.darwin)
+      - name: Upload Darwin package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: darwin-package-${{ inputs.sha }}
+          path: |
+            darwin-dist/cccc-v0.4.58-aarch64-apple-darwin.tar.gz
+            darwin-dist/SHA256SUMS.darwin
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
