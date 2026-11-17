@@ -86,12 +86,12 @@ pub(super) fn claim(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             }
             expire_active_turn(home, &group, &actor, &runtime, c)?;
         }
-        // Poll admission. With the owner's per-binding poll mode on and no
+        // Poll admission. With the owner's poll mode on for this Actor and no
         // live subscription, no wake is ever delivered, so the paired
         // session's own timed call claims queued work. The wake is minted
         // only when work is claimed: an idle poll changes nothing. Every
         // check above (binding, session, epoch, one unfinished turn) applies.
-        let poll = c["dots"]["poll_mode"] == true
+        let poll = poll_mode(&actor)
             && !subscribed(&c["dots"]["subscription"], chrono::Utc::now().timestamp_millis());
         if poll {
             if !active(&group, &actor) {
