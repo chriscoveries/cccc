@@ -1,7 +1,7 @@
 //! Instance identity for ChatGPT pairing.
 //!
 //! One ChatGPT account can have several CCCC plugins installed, one per CCCC
-//! instance ("CCCC LOCAL", "CCCC OTHER"). The pairing prompt used to say
+//! instance ("CCCC alpha", "CCCC beta"). The pairing prompt used to say
 //! only "the same CCCC connector", so ChatGPT sometimes called another
 //! instance's `cccc_pair` and then sat on that plugin's approval prompt until
 //! the pairing timed out. When the operator tells CCCC the display name of
@@ -74,12 +74,12 @@ mod tests {
 
     #[test]
     fn names_this_instance_and_refuses_other_cccc_plugins() {
-        let prompt = pairing_prompt("ABC123", Some("CCCC LOCAL"));
-        assert!(prompt.contains("ONLY the ChatGPT plugin named \"CCCC LOCAL\""));
+        let prompt = pairing_prompt("ABC123", Some("CCCC alpha"));
+        assert!(prompt.contains("ONLY the ChatGPT plugin named \"CCCC alpha\""));
         assert!(prompt.contains("{\"code\":\"ABC123\"}"));
         assert!(prompt.contains("deny it"));
         assert!(prompt.contains("reply with the returned receipt exactly"));
-        assert!(!prompt.contains("CCCC OTHER"));
+        assert!(!prompt.contains("CCCC beta"));
     }
 
     #[test]
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn named_prompt_keeps_the_stock_head_and_tail() {
         let stock = crate::browser_surface::pairing_prompt("wm_pair_ab12");
-        let named = pairing_prompt("wm_pair_ab12", Some("CCCC OTHER"));
+        let named = pairing_prompt("wm_pair_ab12", Some("CCCC beta"));
         let head = "Connect this conversation to the Actor selected in CCCC. ";
         let tail = " This records a pending link;";
         assert!(stock.starts_with(head) && named.starts_with(head));
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn sanitizes_the_configured_name() {
-        assert_eq!(sanitize(Some("  CCCC OTHER ")), Some("CCCC OTHER".into()));
+        assert_eq!(sanitize(Some("  CCCC beta ")), Some("CCCC beta".into()));
         assert_eq!(sanitize(Some("")), None);
         assert_eq!(sanitize(None), None);
         assert_eq!(sanitize(Some("a\"b")), None);
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn tool_description_names_the_instance_only_when_configured() {
-        assert!(tool_description_suffix(Some("CCCC OTHER")).contains("\"CCCC OTHER\""));
+        assert!(tool_description_suffix(Some("CCCC beta")).contains("\"CCCC beta\""));
         assert_eq!(tool_description_suffix(None), "");
     }
 }
