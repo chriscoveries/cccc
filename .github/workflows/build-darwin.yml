@@ -1,12 +1,8 @@
 name: Darwin package
-run-name: Darwin package ${{ inputs.sha }}
+run-name: Darwin package
 on:
-  workflow_dispatch:
-    inputs:
-      sha:
-        description: "Exact 40-character source commit"
-        required: true
-        type: string
+  push:
+    branches: [ci/darwin-package]
 permissions:
   contents: read
 jobs:
@@ -19,7 +15,7 @@ jobs:
       run:
         shell: bash
     env:
-      SHA: ${{ inputs.sha }}
+      SHA: 1ba574be7ffefa6a56363a10d6065f4fba2645b1
       CARGO_TARGET_DIR: target
       CARGO_INCREMENTAL: "0"
       CARGO_BUILD_JOBS: "1"
@@ -39,7 +35,7 @@ jobs:
           done
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.sha }}
+          ref: 1ba574be7ffefa6a56363a10d6065f4fba2645b1
           persist-credentials: false
       - name: Validate source and candidate version
         run: |
@@ -72,7 +68,7 @@ jobs:
       - name: Upload Darwin package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: darwin-package-${{ inputs.sha }}
+          name: darwin-package-1ba574be7ffefa6a56363a10d6065f4fba2645b1
           path: |
             darwin-dist/cccc-v0.4.58-aarch64-apple-darwin.tar.gz
             darwin-dist/SHA256SUMS.darwin
