@@ -45,16 +45,13 @@ fn stale_prompt_code(mid: &str) -> Option<&str> {
     if before == STOCK_CONNECTOR {
         return (after == ".").then_some(code);
     }
-    let Some((name, tail)) = before
+    let (name, tail) = before
         .strip_prefix("Use ONLY the ChatGPT plugin named \"")
         .and_then(|rest| {
             rest.split_once(
                 "\" (this CCCC instance). Send this temporary CCCC pairing code to that plugin's cccc_pair tool: ",
             )
-        })
-    else {
-        return None;
-    };
+        })?;
     if !tail.is_empty() || !plugin_name_shape(name) {
         return None;
     }
@@ -518,12 +515,12 @@ mod tests {
     fn the_named_instance_prompt_is_stale_too() {
         let code = format!("wm_pair_{}", "0123456789abcdef".repeat(4));
         let named = format!(
-            "Connect this conversation to the Actor selected in CCCC. Use ONLY the ChatGPT plugin named \"CCCC FIRESTAR\" (this CCCC instance). Send this temporary CCCC pairing code to that plugin's cccc_pair tool: {{\"code\":\"{code}\"}}. Other CCCC plugins in this account belong to different CCCC instances and cannot accept this code: do not call them, and if ChatGPT asks to approve a CCCC plugin with any other name, deny it and use \"CCCC FIRESTAR\" instead. This records a pending link; reply with the returned receipt exactly as plain text so CCCC can verify this window and activate the link. Subsequent CCCC tool calls will use that Actor's configured permissions. This setup does not read workspace files or run tasks; wait for the next task message. If ChatGPT requires my approval, ask me. If the call is blocked or fails, report the error."
+            "Connect this conversation to the Actor selected in CCCC. Use ONLY the ChatGPT plugin named \"CCCC alpha\" (this CCCC instance). Send this temporary CCCC pairing code to that plugin's cccc_pair tool: {{\"code\":\"{code}\"}}. Other CCCC plugins in this account belong to different CCCC instances and cannot accept this code: do not call them, and if ChatGPT asks to approve a CCCC plugin with any other name, deny it and use \"CCCC alpha\" instead. This records a pending link; reply with the returned receipt exactly as plain text so CCCC can verify this window and activate the link. Subsequent CCCC tool calls will use that Actor's configured permissions. This setup does not read workspace files or run tasks; wait for the next task message. If ChatGPT requires my approval, ask me. If the call is blocked or fails, report the error."
         );
         assert!(is_stale_pairing_prompt(&named));
         // The plugin name must match itself; a different second name is not
         // one of our prompts.
-        let mismatched = named.replace("use \"CCCC FIRESTAR\" instead", "use \"Other\" instead");
+        let mismatched = named.replace("use \"CCCC alpha\" instead", "use \"Other\" instead");
         assert!(!is_stale_pairing_prompt(&mismatched));
     }
 
