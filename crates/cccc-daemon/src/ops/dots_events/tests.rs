@@ -1552,9 +1552,7 @@ fn poll_setting(f: &Fixture, value: &str) {
         .iter_mut()
         .find(|actor| actor.id == "dot")
         .expect("Dot Actor");
-    actor
-        .env
-        .insert("CCCC_DOTS_POLL_MODE".into(), value.into());
+    actor.env.insert("CCCC_DOTS_POLL_MODE".into(), value.into());
     groups.save(&group).expect("save poll mode");
 }
 
@@ -1653,4 +1651,22 @@ fn dots_poll_mode_off_on_the_actor_stays_idle_when_unsubscribed() {
     let idle = f.claim(&f.claim_capture());
     assert_eq!(idle["status"], "idle");
     assert!(idle.get("actor_token").is_none());
+}
+
+#[test]
+fn dots_poll_mode_stopped_actor_gets_nothing() {
+    let f = Fixture::new();
+    f.start();
+    unsubscribed(&f, true);
+    f.source("queued for a stopped Actor");
+    f.call("actor_stop", json!({}));
+    let response = f.response(
+        "dots_work_claim",
+        json!({"by":"dot","_cccc_web_binding":f.claim_capture()}),
+    );
+    // A stopped Actor is either refused or idle; it never gets a credential.
+    if response.ok {
+        assert_eq!(response.result["status"], "idle");
+        assert!(!response.result.contains_key("actor_token"));
+    }
 }

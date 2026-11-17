@@ -121,7 +121,10 @@ fn poll_mode(actor: &Actor) -> bool {
         .cloned()
         .or_else(|| std::env::var("CCCC_DOTS_POLL_MODE").ok())
         .unwrap_or_default();
-    matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on")
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "on"
+    )
 }
 
 fn subscribed(subscription: &Value, now: i64) -> bool {
