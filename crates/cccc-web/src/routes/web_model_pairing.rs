@@ -237,7 +237,8 @@ async fn start_connection(
             let Ok(pair) = call(&state, "web_model_pairing_begin", begin.clone()).await else {
                 break result;
             };
-            let (Some(id), Some(code)) = (pair["pairing_id"].as_str(), pair["code"].as_str()) else {
+            let (Some(id), Some(code)) = (pair["pairing_id"].as_str(), pair["code"].as_str())
+            else {
                 break result;
             };
             tracing::info!(%group, %actor, "Web Model pairing timed out; retrying once with a new code");

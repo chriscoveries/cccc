@@ -149,8 +149,20 @@ mod tests {
         ));
         // Cooldown: no loop.
         let later = now + Duration::from_secs(60);
-        assert!(!should_rotate(true, &full(0, false), &chat, Some(now), later));
+        assert!(!should_rotate(
+            true,
+            &full(0, false),
+            &chat,
+            Some(now),
+            later
+        ));
         let after = now + ROTATION_COOLDOWN;
-        assert!(should_rotate(true, &full(0, false), &chat, Some(now), after));
+        assert!(should_rotate(
+            true,
+            &full(0, false),
+            &chat,
+            Some(now),
+            after
+        ));
     }
 }

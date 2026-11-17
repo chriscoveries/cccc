@@ -87,15 +87,21 @@ mod tests {
     fn only_an_ambiguous_existing_chat_delivery_is_reconcilable() {
         assert_eq!(reconcilable(&ambiguous("x")), Some("d1".into()));
         assert_eq!(
-            reconcilable(&json!({"kind":"new_chat","last_delivery_status":"submission_ambiguous","last_delivery_id":"d1"})),
+            reconcilable(
+                &json!({"kind":"new_chat","last_delivery_status":"submission_ambiguous","last_delivery_id":"d1"})
+            ),
             None
         );
         assert_eq!(
-            reconcilable(&json!({"kind":"existing_chat","last_delivery_status":"submitted","last_delivery_id":"d1"})),
+            reconcilable(
+                &json!({"kind":"existing_chat","last_delivery_status":"submitted","last_delivery_id":"d1"})
+            ),
             None
         );
         assert_eq!(
-            reconcilable(&json!({"kind":"existing_chat","last_delivery_status":"submission_ambiguous"})),
+            reconcilable(
+                &json!({"kind":"existing_chat","last_delivery_status":"submission_ambiguous"})
+            ),
             None
         );
     }
@@ -105,8 +111,14 @@ mod tests {
         assert_eq!(auto_resume_after(None), None);
         assert_eq!(auto_resume_after(Some("0")), None);
         assert_eq!(auto_resume_after(Some("abc")), None);
-        assert_eq!(auto_resume_after(Some("20")), Some(Duration::from_secs(1200)));
-        assert_eq!(auto_resume_after(Some("99999")), Some(Duration::from_secs(86400)));
+        assert_eq!(
+            auto_resume_after(Some("20")),
+            Some(Duration::from_secs(1200))
+        );
+        assert_eq!(
+            auto_resume_after(Some("99999")),
+            Some(Duration::from_secs(86400))
+        );
     }
 
     #[test]
@@ -115,9 +127,21 @@ mod tests {
             .expect("valid RFC 3339 time")
             .with_timezone(&chrono::Utc);
         let after = Some(Duration::from_secs(20 * 60));
-        assert!(auto_resume_due(&ambiguous("2026-11-15T07:30:00Z"), after, now));
-        assert!(!auto_resume_due(&ambiguous("2026-11-15T07:50:00Z"), after, now));
-        assert!(!auto_resume_due(&ambiguous("2026-11-15T07:30:00Z"), None, now));
+        assert!(auto_resume_due(
+            &ambiguous("2026-11-15T07:30:00Z"),
+            after,
+            now
+        ));
+        assert!(!auto_resume_due(
+            &ambiguous("2026-11-15T07:50:00Z"),
+            after,
+            now
+        ));
+        assert!(!auto_resume_due(
+            &ambiguous("2026-11-15T07:30:00Z"),
+            None,
+            now
+        ));
         assert!(!auto_resume_due(&ambiguous("not a time"), after, now));
         let mut reviewed = ambiguous("2026-11-15T07:30:00Z");
         reviewed["last_delivery_reviewed_at"] = json!("2026-11-15T07:31:00Z");
@@ -130,8 +154,14 @@ mod tests {
         assert!(tab_safe_to_resume(&ok, true));
         assert!(!tab_safe_to_resume(&ok, false));
         assert!(!tab_safe_to_resume(&json!({"ready":false}), true));
-        assert!(!tab_safe_to_resume(&json!({"ready":true,"composer_chars":5}), true));
-        assert!(!tab_safe_to_resume(&json!({"ready":true,"running":true}), true));
+        assert!(!tab_safe_to_resume(
+            &json!({"ready":true,"composer_chars":5}),
+            true
+        ));
+        assert!(!tab_safe_to_resume(
+            &json!({"ready":true,"running":true}),
+            true
+        ));
         assert!(!tab_safe_to_resume(
             &json!({"ready":true,"composer_has_attachments":true}),
             true
