@@ -110,6 +110,20 @@ fn connector(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<Optio
         .find(|c| binding(c, group, actor).is_some()))
 }
 
+/// Poll mode: a paired Dot with no live subscription may claim queued work
+/// from its own timed call. Off by default. CCCC_DOTS_POLL_MODE on the Actor
+/// wins; the daemon's environment sets it for every Dot on this host.
+fn poll_mode(actor: &Actor) -> bool {
+    let value = actor
+        .env
+        .get("CCCC_DOTS_POLL_MODE")
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .or_else(|| std::env::var("CCCC_DOTS_POLL_MODE").ok())
+        .unwrap_or_default();
+    matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on")
+}
+
 fn subscribed(subscription: &Value, now: i64) -> bool {
     subscription.is_object()
         && subscription["enabled"] == true
@@ -148,7 +162,7 @@ pub(super) fn project(
         .as_str()
         .is_some_and(|id| !id.is_empty());
     let subscribed = subscribed(&dots["subscription"], chrono::Utc::now().timestamp_millis());
-    let poll_mode = dots["poll_mode"] == true;
+    let poll_mode = poll_mode(actor);
     let paired = connector
         .as_ref()
         .and_then(|c| binding(c, group, actor))

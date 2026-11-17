@@ -1535,12 +1535,27 @@ fn dots(f: &Fixture) -> Value {
 fn unsubscribed(f: &Fixture, poll: bool) {
     store::dots_update(&f.home, &f.connector_id, |c| {
         c["dots"]["subscription"]["enabled"] = json!(false);
-        if poll {
-            c["dots"]["poll_mode"] = json!(true);
-        }
         Ok(())
     })
     .expect("retire the subscription");
+    if poll {
+        poll_setting(f, "on");
+    }
+}
+
+/// The owner's per-Dot switch: CCCC_DOTS_POLL_MODE in the Actor's environment.
+fn poll_setting(f: &Fixture, value: &str) {
+    let groups = GroupStore::new(f.home.clone()).expect("group store");
+    let mut group = groups.load(&f.group.group_id).expect("load group");
+    let actor = group
+        .actors
+        .iter_mut()
+        .find(|actor| actor.id == "dot")
+        .expect("Dot Actor");
+    actor
+        .env
+        .insert("CCCC_DOTS_POLL_MODE".into(), value.into());
+    groups.save(&group).expect("save poll mode");
 }
 
 #[test]
@@ -1595,11 +1610,7 @@ fn dots_without_poll_mode_stays_idle_when_unsubscribed() {
 fn dots_poll_mode_leaves_a_subscribed_dot_on_the_native_wake_path() {
     let f = Fixture::new();
     f.start();
-    store::dots_update(&f.home, &f.connector_id, |c| {
-        c["dots"]["poll_mode"] = json!(true);
-        Ok(())
-    })
-    .expect("poll mode on a subscribed Dot");
+    poll_setting(&f, "on");
     f.source("delivered by the native wake");
     f.delivery();
     let claimed = f.claim(&f.claim_capture());
@@ -1630,4 +1641,16 @@ fn dots_poll_mode_completed_turn_token_cannot_run_the_next_turn() {
         store::dots_binding_for_token(&f.private(), &token, "cccc_message_send").is_none(),
         "a completed poll turn's token must not authorize the next turn"
     );
+}
+
+#[test]
+fn dots_poll_mode_off_on_the_actor_stays_idle_when_unsubscribed() {
+    let f = Fixture::new();
+    f.start();
+    unsubscribed(&f, false);
+    poll_setting(&f, "off");
+    f.source("queued while poll mode is off");
+    let idle = f.claim(&f.claim_capture());
+    assert_eq!(idle["status"], "idle");
+    assert!(idle.get("actor_token").is_none());
 }
