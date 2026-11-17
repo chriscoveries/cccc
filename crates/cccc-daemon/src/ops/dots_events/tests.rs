@@ -1937,10 +1937,14 @@ fn dots_poll_mode_respects_stop_and_can_be_turned_off() {
     let f = Fixture::new();
     f.call("dots_events_poll_mode", json!({"enabled":true}));
     f.source("queued while the Dot Actor is stopped");
-    let stopped = f.claim(&f.claim_capture());
-    assert_eq!(stopped["status"], "idle");
-    assert!(stopped.get("actor_token").is_none());
+    // A stopped Actor's captured authority is refused before the claim runs.
+    let stopped = f.response(
+        "dots_work_claim",
+        json!({"by":"dot","_cccc_web_binding":f.claim_capture()}),
+    );
+    assert!(!stopped.ok);
     assert!(f.private()["dots"]["wake"].is_null());
+    assert!(f.private()["dots"]["execution"].is_null());
 
     f.call("actor_start", json!({}));
     f.call("dots_events_poll_mode", json!({"enabled":false}));
