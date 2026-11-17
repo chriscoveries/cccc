@@ -460,15 +460,17 @@ async fn deliver_once(
             target_url,
             readiness["tab_url"].as_str().unwrap_or(""),
         )
-        && super::web_model_reopen::state_allows_reopen(
-            readiness["state"].as_str().unwrap_or(""),
-        );
+        && super::web_model_reopen::state_allows_reopen(readiness["state"].as_str().unwrap_or(""));
     if bound_chat_mismatch {
         if !super::web_model_reopen::try_book(session_key, rate_limit.as_ref()) {
             return Ok(DeliveryOutcome::Idle);
         }
         if readiness["ready"] != true {
-            tracing::info!(group_id, actor_id, "Web-model tab is off its bound conversation; reopening it");
+            tracing::info!(
+                group_id,
+                actor_id,
+                "Web-model tab is off its bound conversation; reopening it"
+            );
             if let Err(error) = state
                 .browser_surfaces
                 .align_chatgpt_conversation_target(

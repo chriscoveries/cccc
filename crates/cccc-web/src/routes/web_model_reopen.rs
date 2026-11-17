@@ -23,10 +23,7 @@ static LAST_REOPEN: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 pub(super) fn state_allows_reopen(state: &str) -> bool {
     !matches!(
         state,
-        "loading"
-            | "sign_in_required"
-            | "verification_required"
-            | "conversation_length_exceeded"
+        "loading" | "sign_in_required" | "verification_required" | "conversation_length_exceeded"
     )
 }
 
@@ -79,7 +76,12 @@ mod tests {
         ] {
             assert!(!state_allows_reopen(state), "{state}");
         }
-        for state in ["page_not_ready", "ready", "rate_limited", "conversation_load_failed"] {
+        for state in [
+            "page_not_ready",
+            "ready",
+            "rate_limited",
+            "conversation_load_failed",
+        ] {
             assert!(state_allows_reopen(state), "{state}");
         }
     }
@@ -88,7 +90,12 @@ mod tests {
     fn at_most_one_reopen_per_ten_minutes() {
         let now = Instant::now();
         assert!(reopen_due(None, now, None, 0));
-        assert!(!reopen_due(Some(now), now + Duration::from_secs(60), None, 0));
+        assert!(!reopen_due(
+            Some(now),
+            now + Duration::from_secs(60),
+            None,
+            0
+        ));
         assert!(!reopen_due(
             Some(now),
             now + REOPEN_COOLDOWN - Duration::from_secs(1),
