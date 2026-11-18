@@ -1215,6 +1215,37 @@ async fn explicit_pairing_repairs_a_stale_binding_and_preserves_a_project_chat_b
     }
     page_value(&page, "document.querySelector('textarea').value=''").await;
 
+    // The composer changes after the preparation probe, as the final
+    // document guard selects the current composer for navigation.
+    page_value(
+        &page,
+        r#"() => {
+            const box = document.querySelector('textarea');
+            const set = box.setAttribute.bind(box);
+            let probes = 0;
+            box.setAttribute = (name, value) => {
+                if (name === 'data-cccc-web-model-composer' && ++probes === 2) {
+                    box.value = 'Draft just before navigation';
+                    delete box.setAttribute;
+                }
+                set(name, value);
+            };
+        }"#,
+    )
+    .await;
+    let refused = change(State(state.clone()), Json(repair.clone()))
+        .await
+        .expect_err("draft at navigation time blocks replacement");
+    assert_eq!(refused.code(), "pairing_composer_occupied");
+    assert_eq!(page_value(&page, "location.href").await, project_url);
+    assert_eq!(
+        page_value(&page, "document.querySelector('textarea').value").await,
+        "Draft just before navigation"
+    );
+    assert_eq!(binding(), moved);
+    assert_eq!(target(), ambiguous);
+    page_value(&page, "document.querySelector('textarea').value=''").await;
+
     change(State(state.clone()), Json(repair))
         .await
         .expect("one replacement request");
