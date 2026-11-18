@@ -492,6 +492,10 @@ async fn deliver_once(
     {
         return resolve_pending_new_chat(state, group_id, actor_id, session_key, &target).await;
     }
+    let delivery_status = target["last_delivery_status"].as_str();
+    let staged = delivery_status == Some("deferred");
+    let preflight_deferred = delivery_status == Some("preflight_deferred");
+    let resume_claim = staged || preflight_deferred;
     let rate_limit = target.get("load_recovery");
     // cwf#825/#821: the tab left its bound conversation (Saved chat
     // unavailable / could not load on another URL). Reopen the bound URL at
@@ -534,6 +538,11 @@ async fn deliver_once(
     // claimed, so queued messages stay unread until the Actor is re-paired to
     // a fresh chat. Record it once so status/health stop looking healthy.
     if readiness["state"] == crate::browser_surface::CONVERSATION_LENGTH_EXCEEDED_STATE {
+        // The browser health already reports the full chat. Keep the exact
+        // turn available for resumption or settlement by a lifecycle change.
+        if resume_claim {
+            return Ok(DeliveryOutcome::Idle);
+        }
         if target["last_delivery_status"] != "conversation_length_exceeded" {
             update_target(
                 state,
@@ -574,7 +583,7 @@ async fn deliver_once(
         return Ok(DeliveryOutcome::Idle);
     }
     if reconcile_draft::composer_occupied(&readiness)
-        && target["last_delivery_status"] != "deferred"
+        && !staged
         && reconcile_draft::clear_owned_draft(state, group_id, actor_id, &target, &readiness)
             .await?
     {
@@ -584,10 +593,9 @@ async fn deliver_once(
             .await
             .map_err(|error| ApiError::bad(error.to_string()))?;
     }
-    if reconcile_draft::composer_occupied(&readiness)
-        && target["last_delivery_status"] != "deferred"
-    {
-        if target["last_delivery_status"] != "draft_blocked" {
+    if reconcile_draft::composer_occupied(&readiness) && !staged {
+        // An unsent claim still needs its resume ID after the draft clears.
+        if !preflight_deferred && delivery_status != Some("draft_blocked") {
             update_target(
                 state,
                 group_id,
@@ -622,21 +630,25 @@ async fn deliver_once(
             .await
         {
             let message = error.to_string();
-            update_target(
-                state,
-                group_id,
-                actor_id,
-                json!({
-                    "last_delivery_status":"failed",
-                    "last_submission_evidence":{
-                        "submitted":false,
-                        "submission_evidence":"bound_conversation_unavailable",
-                        "error":message.as_str()
-                    },
-                    "last_error":message.as_str()
-                }),
-            )?;
-            record_connector(state, group_id, actor_id, "failed", "", &message)?;
+            if resume_claim {
+                update_target(state, group_id, actor_id, json!({"last_error":message}))?;
+            } else {
+                update_target(
+                    state,
+                    group_id,
+                    actor_id,
+                    json!({
+                        "last_delivery_status":"failed",
+                        "last_submission_evidence":{
+                            "submitted":false,
+                            "submission_evidence":"bound_conversation_unavailable",
+                            "error":message.as_str()
+                        },
+                        "last_error":message.as_str()
+                    }),
+                )?;
+                record_connector(state, group_id, actor_id, "failed", "", &message)?;
+            }
             // cwf#825: keep the worker alive; the reopen gate above retries
             // the bound URL once per 10 minutes instead of a dead lane.
             super::web_model_reopen::try_book(session_key, rate_limit);
@@ -652,10 +664,7 @@ async fn deliver_once(
         return Ok(DeliveryOutcome::Idle);
     }
     let mut wait_args = browser_wait_args(group_id, actor_id);
-    if matches!(
-        target["last_delivery_status"].as_str(),
-        Some("deferred" | "preflight_deferred")
-    ) {
+    if resume_claim {
         // Resume the saved claim without taking another batch.
         wait_args.insert(
             "resume_turn_id".into(),
@@ -729,12 +738,14 @@ async fn deliver_once(
     {
         return Err(ApiError::bad("Actor binding changed before delivery"));
     }
-    let staged = target["last_delivery_status"] == "deferred";
+    let resuming_attempt = resume_claim
+        && target["last_delivery_turn_id"].as_str() == Some(turn_id)
+        && target["last_delivery_event_ids"] == turn["event_ids"];
     let ready = matches!(after_claim, Ok(Ok(ref after)) if ready_to_claim(&target, after)
-        && (staged || !reconcile_draft::composer_occupied(after)))
+        && (staged && resuming_attempt || !reconcile_draft::composer_occupied(after)))
         && state.browser_surfaces.info(session_key).await["target_id"] == surface["target_id"];
     if !ready || !super::web_model_supervisor::actor_delivery_enabled(state, group_id, actor_id) {
-        if !staged && target["last_delivery_status"] != "preflight_deferred" {
+        if !resuming_attempt {
             update_target(
                 state,
                 group_id,

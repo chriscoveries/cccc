@@ -774,11 +774,6 @@ impl BrowserSurfaces {
                 .context("decode visible browser composer")?
         };
         let ready = !candidate.selector.is_empty();
-        let snapshot = if ready {
-            inspect_submission(page, "", &[]).await?
-        } else {
-            SubmissionSnapshot::default()
-        };
         // cwf#821: a page with no composer may be ChatGPT's "Could not load
         // this conversation" page (often an account-wide 429). Report it
         // distinctly so delivery can wait and recover instead of stalling.
@@ -791,6 +786,11 @@ impl BrowserSurfaces {
                     .ok()
                     .and_then(|probe| super::load_error::classify_load_error(&probe))
             };
+        let snapshot = if ready || load_error.is_some() {
+            inspect_submission(page, "", &[]).await?
+        } else {
+            SubmissionSnapshot::default()
+        };
         // cwf#853: ChatGPT keeps the composer on a conversation that hit its
         // maximum length, but refuses every turn. Treat it as not ready so
         // delivery never claims queued work for a dead conversation.

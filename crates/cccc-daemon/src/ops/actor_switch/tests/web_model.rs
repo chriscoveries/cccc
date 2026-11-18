@@ -183,6 +183,33 @@ fn work_a_browser_never_marked_for_submission_goes_back_to_the_queue() {
 }
 
 #[test]
+fn a_switch_requeues_an_exact_unsent_preflight_claim() {
+    let fixture = Fixture::new();
+    fixture.browser_member();
+    let message = fixture.message("readiness was lost before submission");
+    let turn = fixture.claim();
+    integration_state::group_update(
+        &fixture.store(),
+        &fixture.group_id,
+        "web_model_browser_targets",
+        |targets| {
+            targets["x"] = json!({
+                "last_delivery_status":"preflight_deferred",
+                "last_delivery_turn_id":turn["turn_id"],
+                "last_delivery_event_ids":turn["event_ids"],
+                "last_submission_evidence":{"submitted":false,"submission_evidence":"send_not_started"}
+            });
+            Ok(())
+        }
+    ).expect("held target");
+    fixture.switch(to_codex());
+    assert_eq!(fixture.active_turn(), "");
+    assert_eq!(fixture.delivery_state(&message).as_deref(), Some("failed"));
+    assert_eq!(fixture.transport(&message), BROWSER);
+    assert_eq!(fixture.pending(), [message.id]);
+}
+
+#[test]
 fn work_a_browser_may_have_submitted_is_left_for_review() {
     let fixture = Fixture::new();
     fixture.browser_member();

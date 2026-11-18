@@ -1251,7 +1251,13 @@ pub(super) fn settle_active_turn(
     let targets =
         integration_state::group_get(&store, &group.group_id, "web_model_browser_targets")
             .map_err(OpError::io)?;
-    let fenced = targets[&actor.id]["last_delivery_turn_id"].as_str() == Some(active_turn);
+    let target = &targets[&actor.id];
+    let fenced = target["last_delivery_turn_id"].as_str() == Some(active_turn);
+    let preflight_unsent = fenced
+        && target["last_delivery_status"] == "preflight_deferred"
+        && target["last_submission_evidence"]["submitted"] == false
+        && target["last_submission_evidence"]["submission_evidence"] == "send_not_started"
+        && target["last_delivery_event_ids"] == state["active_event_ids"];
     let event_ids = state["active_event_ids"]
         .as_array()
         .into_iter()
@@ -1264,9 +1270,11 @@ pub(super) fn settle_active_turn(
             continue;
         };
         let outcome = match delivery.as_str() {
-            "claimed" if !fenced => crate::ops::runtime_delivery::DeliveryOutcome::Unsubmitted(
-                "the member's runtime was switched before this was submitted",
-            ),
+            "claimed" if !fenced || preflight_unsent && transport == "web_model_browser" => {
+                crate::ops::runtime_delivery::DeliveryOutcome::Unsubmitted(
+                    "the member's runtime was switched before this was submitted",
+                )
+            }
             "claimed" | "accepted" => crate::ops::runtime_delivery::DeliveryOutcome::Ambiguous(
                 "the member's runtime was switched while this was with its previous owner",
             ),

@@ -435,7 +435,7 @@ pub(super) async fn payload(
         && super::web_model_reconcile::composer_occupied(&readiness)
         && !matches!(
             target["last_delivery_status"].as_str(),
-            Some("deferred" | "preflight_deferred" | "submitting" | "legacy_recovery_submitting")
+            Some("deferred" | "submitting" | "legacy_recovery_submitting")
         );
     let closed_reason = surface["closed_reason"].as_str().unwrap_or_default();
     let login_required = readiness["login_required"].as_bool().unwrap_or(false);
@@ -595,7 +595,7 @@ pub(super) async fn payload(
             "Binding chat",
             "Prompt was submitted; waiting for ChatGPT to assign the chat URL.",
         ),
-        "submitting" if internal_delivery_status == "deferred" => (
+        "submitting" if matches!(internal_delivery_status, "deferred" | "preflight_deferred") => (
             "Waiting to submit",
             "The Web Model is responding or its Send control is not ready.",
         ),

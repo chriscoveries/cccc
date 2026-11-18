@@ -199,9 +199,14 @@ pub(super) async fn handle_load_error(
     if let Some(hint) = hint {
         record.apply_retry_after(now, hint);
     }
-    // A deferred batch can still own an attachment or draft on this page.
-    let staged = target["last_delivery_status"] == "deferred";
-    let reload = !staged && record.book(now);
+    // Error pages can still expose an attachment or a running reply even
+    // when they have no usable composer. Keep the episode without navigating.
+    let busy = matches!(
+        target["last_delivery_status"].as_str(),
+        Some("deferred" | "submitting" | "legacy_recovery_submitting")
+    ) || super::web_model_reconcile::composer_occupied(readiness)
+        || readiness["running"] == true;
+    let reload = !busy && record.book(now);
     if previous.as_ref() != Some(&record) {
         update_target(state, group, actor, json!({"load_recovery":record}))?;
     }

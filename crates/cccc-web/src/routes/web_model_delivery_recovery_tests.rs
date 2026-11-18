@@ -361,6 +361,110 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
         "the completed batch must not be submitted again"
     );
 
+    let fourth = message("send once after the draft clears");
+    // The second composer inspection in this attempt runs after the daemon
+    // claim. Model a human beginning a draft at that point.
+    page.evaluate(
+        r#"() => {
+        const box = document.querySelector('textarea');
+        const original = box.setAttribute.bind(box);
+        let probes = 0;
+        box.setAttribute = (name, value) => {
+            if (name === 'data-cccc-web-model-composer' && ++probes === 2) {
+                box.value = 'Unsent draft';
+                delete box.setAttribute;
+            }
+            original(name, value);
+        };
+    }"#,
+    )
+    .await
+    .expect("draft during claim");
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("preflight"),
+        DeliveryOutcome::Idle
+    ));
+    let held = load_target(&state, &group.group_id, "browser-test").expect("held claim");
+    assert_eq!(held["last_delivery_status"], "preflight_deferred");
+    assert_eq!(held["last_delivery_event_ids"], json!([fourth.id]));
+    assert_eq!(
+        held["last_submission_evidence"]["submission_evidence"],
+        "send_not_started"
+    );
+    for _ in 0..2 {
+        assert!(matches!(
+            deliver_pending(&state, &group.group_id, "browser-test")
+                .await
+                .expect("draft held"),
+            DeliveryOutcome::Idle
+        ));
+        assert_eq!(
+            load_target(&state, &group.group_id, "browser-test").expect("same claim"),
+            held
+        );
+        assert_eq!(
+            call("headless_status", json!({})).await["state"]["active_turn_id"],
+            held["last_delivery_turn_id"]
+        );
+    }
+    assert_eq!(
+        page.evaluate("document.querySelector('textarea').value")
+            .await
+            .expect("draft")
+            .into_value::<String>()
+            .expect("text"),
+        "Unsent draft"
+    );
+    page.evaluate(r#"() => {
+        document.querySelector('textarea').value = '';
+        const banner = document.createElement('div');
+        banner.id = 'conversation-limit';
+        banner.textContent = "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat.";
+        document.body.append(banner);
+    }"#).await.expect("full-chat banner");
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("full chat"),
+        DeliveryOutcome::Idle
+    ));
+    assert_eq!(
+        load_target(&state, &group.group_id, "browser-test").expect("same claim"),
+        held
+    );
+    page.evaluate("document.querySelector('#conversation-limit').remove()")
+        .await
+        .expect("recover page");
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("resume exact claim"),
+        DeliveryOutcome::Submitted
+    ));
+    let delivered = load_target(&state, &group.group_id, "browser-test").expect("delivered");
+    assert_eq!(
+        delivered["last_delivery_turn_id"],
+        held["last_delivery_turn_id"]
+    );
+    assert_eq!(delivered["last_delivery_id"], held["last_delivery_id"]);
+    assert_eq!(
+        page.evaluate("window.attempts")
+            .await
+            .expect("attempts")
+            .into_value::<u32>()
+            .expect("number"),
+        2,
+        "one send for each resumed batch"
+    );
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("queue drained"),
+        DeliveryOutcome::Idle
+    ));
+
     surfaces.close(&session_key).await.expect("close browser");
     let _ = shutdown.send(());
     server.abort();
@@ -1215,7 +1319,73 @@ async fn load_error_is_retried_before_ambiguous_review_and_exhausts_visibly() {
     let binding =
         load_target(state, group, RECOVERY_ACTOR).expect("bound")["binding_revision"].clone();
 
-    for attempts in 0..=3 {
+    let page = state
+        .browser_surfaces
+        .sessions
+        .lock()
+        .await
+        .get(&session_key)
+        .expect("page")
+        .page
+        .clone();
+    page.evaluate(
+        r#"() => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.id = 'held-file';
+        const upload = new DataTransfer();
+        upload.items.add(new File(['draft'], 'draft.txt'));
+        input.files = upload.files;
+        document.body.append(input);
+        const stop = document.createElement('button');
+        stop.id = 'running-reply';
+        stop.setAttribute('aria-label', 'Stop generating');
+        stop.textContent = 'Stop';
+        document.body.append(stop);
+    }"#,
+    )
+    .await
+    .expect("staged file while provider stops");
+    let readiness = state
+        .browser_surfaces
+        .prompt_readiness(&session_key)
+        .await
+        .expect("load error");
+    assert_eq!(readiness["ready"], false);
+    assert_eq!(readiness["composer_has_attachments"], true);
+    assert_eq!(readiness["running"], true);
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("record episode"),
+        DeliveryOutcome::Idle
+    ));
+    let mut due =
+        load_target(state, group, RECOVERY_ACTOR).expect("target")["load_recovery"].clone();
+    due["next_reload_at_ms"] = json!(0);
+    update_target(state, group, RECOVERY_ACTOR, json!({"load_recovery":due})).expect("due retry");
+    for blocker in ["#running-reply", "#held-file"] {
+        assert!(matches!(
+            deliver_pending(state, group, RECOVERY_ACTOR)
+                .await
+                .expect("busy error page"),
+            DeliveryOutcome::Idle
+        ));
+        assert_eq!(visits.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            load_target(state, group, RECOVERY_ACTOR).expect("target")["load_recovery"]["reload_attempts"],
+            0,
+            "a blocked retry must not spend its budget"
+        );
+        page.evaluate(format!(
+            "document.querySelector({}).remove()",
+            json!(blocker)
+        ))
+        .await
+        .expect("operator clears obstruction");
+    }
+
+    for attempts in 1..=3 {
         assert!(matches!(
             deliver_pending(state, group, RECOVERY_ACTOR)
                 .await
@@ -1254,15 +1424,6 @@ async fn load_error_is_retried_before_ambiguous_review_and_exhausts_visibly() {
 
     // An operator reopens the conversation after the provider is healthy.
     healthy.store(true, Ordering::Relaxed);
-    let page = state
-        .browser_surfaces
-        .sessions
-        .lock()
-        .await
-        .get(&session_key)
-        .expect("page")
-        .page
-        .clone();
     page.reload().await.expect("operator reload");
     assert!(matches!(
         deliver_pending(state, group, RECOVERY_ACTOR)
