@@ -8,9 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::AppState;
 use crate::api::ApiError;
-use crate::browser_surface::{
-    BOUND_CONVERSATION_ERROR_MARKER, PromptSubmissionOutcome, is_chatgpt_url,
-};
+use crate::browser_surface::{BoundPromptNotReady, PromptSubmissionOutcome, is_chatgpt_url};
 
 use super::web_model_browser::key;
 use super::web_model_delivery_completion::{
@@ -382,7 +380,9 @@ async fn deliver_once(
             return Ok(DeliveryOutcome::Idle);
         }
     };
-    if recovery::handle_load_error(state, group_id, actor_id, &target, &readiness).await? {
+    if readiness["state"] == "page_changed"
+        || recovery::handle_load_error(state, group_id, actor_id, &target, &readiness).await?
+    {
         return Ok(DeliveryOutcome::Idle);
     }
     if target["last_delivery_status"] == "submission_ambiguous" {
@@ -838,36 +838,19 @@ async fn deliver_once(
             )
             .await;
         }
-        Err(error) if error.to_string().contains(BOUND_CONVERSATION_ERROR_MARKER) => {
+        Err(error) if error.is::<BoundPromptNotReady>() => {
             let message = error.to_string();
-            update_target(
-                state,
-                group_id,
-                actor_id,
+            let patch = if staged && resuming_attempt {
+                json!({"last_delivery_status":"deferred","last_error":message})
+            } else {
                 json!({
-                    "last_delivery_status":"failed",
-                    "last_submission_evidence":{
-                        "submitted":false,
-                        "submission_evidence":"bound_conversation_unavailable",
-                        "error":message.as_str()
-                    },
-                    "last_error":message.as_str()
-                }),
-            )?;
-            record_connector(state, group_id, actor_id, "failed", turn_id, &message)?;
-            record_delivery(
-                state,
-                group_id,
-                actor_id,
-                turn_id,
-                turn["event_ids"].clone(),
-                &delivery_id,
-                "failed",
-                &message,
-                json!({"target_url":target_url}),
-            )
-            .await;
-            return Ok(DeliveryOutcome::Stopped);
+                    "last_delivery_status":"preflight_deferred",
+                    "last_submission_evidence":{"submitted":false,"submission_evidence":"send_not_started"},
+                    "last_error":message
+                })
+            };
+            update_target(state, group_id, actor_id, patch)?;
+            return Ok(DeliveryOutcome::Idle);
         }
         Err(error) => {
             let message = format!(

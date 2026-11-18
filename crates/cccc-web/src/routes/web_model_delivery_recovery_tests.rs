@@ -800,6 +800,56 @@ async fn contended_worker_recovers_manual_send_and_only_delivers_later_work() {
         "fixture must enable delivery: {:?}",
         store.load(&group.group_id).expect("group").running
     );
+    let mut held_turn = None;
+    for probe in [2, 3] {
+        // The second inspection runs after the claim. The third selects the
+        // composer for staging after the worker's preflight succeeded.
+        page.evaluate(format!(
+            r#"(() => {{
+            const box = document.querySelector('textarea');
+            const original = box.setAttribute.bind(box);
+            let probes = 0;
+            box.setAttribute = (name, value) => {{
+                if (name === 'data-cccc-web-model-composer' && ++probes === {probe}) {{
+                    history.replaceState(null, '', '/c/unrelated-fixture');
+                    delete box.setAttribute;
+                }}
+                original(name, value);
+            }};
+        }})()"#
+        ))
+        .await
+        .expect("switch chats during inspection");
+        assert!(matches!(
+            deliver_pending(&state, &group.group_id, "browser-test")
+                .await
+                .expect("hold changed chat"),
+            DeliveryOutcome::Idle
+        ));
+        let held = load_target(&state, &group.group_id, "browser-test").expect("held target");
+        assert_eq!(held["last_delivery_status"], "preflight_deferred");
+        assert_eq!(held["last_delivery_event_ids"], json!([first.id]));
+        assert_eq!(
+            held["last_submission_evidence"]["submission_evidence"],
+            "send_not_started"
+        );
+        let turn = held["last_delivery_turn_id"].clone();
+        assert!(!turn.as_str().expect("claimed turn ID").is_empty());
+        assert_eq!(*held_turn.get_or_insert(turn.clone()), turn);
+        assert_eq!(
+            page.evaluate(
+                "[location.pathname, document.querySelector('textarea').value, window.attempts]"
+            )
+            .await
+            .expect("wrong chat")
+            .into_value::<Value>()
+            .expect("page state"),
+            json!(["/c/unrelated-fixture", "", 0])
+        );
+        page.evaluate("history.replaceState(null,'','/g/g-p-fixture/c/recovery-fixture')")
+            .await
+            .expect("restore bound chat through Project alias");
+    }
     let initial_state = state.clone();
     let initial_group = group.group_id.clone();
     let initial = tokio::spawn(async move {
@@ -857,6 +907,10 @@ async fn contended_worker_recovers_manual_send_and_only_delivers_later_work() {
     );
     initial.await.expect("initial task");
     let ambiguous = load_target(&state, &group.group_id, "browser-test").expect("target");
+    assert_eq!(
+        ambiguous["last_delivery_turn_id"],
+        held_turn.expect("deferred turn")
+    );
     assert!(
         !recover_verified_ambiguous_submission(&state, &group.group_id, "browser-test", &ambiguous)
             .await

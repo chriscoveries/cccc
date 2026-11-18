@@ -19,8 +19,8 @@ pub(crate) use chrome_test_guard::chrome_test_guard;
 
 pub use interaction::{serve_socket, serve_vnc_socket};
 pub(crate) use prompt_submission::{
-    BOUND_CONVERSATION_ERROR_MARKER, PromptSubmissionOutcome, conversation_target_matches,
-    is_chatgpt_url, normalized_chatgpt_conversation_url,
+    BoundPromptNotReady, PromptSubmissionOutcome, conversation_target_matches, is_chatgpt_url,
+    normalized_chatgpt_conversation_url,
 };
 
 use anyhow::{Context, Result, bail};

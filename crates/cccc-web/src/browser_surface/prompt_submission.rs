@@ -19,7 +19,19 @@ pub(crate) const SUBMISSION_EVIDENCE_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
 const SEND_STABILITY_INTERVAL: Duration = Duration::from_millis(300);
 const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(10);
-pub(crate) const BOUND_CONVERSATION_ERROR_MARKER: &str = "chatgpt_bound_conversation_unavailable:";
+const BOUND_CONVERSATION_ERROR_MARKER: &str = "chatgpt_bound_conversation_unavailable:";
+
+#[derive(Debug)]
+pub(crate) struct BoundPromptNotReady;
+
+impl std::fmt::Display for BoundPromptNotReady {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .write_str("The bound conversation was no longer ready before the prompt was staged")
+    }
+}
+
+impl std::error::Error for BoundPromptNotReady {}
 
 pub(crate) enum PromptSubmissionOutcome {
     Verified(Value),
@@ -34,6 +46,15 @@ struct ComposerCandidate {
     descriptor: String,
     verification_required: bool,
     login_required: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ReadinessSnapshot {
+    url: String,
+    candidate: ComposerCandidate,
+    submission: SubmissionSnapshot,
+    attachments: bool,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -213,21 +234,16 @@ impl BrowserSurfaces {
         if let Some(target) = pairing {
             target.check_before_send(self, key).await?;
         }
+        let bound_chat = has_chatgpt_conversation_route(target_url);
         // Recovery owns one exact draft on the current page, not permission to
         // navigate back and replace whatever is there after a user changes tabs.
-        if expected_staged_draft.is_none() {
-            if has_chatgpt_conversation_route(target_url) {
-                self.align_chatgpt_conversation_target(key, target_url, Duration::from_secs(5))
-                    .await?;
-            } else if !target_url.is_empty() {
-                let current = page.url().await?.unwrap_or_default();
-                if !same_page(&current, target_url) {
-                    goto_dom_content_loaded(&page, target_url).await?;
-                }
+        // Managed ChatGPT delivery already aligns the page before claiming.
+        if expected_staged_draft.is_none() && !bound_chat && !target_url.is_empty() {
+            let current = page.url().await?.unwrap_or_default();
+            if !same_page(&current, target_url) {
+                goto_dom_content_loaded(&page, target_url).await?;
             }
         }
-        dismiss_duplicate_upload_dialog(&page).await?;
-
         // Pairing retries share their explanatory prefix, but each carries a
         // different code. Only the complete setup message identifies this send.
         let needles = if pairing.is_some() {
@@ -236,6 +252,10 @@ impl BrowserSurfaces {
             submission_needles(prompt)
         };
         let existing = inspect_submission(&page, prompt, &needles).await?;
+        if bound_chat && !conversation_target_matches(target_url, &existing.url) {
+            return Err(BoundPromptNotReady.into());
+        }
+        dismiss_duplicate_upload_dialog(&page, bound_chat.then_some(existing.url.as_str())).await?;
         // cwf#853: never type into a conversation ChatGPT has closed for length.
         if let Some(limit) = conversation_limit_after_submit(&page).await {
             self.record_page_state(key, &page).await;
@@ -258,9 +278,25 @@ impl BrowserSurfaces {
             )));
         }
 
-        let composer = wait_for_composer(&page).await?;
+        let composer = if bound_chat {
+            let composer: ComposerCandidate = page
+                .evaluate(format!("({SELECT_COMPOSER_SCRIPT})()"))
+                .await
+                .context(BoundPromptNotReady)?
+                .into_value()
+                .context(BoundPromptNotReady)?;
+            if composer.selector.is_empty() {
+                return Err(BoundPromptNotReady.into());
+            }
+            composer
+        } else {
+            wait_for_composer(&page).await?
+        };
         let staged = inspect_submission(&page, prompt, &needles).await?;
-        let owns_staged_draft = if let Some(expected) = expected_staged_draft {
+        if bound_chat && !conversation_target_matches(target_url, &staged.url) {
+            return Err(BoundPromptNotReady.into());
+        }
+        let owned_draft = if let Some(expected) = expected_staged_draft {
             let previous =
                 inspect_submission(&page, expected, &submission_needles(expected)).await?;
             if !recoverable_staged_draft(target_url, &previous) {
@@ -273,11 +309,11 @@ impl BrowserSurfaces {
                     &previous,
                 )));
             }
-            true
+            previous.exact_composer_text
         } else {
-            false
+            None
         };
-        if !staged.composer_exact && staged.composer_chars > 0 && !owns_staged_draft {
+        if !staged.composer_exact && staged.composer_chars > 0 && owned_draft.is_none() {
             // A previous delivery or a human may own this draft. Never replace
             // it, including if it appeared after the pre-claim readiness check.
             return Ok(PromptSubmissionOutcome::Ambiguous(evidence(
@@ -294,12 +330,24 @@ impl BrowserSurfaces {
             if let Some(target) = pairing {
                 target.check_before_send(self, key).await?;
             }
-            focus_and_select_composer(&page).await?;
-            page.execute(InsertTextParams::new(prompt))
-                .await
-                .context("insert prompt into visible browser composer")?;
+            if bound_chat {
+                if self.page(key).await?.target_id() != page.target_id()
+                    || !stage_bound_prompt(&page, &staged.url, prompt, owned_draft.as_deref())
+                        .await?
+                {
+                    return Err(BoundPromptNotReady.into());
+                }
+            } else {
+                focus_and_select_composer(&page).await?;
+                page.execute(InsertTextParams::new(prompt))
+                    .await
+                    .context("insert prompt into visible browser composer")?;
+            }
         }
         let mut baseline = wait_for_prompt_staged(&page, prompt, &needles).await?;
+        if bound_chat && !conversation_target_matches(target_url, &baseline.url) {
+            bail!("The bound conversation changed while staging the prompt");
+        }
         let staged_hash = if inserted_here && pairing.is_none() {
             baseline
                 .exact_composer_text
@@ -345,6 +393,9 @@ impl BrowserSurfaces {
         // Waiting for controls must not grant permission to send a draft that
         // a human changed in the meantime (or submit a manual send twice).
         let before_send = inspect_submission(&page, prompt, &needles).await?;
+        if bound_chat && !conversation_target_matches(target_url, &before_send.url) {
+            bail!("The bound conversation changed before send activation");
+        }
         if before_send.echo_found || !before_send.composer_exact {
             return Ok(self
                 .classify_deferred_submission(
@@ -419,7 +470,8 @@ impl BrowserSurfaces {
                 )
                 .await),
             SendReadiness::Missing(probe) => {
-                let request_submit = request_submit(&page).await;
+                let request_submit =
+                    request_submit(&page, prompt, &needles, &before_send.url).await;
                 match request_submit {
                     Ok(result) if result.unsafe_state => Ok(self
                         .classify_deferred_submission(
@@ -455,7 +507,7 @@ impl BrowserSurfaces {
                             )
                             .await)
                     }
-                    Ok(_) if probe.running || probe.stop_visible => Ok(self
+                    Ok(_) if bound_chat || probe.running || probe.stop_visible => Ok(self
                         .classify_deferred_submission(
                             key,
                             &page,
@@ -544,7 +596,7 @@ impl BrowserSurfaces {
                 &limit,
             );
         }
-        if observed.echo_found {
+        if observed.echo_found && receipt_on_bound_chat(attempt.baseline, &observed) {
             return PromptSubmissionOutcome::Verified(evidence(
                 true,
                 attempt.action,
@@ -600,7 +652,7 @@ impl BrowserSurfaces {
             }
             match inspect_submission(page, prompt, needles).await {
                 Ok(snapshot) => {
-                    if snapshot.echo_found {
+                    if snapshot.echo_found && receipt_on_bound_chat(baseline, &snapshot) {
                         if let Some(limit) = conversation_limit_after_submit(page).await {
                             self.record_page_state(key, page).await;
                             return conversation_limit_outcome(
@@ -764,15 +816,30 @@ impl BrowserSurfaces {
         // A new window may still be waiting for response headers. It cannot
         // contain a composer, and evaluating JS there can wait for navigation.
         let loading = matches!(url.as_str(), "" | "about:blank");
-        let candidate = if loading {
-            ComposerCandidate::default()
+        let observed = if loading {
+            ReadinessSnapshot::default()
         } else {
-            page.evaluate(format!("({SELECT_COMPOSER_SCRIPT})()"))
-                .await
-                .context("inspect visible browser composer")?
-                .into_value::<ComposerCandidate>()
-                .context("decode visible browser composer")?
+            let messages = super::chatgpt_dom::MESSAGES_SCRIPT;
+            page.evaluate(format!(
+                r#"(() => {{
+                    const url = location.href;
+                    const candidate = ({SELECT_COMPOSER_SCRIPT})();
+                    const submission = ({INSPECT_SUBMISSION_SCRIPT})({{}}, ({messages})());
+                    const attachments = ({COMPOSER_ATTACHMENTS_SCRIPT})();
+                    return {{url, candidate, submission, attachments}};
+                }})()"#,
+            ))
+            .await
+            .context("inspect browser readiness")?
+            .into_value::<ReadinessSnapshot>()
+            .context("decode browser readiness")?
         };
+        let ReadinessSnapshot {
+            url: observed_url,
+            candidate,
+            submission: snapshot,
+            attachments,
+        } = observed;
         let ready = !candidate.selector.is_empty();
         // cwf#821: a page with no composer may be ChatGPT's "Could not load
         // this conversation" page (often an account-wide 429). Report it
@@ -786,11 +853,6 @@ impl BrowserSurfaces {
                     .ok()
                     .and_then(|probe| super::load_error::classify_load_error(&probe))
             };
-        let snapshot = if ready || load_error.is_some() {
-            inspect_submission(page, "", &[]).await?
-        } else {
-            SubmissionSnapshot::default()
-        };
         // cwf#853: ChatGPT keeps the composer on a conversation that hit its
         // maximum length, but refuses every turn. Treat it as not ready so
         // delivery never claims queued work for a dead conversation.
@@ -802,12 +864,25 @@ impl BrowserSurfaces {
         } else {
             None
         };
+        if !loading {
+            let current_url = page
+                .evaluate("location.href")
+                .await?
+                .into_value::<String>()?;
+            if snapshot.url != observed_url || current_url != observed_url {
+                return Ok(json!({
+                    "ready":false,"state":"page_changed","tab_url":current_url,
+                    "checked_at":cccc_contracts::utc_now(),
+                    "message":"The conversation changed during inspection. Checking again before delivery."
+                }));
+            }
+        }
         let conversation_full = conversation_limit.is_some();
         let ready = ready && !conversation_full;
         let readiness = json!({
             "ready":ready,
             "composer_chars":snapshot.composer_chars,
-            "composer_has_attachments":!loading && composer_has_attachments(page).await?,
+            "composer_has_attachments":attachments,
             "running":snapshot.running,
             "thread_loaded":snapshot.thread_loaded,
             "login_required":candidate.login_required,
@@ -817,7 +892,7 @@ impl BrowserSurfaces {
                 else if conversation_full {super::conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE}
                 else {load_error.unwrap_or("page_not_ready")},
             "conversation_limit":conversation_limit.as_ref().map(super::conversation_limit::ConversationLimitProbe::to_json),
-            "tab_url":url,
+            "tab_url":if loading { url } else { observed_url },
             "input_selector":candidate.descriptor,
             "checked_at":cccc_contracts::utc_now(),
             "message":if loading {
@@ -889,15 +964,19 @@ impl BrowserSurfaces {
     }
 }
 
-async fn dismiss_duplicate_upload_dialog(page: &Page) -> Result<()> {
+async fn dismiss_duplicate_upload_dialog(page: &Page, url: Option<&str>) -> Result<()> {
+    let url = json!(url);
     let action = page
-        .evaluate(format!("({DISMISS_DUPLICATE_UPLOAD_DIALOG_SCRIPT})()"))
+        .evaluate(format!(
+            "(() => {{ const url = {url}; return url !== null && location.href !== url ? 'changed' : ({DISMISS_DUPLICATE_UPLOAD_DIALOG_SCRIPT})(); }})()"
+        ))
         .await
         .context("inspect duplicate compatibility image dialog")?
         .into_value::<String>()
         .context("decode duplicate compatibility image dialog state")?;
     match action.as_str() {
         "none" => return Ok(()),
+        "changed" => return Err(BoundPromptNotReady.into()),
         "dismissed" => {}
         _ => bail!("ChatGPT duplicate compatibility image dialog could not be dismissed"),
     }
@@ -1022,8 +1101,11 @@ async fn attach_compatibility_image(
 
 // Keep the early recovery inspection and final replacement check identical.
 fn recoverable_staged_draft(target_url: &str, snapshot: &SubmissionSnapshot) -> bool {
-    same_page(&snapshot.url, target_url)
-        && snapshot.user_message_count == 0
+    (if has_chatgpt_conversation_route(target_url) {
+        conversation_target_matches(target_url, &snapshot.url)
+    } else {
+        same_page(&snapshot.url, target_url)
+    }) && snapshot.user_message_count == 0
         && !snapshot.echo_found
         && !snapshot.running
         && !snapshot.stop_visible
@@ -1078,6 +1160,38 @@ async fn focus_and_select_composer(page: &Page) -> Result<()> {
         bail!("visible browser composer disappeared before prompt insertion");
     }
     Ok(())
+}
+
+async fn stage_bound_prompt(
+    page: &Page,
+    url: &str,
+    prompt: &str,
+    owned: Option<&str>,
+) -> Result<bool> {
+    let payload = json!({"url":url,"prompt":prompt,"owned":owned});
+    let messages = super::chatgpt_dom::MESSAGES_SCRIPT;
+    let result = page.evaluate(format!(
+        r#"(() => {{
+            const payload = {payload};
+            const ready = () => {{
+                if (location.href !== payload.url || ({COMPOSER_ATTACHMENTS_SCRIPT})()) return false;
+                const observed = ({INSPECT_SUBMISSION_SCRIPT})({{prompt:payload.owned || ''}}, ({messages})());
+                return !observed.running && (payload.owned === null
+                    ? observed.composer_chars === 0
+                    : observed.user_message_count === 0 && observed.exact_composer_text === payload.owned);
+            }};
+            if (!ready() || !({FOCUS_AND_SELECT_SCRIPT})() || !ready()) return 'blocked';
+            return document.execCommand('insertText', false, payload.prompt) ? 'inserted' : 'failed';
+        }})()"#,
+    ))
+    .await
+    .context("stage prompt in bound conversation")?
+    .into_value::<String>()?;
+    match result.as_str() {
+        "inserted" => Ok(true),
+        "blocked" => Ok(false),
+        _ => bail!("Browser could not stage the prompt in the bound conversation"),
+    }
 }
 
 async fn wait_for_prompt_staged(
@@ -1183,8 +1297,23 @@ async fn activate_send_control(
     .context("decode browser send activation")
 }
 
-async fn request_submit(page: &Page) -> Result<RequestSubmitResult> {
-    page.evaluate(format!("({REQUEST_SUBMIT_SCRIPT})()"))
+async fn request_submit(
+    page: &Page,
+    prompt: &str,
+    needles: &[String],
+    url: &str,
+) -> Result<RequestSubmitResult> {
+    let payload = json!({"prompt":prompt,"needles":needles,"url":url});
+    let messages = super::chatgpt_dom::MESSAGES_SCRIPT;
+    page.evaluate(format!(
+        r#"(() => {{
+            const payload = {payload};
+            const state = ({INSPECT_SUBMISSION_SCRIPT})(payload, ({messages})());
+            if (state.url !== payload.url || state.echo_found || !state.composer_exact || state.running)
+                return {{action:'', invoked:false, unsafe_state:true, error:''}};
+            return ({REQUEST_SUBMIT_SCRIPT})();
+        }})()"#,
+    ))
         .await
         .context("request browser composer submission")?
         .into_value::<RequestSubmitResult>()
@@ -1223,6 +1352,11 @@ fn weak_submission_evidence(
     None
 }
 
+fn receipt_on_bound_chat(baseline: &SubmissionSnapshot, observed: &SubmissionSnapshot) -> bool {
+    !has_chatgpt_conversation_route(&baseline.url)
+        || conversation_target_matches(&baseline.url, &observed.url)
+}
+
 fn conversation_route_changed(before: &str, after: &str) -> bool {
     if before == after {
         return false;
@@ -1255,7 +1389,7 @@ pub(crate) fn is_chatgpt_url(value: &str) -> bool {
     reqwest::Url::parse(value).is_ok_and(|url| {
         url.host_str().is_some_and(|host| {
             let host = host.trim_end_matches('.').to_ascii_lowercase();
-            host == "chatgpt.com" || host.ends_with(".chatgpt.com")
+            host == "chatgpt.com" || host.ends_with(".chatgpt.com") || host == "chat.openai.com"
         })
     })
 }
