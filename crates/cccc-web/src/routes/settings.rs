@@ -66,6 +66,7 @@ fn projected_settings(group: &Value) -> Value {
                 "delivery",
                 "reply_notice_after_seconds",
             ),
+            ("mail_footer", "delivery", "mail_footer"),
             (
                 "terminal_transcript_visibility",
                 "terminal_transcript",
@@ -86,6 +87,7 @@ fn projected_settings(group: &Value) -> Value {
         "mail_notice_after_seconds":1800,
         "mail_notice_idle_after_seconds":60,
         "reply_notice_after_seconds":900,
+        "mail_footer":"",
         "terminal_transcript_visibility":"foreman"
     });
     if let (Some(target), Some(source)) = (settings.as_object_mut(), stored.as_object()) {
