@@ -70,6 +70,50 @@ same section; verification does not start it for you. These operations are indep
 agent editor's Save button. Disconnecting is a separate maintenance action and is
 not required to replace a conversation.
 
+#### Repair a stale binding from the private API
+
+Moving the same conversation into or out of a Project keeps its conversation
+identity. If its connection still needs repair, send one administrator request
+to `POST /api/v1/web-model/pairing` with `action: "connect"`, `replace: true`,
+and the actor's `group_id` and `actor_id`. Supply `conversation_url` to open
+or prepare that actor's owned browser page, or omit it to use the current
+page. A draft, attachment, running response, sign-in or verification may
+require attention in the browser before retrying.
+
+If the saved chat cannot be reviewed and the last ambiguous delivery already
+has a durable completion, the operator can acknowledge that exact delivery in
+the same request. Take `expected_binding_revision` from the fresh private
+browser-session status's `delivery_target.binding_revision` and
+`abandon_delivery_id` from `delivery.last_delivery_id`. For example:
+
+```sh
+curl --config "$CCCC_ADMIN_CURL_CONFIG" --fail-with-body \
+  --json @replacement.json "$CCCC_URL/api/v1/web-model/pairing"
+```
+
+Supply the following in `replacement.json`, with the actual IDs. Use local
+administrator authentication in the curl config.
+
+```json
+{
+  "group_id": "<group>",
+  "actor_id": "<actor>",
+  "action": "connect",
+  "replace": true,
+  "conversation_url": "https://chatgpt.com/g/<project>/c/<conversation>",
+  "expected_binding_revision": "<current revision>",
+  "abandon_delivery_id": "<completed ambiguous delivery>"
+}
+```
+
+An acknowledgement accepts that the old submission's outcome is unknown.
+The old batch is retained in delivery history and is never replayed by repair.
+An active turn or changed delivery is refused. The `waiting` response means
+verification started. The previous binding remains until the new conversation
+is verified. Check the new revision and verify a fresh PONG before sending more
+work. A failed attempt leaves the prior binding and delivery fence available
+for further review.
+
 **Shared login & connector** opens instance settings while retaining the agent's
 unsaved draft. Creating a connector credential only creates its address: it does
 not prove that ChatGPT has added or used it. Shared settings separately show the

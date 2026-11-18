@@ -468,7 +468,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     // B can pair independently through the same connector, including a new chat.
     page_value(
         &b,
-        "history.replaceState(null,'','/');window.holdReceipt=false;window.provisionalPath='/c/local-chatgpt%3A00000000-0000-4000-8000-000000000001'",
+        "history.replaceState(null,'','/g/g-p-fixture/project');window.holdReceipt=false;window.provisionalPath='/g/g-p-fixture/c/local-chatgpt%3A00000000-0000-4000-8000-000000000001'",
     )
     .await;
     let beta_key = super::super::web_model_browser::key(gid, "beta");
@@ -482,6 +482,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         "/c/WEB:00000000-0000-4000-8000-000000000001",
         "/c/local-chatgpt:00000000-0000-4000-8000-000000000001",
         "/c/local-chatgpt%3A00000000-0000-4000-8000-000000000001",
+        "/g/g-p-fixture/c/local-chatgpt%3A00000000-0000-4000-8000-000000000001",
     ] {
         page_value(
             &b,
@@ -504,7 +505,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
             "a provisional URL cannot start a separate pairing"
         );
     }
-    page_value(&b, "history.replaceState(null,'','/')").await;
+    page_value(&b, "history.replaceState(null,'','/g/g-p-fixture/project')").await;
     connect_actor(&state, gid, "beta").await;
     wait_page(&b, "!!window.reply?.receipt").await;
     let pending = wait_pair(&state, gid, "beta", "awaiting_confirmation").await;
@@ -536,6 +537,33 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     page_value(&b, "history.replaceState(null,'','/c/new-fixture')").await;
     wait_pair(&state, gid, "beta", "bound").await;
     assert_eq!(page_value(&b, "window.submits").await, 1);
+    let before_move = state
+        .browser_surfaces
+        .pairing_page(&beta_key)
+        .await
+        .expect("saved chat");
+    page_value(
+        &b,
+        "history.replaceState(null,'','/g/g-p-fixture/c/new-fixture')",
+    )
+    .await;
+    before_move
+        .check_before_send(&state.browser_surfaces, &beta_key)
+        .await
+        .expect("same owned conversation");
+    assert_eq!(
+        before_move
+            .receipt_url(
+                &state.browser_surfaces,
+                &beta_key,
+                prompt.as_str().expect("setup text"),
+                pending["receipt"].as_str()
+            )
+            .await
+            .expect("Project move")
+            .as_deref(),
+        Some("https://chatgpt.com/g/g-p-fixture/c/new-fixture")
+    );
     // Moving a bound chat into a Project must preserve its exact-batch receipt
     // without navigating away from the current page or sending a second time.
     let marker = "[cccc] Browser batch project-fixture events=fixture actor=beta";

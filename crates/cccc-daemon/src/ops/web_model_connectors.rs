@@ -4,7 +4,7 @@ use super::operation::{Operation, Policy::GlobalWrite};
 use crate::dispatch::{OpError, OpResult, object, required_arg, string_arg};
 use cccc_contracts::{DaemonRequest, GroupState, RunnerKind};
 use cccc_core::{GroupStore, HomeLayout, integration_state, web_model_connectors as store};
-use serde_json::json;
+use serde_json::{Value, json};
 
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     matches!(
@@ -216,12 +216,16 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             .map_err(OpError::io)?;
         return object(json!({"state":"failed","error_code":reason}));
     }
-    let automatic = if request.op == "web_model_pairing_confirm" {
-        store::pairing_for_actor(&connector, &group_id, &actor_id)
-            .is_some_and(|p| p["automatic"] == true)
+    let generation = cccc_core::actors::generation_identity(actor);
+    let binding = store::binding_for_actor(&connector, &group_id, &actor_id, &generation);
+    let pairing = store::pairing_for_actor(&connector, &group_id, &actor_id);
+    let confirming = request.op == "web_model_pairing_confirm";
+    let beginning = request.op == "web_model_pairing_begin";
+    let replace = request.args.get("replace") == Some(&json!(true));
+    let automatic = if confirming {
+        pairing.as_ref().is_some_and(|p| p["automatic"] == true)
     } else {
-        request.op == "web_model_pairing_begin"
-            && request.args.get("automatic") == Some(&json!(true))
+        beginning && request.args.get("automatic") == Some(&json!(true))
     };
     if automatic {
         if !actor.enabled
@@ -237,18 +241,9 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         // existing binding. It is never removed up front: the old binding stays
         // in force until this pairing's confirm overwrites it, so a failed or
         // abandoned attempt leaves the working route untouched.
-        let replace = request.args.get("by") == Some(&json!("user"))
-            && request.args.get("replace") == Some(&json!(true));
         if !replace
-            && store::binding_for_actor(
-                &connector,
-                &group_id,
-                &actor_id,
-                &cccc_core::actors::generation_identity(actor),
-            )
-            .is_some_and(|b| {
-                request.op != "web_model_pairing_confirm"
-                    || request.args.get("pairing_id") != Some(&b["pairing_id"])
+            && binding.as_ref().is_some_and(|b| {
+                !confirming || request.args.get("pairing_id") != Some(&b["pairing_id"])
             })
         {
             return Err(OpError::new(
@@ -265,40 +260,68 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let runtime = super::runtime_state::actor_state(home, &group_id, &actor_id)?;
     let targets = integration_state::group_get(&groups, &group_id, "web_model_browser_targets")
         .map_err(OpError::io)?;
-    let status = targets[&actor_id]["last_delivery_status"]
-        .as_str()
-        .unwrap_or("");
-    let unresolved = runtime["active_turn_id"]
+    let target = &targets[&actor_id];
+    let active = runtime["active_turn_id"]
         .as_str()
         .is_some_and(|s| !s.is_empty())
-        || runtime["status"] == "working"
-        || matches!(
-            status,
-            "submitting"
-                | "deferred"
-                | "pending_new_chat_bind"
-                | "legacy_recovery_submitting"
-                | "submission_ambiguous"
-                | "submission_ambiguous_completion_pending"
-                | "completion_ambiguous"
-                | "ambiguous"
-                | "completion_conflict"
-                | "legacy_submission_unverified"
-        );
-    let normalize_url = store::conversation_url;
-    let old_url = targets[&actor_id]["url"]
+        || runtime["status"] == "working";
+    let unresolved = active
+        || store::delivery_fenced(target)
+            && !binding
+                .as_ref()
+                .is_some_and(|b| store::abandoned_delivery_matches(b, target));
+    let old_url = target["url"]
         .as_str()
-        .and_then(|u| normalize_url(u).ok());
+        .filter(|u| store::conversation_identity(u).is_some());
     let same_url = string_arg(request, "url")
-        .and_then(|u| normalize_url(&u).ok())
-        .is_some_and(|u| Some(u) == old_url);
+        .is_some_and(|url| old_url.is_some_and(|old| store::same_conversation(old, &url)));
+    let already_confirmed = confirming
+        && binding
+            .as_ref()
+            .is_some_and(|b| request.args.get("pairing_id") == Some(&b["pairing_id"]));
+    let requested_recovery = if beginning
+        && (request.args.contains_key("abandon_delivery_id")
+            || request.args.contains_key("expected_binding_revision"))
+    {
+        Some(json!({
+            "delivery_id": required_arg(request, "abandon_delivery_id")?,
+            "binding_revision": required_arg(request, "expected_binding_revision")?,
+        }))
+    } else if confirming && !already_confirmed {
+        pairing
+            .as_ref()
+            .filter(|p| request.args.get("pairing_id") == Some(&p["pairing_id"]))
+            .and_then(|p| p.get("recovery"))
+            .cloned()
+    } else {
+        None
+    };
+    let recovery = requested_recovery
+        .as_ref()
+        .map(|expected| {
+            if !replace || active || same_url {
+                return Err(repair_refused());
+            }
+            let current = recovery_evidence(
+                home,
+                &group_id,
+                &actor_id,
+                binding.as_ref(),
+                target,
+                expected,
+            )?;
+            if confirming && &current != expected {
+                return Err(repair_refused());
+            }
+            Ok(current)
+        })
+        .transpose()?;
     // Re-pairing the SAME saved conversation restores access without deleting
     // unresolved evidence. A different conversation still requires resolution.
-    if unresolved
-        && (automatic
-            || !(request.op == "web_model_pairing_begin" && old_url.is_some()
-                || request.op == "web_model_pairing_confirm" && same_url))
-    {
+    let stopped_same_chat =
+        !automatic && (beginning && old_url.is_some() || confirming && same_url);
+    let explicit_same_chat = replace && !active && same_url && (beginning || confirming);
+    if unresolved && !(stopped_same_chat || explicit_same_chat || recovery.is_some()) {
         return Err(OpError::new(
             "delivery_unresolved",
             if old_url.is_none() {
@@ -308,11 +331,18 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             },
         ));
     }
-    let generation = cccc_core::actors::generation_identity(actor);
     match request.op.as_str() {
         "web_model_pairing_begin" => object(
-            store::begin_pairing(home, &id, &group_id, &actor_id, &generation, automatic)
-                .map_err(OpError::io)?,
+            store::begin_pairing_with_recovery(
+                home,
+                &id,
+                &group_id,
+                &actor_id,
+                &generation,
+                automatic,
+                recovery,
+            )
+            .map_err(OpError::io)?,
         ),
         "web_model_pairing_confirm" => {
             let pair = required_arg(request, "pairing_id")?;
@@ -328,6 +358,56 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         }
         _ => unreachable!(),
     }
+}
+
+fn repair_refused() -> OpError {
+    OpError::new(
+        "delivery_unresolved",
+        "Replacement requires the current binding and a completed ambiguous delivery. Refresh status before retrying.",
+    )
+}
+
+fn recovery_evidence(
+    home: &HomeLayout,
+    group: &str,
+    actor: &str,
+    binding: Option<&Value>,
+    target: &Value,
+    expected: &Value,
+) -> Result<Value, OpError> {
+    let binding = binding.ok_or_else(repair_refused)?;
+    let revision = expected["binding_revision"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(repair_refused)?;
+    let delivery = expected["delivery_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(repair_refused)?;
+    if binding["revision"] != revision
+        || target["binding_revision"] != revision
+        || target["kind"] != "existing_chat"
+        || target["last_delivery_status"] != "submission_ambiguous"
+        || target["last_delivery_id"] != delivery
+    {
+        return Err(repair_refused());
+    }
+    let turn = target["last_delivery_turn_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(repair_refused)?;
+    let events = serde_json::from_value::<Vec<String>>(target["last_delivery_event_ids"].clone())
+        .ok()
+        .filter(|events| !events.is_empty())
+        .ok_or_else(repair_refused)?;
+    if !super::runtime_completion::committed(home, group, actor, turn, &events)?
+        .is_some_and(|receipt| receipt.delivery_id == delivery)
+    {
+        return Err(repair_refused());
+    }
+    Ok(
+        json!({"binding_revision":revision,"delivery_id":delivery,"turn_id":turn,"event_ids":events}),
+    )
 }
 
 #[cfg(test)]
