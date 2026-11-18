@@ -11,6 +11,7 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         request.op.as_str(),
         "web_model_connector_configure"
             | "web_model_connector_revoke"
+            | "web_model_pairing_validate_replacement"
             | "web_model_pairing_begin"
             | "web_model_pairing_accept"
             | "web_model_pairing_confirm"
@@ -220,8 +221,15 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let binding = store::binding_for_actor(&connector, &group_id, &actor_id, &generation);
     let pairing = store::pairing_for_actor(&connector, &group_id, &actor_id);
     let confirming = request.op == "web_model_pairing_confirm";
-    let beginning = request.op == "web_model_pairing_begin";
+    let validating = request.op == "web_model_pairing_validate_replacement";
+    let beginning = request.op == "web_model_pairing_begin" || validating;
     let replace = request.args.get("replace") == Some(&json!(true));
+    if validating && !replace {
+        return Err(OpError::new(
+            "invalid_argument",
+            "Replacement requires replace: true",
+        ));
+    }
     let automatic = if confirming {
         pairing.as_ref().is_some_and(|p| p["automatic"] == true)
     } else {
@@ -273,8 +281,11 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let old_url = target["url"]
         .as_str()
         .filter(|u| store::conversation_identity(u).is_some());
-    let same_url = string_arg(request, "url")
-        .is_some_and(|url| old_url.is_some_and(|old| store::same_conversation(old, &url)));
+    let requested_url = string_arg(request, "url");
+    let same_url = requested_url
+        .as_deref()
+        .zip(old_url)
+        .is_some_and(|(url, old)| store::same_conversation(old, url));
     let already_confirmed = confirming
         && binding
             .as_ref()
@@ -302,6 +313,23 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             if !replace || active || same_url {
                 return Err(repair_refused());
             }
+            if beginning
+                && pairing.as_ref().is_some_and(|pair| {
+                    pair["generation"] == generation
+                        && matches!(
+                            pair["state"].as_str(),
+                            Some("waiting" | "awaiting_confirmation")
+                        )
+                        && pair["expires_at_ms"]
+                            .as_i64()
+                            .is_some_and(|expiry| expiry > chrono::Utc::now().timestamp_millis())
+                })
+            {
+                return Err(OpError::new(
+                    "pairing_in_progress",
+                    "Cancel the current pairing attempt before replacing it",
+                ));
+            }
             let current = recovery_evidence(
                 home,
                 &group_id,
@@ -318,8 +346,9 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         .transpose()?;
     // Re-pairing the SAME saved conversation restores access without deleting
     // unresolved evidence. A different conversation still requires resolution.
-    let stopped_same_chat =
-        !automatic && (beginning && old_url.is_some() || confirming && same_url);
+    let stopped_same_chat = !automatic
+        && (beginning && old_url.is_some() && (!replace || requested_url.is_none() || same_url)
+            || confirming && same_url);
     let explicit_same_chat = replace && !active && same_url && (beginning || confirming);
     if unresolved && !(stopped_same_chat || explicit_same_chat || recovery.is_some()) {
         return Err(OpError::new(
@@ -332,6 +361,7 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         ));
     }
     match request.op.as_str() {
+        "web_model_pairing_validate_replacement" => object(json!({"valid":true})),
         "web_model_pairing_begin" => object(
             store::begin_pairing_with_recovery(
                 home,

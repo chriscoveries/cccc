@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use base64::Engine;
+use cccc_core::web_model_connectors;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -1578,12 +1579,17 @@ fn build_browser_prompt(
         "[CCCC] Session bootstrap for this browser chat:\n\n{system_prompt}\n\n{WEB_TRANSPORT_NOTE}"
     );
     let digest = bootstrap_seed_digest(&seed_text);
+    let same_seed_chat = target["bootstrap_seed_conversation_url"]
+        .as_str()
+        .is_some_and(|url| {
+            url == target_url || web_model_connectors::same_conversation(url, target_url)
+        });
     let seed_required = target["bootstrap_seed_delivered_at"]
         .as_str()
         .is_none_or(str::is_empty)
         || target["bootstrap_seed_version"].as_str() != Some(BOOTSTRAP_SEED_VERSION)
         || target["bootstrap_seed_digest"].as_str() != Some(digest.as_str())
-        || target["bootstrap_seed_conversation_url"].as_str() != Some(target_url);
+        || !same_seed_chat;
     let seed = seed_required.then_some(BootstrapSeed {
         text: seed_text,
         digest,

@@ -221,9 +221,10 @@ async fn start_connection(
                 .ok_or_else(|| ApiError::bad("Choose a ChatGPT conversation or new-chat URL"))
         })
         .transpose()?;
-    if let Some(body) = request.filter(|body| {
+    let recovery = request.filter(|body| {
         body.get("abandon_delivery_id").is_some() || body.get("expected_binding_revision").is_some()
-    }) {
+    });
+    if let Some(body) = recovery {
         if !replace {
             return Err(ApiError::bad(
                 "Acknowledging an ambiguous delivery requires replace: true",
@@ -235,6 +236,19 @@ async fn start_connection(
                 json!(super::web_model_connectors::required(body, field)?),
             );
         }
+    }
+    if destination.is_some() || recovery.is_some() {
+        if let Some(url) = destination.as_deref() {
+            args.insert("url".into(), json!(url));
+        }
+        // Reject stale acknowledgement and lifecycle state before opening or
+        // navigating the browser. Begin checks again with the URL we observed.
+        call(
+            state,
+            "web_model_pairing_validate_replacement",
+            args.clone(),
+        )
+        .await?;
     }
     let key = super::web_model_browser::key(group, actor);
     if let Some(url) = destination.as_deref() {

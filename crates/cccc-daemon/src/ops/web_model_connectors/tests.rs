@@ -299,6 +299,7 @@ fn explicit_replace_repairs_without_removing_the_working_binding() {
     let mut repair = replace;
     repair["expected_binding_revision"] = old["revision"].clone();
     repair["abandon_delivery_id"] = json!("receipt-1");
+    repair["url"] = json!("https://chatgpt.com/g/g-p-fixture/c/replacement");
     assert_eq!(
         execute(&home, &request("web_model_pairing_begin", repair.clone()))
             .expect_err("a status row is not a durable completion")
@@ -329,11 +330,38 @@ fn explicit_replace_repairs_without_removing_the_working_binding() {
         .expect("settle newer turn in fixture");
     let mut stale = repair.clone();
     stale["expected_binding_revision"] = json!("stale");
+    assert_eq!(
+        execute(
+            &home,
+            &request("web_model_pairing_validate_replacement", stale.clone())
+        )
+        .expect_err("stale acknowledgement rejected before browser preparation")
+        .code,
+        "delivery_unresolved"
+    );
     assert!(execute(&home, &request("web_model_pairing_begin", stale)).is_err());
+    let pairing =
+        || store::pairing_for_actor(&store::load(&home).expect("store")[0], &group.group_id, "a");
+    let before = pairing();
+    execute(
+        &home,
+        &request("web_model_pairing_validate_replacement", repair.clone()),
+    )
+    .expect("read-only validation");
+    assert_eq!(pairing(), before);
     let (_, confirm) = pair_and_confirm(
         &repair,
         "host-3",
         "https://chatgpt.com/g/g-p-fixture/c/replacement",
+    );
+    assert_eq!(
+        execute(
+            &home,
+            &request("web_model_pairing_validate_replacement", repair)
+        )
+        .expect_err("a live candidate must be cancelled before another repair")
+        .code,
+        "pairing_in_progress"
     );
     assert_eq!(bound_url(&home), Some(old["url"].clone()));
     integration_state::group_update(&groups, &group.group_id, "web_model_browser_targets", |v| {
