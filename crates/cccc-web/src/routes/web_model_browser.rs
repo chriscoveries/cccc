@@ -99,6 +99,7 @@ pub(super) async fn open_actor_surface(
     actor_id: &str,
     width: u32,
     height: u32,
+    destination: Option<&str>,
 ) -> Result<Value, ApiError> {
     validate_actor(state, group_id, actor_id)?;
     let group = GroupStore::new(state.home.clone())
@@ -116,8 +117,18 @@ pub(super) async fn open_actor_surface(
         .runtime
         .web_model_provider()
         .ok_or_else(|| ApiError::not_found("This Actor is no longer a Web Model"))?;
-    let target = super::web_model_delivery_state::target(state, group_id, actor_id)?;
-    let open_url = browser_open_url(&target, provider_url(provider))?;
+    let open_url = match destination {
+        Some(url) if provider == "chatgpt_web" => url.to_owned(),
+        Some(_) => {
+            return Err(ApiError::bad(
+                "Replacement requires a ChatGPT Web Model Actor",
+            ));
+        }
+        None => {
+            let target = super::web_model_delivery_state::target(state, group_id, actor_id)?;
+            browser_open_url(&target, provider_url(provider))?
+        }
+    };
     let profile = super::web_model_shared_browser::profile(state, provider);
     state
         .browser_surfaces
@@ -139,7 +150,7 @@ async fn ensure_open_for_actor(
     width: u32,
     height: u32,
 ) -> Result<Value, ApiError> {
-    open_actor_surface(state, group_id, actor_id, width, height).await?;
+    open_actor_surface(state, group_id, actor_id, width, height, None).await?;
     let target = super::web_model_delivery_state::target(state, group_id, actor_id)?;
     let open_url = browser_open_url(
         &target,

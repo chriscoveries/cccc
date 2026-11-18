@@ -3,7 +3,7 @@ use super::{web_model_connector_store as store, web_model_delivery_completion::c
 use crate::{
     AppState,
     api::{ApiError, ApiResult, success},
-    browser_surface::{PairingPage, PromptSubmissionOutcome},
+    browser_surface::{PairingPage, PromptSubmissionOutcome, pairing_destination},
 };
 use axum::{Json, Router, extract::State, routing::post};
 use cccc_core::web_model_connectors;
@@ -142,7 +142,7 @@ async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
     // without removing it first. The old binding stays in force until the new
     // pairing is confirmed, so a browser that is not ready changes nothing.
     let replace = body["replace"] == true;
-    start_connection(&state, &group, &actor, false, replace)
+    start_connection(&state, &group, &actor, false, replace, Some(&body))
         .await
         .map(success)
 }
@@ -150,7 +150,7 @@ async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
 /// The first attempt follows normal Actor startup. An existing attempt, even
 /// expired/cancelled/interrupted, requires an explicit retry; never replay sends.
 pub(super) async fn ensure_automatic(state: &AppState, group: &str, actor: &str) {
-    let _ = start_connection(state, group, actor, true, false).await;
+    let _ = start_connection(state, group, actor, true, false, None).await;
 }
 
 /// cwf#853: the delivery worker's fresh-chat self-heal. Same path as an
@@ -161,7 +161,7 @@ pub(super) async fn start_replacement(
     group: &str,
     actor: &str,
 ) -> Result<Value, ApiError> {
-    start_connection(state, group, actor, false, true).await
+    start_connection(state, group, actor, false, true, None).await
 }
 
 async fn start_connection(
@@ -170,8 +170,9 @@ async fn start_connection(
     actor: &str,
     first_attempt: bool,
     replace: bool,
+    request: Option<&Value>,
 ) -> Result<Value, ApiError> {
-    let control = super::web_model_delivery::control_guard(group, actor)?;
+    let control = super::web_model_delivery::control_work(state, group, actor)?;
     let connector = store::load(state)?
         .into_iter()
         .find(|c| c["revoked"] != true && c["provider"] == "chatgpt_web")
@@ -207,12 +208,54 @@ async fn start_connection(
     if replace {
         args.insert("replace".into(), json!(true));
     }
+    let destination = request
+        .and_then(|body| body.get("conversation_url"))
+        .map(|url| {
+            if !replace {
+                return Err(ApiError::bad(
+                    "Selecting a destination requires replace: true",
+                ));
+            }
+            url.as_str()
+                .and_then(|url| pairing_destination(url).ok())
+                .ok_or_else(|| ApiError::bad("Choose a ChatGPT conversation or new-chat URL"))
+        })
+        .transpose()?;
+    if let Some(body) = request.filter(|body| {
+        body.get("abandon_delivery_id").is_some() || body.get("expected_binding_revision").is_some()
+    }) {
+        if !replace {
+            return Err(ApiError::bad(
+                "Acknowledging an ambiguous delivery requires replace: true",
+            ));
+        }
+        for field in ["abandon_delivery_id", "expected_binding_revision"] {
+            args.insert(
+                field.into(),
+                json!(super::web_model_connectors::required(body, field)?),
+            );
+        }
+    }
     let key = super::web_model_browser::key(group, actor);
+    if let Some(url) = destination.as_deref() {
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            prepare_destination(state, group, actor, url),
+        )
+        .await
+        .map_err(|_| pairing_error("pairing_browser_not_ready"))??;
+    }
     let target = state
         .browser_surfaces
         .pairing_page(&key)
         .await
         .map_err(|e| pairing_error(&e.to_string()))?;
+    if let Some(url) = destination.as_deref()
+        && !destination_matches(url, target.initial_url())
+    {
+        return Err(pairing_error("pairing_target_changed"));
+    }
+    args.insert("url".into(), json!(target.initial_url()));
     let pair = call(state, "web_model_pairing_begin", args.clone()).await?;
     let id = pair["pairing_id"]
         .as_str()
@@ -271,6 +314,23 @@ async fn start_connection(
             args.insert("pairing_id".into(), json!(id));
             connecting = Connecting::new(&state, id);
         };
+        if result.is_ok() && replace {
+            match super::web_model_delivery_state::target(&state, &group, &actor) {
+                Ok(current) => {
+                    if let Some(delivery) = super::web_model_reconcile::reconcilable(&current)
+                        && let Err(error) = super::web_model_delivery::resume_reviewed_locked(
+                            &state, &group, &actor, &delivery,
+                        )
+                        .await
+                    {
+                        tracing::info!(%group, %actor, %error, "Replacement confirmed; delivery still needs review");
+                    }
+                }
+                Err(error) => {
+                    tracing::info!(%group, %actor, %error, "Replacement confirmed; delivery state unavailable")
+                }
+            }
+        }
         drop(control);
         drop(connecting);
         if result.is_ok() && automatic {
@@ -278,6 +338,68 @@ async fn start_connection(
         }
     });
     Ok(json!({"state":"waiting","pairing_id":id,"expires_at_ms":pair["expires_at_ms"]}))
+}
+
+fn destination_matches(expected: &str, observed: &str) -> bool {
+    pairing_destination(observed).is_ok_and(|url| url == expected)
+        || web_model_connectors::same_conversation(expected, observed)
+}
+
+async fn prepare_destination(
+    state: &AppState,
+    group: &str,
+    actor: &str,
+    url: &str,
+) -> Result<(), ApiError> {
+    let surfaces = &state.browser_surfaces;
+    let key = super::web_model_browser::key(group, actor);
+    super::web_model_browser::open_actor_surface(state, group, actor, 1366, 900, Some(url))
+        .await
+        .map_err(|_| pairing_error("pairing_browser_required"))?;
+    let mut navigated = false;
+    loop {
+        let snapshot = surfaces
+            .prompt_readiness(&key)
+            .await
+            .map_err(|_| pairing_error("pairing_browser_not_ready"))?;
+        let observed = snapshot["tab_url"].as_str().unwrap_or_default();
+        let category = snapshot["state"].as_str().unwrap_or_default();
+        let matches = destination_matches(url, observed);
+        if matches && category == "ready" && snapshot["running"] == false {
+            return Ok(());
+        }
+        if super::web_model_reconcile::composer_occupied(&snapshot) {
+            return Err(pairing_error("pairing_composer_occupied"));
+        }
+        if category == "loading" || matches && category == "page_not_ready" {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        }
+        let empty = snapshot["composer_chars"].as_u64() == Some(0)
+            && snapshot["composer_has_attachments"] == false
+            && snapshot["running"] == false;
+        if !matches
+            && !navigated
+            && empty
+            && matches!(
+                category,
+                "ready" | "conversation_load_failed" | "conversation_length_exceeded"
+            )
+        {
+            surfaces
+                .navigate_to_url(&key, url)
+                .await
+                .map_err(|_| pairing_error("pairing_browser_not_ready"))?;
+            navigated = true;
+            continue;
+        }
+        return Err(
+            pairing_error("pairing_browser_not_ready").with_details(json!({
+                "browser_state":category,
+                "observed_url":pairing_destination(observed).ok()
+            })),
+        );
+    }
 }
 
 async fn connect(
