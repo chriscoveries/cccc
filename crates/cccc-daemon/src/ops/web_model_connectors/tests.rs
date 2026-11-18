@@ -250,6 +250,128 @@ fn explicit_replace_repairs_without_removing_the_working_binding() {
         bound_url(&home),
         Some(json!("https://chatgpt.com/c/second"))
     );
+
+    // The reported stale-pairing sequence: the saved chat cannot be reviewed,
+    // remove is refused, and an ordinary connect still sees the old binding.
+    let old = store::binding_for_session(&store::load(&home).expect("store")[0], "host-2")
+        .expect("old binding");
+    let unresolved = json!({"a": {
+        "url": old["url"], "binding_revision": old["revision"], "kind": "existing_chat",
+        "last_delivery_status": "submission_ambiguous", "last_delivery_id": "receipt-1",
+        "last_delivery_turn_id": "turn-1", "last_delivery_event_ids": ["event-1"]
+    }});
+    integration_state::group_update(&groups, &group.group_id, "web_model_browser_targets", |v| {
+        *v = unresolved.clone();
+        Ok(())
+    })
+    .expect("store pending delivery");
+    groups
+        .mutate(&group.group_id, |g| {
+            g.actors[0].enabled = false;
+            Ok(())
+        })
+        .expect("stop");
+    assert_eq!(
+        execute(&home, &request("web_model_binding_remove", args.clone()))
+            .expect_err("unresolved delivery blocks removal")
+            .code,
+        "delivery_unresolved"
+    );
+    groups
+        .mutate(&group.group_id, |g| {
+            g.actors[0].enabled = true;
+            Ok(())
+        })
+        .expect("start");
+    assert_eq!(
+        execute(&home, &request("web_model_pairing_begin", args.clone()))
+            .expect_err("connect still sees the binding")
+            .code,
+        "already_paired"
+    );
+    assert_eq!(
+        execute(&home, &request("web_model_pairing_begin", replace.clone()))
+            .expect_err("bare replace cannot abandon a delivery")
+            .code,
+        "delivery_unresolved"
+    );
+
+    let mut repair = replace;
+    repair["expected_binding_revision"] = old["revision"].clone();
+    repair["abandon_delivery_id"] = json!("receipt-1");
+    assert_eq!(
+        execute(&home, &request("web_model_pairing_begin", repair.clone()))
+            .expect_err("a status row is not a durable completion")
+            .code,
+        "delivery_unresolved"
+    );
+    let completion = super::super::runtime_completion::Completion {
+        turn_id: "turn-1".into(),
+        event_ids: vec!["event-1".into()],
+        status: "done".into(),
+        delivery_id: "receipt-1".into(),
+    };
+    let consumed =
+        super::super::runtime_completion::append(&home, &group.group_id, "a", &completion)
+            .expect("completion receipt");
+    super::super::runtime_state::set_runtime_status(
+        &home,
+        &group,
+        "a",
+        "working",
+        "active-turn",
+        "",
+        &[],
+    )
+    .expect("carry a newer active turn");
+    assert!(execute(&home, &request("web_model_pairing_begin", repair.clone())).is_err());
+    super::super::runtime_state::set_runtime_status(&home, &group, "a", "waiting", "", "", &[])
+        .expect("settle newer turn in fixture");
+    let mut stale = repair.clone();
+    stale["expected_binding_revision"] = json!("stale");
+    assert!(execute(&home, &request("web_model_pairing_begin", stale)).is_err());
+    let (_, confirm) = pair_and_confirm(
+        &repair,
+        "host-3",
+        "https://chatgpt.com/g/g-p-fixture/c/replacement",
+    );
+    assert_eq!(bound_url(&home), Some(old["url"].clone()));
+    integration_state::group_update(&groups, &group.group_id, "web_model_browser_targets", |v| {
+        v["a"]["last_delivery_id"] = json!("changed");
+        Ok(())
+    })
+    .expect("changed delivery");
+    assert!(
+        execute(
+            &home,
+            &request("web_model_pairing_confirm", confirm.clone())
+        )
+        .is_err()
+    );
+    assert_eq!(bound_url(&home), Some(old["url"].clone()));
+    integration_state::group_update(&groups, &group.group_id, "web_model_browser_targets", |v| {
+        *v = unresolved.clone();
+        Ok(())
+    })
+    .expect("restore captured delivery");
+    execute(
+        &home,
+        &request("web_model_pairing_confirm", confirm.clone()),
+    )
+    .expect("repair confirm");
+    execute(&home, &request("web_model_pairing_confirm", confirm)).expect("confirmation retry");
+    let connector = &store::load(&home).expect("reopened store")[0];
+    assert!(store::binding_for_session(connector, "host-2").is_none());
+    let binding = store::binding_for_session(connector, "host-3").expect("replacement binding");
+    assert_ne!(binding["revision"], old["revision"]);
+    assert!(store::abandoned_delivery_matches(
+        &binding,
+        &unresolved["a"]
+    ));
+    let retained = super::super::runtime_completion::find(&home, &group.group_id, "a", &completion)
+        .expect("read exact completion")
+        .expect("completion retained");
+    assert_eq!(retained.id, consumed.id);
 }
 
 #[test]

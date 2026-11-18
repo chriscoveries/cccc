@@ -1,4 +1,4 @@
-use cccc_core::{GroupStore, integration_state};
+use cccc_core::{GroupStore, integration_state, web_model_connectors};
 use serde_json::{Value, json};
 
 use crate::AppState;
@@ -16,7 +16,24 @@ pub(super) fn target(state: &AppState, group_id: &str, actor_id: &str) -> Result
         .cloned()
         .unwrap_or_else(|| json!({}));
     if let Some(binding) = web_model_connector_store::for_actor(state, group_id, actor_id) {
-        if target["binding_revision"] != binding["revision"] && target["url"] != binding["url"] {
+        let same_chat = target["url"]
+            .as_str()
+            .zip(binding["url"].as_str())
+            .is_some_and(|(old, new)| web_model_connectors::same_conversation(old, new));
+        if target["binding_revision"] != binding["revision"]
+            && target["url"] != binding["url"]
+            && !same_chat
+        {
+            if binding["abandoned_delivery"].is_object()
+                && web_model_connectors::delivery_fenced(&target)
+                && !web_model_connectors::abandoned_delivery_matches(&binding, &target)
+            {
+                return Err(ApiError::conflict(
+                    "delivery_unresolved",
+                    "The pending delivery changed during replacement. Review it before resuming.",
+                    json!({}),
+                ));
+            }
             target = json!({});
         }
         target["binding_revision"] = binding["revision"].clone();

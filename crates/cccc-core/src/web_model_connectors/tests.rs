@@ -255,6 +255,29 @@ fn conflicting_conversations_expiration_and_revocation_fail_closed() {
     assert!(binding_for_session(&load(&home).expect("load")[0], "session-a").is_none());
     assert!(begin_pairing(&home, id, "g_fixture", "a", "generation-1", false).is_err());
 }
+
+#[test]
+fn project_move_cannot_bind_the_same_conversation_to_another_actor() {
+    let (_temp, home, c) = fixture();
+    let id = c["connector"]["connector_id"].as_str().expect("id");
+    bound(&home, id, "a", "session-a");
+    let p = begin_pairing(&home, id, "g_fixture", "b", "generation-1", false).expect("begin");
+    accept_pairing(&home, id, p["code"].as_str().expect("code"), "session-b").expect("candidate");
+    assert_eq!(
+        confirm_pairing(
+            &home,
+            id,
+            "g_fixture",
+            "b",
+            "generation-1",
+            p["pairing_id"].as_str().expect("id"),
+            "https://chatgpt.com/g/g-p-fixture/c/conversation-a",
+        )
+        .expect_err("same conversation belongs to actor a")
+        .to_string(),
+        "binding_conflict"
+    );
+}
 #[test]
 fn actor_retirement_and_rollback_preserve_other_routes_and_global_credentials() {
     let (_temp, home, c) = fixture();

@@ -4,6 +4,7 @@
 //! to a fresh chat before pairing starts (cwf#853).
 use super::BrowserSurfaces;
 use anyhow::{Context, Result, bail};
+use cccc_core::web_model_connectors::{conversation_url, same_conversation};
 use chromiumoxide::Page;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -151,13 +152,15 @@ impl BrowserSurfaces {
         // A draft in the composer is never discarded by this navigation.
         let full_and_empty = self.prompt_readiness(key).await.ok().is_some_and(|r| {
             r["state"] == super::conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE
-                && r["composer_chars"].as_u64().unwrap_or(0) == 0
+                && r["composer_chars"].as_u64() == Some(0)
+                && r["composer_has_attachments"] == false
+                && r["running"] == false
         });
         if full_and_empty {
             self.open_fresh_chat_for_pairing(key).await?;
         }
         let initial_url = page.url().await?.unwrap_or_default();
-        let conversation = cccc_core::web_model_connectors::conversation_url(&initial_url).ok();
+        let conversation = conversation_url(&initial_url).ok();
         if conversation.is_none() && !new_chat_url(&initial_url) {
             bail!("pairing_browser_required");
         }
@@ -234,6 +237,10 @@ pub(super) fn fresh_chat_url(current: &str) -> Option<String> {
 }
 
 impl PairingPage {
+    pub(crate) fn initial_url(&self) -> &str {
+        &self.initial_url
+    }
+
     /// Remove an earlier attempt's unsent setup message, and only that: a human
     /// draft, the message with anything added, or a pending file keeps the
     /// composer occupied. The text is compared and deleted in one page task, so
@@ -256,7 +263,7 @@ impl PairingPage {
         key: &str,
     ) -> Result<()> {
         let url = self.current_url(surfaces, key).await?;
-        if url != self.initial_url {
+        if url != self.initial_url && !same_conversation(&self.initial_url, &url) {
             bail!("pairing_target_changed");
         }
         let attachments = super::prompt_submission::composer_has_attachments(&self.page).await?;
@@ -287,11 +294,15 @@ impl PairingPage {
         receipt: Option<&str>,
     ) -> Result<Option<String>> {
         let url = self.current_url(surfaces, key).await?;
-        let conversation = cccc_core::web_model_connectors::conversation_url(&url).ok();
-        if self
-            .conversation
-            .as_ref()
-            .is_some_and(|expected| conversation.as_ref() != Some(expected))
+        let conversation = conversation_url(&url).ok();
+        let same_origin = chatgpt_page_url(&url)
+            .zip(chatgpt_page_url(&self.initial_url))
+            .is_some_and(|(current, initial)| current.origin() == initial.origin());
+        if !same_origin
+            || self
+                .conversation
+                .as_ref()
+                .is_some_and(|expected| !same_conversation(expected, &url))
             || (conversation.is_none() && !pending_new_chat_url(&url))
         {
             bail!("pairing_target_changed");
@@ -329,14 +340,46 @@ impl PairingPage {
     }
 }
 
+pub(crate) fn pairing_destination(raw: &str) -> Result<String> {
+    if let Ok(url) = conversation_url(raw) {
+        return Ok(url);
+    }
+    let mut url = chatgpt_page_url(raw).context("invalid pairing destination")?;
+    if !new_chat_path(url.path()) {
+        bail!("invalid pairing destination");
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
+fn project_id(value: &str) -> bool {
+    value.strip_prefix("g-p-").is_some_and(|id| {
+        !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    })
+}
+
+fn new_chat_path(path: &str) -> bool {
+    path == "/"
+        || path.strip_prefix("/g/").is_some_and(|rest| {
+            let rest = rest.trim_end_matches('/');
+            project_id(rest.strip_suffix("/project").unwrap_or(rest))
+        })
+}
+
 fn new_chat_url(raw: &str) -> bool {
-    chatgpt_page_url(raw).is_some_and(|url| url.path() == "/")
+    chatgpt_page_url(raw).is_some_and(|url| new_chat_path(url.path()))
 }
 
 fn pending_new_chat_url(raw: &str) -> bool {
     chatgpt_page_url(raw).is_some_and(|url| {
-        url.path() == "/"
-            || url.path().strip_prefix("/c/").is_some_and(|id| {
+        let path = url.path();
+        let provisional = path.strip_prefix("/c/").or_else(|| {
+            let (project, id) = path.strip_prefix("/g/")?.split_once("/c/")?;
+            project_id(project).then_some(id)
+        });
+        new_chat_path(path)
+            || provisional.is_some_and(|id| {
                 !id.contains('/') && super::prompt_submission::provisional_conversation_id(id)
             })
     })

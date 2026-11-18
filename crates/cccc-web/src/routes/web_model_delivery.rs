@@ -1184,7 +1184,7 @@ pub(super) async fn control_guard_wait(
 }
 
 /// The body of resume-delivery; the caller holds the Actor's browser work.
-async fn resume_reviewed_locked(
+pub(super) async fn resume_reviewed_locked(
     state: &AppState,
     group_id: &str,
     actor_id: &str,
