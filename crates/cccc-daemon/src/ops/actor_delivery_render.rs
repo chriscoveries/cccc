@@ -583,4 +583,90 @@ mod tests {
         assert!(rendered.contains("legacy request text"));
         assert!(!rendered.contains("Request:\nevent fallback"));
     }
+
+    #[test]
+    fn unset_footer_keeps_rendered_batch_unchanged() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let group = test_group();
+        let mut event = Event::new("chat.message", "g_test");
+        event.by = "user".into();
+        event.data = json!({
+            "to": ["peer1"],
+            "text": "hello",
+            "message_mode": "send",
+        })
+        .as_object()
+        .cloned()
+        .expect("data");
+
+        let baseline = render_batch(&group, &[event.clone()]).expect("baseline");
+        let rendered =
+            render_batch_with_mail_context(&home, &group, "peer1", &[event]).expect("rendered");
+        assert_eq!(rendered, baseline);
+    }
+
+    #[test]
+    fn set_footer_appends_once_per_batch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let mut group = test_group();
+        group
+            .extra
+            .insert("delivery".into(), json!({"mail_footer": "REMINDER"}));
+
+        let mut first = Event::new("chat.message", "g_test");
+        first.by = "user".into();
+        first.data = json!({
+            "to": ["peer1"],
+            "text": "first",
+            "message_mode": "send",
+        })
+        .as_object()
+        .cloned()
+        .expect("data");
+        let mut second = Event::new("chat.message", "g_test");
+        second.by = "user".into();
+        second.data = json!({
+            "to": ["peer1"],
+            "text": "second",
+            "message_mode": "send",
+        })
+        .as_object()
+        .cloned()
+        .expect("data");
+
+        let rendered = render_batch_with_mail_context(&home, &group, "peer1", &[first, second])
+            .expect("rendered");
+        assert!(rendered.contains("REMINDER"));
+        assert_eq!(rendered.matches("REMINDER").count(), 1);
+    }
+
+    #[test]
+    fn over_length_footer_is_handled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let mut group = test_group();
+        let footer = "x".repeat(600);
+        group
+            .extra
+            .insert("delivery".into(), json!({"mail_footer": footer}));
+
+        let mut event = Event::new("chat.message", "g_test");
+        event.by = "user".into();
+        event.data = json!({
+            "to": ["peer1"],
+            "text": "hello",
+            "message_mode": "send",
+        })
+        .as_object()
+        .cloned()
+        .expect("data");
+
+        let baseline = render_batch(&group, &[event.clone()]).expect("baseline");
+        let rendered =
+            render_batch_with_mail_context(&home, &group, "peer1", &[event]).expect("rendered");
+        assert_eq!(rendered, baseline);
+        assert!(!rendered.contains(&footer));
+    }
 }
