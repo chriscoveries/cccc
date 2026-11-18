@@ -66,12 +66,27 @@ pub fn render_batch(group: &GroupDoc, events: &[Event]) -> Option<String> {
     Some(reply_guidance::append(events, rendered))
 }
 
+const MAX_MAIL_FOOTER_CHARS: usize = 500;
+
+fn mail_footer(group: &GroupDoc) -> String {
+    group
+        .extra
+        .get("delivery")
+        .and_then(Value::as_object)
+        .and_then(|delivery| delivery.get("mail_footer"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.chars().count() <= MAX_MAIL_FOOTER_CHARS)
+        .unwrap_or_default()
+        .to_owned()
+}
+
 pub fn render_batch_with_mail_context(
     home: &HomeLayout,
     group: &GroupDoc,
     actor_id: &str,
     events: &[Event],
 ) -> Option<String> {
+    let footer = mail_footer(group);
     let mut output = render_batch(group, events)?;
     let has_direct_message = events.iter().any(|event| {
         event.kind == "chat.message"
@@ -81,6 +96,10 @@ pub fn render_batch_with_mail_context(
             )
     });
     if !has_direct_message {
+        if !footer.is_empty() {
+            output.push_str("\n\n");
+            output.push_str(&footer);
+        }
         return Some(output);
     }
     let pending = cccc_core::inbox::mail_pending_summary(home, group, actor_id)
@@ -96,6 +115,10 @@ pub fn render_batch_with_mail_context(
         output.push_str(&format!(
             "\n\n[cccc] MAIL PENDING: {count} {noun}. Call cccc_inbox_read when appropriate."
         ));
+    }
+    if !footer.is_empty() {
+        output.push_str("\n\n");
+        output.push_str(&footer);
     }
     Some(output)
 }
