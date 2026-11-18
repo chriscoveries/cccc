@@ -699,7 +699,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         "document.querySelector('textarea').value='preserve before automatic connection'",
     )
     .await;
-    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid), true).await;
+    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid)).await;
     assert!(
         stored_pair(&state, gid, "alpha").is_none(),
         "draft defers initial send"
@@ -707,7 +707,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     assert_eq!(page_value(&a, "window.submits").await, 0);
     wait_pair(&state, gid, "beta", "awaiting_confirmation").await;
     page_value(&a, "document.querySelector('textarea').value=''").await;
-    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid), false).await;
+    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid)).await;
     wait_pair(&state, gid, "alpha", "awaiting_confirmation").await;
     assert_eq!(page_value(&a, "window.submits").await, 1);
     assert_eq!(page_value(&a, "(window.business||[]).length").await, 0);
@@ -754,7 +754,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         json!({"group_id":gid,"actor_id":"beta","by":"user"}),
     )
     .await;
-    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid), true).await;
+    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid)).await;
     assert_eq!(
         store::for_actor(&state, gid, "beta").expect("B still bound")["revision"],
         bound["revision"]
@@ -774,7 +774,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         json!({"group_id":gid,"actor_id":"beta","by":"user"}),
     )
     .await;
-    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid), true).await;
+    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid)).await;
     wait_pair(&state, gid, "beta", "awaiting_confirmation").await;
     invoke(
         "actor_stop",
@@ -795,7 +795,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     })
     .await
     .expect("old task exits");
-    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid), false).await;
+    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid)).await;
     assert_eq!(
         page_value(&b, "window.submits").await,
         1,
@@ -815,7 +815,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     })
     .await
     .expect("cancel task exits");
-    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid), false).await;
+    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid)).await;
     assert_eq!(page_value(&b, "window.submits").await, 2);
     assert_eq!(
         stored_pair(&state, gid, "beta").expect("cancel fence")["state"],
@@ -840,7 +840,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         json!({"group_id":gid,"actor_id":"beta","by":"user"}),
     )
     .await;
-    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid), true).await;
+    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid)).await;
     wait_pair(&state, gid, "beta", "awaiting_confirmation").await;
     invoke(
         "group_set_state",
@@ -861,7 +861,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     })
     .await
     .expect("paused task exits");
-    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid), true).await;
+    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid)).await;
     assert!(store::for_actor(&state, gid, "beta").is_none());
     let cid = configured["connector"]["connector_id"]
         .as_str()
@@ -879,7 +879,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         &state,
         orphan["pairing_id"].as_str().expect("id")
     ));
-    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid), true).await;
+    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid)).await;
     store::update_connector(&state, cid, |c| {
         for p in c["pairings"].as_object_mut().expect("pairs").values_mut() {
             if p["actor_id"] == "beta" {
@@ -888,7 +888,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         }
     })
     .expect("expire orphan");
-    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid), true).await;
+    super::super::web_model_supervisor::ensure_running_actor(&state, Some(gid)).await;
     assert_eq!(
         page_value(&b, "window.submits").await,
         1,

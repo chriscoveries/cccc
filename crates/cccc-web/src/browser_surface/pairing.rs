@@ -6,6 +6,7 @@ use super::BrowserSurfaces;
 use anyhow::{Context, Result, bail};
 use chromiumoxide::Page;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
 // CCCC's setup message. The route sends it; the guard below recognizes a copy
@@ -25,12 +26,19 @@ pub(crate) fn pairing_prompt(code: &str) -> String {
 /// The whole setup message with exactly one code, as the composer shows it, and
 /// nothing added. Anything else in the composer may be a human's draft.
 fn is_stale_pairing_prompt(text: &str) -> bool {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .strip_prefix(PROMPT_HEAD)
-        .and_then(|rest| rest.strip_suffix(PROMPT_TAIL))
-        .is_some_and(|mid| stale_prompt_code(mid).is_some())
+    pairing_prompt_hash(text).is_some()
+}
+
+fn pairing_prompt_hash(text: &str) -> Option<String> {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mid = normalized
+        .strip_prefix(PROMPT_HEAD)?
+        .strip_suffix(PROMPT_TAIL)?;
+    Some(draft_digest(stale_prompt_code(mid)?))
+}
+
+pub(super) fn draft_digest(text: &str) -> String {
+    format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
 /// The one-time code inside a connector sentence that is exactly one of the
@@ -83,6 +91,50 @@ pub(crate) struct PairingPage {
 }
 
 impl BrowserSurfaces {
+    // The route holds the actor work permit. The surface lock also excludes
+    // viewer commands, replacement and retirement while inspecting this draft.
+    pub(crate) async fn clear_owned_actor_draft(
+        &self,
+        key: &str,
+        target_id: &str,
+        saved_url: &str,
+        delivery_hash: Option<&str>,
+        terminal_pairing_hash: Option<&str>,
+    ) -> Result<bool> {
+        if delivery_hash.is_none() && terminal_pairing_hash.is_none() {
+            return Ok(false);
+        }
+        let operation = self.key_operation(key).await;
+        let _operation = operation.lock().await;
+        let page = self.page(key).await?;
+        if page.target_id().as_ref() != target_id {
+            return Ok(false);
+        }
+        let readiness = self.prompt_readiness(key).await?;
+        let url = readiness["tab_url"].as_str().unwrap_or_default();
+        let matches_saved = if super::is_chatgpt_url(saved_url) {
+            super::conversation_target_matches(saved_url, url)
+        } else {
+            !saved_url.is_empty() && saved_url == url
+        };
+        if !matches_saved
+            || readiness["ready"] != true
+            || readiness["running"] != false
+            || readiness["composer_has_attachments"] != false
+        {
+            return Ok(false);
+        }
+        let text = read_composer(&page).await?;
+        let owned = !text.is_empty()
+            && (delivery_hash.is_some_and(|hash| draft_digest(&text) == hash)
+                || terminal_pairing_hash
+                    .is_some_and(|hash| pairing_prompt_hash(&text).as_deref() == Some(hash)));
+        if !owned || !compare_and_clear(&page, url, &text).await? {
+            return Ok(false);
+        }
+        read_back_empty(self, key).await
+    }
+
     pub(crate) async fn pairing_page(&self, key: &str) -> Result<PairingPage> {
         let page = self
             .sessions
@@ -188,38 +240,14 @@ impl PairingPage {
     /// typing cannot land in between, then read back before pairing goes on.
     async fn clear_stale_prompt(&self, surfaces: &BrowserSurfaces, key: &str) -> Result<()> {
         self.check_before_send(surfaces, key).await?;
-        let text = self
-            .page
-            .evaluate(format!("({READ_COMPOSER_SCRIPT})()"))
-            .await?
-            .into_value::<Option<String>>()?
-            .unwrap_or_default();
-        if !is_stale_pairing_prompt(&text) {
+        let text = read_composer(&self.page).await?;
+        if !is_stale_pairing_prompt(&text)
+            || !compare_and_clear(&self.page, &self.initial_url, &text).await?
+            || !read_back_empty(surfaces, key).await?
+        {
             bail!("pairing_composer_occupied");
         }
-        let cleared = self
-            .page
-            .evaluate(format!(
-                "({CLEAR_COMPOSER_SCRIPT})({}, {})",
-                json!({ "expected": text }),
-                super::prompt_submission::COMPOSER_ATTACHMENTS_SCRIPT
-            ))
-            .await?
-            .into_value::<bool>()?;
-        if !cleared {
-            bail!("pairing_composer_occupied");
-        }
-        let deadline = Instant::now() + CLEAR_READBACK;
-        loop {
-            let readiness = surfaces.prompt_readiness(key).await?;
-            if readiness["composer_chars"].as_u64() == Some(0) {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                bail!("pairing_composer_occupied");
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        Ok(())
     }
 
     pub(crate) async fn check_before_send(
@@ -324,24 +352,65 @@ fn chatgpt_page_url(raw: &str) -> Option<reqwest::Url> {
     })
 }
 
-// The text of the composer that readiness marked, normalized as delivery checks do.
+async fn read_composer(page: &Page) -> Result<String> {
+    Ok(page
+        .evaluate(format!("({READ_COMPOSER_SCRIPT})()"))
+        .await?
+        .into_value::<Option<String>>()?
+        .unwrap_or_default())
+}
+
+async fn compare_and_clear(page: &Page, url: &str, text: &str) -> Result<bool> {
+    Ok(page
+        .evaluate(format!(
+            "({CLEAR_COMPOSER_SCRIPT})({}, {})",
+            json!({"expected":text,"url":url}),
+            super::prompt_submission::COMPOSER_ATTACHMENTS_SCRIPT,
+        ))
+        .await?
+        .into_value::<bool>()?)
+}
+
+async fn read_back_empty(surfaces: &BrowserSurfaces, key: &str) -> Result<bool> {
+    let deadline = Instant::now() + CLEAR_READBACK;
+    loop {
+        let readiness = surfaces.prompt_readiness(key).await?;
+        if readiness["composer_chars"].as_u64() == Some(0)
+            && readiness["composer_has_attachments"] == false
+        {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+// The text of the composer that readiness marked, preserving exact text for the final comparison.
 const READ_COMPOSER_SCRIPT: &str = r#"() => {
   const input = document.querySelector('[data-cccc-web-model-composer="cccc-web-model-composer"]');
   if (!input) return null;
   const text = ('value' in input) ? input.value : (input.innerText || input.textContent || '');
-  return String(text || '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
+  return String(text || '');
 }"#;
 
 // Delete the marked composer's whole content only while it is still exactly the
 // approved text with no file. Focusing runs the page's own focus handlers, which
 // may change the box, so every check comes after it, right before the deletion.
-const CLEAR_COMPOSER_SCRIPT: &str = r#"({expected}, hasAttachments) => {
+const CLEAR_COMPOSER_SCRIPT: &str = r#"({expected,url}, hasAttachments) => {
   const input = document.querySelector('[data-cccc-web-model-composer="cccc-web-model-composer"]');
   if (!input) return false;
   input.focus();
   const text = ('value' in input) ? input.value : (input.innerText || input.textContent || '');
-  if (document.activeElement !== input || hasAttachments()
-      || String(text || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim() !== expected) return false;
+  const running = Array.from(document.querySelectorAll('button, [role="button"]')).some(node => {
+    if (!node.getClientRects().length || node.closest('[aria-hidden="true"], [inert]')) return false;
+    const label = [node.getAttribute('aria-label'), node.title, node.getAttribute('data-testid'),
+      node.id, node.innerText].join(' ').toLowerCase();
+    return /\bstop\b|停止|中止|cancel generation|interrupt/.test(label);
+  });
+  if (location.href !== url || running || document.activeElement !== input || hasAttachments()
+      || String(text || '') !== expected) return false;
   if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
     input.setSelectionRange(0, String(input.value || '').length);
   } else {

@@ -11,8 +11,8 @@ use anyhow::{Context, Result};
 use chromiumoxide::Page;
 use chromiumoxide::cdp::browser_protocol::network::EventResponseReceived;
 use futures_util::StreamExt;
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::BrowserSurfaces;
 
@@ -24,6 +24,7 @@ const RELOAD_BASE_DELAY: Duration = Duration::from_secs(30);
 const RELOAD_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 /// Upper bound on any single wait, even for a large `Retry-After`.
 const RELOAD_MAX_DELAY: Duration = Duration::from_secs(15 * 60);
+const MAX_RELOAD_ATTEMPTS: u32 = 3;
 /// Margin added to `Retry-After` so the reload lands after the window closes.
 const RETRY_AFTER_MARGIN: Duration = Duration::from_secs(2);
 /// How long a recovery reload watches for the conversation response status.
@@ -77,11 +78,16 @@ pub(crate) fn parse_retry_after(value: &str) -> Option<u64> {
     value.trim().parse::<u64>().ok()
 }
 
-fn is_conversation_api(url: &str) -> bool {
+fn is_conversation_api(url: &str, target: &str) -> bool {
+    let Some(conversation) = super::prompt_submission::normalized_chatgpt_conversation_url(target)
+        .and_then(|url| reqwest::Url::parse(&url).ok())
+        .and_then(|url| super::prompt_submission::chatgpt_conversation_id(&url))
+    else {
+        return false;
+    };
     reqwest::Url::parse(url).ok().is_some_and(|url| {
         matches!(url.host_str(), Some("chatgpt.com" | "chat.openai.com"))
-            && (url.path() == "/backend-api/conversation"
-                || url.path().starts_with("/backend-api/conversation/"))
+            && url.path().strip_prefix("/backend-api/conversation/") == Some(conversation.as_str())
     })
 }
 
@@ -101,37 +107,53 @@ pub(super) fn load_error_message(state: &str) -> &'static str {
     }
 }
 
+#[derive(Default)]
 struct ReloadObservation {
     status: Option<i64>,
     retry_after_secs: Option<u64>,
 }
 
-/// Reload once and watch the conversation API response for a bounded window.
-async fn reload_and_observe(page: &Page) -> Result<ReloadObservation> {
-    let mut responses = page
+async fn observe_response(
+    mut responses: impl futures_util::Stream<Item = std::sync::Arc<EventResponseReceived>> + Unpin,
+    target: &str,
+) -> ReloadObservation {
+    tokio::time::timeout(RELOAD_OBSERVE_WINDOW, async {
+        while let Some(event) = responses.next().await {
+            if !is_conversation_api(&event.response.url, target) {
+                continue;
+            }
+            return ReloadObservation {
+                status: Some(event.response.status),
+                retry_after_secs: (event.response.status == 429)
+                    .then(|| retry_after_header(event.response.headers.inner()))
+                    .flatten(),
+            };
+        }
+        ReloadObservation::default()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Reload once and watch the bound conversation's response for a bounded window.
+async fn reload_and_observe(page: &Page, target: &str) -> Result<ReloadObservation> {
+    if super::normalized_chatgpt_conversation_url(target).is_none() {
+        page.reload().await.context("reload browser conversation")?;
+        return Ok(ReloadObservation::default());
+    }
+    let responses = page
         .event_listener::<EventResponseReceived>()
         .await
         .context("listen for ChatGPT conversation responses")?;
-    page.reload().await.context("reload ChatGPT conversation")?;
-    let mut observed = ReloadObservation {
-        status: None,
-        retry_after_secs: None,
-    };
-    let _ = tokio::time::timeout(RELOAD_OBSERVE_WINDOW, async {
-        while let Some(event) = responses.next().await {
-            if !is_conversation_api(&event.response.url) {
-                continue;
-            }
-            observed.status = Some(event.response.status);
-            if event.response.status == 429 {
-                observed.retry_after_secs = retry_after_header(event.response.headers.inner());
-            }
-            // The first conversation response decides whether the page loads.
-            break;
-        }
-    })
-    .await;
-    Ok(observed)
+    let current = page.url().await?.unwrap_or_default();
+    if super::conversation_target_matches(target, &current) {
+        page.reload().await.context("reload ChatGPT conversation")?;
+    } else {
+        super::navigation::goto_dom_content_loaded(page, target)
+            .await
+            .context("reopen saved ChatGPT conversation after a load error")?;
+    }
+    Ok(observe_response(responses, target).await)
 }
 
 fn retry_after_header(headers: &Value) -> Option<u64> {
@@ -142,103 +164,135 @@ fn retry_after_header(headers: &Value) -> Option<u64> {
     })
 }
 
-impl BrowserSurfaces {
-    /// Self-heal a tab stranded on ChatGPT's load error page. Called with the
-    /// readiness just inspected for `key`. Returns the recovery record that is
-    /// also stored in the session metadata (`rate_limit`), or `None` when the
-    /// page is not on the error page (which also clears an old record).
-    pub(crate) async fn recover_load_error(
-        &self,
-        key: &str,
-        readiness: &Value,
-    ) -> Result<Option<Value>> {
-        let state = readiness["state"].as_str().unwrap_or_default();
-        if !is_load_error_state(state) {
-            self.set_rate_limit_record(key, None).await;
-            return Ok(None);
-        }
-        let now = chrono::Utc::now().timestamp_millis();
-        let mut record = self
-            .session_metadata(key, "rate_limit")
-            .await
-            .filter(Value::is_object)
-            .unwrap_or_else(|| {
-                let delay = next_reload_delay(0, None);
-                json!({
-                    "state":state,
-                    "first_seen_at":cccc_contracts::utc_now(),
-                    "reload_attempts":0,
-                    "retry_after_secs":Value::Null,
-                    "last_http_status":Value::Null,
-                    "next_reload_at_ms":now + delay.as_millis() as i64,
-                })
-            });
-        record["state"] = json!(state);
-        if record["next_reload_at_ms"].as_i64().unwrap_or(0) > now {
-            self.set_rate_limit_record(key, Some(record.clone())).await;
-            return Ok(Some(record));
-        }
-        let attempts = record["reload_attempts"].as_u64().unwrap_or(0) as u32 + 1;
-        // Book this attempt and the next window before reloading, so a reload
-        // that errors still waits a full backoff window: never a tight loop.
-        record["reload_attempts"] = json!(attempts);
-        record["next_reload_at_ms"] = json!(
-            now + next_reload_delay(attempts, record["retry_after_secs"].as_u64()).as_millis()
-                as i64
-        );
-        self.set_rate_limit_record(key, Some(record.clone())).await;
-        let page = self.page(key).await?;
-        let observed = reload_and_observe(&page).await?;
-        let retry_after = observed
-            .retry_after_secs
-            .or_else(|| record["retry_after_secs"].as_u64());
-        let delay = next_reload_delay(attempts, retry_after);
-        record["last_reload_at"] = json!(cccc_contracts::utc_now());
-        record["retry_after_secs"] = json!(retry_after);
-        if observed.status.is_some() {
-            record["last_http_status"] = json!(observed.status);
-        }
-        if observed.status == Some(429) {
-            record["state"] = json!(RATE_LIMITED_STATE);
-        }
-        record["next_reload_at_ms"] =
-            json!(chrono::Utc::now().timestamp_millis() + delay.as_millis() as i64);
-        tracing::info!(
-            key,
-            attempts,
-            status = observed.status,
-            retry_after,
-            next_delay_secs = delay.as_secs(),
-            "Web Model tab reloaded once after ChatGPT load error"
-        );
-        self.set_rate_limit_record(key, Some(record.clone())).await;
-        Ok(Some(record))
+/// Stored with the bound actor's delivery target, so replacing a CDP page
+/// cannot reset the retry budget or allow another request inside Retry-After.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct LoadRecovery {
+    pub(crate) state: String,
+    pub(crate) first_seen_at: String,
+    pub(crate) reload_attempts: u32,
+    pub(crate) retry_after_secs: Option<u64>,
+    pub(crate) last_http_status: Option<i64>,
+    pub(crate) next_reload_at_ms: Option<i64>,
+    pub(crate) last_reload_failed: bool,
+}
+
+impl LoadRecovery {
+    pub(crate) fn new(state: &str, now_ms: i64, retry_after_secs: Option<u64>) -> Self {
+        let mut recovery = Self {
+            state: state.to_owned(),
+            first_seen_at: cccc_contracts::utc_now(),
+            reload_attempts: 0,
+            retry_after_secs,
+            last_http_status: (state == RATE_LIMITED_STATE).then_some(429),
+            next_reload_at_ms: None,
+            last_reload_failed: false,
+        };
+        recovery.schedule(now_ms);
+        recovery
     }
 
-    async fn session_metadata(&self, key: &str, field: &str) -> Option<Value> {
-        self.sessions
+    /// Update the budget before touching Chrome, including for an I/O failure.
+    pub(crate) fn book(&mut self, now_ms: i64) -> bool {
+        if self
+            .next_reload_at_ms
+            .is_none_or(|deadline| deadline > now_ms)
+            || self.reload_attempts >= MAX_RELOAD_ATTEMPTS
+        {
+            return false;
+        }
+        self.reload_attempts += 1;
+        self.schedule(now_ms);
+        true
+    }
+
+    pub(crate) fn apply_retry_after(&mut self, now_ms: i64, retry_after: u64) {
+        self.retry_after_secs = Some(retry_after.max(self.retry_after_secs.unwrap_or_default()));
+        self.last_http_status = Some(429);
+        self.state = RATE_LIMITED_STATE.to_owned();
+        self.schedule(now_ms);
+    }
+
+    fn schedule(&mut self, now_ms: i64) {
+        let provider_wait = self.retry_after_secs.is_some_and(|secs| {
+            Duration::from_secs(secs).saturating_add(RETRY_AFTER_MARGIN) > RELOAD_MAX_DELAY
+        });
+        self.next_reload_at_ms = (!provider_wait && self.reload_attempts < MAX_RELOAD_ATTEMPTS)
+            .then(|| {
+                now_ms
+                    + next_reload_delay(self.reload_attempts, self.retry_after_secs).as_millis()
+                        as i64
+            });
+    }
+}
+
+impl BrowserSurfaces {
+    pub(super) async fn observe_initial_load(&self, key: &str, page: &Page, target: &str) {
+        if super::normalized_chatgpt_conversation_url(target).is_none() {
+            return;
+        }
+        let Some(hint) = self
+            .sessions
             .lock()
             .await
             .get(key)
-            .and_then(|session| session.metadata.get(field).cloned())
-    }
-
-    async fn set_rate_limit_record(&self, key: &str, record: Option<Value>) {
-        let mut sessions = self.sessions.lock().await;
-        let Some(metadata) = sessions
-            .get_mut(key)
-            .and_then(|session| session.metadata.as_object_mut())
+            .map(|session| std::sync::Arc::clone(&session.initial_retry_after))
         else {
             return;
         };
-        match record {
-            Some(record) => {
-                metadata.insert("rate_limit".into(), record);
+        let Ok(Ok(responses)) = tokio::time::timeout(
+            Duration::from_secs(1),
+            page.event_listener::<EventResponseReceived>(),
+        )
+        .await
+        else {
+            return;
+        };
+        let target = target.to_owned();
+        tokio::spawn(async move {
+            let observed = observe_response(responses, &target).await;
+            *hint.lock().await = observed.retry_after_secs;
+        });
+    }
+
+    pub(crate) async fn take_initial_retry_after(&self, key: &str) -> Option<u64> {
+        let hint = self
+            .sessions
+            .lock()
+            .await
+            .get(key)?
+            .initial_retry_after
+            .clone();
+        let value = hint.lock().await.take();
+        value
+    }
+
+    pub(crate) async fn reload_conversation(
+        &self,
+        key: &str,
+        target: &str,
+        recovery: &mut LoadRecovery,
+    ) {
+        let observation =
+            tokio::time::timeout(RELOAD_OBSERVE_WINDOW + Duration::from_secs(5), async {
+                let page = self.page(key).await?;
+                reload_and_observe(&page, target).await
+            })
+            .await;
+
+        recovery.last_reload_failed = !matches!(&observation, Ok(Ok(_)));
+        if let Ok(Ok(observed)) = observation {
+            if observed.status.is_some() {
+                recovery.last_http_status = observed.status;
             }
-            None => {
-                metadata.remove("rate_limit");
+            if observed.status == Some(429) {
+                recovery.state = RATE_LIMITED_STATE.to_owned();
+            }
+            if observed.retry_after_secs.is_some() {
+                recovery.retry_after_secs = observed.retry_after_secs;
             }
         }
+        recovery.schedule(chrono::Utc::now().timestamp_millis());
     }
 }
 
@@ -276,6 +330,7 @@ pub(super) const LOAD_ERROR_SCRIPT: &str = r#"() => {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn classifier_distinguishes_rate_limit_from_load_error_and_ordinary_unready_pages() {
@@ -339,6 +394,22 @@ mod tests {
     }
 
     #[test]
+    fn recovery_books_three_reloads_and_honors_long_provider_delays() {
+        let mut recovery = LoadRecovery::new(RATE_LIMITED_STATE, 0, Some(85));
+        assert!(!recovery.book(86_999));
+        assert!(recovery.book(87_000));
+        assert!(!recovery.book(87_000));
+        assert!(recovery.book(174_000));
+        assert!(!recovery.book(293_999));
+        assert!(recovery.book(294_000));
+        assert_eq!(recovery.reload_attempts, 3);
+        assert_eq!(recovery.next_reload_at_ms, None);
+        assert!(!recovery.book(i64::MAX));
+        let paused = LoadRecovery::new(RATE_LIMITED_STATE, 0, Some(900));
+        assert_eq!(paused.next_reload_at_ms, None);
+    }
+
+    #[test]
     fn retry_after_parsing_and_conversation_api_matching() {
         assert_eq!(parse_retry_after("85"), Some(85));
         assert_eq!(parse_retry_after(" 1 "), Some(1));
@@ -349,49 +420,22 @@ mod tests {
         );
         assert_eq!(retry_after_header(&json!({"retry-after":"7"})), Some(7));
         assert_eq!(retry_after_header(&json!({"x":"1"})), None);
+        let target = "https://chatgpt.com/c/123";
         assert!(is_conversation_api(
-            "https://chatgpt.com/backend-api/conversation/abc"
-        ));
-        assert!(is_conversation_api(
-            "https://chatgpt.com/backend-api/conversation"
+            "https://chatgpt.com/backend-api/conversation/123",
+            target,
         ));
         assert!(!is_conversation_api(
-            "https://chatgpt.com/backend-api/conversations?offset=0"
+            "https://chatgpt.com/backend-api/conversation/456",
+            target,
         ));
         assert!(!is_conversation_api(
-            "https://example.com/backend-api/conversation/abc"
+            "https://chatgpt.com/backend-api/conversation",
+            target,
         ));
-    }
-
-    #[tokio::test]
-    async fn load_error_script_reads_the_stranded_chatgpt_page() {
-        if crate::system_browser_path().is_none() {
-            return;
-        }
-        let _chrome_guard = super::super::chrome_test_guard().await;
-        let temp = tempfile::tempdir().expect("fixture");
-        let (url, server) = super::super::browser_surface_tests::local_page(
-            "<main><div>Could not load this ChatGPT conversation</div><button>Try again</button></main>",
-        )
-        .await;
-        let surfaces = BrowserSurfaces::default();
-        surfaces
-            .open("load-error", &temp.path().join("profile"), &url, 800, 600)
-            .await
-            .expect("open");
-        let page = surfaces.page("load-error").await.expect("page");
-        let probe = probe_load_error(&page).await.expect("probe");
-        assert!(
-            probe.load_failed_text && probe.try_again_button,
-            "{probe:?}"
-        );
-        let readiness = surfaces
-            .prompt_readiness("load-error")
-            .await
-            .expect("readiness");
-        assert_eq!(readiness["ready"], false);
-        assert_eq!(readiness["state"], LOAD_FAILED_STATE);
-        surfaces.close("load-error").await.expect("close");
-        server.abort();
+        assert!(!is_conversation_api(
+            "https://example.org/backend-api/conversation/123",
+            target,
+        ));
     }
 }

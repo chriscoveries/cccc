@@ -50,6 +50,27 @@ impl Drop for Connecting {
     }
 }
 
+pub(super) fn actor_pairing(
+    state: &AppState,
+    group: &str,
+    actor: &str,
+) -> Result<Option<Value>, ApiError> {
+    let doc = cccc_core::GroupStore::new(state.home.clone())
+        .and_then(|store| store.load(group))
+        .map_err(store::io_error)?;
+    let Some(actor) = doc.actors.iter().find(|item| item.id == actor) else {
+        return Ok(None);
+    };
+    let Some(provider) = actor.runtime.web_model_provider() else {
+        return Ok(None);
+    };
+    Ok(store::load(state)?
+        .into_iter()
+        .find(|connector| connector["revoked"] != true && connector["provider"] == provider)
+        .and_then(|connector| web_model_connectors::pairing_for_actor(&connector, group, &actor.id))
+        .filter(|pair| pair["generation"] == cccc_core::actors::generation_identity(actor)))
+}
+
 async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult {
     let group = super::web_model_connectors::required(&body, "group_id")?;
     let actor = super::web_model_connectors::required(&body, "actor_id")?;
@@ -91,6 +112,9 @@ async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
         if let Err(error) =
             super::web_model_delivery::reconcile_before_remove(&state, &group, &actor).await
         {
+            if error.code() == "composer_occupied" {
+                return Err(error);
+            }
             tracing::info!(%group, %actor, %error, "Web Model remove: ambiguous delivery left for review");
         }
         let _control = super::web_model_delivery::control_guard_wait(
@@ -384,6 +408,9 @@ fn pairing_error(code: &str) -> ApiError {
         "pairing_target_changed" => "pairing_target_changed",
         _ => "pairing_failed",
     };
+    if code == "pairing_composer_occupied" {
+        return ApiError::bad_code(code, code, json!({"reason":"composer_occupied"}));
+    }
     ApiError::bad_code(code, code, json!({}))
 }
 

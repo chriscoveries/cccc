@@ -10,7 +10,8 @@
 //! are the same ones the manual resume-delivery route applies (the tab shows
 //! the saved conversation, it is ready, its composer is empty and no response
 //! is running); nothing is ever replayed.
-use serde_json::Value;
+use crate::{AppState, api::ApiError};
+use serde_json::{Value, json};
 use std::time::Duration;
 
 /// Env switch for the worker's automatic resume, in minutes. Unset or 0 = off.
@@ -71,6 +72,100 @@ pub(super) fn tab_safe_to_resume(readiness: &Value, matches_saved_chat: bool) ->
         && readiness["composer_chars"].as_u64().unwrap_or(0) == 0
         && readiness["composer_has_attachments"] != true
         && readiness["running"] != true
+}
+
+pub(super) fn composer_occupied(readiness: &Value) -> bool {
+    readiness["composer_chars"].as_u64().unwrap_or(0) > 0
+        || readiness["composer_has_attachments"] == true
+}
+
+pub(super) fn occupied_error() -> ApiError {
+    ApiError::bad_code(
+        "composer_occupied",
+        "The conversation has an unsent draft. Check the message box and try again.",
+        json!({"reason":"composer_occupied"}),
+    )
+}
+
+/// New proof comes from a successful readback after CCCC inserted the text.
+/// A continuation of the same attempt keeps its existing proof.
+pub(super) fn staged_draft_proof(
+    target: &Value,
+    surface: &Value,
+    evidence: &Value,
+    delivery_id: &str,
+) -> Value {
+    let Some(digest) = evidence["baseline"]["staged_draft_sha256"].as_str() else {
+        return if target["last_delivery_id"] == delivery_id {
+            target["staged_draft"].clone()
+        } else {
+            Value::Null
+        };
+    };
+    json!({
+        "sha256":digest,"delivery_id":delivery_id,
+        "binding_revision":target["binding_revision"],
+        "actor_identity":surface["metadata"]["actor_identity"],
+        "target_id":surface["target_id"],
+    })
+}
+
+pub(super) async fn clear_owned_draft(
+    state: &AppState,
+    group: &str,
+    actor: &str,
+    target: &Value,
+    readiness: &Value,
+) -> Result<bool, ApiError> {
+    if !composer_occupied(readiness)
+        || readiness["composer_has_attachments"] == true
+        || readiness["running"] != false
+        || target["kind"] != "existing_chat"
+        || target["last_delivery_status"] == "deferred"
+        || !super::web_model_reopen::saved_page_matches(target, readiness)
+    {
+        return Ok(false);
+    }
+    let key = super::web_model_browser::key(group, actor);
+    let surface = state.browser_surfaces.info(&key).await;
+    let Some(target_id) = surface["target_id"].as_str() else {
+        return Ok(false);
+    };
+    let proof = &target["staged_draft"];
+    let delivery_hash = (proof["delivery_id"].is_string()
+        && proof["delivery_id"] == target["last_delivery_id"]
+        && proof["binding_revision"].is_string()
+        && proof["binding_revision"] == target["binding_revision"]
+        && proof["actor_identity"].is_string()
+        && proof["actor_identity"] == surface["metadata"]["actor_identity"]
+        && proof["target_id"] == target_id)
+        .then(|| proof["sha256"].as_str())
+        .flatten();
+
+    let pairing = super::web_model_pairing::actor_pairing(state, group, actor)?;
+    let pairing_hash = pairing
+        .as_ref()
+        .filter(|pair| {
+            matches!(pair["state"].as_str(), Some("failed" | "cancelled"))
+                || (matches!(
+                    pair["state"].as_str(),
+                    Some("waiting" | "awaiting_confirmation")
+                ) && pair["expires_at_ms"]
+                    .as_i64()
+                    .is_some_and(|ms| ms <= chrono::Utc::now().timestamp_millis()))
+        })
+        .and_then(|pair| pair["code_hash"].as_str());
+    state
+        .browser_surfaces
+        .clear_owned_actor_draft(
+            &key,
+            target_id,
+            target["url"].as_str().unwrap_or_default(),
+            delivery_hash,
+            pairing_hash,
+        )
+        .await
+        .map_err(|error| ApiError::bad(error.to_string()))
 }
 
 #[cfg(test)]

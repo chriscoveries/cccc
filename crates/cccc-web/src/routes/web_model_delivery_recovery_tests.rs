@@ -729,12 +729,8 @@ async fn contended_worker_recovers_manual_send_and_only_delivers_later_work() {
     });
     // Ledger/status wake-ups during the live submission must not orphan it.
     for _ in 0..8 {
-        super::super::web_model_supervisor::ensure_running_actor(
-            &state,
-            Some(&group.group_id),
-            true,
-        )
-        .await;
+        super::super::web_model_supervisor::ensure_running_actor(&state, Some(&group.group_id))
+            .await;
     }
     tokio::time::timeout(std::time::Duration::from_secs(15),async {
         loop {
@@ -875,9 +871,37 @@ async fn contended_worker_recovers_manual_send_and_only_delivers_later_work() {
             .expect("text"),
         "A new human draft"
     );
-    page.evaluate("document.querySelector('textarea').value=''")
-        .await
-        .expect("human clears own draft");
+    // A failed setup can leave its exact draft in the bound conversation.
+    // Only the candidate for this actor has authority to identify it.
+    let binding =
+        super::super::web_model_connector_store::for_actor(&state, &group.group_id, "browser-test")
+            .expect("binding");
+    let connector = binding["connector_id"].as_str().expect("connector");
+    let pairing = cccc_core::web_model_connectors::begin_pairing(
+        &state.home,
+        connector,
+        &group.group_id,
+        "browser-test",
+        "fixture-generation",
+        false,
+    )
+    .expect("start setup");
+    cccc_core::web_model_connectors::fail_pairing(
+        &state.home,
+        connector,
+        &group.group_id,
+        "browser-test",
+        pairing["pairing_id"].as_str().expect("candidate"),
+        "pairing_interrupted",
+    )
+    .expect("terminal setup");
+    let stale = crate::browser_surface::pairing_prompt(pairing["code"].as_str().expect("code"));
+    page.evaluate(format!(
+        "document.querySelector('textarea').value={}",
+        json!(stale)
+    ))
+    .await
+    .expect("put terminal setup in composer");
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             if page
@@ -931,4 +955,346 @@ async fn contended_worker_recovers_manual_send_and_only_delivers_later_work() {
         .await
         .expect("stop daemon");
     daemon.await.expect("daemon task").expect("daemon stopped");
+}
+
+const RECOVERY_ACTOR: &str = "browser-test";
+
+struct RecoveryFixture {
+    _home: tempfile::TempDir,
+    state: AppState,
+    group: cccc_core::GroupDoc,
+}
+
+impl RecoveryFixture {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(directory.path().join("home")).expect("home");
+        home.initialize().expect("initialize");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("page recovery", "").expect("group");
+        group.running = true;
+        let mut actor = Actor::new(RECOVERY_ACTOR);
+        actor.runtime = ActorRuntime::WebModel;
+        actor.normalize_runtime_constraints();
+        actor.generation = "fixture-generation".into();
+        actor
+            .env
+            .insert("CCCC_WEB_MODEL_DELIVERY_MODE".into(), "browser".into());
+        group.actors.push(actor);
+        group.extra.insert(
+            super::super::web_model_browser::TARGETS_KEY.into(),
+            json!({}),
+        );
+        store.save(&group).expect("save");
+        let (_, _, _, state) = crate::app_with_shutdown(
+            home,
+            tokio::sync::broadcast::channel(1).0,
+            crate::WebMode::Normal,
+            None,
+            crate::LiveBinding {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            "managed-page-recovery".into(),
+        );
+        Self {
+            _home: directory,
+            state,
+            group,
+        }
+    }
+
+    fn queue(&self) {
+        let store = GroupStore::new(self.state.home.clone()).expect("store");
+        let mut event = Event::new("chat.message", &self.group.group_id);
+        event.by = "user".into();
+        event.data.insert("message_mode".into(), json!("send"));
+        event.data.insert("to".into(), json!([RECOVERY_ACTOR]));
+        event
+            .data
+            .insert("text".into(), json!("Queued while the browser was closed"));
+        ledger::append(
+            &store.ledger_path(&self.group.group_id).expect("ledger"),
+            &event,
+        )
+        .expect("message");
+    }
+
+    async fn open(&self, url: &str) -> String {
+        let group = &self.group.group_id;
+        super::login_tests::pair_fixture(&self.state, group, url);
+        let actor = &self.group.actors[0];
+        let profile = super::super::web_model_shared_browser::profile(&self.state, "chatgpt_web");
+        let session_key = key(group, RECOVERY_ACTOR);
+        self.state
+            .browser_surfaces
+            .open_shared_actor_fixture(
+                &session_key,
+                &profile,
+                url,
+                &crate::browser_surface::actor_identity(actor),
+            )
+            .await
+            .expect("managed browser page");
+        self.wait_for_page(&session_key, url).await;
+        session_key
+    }
+
+    async fn wait_for_page(&self, key: &str, url: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if self
+                    .state
+                    .browser_surfaces
+                    .prompt_readiness(key)
+                    .await
+                    .is_ok_and(|state| state["tab_url"] == url && state["state"] != "loading")
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("fixture page loads");
+    }
+}
+
+async fn local_recovery_server(router: Router) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listen");
+    let url = format!("http://{}/", listener.local_addr().expect("address"));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve");
+    });
+    (url, server)
+}
+
+#[tokio::test]
+async fn closed_idle_and_unresponsive_pages_reopen_only_on_their_own_managed_target() {
+    use super::super::web_model_supervisor::reopen_on_demand;
+    use std::time::Duration;
+
+    if crate::system_browser_path().is_none() {
+        return;
+    }
+    let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
+    let (url, server) = local_recovery_server(Router::new().route("/", get(|| async {
+        Html(r#"<textarea id="prompt-textarea" style="width:500px;height:120px"></textarea>
+        <button aria-label="Stop generating">Stop</button><script>document.hasFocus=()=>false;</script>"#)
+    }))).await;
+    let fixture = RecoveryFixture::new();
+    let state = &fixture.state;
+    let group = &fixture.group.group_id;
+    let session_key = fixture.open(&url).await;
+    let surfaces = &state.browser_surfaces;
+    let profile = super::super::web_model_shared_browser::profile(state, "chatgpt_web");
+    let sibling = surfaces
+        .open_shared_actor_fixture("test-sibling", &profile, &url, "sibling")
+        .await
+        .expect("sibling");
+    let initial = surfaces.info(&session_key).await;
+    let initial_target = initial["target_id"].as_str().expect("target");
+    assert!(
+        !surfaces
+            .consider_actor_idle_close(&session_key, initial_target, true, Duration::ZERO)
+            .await
+            .expect("busy page protected")
+    );
+    let page = surfaces
+        .sessions
+        .lock()
+        .await
+        .get(&session_key)
+        .expect("session")
+        .page
+        .clone();
+    page.evaluate("document.querySelector('button').remove()")
+        .await
+        .expect("finish response");
+    assert!(
+        surfaces
+            .consider_actor_idle_close(&session_key, initial_target, true, Duration::ZERO)
+            .await
+            .expect("idle page closes")
+    );
+    let retired = surfaces.info(&session_key).await;
+    assert_eq!(retired["closed_reason"], "idle");
+    assert!(!reopen_on_demand(state, group, RECOVERY_ACTOR, &retired).await);
+    assert_eq!(surfaces.info(&session_key).await["active"], false);
+
+    fixture.queue();
+    assert!(reopen_on_demand(state, group, RECOVERY_ACTOR, &retired).await);
+    fixture.wait_for_page(&session_key, &url).await;
+    let first_reopened = surfaces.info(&session_key).await;
+    let first_reopened_id = first_reopened["target_id"].as_str().expect("new target");
+    assert_ne!(first_reopened_id, initial_target);
+    assert_ne!(first_reopened["target_id"], sibling["target_id"]);
+    let page = surfaces
+        .sessions
+        .lock()
+        .await
+        .get(&session_key)
+        .expect("session")
+        .page
+        .clone();
+    page.evaluate("document.querySelector('button').remove()")
+        .await
+        .expect("finish response");
+    surfaces
+        .prompt_readiness(&session_key)
+        .await
+        .expect("last healthy observation");
+    for expected in [false, false, true] {
+        assert_eq!(
+            surfaces
+                .actor_probe_timed_out(&session_key, first_reopened_id, true)
+                .await
+                .expect("renderer timeout"),
+            expected
+        );
+    }
+    let retired = surfaces.info(&session_key).await;
+    assert_eq!(retired["closed_reason"], "renderer_unresponsive");
+    assert!(reopen_on_demand(state, group, RECOVERY_ACTOR, &retired).await);
+    assert_ne!(
+        surfaces.info(&session_key).await["target_id"],
+        first_reopened["target_id"]
+    );
+    assert_eq!(
+        surfaces.info("test-sibling").await["target_id"],
+        sibling["target_id"]
+    );
+    surfaces.shutdown_all().await.expect("close shared browser");
+    server.abort();
+}
+
+#[tokio::test]
+async fn load_error_is_retried_before_ambiguous_review_and_exhausts_visibly() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    if crate::system_browser_path().is_none() {
+        return;
+    }
+    let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
+    let visits = Arc::new(AtomicUsize::new(0));
+    let visits_on_page = Arc::clone(&visits);
+    let healthy = Arc::new(AtomicBool::new(false));
+    let healthy_on_page = Arc::clone(&healthy);
+    let (url, server) = local_recovery_server(Router::new().route("/", get(move || {
+        let visits = Arc::clone(&visits_on_page);
+        let healthy = Arc::clone(&healthy_on_page);
+        async move {
+            use axum::response::IntoResponse;
+            visits.fetch_add(1, Ordering::Relaxed);
+            if healthy.load(Ordering::Relaxed) {
+                return Html(r#"<article data-message-author-role="user">Earlier message</article>
+                    <textarea id="prompt-textarea" style="width:500px;height:120px"></textarea>"#)
+                    .into_response();
+            }
+            (axum::http::StatusCode::TOO_MANY_REQUESTS, [("Retry-After", "85")],
+                Html("<main>Could not load this ChatGPT conversation<button>Try again</button></main>"))
+                .into_response()
+        }
+    }))).await;
+    let fixture = RecoveryFixture::new();
+    let state = &fixture.state;
+    let group = &fixture.group.group_id;
+    let session_key = fixture.open(&url).await;
+    fixture.queue();
+    update_target(
+        state,
+        group,
+        RECOVERY_ACTOR,
+        json!({
+            "last_delivery_status":"submission_ambiguous","last_delivery_id":"prior"
+        }),
+    )
+    .expect("existing fence");
+    let binding =
+        load_target(state, group, RECOVERY_ACTOR).expect("bound")["binding_revision"].clone();
+
+    for attempts in 0..=3 {
+        assert!(matches!(
+            deliver_pending(state, group, RECOVERY_ACTOR)
+                .await
+                .expect("load error"),
+            DeliveryOutcome::Idle
+        ));
+        let target = load_target(state, group, RECOVERY_ACTOR).expect("target");
+        assert_eq!(target["binding_revision"], binding);
+        assert_eq!(target["last_delivery_status"], "submission_ambiguous");
+        assert_eq!(target["load_recovery"]["reload_attempts"], attempts);
+        if attempts < 3 {
+            let mut due = target["load_recovery"].clone();
+            due["next_reload_at_ms"] = json!(0);
+            update_target(state, group, RECOVERY_ACTOR, json!({"load_recovery":due}))
+                .expect("advance retry clock without sleeping");
+        } else {
+            assert!(target["load_recovery"]["next_reload_at_ms"].is_null());
+        }
+    }
+    let attempted = visits.load(Ordering::Relaxed);
+    assert_eq!(attempted, 4);
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("exhausted"),
+        DeliveryOutcome::Idle
+    ));
+    assert_eq!(visits.load(Ordering::Relaxed), attempted);
+    let health = super::super::web_model_browser::payload(state, group, RECOVERY_ACTOR, false)
+        .await
+        .expect("health")
+        .0["result"]["health_snapshot"]
+        .clone();
+    assert_eq!(health["browser"]["state"], "load_recovery_failed");
+    assert!(health["delivery"]["oldest_undelivered_at"].is_string());
+
+    // An operator reopens the conversation after the provider is healthy.
+    healthy.store(true, Ordering::Relaxed);
+    let page = state
+        .browser_surfaces
+        .sessions
+        .lock()
+        .await
+        .get(&session_key)
+        .expect("page")
+        .page
+        .clone();
+    page.reload().await.expect("operator reload");
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("healthy page"),
+        DeliveryOutcome::Ambiguous
+    ));
+    assert!(
+        load_target(state, group, RECOVERY_ACTOR).expect("new target")["load_recovery"].is_null()
+    );
+    state
+        .browser_surfaces
+        .close(&session_key)
+        .await
+        .expect("close");
+    state
+        .browser_surfaces
+        .shutdown_all()
+        .await
+        .expect("close shared browser");
+    server.abort();
+}
+
+#[test]
+fn a_reopened_chat_with_a_composer_still_requires_bound_thread_evidence() {
+    let target = json!({"kind":"existing_chat","url":"https://chatgpt.com/c/thread"});
+    let mut readiness =
+        json!({"ready":true,"running":false,"tab_url":"https://chatgpt.com/c/thread"});
+    assert!(!ready_to_claim(&target, &readiness));
+    readiness["thread_loaded"] = json!(true);
+    readiness["tab_url"] = json!("https://chatgpt.com/g/g-p-project/c/thread");
+    assert!(ready_to_claim(&target, &readiness));
+    readiness["tab_url"] = json!("https://chatgpt.com/c/other");
+    assert!(!ready_to_claim(&target, &readiness));
 }

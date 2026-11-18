@@ -73,13 +73,27 @@ async fn open(
     validate_actor(&state, &group_id, &actor_id)?;
     let width = dimension(&body, "width", 1366, 640, 2560);
     let height = dimension(&body, "height", 900, 480, 1600);
-    ensure_open_for_actor(&state, &group_id, &actor_id, width, height).await?;
+    {
+        let _work = super::web_model_delivery::control_work(&state, &group_id, &actor_id)?;
+        ensure_open_for_actor(&state, &group_id, &actor_id, width, height).await?;
+        let target = super::web_model_delivery_state::target(&state, &group_id, &actor_id)?;
+        if target["load_recovery"]["next_reload_at_ms"].is_null()
+            && target["load_recovery"].is_object()
+        {
+            super::web_model_delivery_state::update_target(
+                &state,
+                &group_id,
+                &actor_id,
+                json!({"load_recovery":null}),
+            )?;
+        }
+    }
     super::web_model_delivery::ensure_worker(state.clone(), group_id.clone(), actor_id.clone())
         .await;
     payload(&state, &group_id, &actor_id, query.inspect).await
 }
 
-pub(super) async fn ensure_open_for_actor(
+pub(super) async fn open_actor_surface(
     state: &AppState,
     group_id: &str,
     actor_id: &str,
@@ -115,7 +129,22 @@ pub(super) async fn ensure_open_for_actor(
             &generation,
         )
         .await
-        .map_err(|error| ApiError::bad(format!("{error:#}")))?;
+        .map_err(|error| ApiError::bad(format!("{error:#}")))
+}
+
+async fn ensure_open_for_actor(
+    state: &AppState,
+    group_id: &str,
+    actor_id: &str,
+    width: u32,
+    height: u32,
+) -> Result<Value, ApiError> {
+    open_actor_surface(state, group_id, actor_id, width, height).await?;
+    let target = super::web_model_delivery_state::target(state, group_id, actor_id)?;
+    let open_url = browser_open_url(
+        &target,
+        provider_url(actor_provider(state, group_id, actor_id)?),
+    )?;
     let session_key = key(group_id, actor_id);
     // An existing surface may be midway through sign-in or navigation. Opening
     // its viewer must not send it away from that page to the saved conversation.
@@ -341,7 +370,12 @@ async fn upgrade(
     }))
 }
 
-async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool) -> ApiResult {
+pub(super) async fn payload(
+    state: &AppState,
+    group_id: &str,
+    actor_id: &str,
+    inspect: bool,
+) -> ApiResult {
     let session_key = key(group_id, actor_id);
     let mut surface = state.browser_surfaces.info(&session_key).await;
     let store = GroupStore::new(state.home.clone()).map_err(io_error)?;
@@ -391,11 +425,33 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
         .cloned()
         .unwrap_or_else(|| json!({}));
     let ready = readiness["ready"].as_bool().unwrap_or(false);
+    let rate_limit = target["load_recovery"].clone();
+    let load_recovery_failed = rate_limit.is_object()
+        && rate_limit["next_reload_at_ms"].is_null()
+        && (!ready || !super::web_model_reopen::saved_page_matches(&target, &readiness));
+    let composer_occupied = active
+        && ready
+        && readiness["running"] == false
+        && super::web_model_reconcile::composer_occupied(&readiness)
+        && !matches!(
+            target["last_delivery_status"].as_str(),
+            Some("deferred" | "preflight_deferred" | "submitting" | "legacy_recovery_submitting")
+        );
+    let closed_reason = surface["closed_reason"].as_str().unwrap_or_default();
     let login_required = readiness["login_required"].as_bool().unwrap_or(false);
     let verification_required = readiness["verification_required"]
         .as_bool()
         .unwrap_or(false);
-    let browser_state = if verification_required {
+    let browser_state = if load_recovery_failed {
+        "load_recovery_failed"
+    } else if composer_occupied {
+        "composer_occupied"
+    } else if closed_reason == "idle" {
+        "idle_closed"
+    } else if closed_reason == "renderer_unresponsive" || metadata["renderer_unresponsive"] == true
+    {
+        "renderer_unresponsive"
+    } else if verification_required {
         "verification_required"
     } else if ready {
         "ready"
@@ -455,7 +511,7 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
         | "submission_ambiguous_completion_pending"
         | "completion_ambiguous"
         | "legacy_submission_unverified" => "ambiguous",
-        "deferred" | "legacy_recovery_submitting" => "submitting",
+        "deferred" | "preflight_deferred" | "legacy_recovery_submitting" => "submitting",
         value => value,
     };
     let submission = &target["last_submission_evidence"];
@@ -471,7 +527,9 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
     let last_error = target["last_error"].as_str().unwrap_or("");
     let delivery_state = match internal_delivery_status {
         "pending_new_chat_bind" => "pending_bind",
-        "submitting" | "deferred" | "legacy_recovery_submitting" => "submitting",
+        "submitting" | "deferred" | "preflight_deferred" | "legacy_recovery_submitting" => {
+            "submitting"
+        }
         "submission_ambiguous"
         | "submission_ambiguous_completion_pending"
         | "completion_ambiguous"
@@ -578,7 +636,31 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
             "No browser delivery has been recorded yet.",
         ),
     };
-    let (next_action, next_label, next_reason) = if !active {
+    let (next_action, next_label, next_reason) = if load_recovery_failed {
+        (
+            "open_chatgpt",
+            "Conversation load recovery stopped",
+            "Open the browser to inspect the conversation and start a new recovery attempt when the provider is available.",
+        )
+    } else if composer_occupied {
+        (
+            "clear_composer",
+            "Check the unsent draft",
+            "The message box holds an unsent draft. Check it in the browser before continuing delivery.",
+        )
+    } else if closed_reason == "idle" {
+        (
+            "none",
+            "Idle page closed",
+            "The page opens when delivery needs it or you open the browser.",
+        )
+    } else if browser_state == "renderer_unresponsive" {
+        (
+            "check_browser",
+            "Browser renderer is unresponsive",
+            "CCCC retries inspection and replaces the owned page when it can do so safely.",
+        )
+    } else if !active {
         (
             "open_chatgpt",
             "Open browser",
@@ -655,7 +737,7 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
             "The Web Model is ready for browser delivery.",
         )
     };
-    let tone = if delivery_state == "failed" {
+    let tone = if delivery_state == "failed" || load_recovery_failed {
         "error"
     } else if next_action != "none" {
         "needs"
@@ -673,17 +755,21 @@ async fn payload(state: &AppState, group_id: &str, actor_id: &str, inspect: bool
         "tone":tone,
         "summary":next_label,
         "browser":{
-            "state":if active {browser_state} else {"closed"},
+            "state":if active || !closed_reason.is_empty() || load_recovery_failed {browser_state} else {"closed"},
             "label":if verification_required{"Needs verification"}else if ready{"Ready"}else if browser_state==crate::browser_surface::CONVERSATION_LENGTH_EXCEEDED_STATE{"Conversation full"}else if login_required{"Needs sign-in"}else if active{"Open"}else{"Not open"},
-            "reason":readiness["message"].as_str().unwrap_or(if active {
-                "Check the conversation input in this browser."
-            } else {
-                "Open the shared browser to sign in or inspect the page."
-            }),
+            "reason":if load_recovery_failed {next_reason} else {
+                readiness["message"].as_str().unwrap_or(if active {
+                    "Check the conversation input in this browser."
+                } else {
+                    "Open the shared browser to sign in or inspect the page."
+                })
+            },
             "active":active,"ready":ready,"logged_in_guess":ready,"url":url,
             "viewer_attached":surface["controller_attached"],
             "last_frame_at":surface["last_frame_at"],
-            "rate_limit":metadata.get("rate_limit").cloned().unwrap_or(Value::Null),
+            "rate_limit":rate_limit,
+            "closed_reason":surface["closed_reason"],
+            "composer_occupied_since":if composer_occupied {metadata["composer_occupied_since"].clone()} else {Value::Null},
             "conversation_limit":readiness.get("conversation_limit").cloned().unwrap_or(Value::Null)
         },
         "target":{

@@ -35,14 +35,15 @@ use navigation::goto_dom_content_loaded;
 use owner::BrowserOwner;
 mod pairing;
 pub(crate) use conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE;
-pub(crate) use load_error::is_load_error_state;
+pub(crate) use load_error::{LoadRecovery, is_load_error_state};
+pub(crate) use page_recovery::PAGE_PROBE_TIMEOUT;
 use page_recovery::{candidate_page_url, close_internal_pages, is_internal_page};
 pub(crate) use pairing::{PairingPage, pairing_prompt};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
@@ -70,7 +71,12 @@ pub struct BrowserSurfaces {
     profile_operations: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     key_profiles: Mutex<HashMap<String, PathBuf>>,
     shutting_down: AtomicBool,
-    closed_pages: Mutex<HashMap<String, Option<String>>>,
+    closed_pages: Mutex<HashMap<String, RetiredPage>>,
+}
+
+struct RetiredPage {
+    generation: Option<String>,
+    reason: &'static str,
 }
 
 #[derive(Debug)]
@@ -102,6 +108,11 @@ pub(super) struct Session {
     strategy: String,
     metadata: Value,
     recover_closed_page: bool,
+    viewers: Arc<AtomicUsize>,
+    idle_since: Option<tokio::time::Instant>,
+    renderer_timeouts: u8,
+    last_observed_busy: bool,
+    initial_retry_after: Arc<Mutex<Option<u64>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -171,7 +182,7 @@ impl BrowserSurfaces {
                 .lock()
                 .await
                 .iter()
-                .map(|(key, generation)| (key.clone(), None, generation.clone())),
+                .map(|(key, retired)| (key.clone(), None, retired.generation.clone())),
         );
         let mut groups = HashMap::new();
         let keys = keys
@@ -205,7 +216,12 @@ impl BrowserSurfaces {
                     .is_some_and(|s| s.page.target_id() == &target)
             } else {
                 !self.sessions.lock().await.contains_key(&key)
-                    && self.closed_pages.lock().await.get(&key) == Some(&generation)
+                    && self
+                        .closed_pages
+                        .lock()
+                        .await
+                        .get(&key)
+                        .is_some_and(|retired| retired.generation == generation)
             };
             if same_owner {
                 closed += usize::from(self.close_key_locked(&key).await?);
@@ -379,6 +395,30 @@ impl BrowserSurfaces {
     }
 
     #[cfg(test)]
+    pub(crate) async fn open_shared_actor_fixture(
+        &self,
+        key: &str,
+        profile: &Path,
+        url: &str,
+        generation: &str,
+    ) -> Result<Value> {
+        self.open_with(OpenRequest {
+            key,
+            profile,
+            url,
+            width: 800,
+            height: 600,
+            storage_state: None,
+            reuse_existing: true,
+            track_initial_url: false,
+            mode: BrowserMode::Headless,
+            shared_browser: true,
+            actor_identity: Some(generation),
+        })
+        .await
+    }
+
+    #[cfg(test)]
     pub async fn open_seeded(
         &self,
         key: &str,
@@ -486,6 +526,7 @@ impl BrowserSurfaces {
         if let Some(page) = page.filter(|_| !shared_browser || actor_identity.is_some()) {
             let opened = async {
                 if shared_browser {
+                    self.observe_initial_load(key, &page, url).await;
                     navigation::start_navigation(&page, url)
                         .await
                         .context("open browser page")?;
@@ -685,6 +726,11 @@ impl BrowserSurfaces {
             strategy: resource.strategy.clone(),
             metadata,
             recover_closed_page: !shared_browser && matches!(mode, BrowserMode::Headless),
+            viewers: Arc::default(),
+            idle_since: None,
+            renderer_timeouts: 0,
+            last_observed_busy: false,
+            initial_retry_after: Arc::default(),
         };
         drop(resource);
         // Register before navigation: failed or cancelled initialization still has
@@ -707,27 +753,31 @@ impl BrowserSurfaces {
             )
         });
         let Some((owner, target_id, recover_closed_page, generation)) = snapshot else {
-            return if self.closed_pages.lock().await.contains_key(key) {
-                closed()
-            } else {
-                idle()
-            };
+            return self
+                .closed_pages
+                .lock()
+                .await
+                .get(key)
+                .map_or_else(idle, closed);
         };
         let owner = owner.read().await;
         let handler_finished = owner.handler.is_finished();
         let user_closed_page = !handler_finished
             && !recover_closed_page
-            && owner
-                .browser
-                .execute(GetTargetsParams::default())
-                .await
-                .is_ok_and(|targets| {
+            && tokio::time::timeout(
+                PAGE_PROBE_TIMEOUT,
+                owner.browser.execute(GetTargetsParams::default()),
+            )
+            .await
+            .is_ok_and(|result| {
+                result.is_ok_and(|targets| {
                     !targets
                         .result
                         .target_infos
                         .iter()
                         .any(|target| target.target_id == target_id)
-                });
+                })
+            });
         drop(owner);
         if handler_finished {
             let message = match self.close(key).await {
@@ -749,13 +799,18 @@ impl BrowserSurfaces {
                 if let Err(error) = self.close_key_locked(key).await {
                     return failed(&format!("Closed browser surface cleanup failed: {error}"));
                 }
+                let retired = RetiredPage {
+                    generation,
+                    reason: "target_closed",
+                };
+                let payload = closed(&retired);
                 if session_actor(key).is_some() {
                     self.closed_pages
                         .lock()
                         .await
-                        .insert(key.to_owned(), generation);
+                        .insert(key.to_owned(), retired);
                 }
-                return closed();
+                return payload;
             }
             // A replacement that opened during inspection has its own lifecycle.
         }
@@ -1125,8 +1180,8 @@ fn state(session: &Session) -> Value {
         "active":true,"state":"ready","message":"Browser surface is ready.","strategy":session.strategy,
         "url":session.url,"width":session.width,"height":session.height,
         "started_at":session.started_at,"updated_at":session.updated_at,
-        "last_frame_seq":session.seq,"last_frame_at":session.updated_at,"controller_attached":false,
-        "metadata":session.metadata,
+        "last_frame_seq":session.seq,"last_frame_at":session.updated_at,"controller_attached":session.viewers.load(Ordering::Acquire) > 0,
+        "metadata":session.metadata, "target_id":session.page.target_id().as_ref(),
         "viewer":session.viewer
     });
     if let Some(initial_url) = &session.initial_url {
@@ -1143,9 +1198,14 @@ fn idle() -> Value {
     })
 }
 
-fn closed() -> Value {
+fn closed(retired: &RetiredPage) -> Value {
+    let message = match retired.reason {
+        "idle" => "Idle browser page closed. It opens on the next delivery or explicit open.",
+        "renderer_unresponsive" => "Unresponsive browser page retired. Recovery is pending.",
+        _ => "Browser surface target is no longer open.",
+    };
     json!({
-        "active":false,"state":"closed","message":"Browser surface was closed by the user.",
+        "active":false,"state":"closed","message":message,"closed_reason":retired.reason,
         "width":0,"height":0,"last_frame_seq":0,"controller_attached":false,
         "viewer":{"kind":"screencast","vnc":{"available":false,"error":"Browser surface was closed"}}
     })

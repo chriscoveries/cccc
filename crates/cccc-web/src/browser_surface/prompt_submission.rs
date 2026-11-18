@@ -70,9 +70,15 @@ struct SubmissionSnapshot {
     running: bool,
     stop_visible: bool,
     composer_exact: bool,
+    #[serde(skip_serializing)]
+    exact_composer_text: Option<String>,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    staged_draft_sha256: Option<String>,
     composer_contains_prompt: bool,
     composer_chars: usize,
     user_message_count: usize,
+    #[serde(skip_serializing)]
+    thread_loaded: bool,
     send_enabled_count: usize,
 }
 
@@ -283,7 +289,8 @@ impl BrowserSurfaces {
                 &staged,
             )));
         }
-        if !staged.composer_exact {
+        let inserted_here = !staged.composer_exact;
+        if inserted_here {
             if let Some(target) = pairing {
                 target.check_before_send(self, key).await?;
             }
@@ -293,6 +300,15 @@ impl BrowserSurfaces {
                 .context("insert prompt into visible browser composer")?;
         }
         let mut baseline = wait_for_prompt_staged(&page, prompt, &needles).await?;
+        let staged_hash = if inserted_here && pairing.is_none() {
+            baseline
+                .exact_composer_text
+                .as_deref()
+                .map(super::pairing::draft_digest)
+        } else {
+            None
+        };
+        baseline.staged_draft_sha256 = staged_hash.clone();
         if let Some(path) = attachment_path {
             let attachment = attach_compatibility_image(&page, path, delivery_id).await?;
             if let AttachmentOutcome::Deferred(attachment) = attachment {
@@ -313,6 +329,7 @@ impl BrowserSurfaces {
                 return Ok(with_attachment_evidence(outcome, attachment));
             }
             baseline = inspect_submission(&page, prompt, &needles).await?;
+            baseline.staged_draft_sha256 = staged_hash;
             if !baseline.composer_exact {
                 bail!("browser prompt changed while attaching the compatibility image");
             }
@@ -742,7 +759,7 @@ impl BrowserSurfaces {
         readiness
     }
 
-    async fn inspect_prompt_readiness(page: &Page) -> Result<Value> {
+    pub(super) async fn inspect_prompt_readiness(page: &Page) -> Result<Value> {
         let url = page.url().await?.unwrap_or_default();
         // A new window may still be waiting for response headers. It cannot
         // contain a composer, and evaluating JS there can wait for navigation.
@@ -792,6 +809,7 @@ impl BrowserSurfaces {
             "composer_chars":snapshot.composer_chars,
             "composer_has_attachments":!loading && composer_has_attachments(page).await?,
             "running":snapshot.running,
+            "thread_loaded":snapshot.thread_loaded,
             "login_required":candidate.login_required,
             "verification_required":candidate.verification_required,
             "state":if loading {"loading"} else if candidate.verification_required {"verification_required"}
@@ -828,6 +846,23 @@ impl BrowserSurfaces {
         };
         if session.page.target_id() != page.target_id() {
             return;
+        }
+        if readiness["state"] != "inspection_failed" {
+            session.renderer_timeouts = 0;
+            session.metadata["renderer_unresponsive"] = Value::Null;
+            session.last_observed_busy = !composer_is_idle(readiness);
+            if session.last_observed_busy {
+                session.idle_since = None;
+            }
+            let occupied = readiness["ready"] == true
+                && readiness["running"] == false
+                && (readiness["composer_chars"].as_u64().unwrap_or(0) > 0
+                    || readiness["composer_has_attachments"] == true);
+            if occupied && session.metadata["composer_occupied_since"].is_null() {
+                session.metadata["composer_occupied_since"] = json!(cccc_contracts::utc_now());
+            } else if !occupied {
+                session.metadata["composer_occupied_since"] = Value::Null;
+            }
         }
         if let Some(url) = readiness["tab_url"].as_str() {
             session.url = url.to_owned();
@@ -1284,7 +1319,7 @@ fn conversation_route_id(url: &reqwest::Url) -> Option<String> {
     })
 }
 
-fn chatgpt_conversation_id(url: &reqwest::Url) -> Option<String> {
+pub(super) fn chatgpt_conversation_id(url: &reqwest::Url) -> Option<String> {
     let segments = url.path_segments()?.collect::<Vec<_>>();
     segments
         .windows(2)
@@ -1381,6 +1416,13 @@ fn with_attachment_evidence(
             PromptSubmissionOutcome::Ambiguous(attach(value))
         }
     }
+}
+
+pub(super) fn composer_is_idle(readiness: &Value) -> bool {
+    readiness["ready"] == true
+        && readiness["running"] == false
+        && readiness["composer_chars"].as_u64() == Some(0)
+        && readiness["composer_has_attachments"] == false
 }
 
 const SELECT_COMPOSER_SCRIPT: &str = r#"() => {
@@ -1622,7 +1664,8 @@ const INSPECT_SUBMISSION_SCRIPT: &str = r#"(payload, messages) => {
     );
     const read = node => normalize(('value' in node) ? node.value : (node.innerText || node.textContent || ''));
     const marked = document.querySelector('[data-cccc-web-model-composer="cccc-web-model-composer"]');
-    const markedText = marked ? read(marked) : '';
+    const rawMarked = marked ? (('value' in marked) ? marked.value : (marked.innerText || marked.textContent || '')) : '';
+    const markedText = normalize(rawMarked);
     const composers = Array.from(new Set([
         ...(marked ? [marked] : []),
         ...document.querySelectorAll('main textarea, main [role="textbox"], main [contenteditable="true"]'),
@@ -1660,8 +1703,10 @@ const INSPECT_SUBMISSION_SCRIPT: &str = r#"(payload, messages) => {
     return {
         url: location.href || '', echo_found: echoFound, running: stopVisible, stop_visible: stopVisible,
         composer_exact: Boolean(markedText && markedText === expected),
+        exact_composer_text: markedText && markedText === expected ? rawMarked : null,
         composer_contains_prompt: composerTexts.some(containsPrompt), composer_chars: markedText.length,
         user_message_count: messageNodes.length,
+        thread_loaded: messages.some(message => message.node.isConnected && visible(message.node)),
         send_enabled_count: safeSend.filter(node => !node.disabled
             && String(node.getAttribute('aria-disabled') || '').toLowerCase() !== 'true').length
     };
@@ -1789,7 +1834,7 @@ mod conversation_target_tests {
         for other in [
             "https://chat.openai.com/c/stable-id",
             "https://chatgpt.com:8443/c/stable-id",
-            "https://user@chatgpt.com/c/stable-id",
+            "https://operator!@chatgpt.com/c/stable-id",
             "http://chatgpt.com/c/stable-id",
             "https://chatgpt.com.example/c/stable-id",
             "https://chatgpt.com/",
