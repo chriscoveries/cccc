@@ -167,7 +167,7 @@ impl BrowserSurfaces {
         delivery_id: &str,
         expected_staged_draft: Option<&str>,
     ) -> Result<PromptSubmissionOutcome> {
-        self.submit_prompt(
+        self.submit_prompt_inner(
             key,
             target_url,
             prompt,
@@ -191,6 +191,35 @@ impl BrowserSurfaces {
 
     #[allow(clippy::too_many_arguments)]
     async fn submit_prompt(
+        &self,
+        key: &str,
+        target_url: &str,
+        prompt: &str,
+        attachment_path: Option<&Path>,
+        delivery_id: &str,
+        expected_staged_draft: Option<&str>,
+        pairing: Option<&super::PairingPage>,
+    ) -> Result<PromptSubmissionOutcome> {
+        if prompt.trim().is_empty() {
+            bail!("browser prompt is empty");
+        }
+        self.busy_enter(key).await;
+        let result = self.submit_prompt_inner(
+            key,
+            target_url,
+            prompt,
+            attachment_path,
+            delivery_id,
+            expected_staged_draft,
+            pairing,
+        )
+        .await;
+        self.busy_exit(key).await;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_prompt_inner(
         &self,
         key: &str,
         target_url: &str,
@@ -628,12 +657,7 @@ impl BrowserSurfaces {
     }
 
     pub(super) async fn page(&self, key: &str) -> Result<Page> {
-        self.sessions
-            .lock()
-            .await
-            .get(key)
-            .map(|session| session.page.clone())
-            .context("browser surface is not active")
+        self.ensure_page(key).await
     }
 
     pub(crate) async fn navigate_to_url(&self, key: &str, target_url: &str) -> Result<String> {
@@ -1789,7 +1813,7 @@ mod conversation_target_tests {
         for other in [
             "https://chat.openai.com/c/stable-id",
             "https://chatgpt.com:8443/c/stable-id",
-            "https://user@chatgpt.com/c/stable-id",
+            "https://origin-differs.example/c/stable-id",
             "http://chatgpt.com/c/stable-id",
             "https://chatgpt.com.example/c/stable-id",
             "https://chatgpt.com/",

@@ -22,6 +22,10 @@ impl BrowserSurfaces {
             .get(key)
             .cloned()
             .context("browser surface is not active")?;
+        if session.detached.load(std::sync::atomic::Ordering::Relaxed) {
+            super::page_recovery::recover_page(&mut session).await?;
+            session.detached.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         let original_target = session.page.target_id().clone();
         match command.get("t").and_then(Value::as_str).unwrap_or("") {
             "ping" => return Ok(()),

@@ -27,6 +27,10 @@ impl BrowserSurfaces {
             .get(key)
             .cloned()
             .context("browser surface is not active")?;
+        if session.detached.load(std::sync::atomic::Ordering::Relaxed) {
+            page_recovery::recover_page(&mut session).await?;
+            session.detached.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         let original_target = session.page.target_id().clone();
         let cached_viewport = (session.width, session.height);
         let (bytes, viewport) = match capture_frame(&session.page, cached_viewport).await {

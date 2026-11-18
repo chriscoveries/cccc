@@ -248,6 +248,11 @@ fn app_with_shutdown_and_recovery(
         DaemonClient::new(home.clone()).without_voice_origin(),
     );
     let browser_surfaces = Arc::new(browser_surface::BrowserSurfaces::default());
+    if let Ok(value) = std::env::var("CCCC_WEB_MODEL_IDLE_CLOSE_SECONDS") {
+        if let Ok(seconds) = value.trim().parse::<u64>() {
+            browser_surfaces.set_idle_close_seconds(seconds);
+        }
+    }
     let codex_voice = Arc::new(if process_recovery.is_some() {
         codex_voice::CodexVoiceSessions::with_process_recovery(process_recovery)
     } else {

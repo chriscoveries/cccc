@@ -182,7 +182,10 @@ pub(super) async fn deliver_pending(
     let Some(_work) = browser_work(state, group_id, actor_id)? else {
         return Ok(DeliveryOutcome::Idle);
     };
-    deliver_once(state, group_id, actor_id, &session_key).await
+    state.browser_surfaces.busy_enter(&session_key).await;
+    let result = deliver_once(state, group_id, actor_id, &session_key).await;
+    state.browser_surfaces.busy_exit(&session_key).await;
+    result
 }
 
 /// One Actor's browser work, from its claim to its last write. The file lock is

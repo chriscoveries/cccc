@@ -84,13 +84,14 @@ pub(crate) struct PairingPage {
 
 impl BrowserSurfaces {
     pub(crate) async fn pairing_page(&self, key: &str) -> Result<PairingPage> {
-        let page = self
-            .sessions
-            .lock()
-            .await
-            .get(key)
-            .map(|s| s.page.clone())
-            .context("pairing_browser_required")?;
+        self.busy_enter(key).await;
+        let result = self.pairing_page_inner(key).await;
+        self.busy_exit(key).await;
+        result
+    }
+
+    async fn pairing_page_inner(&self, key: &str) -> Result<PairingPage> {
+        let page = self.ensure_page(key).await.context("pairing_browser_required")?;
         // cwf#853: a conversation ChatGPT closed for length can never take the
         // handshake (or any later turn). Pairing is an explicit request to
         // bind this Actor, so move the tab to a fresh chat first and pair

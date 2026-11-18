@@ -71,6 +71,8 @@ pub struct BrowserSurfaces {
     key_profiles: Mutex<HashMap<String, PathBuf>>,
     shutting_down: AtomicBool,
     closed_pages: Mutex<HashMap<String, Option<String>>>,
+    /// Seconds of idle before closing the page target; 0 = disabled (default).
+    pub idle_close_seconds: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug)]
@@ -102,6 +104,12 @@ pub(super) struct Session {
     strategy: String,
     metadata: Value,
     recover_closed_page: bool,
+    /// Set when the page target has been closed while idle; cleared after reattach.
+    pub(super) detached: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// In-flight operations on this session; idle close only when zero.
+    pub(super) busy: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Unix seconds of last use; drives idle close.
+    pub(super) last_use: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Clone, Copy)]
@@ -685,6 +693,14 @@ impl BrowserSurfaces {
             strategy: resource.strategy.clone(),
             metadata,
             recover_closed_page: !shared_browser && matches!(mode, BrowserMode::Headless),
+            detached: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            busy: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            last_use: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            )),
         };
         drop(resource);
         // Register before navigation: failed or cancelled initialization still has
@@ -848,6 +864,166 @@ impl BrowserSurfaces {
         let key_operation = self.key_operation(key).await;
         let _key_operation_guard = key_operation.lock().await;
         self.close_key_locked(key).await
+    }
+
+    pub fn idle_close_seconds(&self) -> u64 {
+        self.idle_close_seconds.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_idle_close_seconds(&self, seconds: u64) {
+        self.idle_close_seconds
+            .store(seconds, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub async fn busy_enter(&self, key: &str) {
+        if let Some(session) = self.sessions.lock().await.get(key) {
+            session.busy.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub async fn busy_exit(&self, key: &str) {
+        if let Some(session) = self.sessions.lock().await.get(key) {
+            let _ = session
+                .busy
+                .fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(1))
+                });
+        }
+    }
+
+    pub async fn is_busy(&self, key: &str) -> bool {
+        self.sessions
+            .lock()
+            .await
+            .get(key)
+            .map(|s| s.busy.load(std::sync::atomic::Ordering::Relaxed) != 0)
+            .unwrap_or(false)
+    }
+
+    /// Close page targets for sessions that are idle longer than the configured
+    /// threshold and not busy. Session metadata is retained; the next page use
+    /// reattaches via `ensure_page`.
+    pub async fn close_idle_pages(&self) -> usize {
+        let threshold = self.idle_close_seconds();
+        if threshold == 0 {
+            return 0;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let keys: Vec<String> = self.sessions.lock().await.keys().cloned().collect();
+        let mut closed = 0usize;
+        for key in keys {
+            let detached_already = {
+                let sessions = self.sessions.lock().await;
+                match sessions.get(&key) {
+                    Some(s) => s.detached.load(std::sync::atomic::Ordering::Relaxed),
+                    None => true,
+                }
+            };
+            if detached_already {
+                continue;
+            }
+            let (busy, last_use) = {
+                let sessions = self.sessions.lock().await;
+                match sessions.get(&key) {
+                    Some(s) => (
+                        s.busy.load(std::sync::atomic::Ordering::Relaxed),
+                        s.last_use.load(std::sync::atomic::Ordering::Relaxed),
+                    ),
+                    None => (1, now),
+                }
+            };
+            if busy != 0 || now.saturating_sub(last_use) < threshold {
+                continue;
+            }
+            // close the page target
+            let page = {
+                let sessions = self.sessions.lock().await;
+                sessions.get(&key).map(|s| s.page.clone())
+            };
+            if let Some(page) = page {
+                let _ = page.close().await;
+            }
+            if let Some(session) = self.sessions.lock().await.get(&key) {
+                session
+                    .detached
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                closed += 1;
+            }
+        }
+        closed
+    }
+
+    /// Ensure a usable page for `key`, reattaching if it was closed/detached.
+    /// Retries with bounded backoff if the reloaded page is an error/429 page.
+    pub async fn ensure_page(&self, key: &str) -> Result<Page> {
+        let mut session = self
+            .sessions
+            .lock()
+            .await
+            .get(key)
+            .cloned()
+            .context("browser surface is not active")?;
+        // If the page handle is gone or detached, recover.
+        let needs_recover = session.detached.load(std::sync::atomic::Ordering::Relaxed)
+            || session.page.url().await.is_err();
+        if needs_recover {
+            for attempt in 0..3u32 {
+                match page_recovery::recover_page(&mut session).await {
+                    Ok(()) => {
+                        session.detached.store(false, std::sync::atomic::Ordering::Relaxed);
+                        // check for error/429 page
+                        let url = session.page.url().await.unwrap_or_default().unwrap_or_default();
+                        let looks_bad = url.contains("429")
+                            || url.to_ascii_lowercase().contains("error");
+                        if !looks_bad {
+                            break;
+                        }
+                        if attempt < 2 {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                200 * (1 << attempt),
+                            ))
+                            .await;
+                            continue;
+                        }
+                        // fail visibly
+                        bail!("browser surface reloaded an error/429 page after retries");
+                    }
+                    Err(error) => {
+                        if attempt < 2 {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                200 * (1 << attempt),
+                            ))
+                            .await;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        // update last_use
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Some(s) = self.sessions.lock().await.get(key) {
+            s.last_use.store(now, std::sync::atomic::Ordering::Relaxed);
+        }
+        // store back recovered session if needed
+        if needs_recover {
+            let mut sessions = self.sessions.lock().await;
+            if let Some(current) = sessions.get_mut(key) {
+                if std::sync::Arc::ptr_eq(&current.owner, &session.owner) {
+                    current.page = session.page.clone();
+                    current.url = session.url.clone();
+                    current.detached = session.detached.clone();
+                }
+            }
+        }
+        Ok(session.page.clone())
     }
 
     // Caller holds the per-surface key operation lock.
