@@ -102,6 +102,7 @@ pub(super) async fn reopen_on_demand(
         actor,
         DEFAULT_WIDTH,
         DEFAULT_HEIGHT,
+        None,
     )
     .await
     {

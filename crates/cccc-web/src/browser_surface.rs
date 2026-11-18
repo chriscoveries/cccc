@@ -38,7 +38,7 @@ pub(crate) use conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE;
 pub(crate) use load_error::{LoadRecovery, is_load_error_state};
 pub(crate) use page_recovery::PAGE_PROBE_TIMEOUT;
 use page_recovery::{candidate_page_url, close_internal_pages, is_internal_page};
-pub(crate) use pairing::{PairingPage, pairing_prompt};
+pub(crate) use pairing::{PairingPage, pairing_destination, pairing_prompt};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
