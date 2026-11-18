@@ -591,6 +591,20 @@ pub fn begin_pairing(
     generation: &str,
     automatic: bool,
 ) -> io::Result<Value> {
+    begin_pairing_with_recovery(home, id, group, actor, generation, automatic, None)
+}
+
+/// The daemon supplies recovery evidence only after validating the settled
+/// delivery and the current binding. It stays private to this candidate.
+pub fn begin_pairing_with_recovery(
+    home: &HomeLayout,
+    id: &str,
+    group: &str,
+    actor: &str,
+    generation: &str,
+    automatic: bool,
+    recovery: Option<Value>,
+) -> io::Result<Value> {
     if generation.is_empty() {
         return Err(error("actor_generation_required"));
     }
@@ -600,7 +614,18 @@ pub fn begin_pairing(
         if c["bindings"][route_key(group, actor)]["transport"] == "mcp_events" {
             return Err(error("dots_requires_event_binding"));
         }
-        let (record, result) = pairing_candidate(group, actor, generation, automatic);
+        let (mut record, result) = pairing_candidate(group, actor, generation, automatic);
+        if let Some(recovery) = recovery {
+            let expected = recovery["binding_revision"]
+                .as_str()
+                .filter(|s| !s.is_empty());
+            if expected.is_none()
+                || c["bindings"][route_key(group, actor)]["revision"].as_str() != expected
+            {
+                return Err(error("pairing_changed"));
+            }
+            record["recovery"] = recovery;
+        }
         // One record per Actor. Expired/failed attempts are retained until an
         // explicit retry or lifecycle removal, so a supervisor cannot resend.
         c["pairings"][route_key(group, actor)] = record;
@@ -797,23 +822,99 @@ pub fn confirm_pairing(
         let bindings = c["bindings"]
             .as_object()
             .ok_or_else(|| error("invalid binding store"))?;
-        if bindings
-            .iter()
-            .any(|(other, b)| other != &key && (b["session_key"] == session || b["url"] == url))
-        {
+        if bindings.iter().any(|(other, b)| {
+            other != &key
+                && (b["session_key"] == session
+                    || b["url"] == url
+                    || b["url"]
+                        .as_str()
+                        .is_some_and(|old| same_conversation(old, &url)))
+        }) {
             return Err(error("binding_conflict"));
         }
         if let Some(bound) = bindings.get(&key).filter(|b| b["pairing_id"] == pairing_id) {
-            if bound["url"] != url {
+            if !bound["url"]
+                .as_str()
+                .is_some_and(|old| same_conversation(old, &url))
+            {
                 return Err(error("pairing_target_changed"));
             }
             return Ok(bound.clone());
         }
-        let bound = json!({"group_id":group,"actor_id":actor,"generation":generation,"pairing_id":pairing_id,"revision":Uuid::new_v4().to_string(),"session_key":session,"url":url,"state":"bound","updated_at":cccc_contracts::utc_now()});
+        let mut bound = json!({"group_id":group,"actor_id":actor,"generation":generation,"pairing_id":pairing_id,"revision":Uuid::new_v4().to_string(),"session_key":session,"url":url,"state":"bound","updated_at":cccc_contracts::utc_now()});
+        if let Some(recovery) = pair.get("recovery") {
+            let old = &c["bindings"][&key];
+            if old["revision"] != recovery["binding_revision"]
+                || old["url"]
+                    .as_str()
+                    .is_none_or(|old| same_conversation(old, &url))
+            {
+                return Err(error("pairing_changed"));
+            }
+            bound["abandoned_delivery"] = recovery.clone();
+        } else if let Some(disposition) = c["bindings"][&key].get("abandoned_delivery") {
+            // Target projection may not have caught up yet. A second pairing
+            // cannot revive the old fence while the raw row still names it.
+            bound["abandoned_delivery"] = disposition.clone();
+        }
         c["bindings"][&key] = bound.clone();
         c["pairings"][&key]["state"] = json!("bound");
         Ok(bound)
     })
+}
+
+/// The saved route retains its Project prefix for navigation. Authority to
+/// compare two routes comes from the stable ID on the same HTTPS origin.
+pub fn conversation_identity(value: &str) -> Option<(String, String)> {
+    let normalized = conversation_url(value).ok()?;
+    let url = url::Url::parse(&normalized).ok()?;
+    let (_, id) = url.path().rsplit_once("/c/")?;
+    Some((url.host_str()?.to_owned(), id.to_owned()))
+}
+
+pub fn same_conversation(left: &str, right: &str) -> bool {
+    conversation_identity(left)
+        .zip(conversation_identity(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+pub fn delivery_fenced(target: &Value) -> bool {
+    matches!(
+        target["last_delivery_status"].as_str(),
+        Some(
+            "submitting"
+                | "deferred"
+                | "pending_new_chat_bind"
+                | "legacy_recovery_submitting"
+                | "submission_ambiguous"
+                | "submission_ambiguous_completion_pending"
+                | "completion_ambiguous"
+                | "ambiguous"
+                | "completion_conflict"
+                | "legacy_submission_unverified"
+        )
+    )
+}
+
+pub fn abandoned_delivery_matches(binding: &Value, target: &Value) -> bool {
+    let recovery = &binding["abandoned_delivery"];
+    recovery.is_object()
+        && ["binding_revision", "delivery_id", "turn_id"]
+            .into_iter()
+            .all(|key| {
+                recovery[key]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty())
+            })
+        && recovery["event_ids"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty())
+        && target["kind"] == "existing_chat"
+        && target["last_delivery_status"] == "submission_ambiguous"
+        && recovery["binding_revision"] == target["binding_revision"]
+        && recovery["delivery_id"] == target["last_delivery_id"]
+        && recovery["turn_id"] == target["last_delivery_turn_id"]
+        && recovery["event_ids"] == target["last_delivery_event_ids"]
 }
 
 pub fn conversation_url(value: &str) -> io::Result<String> {
