@@ -1062,7 +1062,7 @@ mod tests {
     async fn xvfb_start_failure_preserves_bounded_stderr() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = tempfile::tempdir_in(".").expect("tempdir");
         let fake = temp.path().join("Xvfb");
         std::fs::write(
             &fake,
