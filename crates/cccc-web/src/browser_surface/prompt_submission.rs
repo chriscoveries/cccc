@@ -716,6 +716,50 @@ impl BrowserSurfaces {
         Ok(observed)
     }
 
+    pub(crate) async fn navigate_pairing_destination(
+        &self,
+        key: &str,
+        target_id: &str,
+        observed_url: &str,
+        destination: &str,
+        require_composer: bool,
+    ) -> Result<()> {
+        let operation = self.key_operation(key).await;
+        let _operation = operation.lock().await;
+        let page = self.page(key).await?;
+        if page.target_id().as_ref() != target_id {
+            bail!("pairing_target_changed");
+        }
+        let args = json!({"observed":observed_url,"destination":destination,
+            "require_composer":require_composer});
+        // Decide and navigate in the same document task so input arriving
+        // after the earlier readiness probe can still stop the navigation.
+        let refused = page
+            .evaluate(format!(
+                r#"(() => {{
+                    const args = {args};
+                    if (location.href !== args.observed) return 'pairing_target_changed';
+                    const candidate = ({SELECT_COMPOSER_SCRIPT})();
+                    const snapshot = ({INSPECT_SUBMISSION_SCRIPT})({{}}, []);
+                    if (snapshot.composer_chars > 0 || ({COMPOSER_ATTACHMENTS_SCRIPT})())
+                        return 'pairing_composer_occupied';
+                    if (snapshot.running || candidate.login_required || candidate.verification_required
+                        || (args.require_composer && !candidate.selector)
+                        || document.readyState === 'loading')
+                        return 'pairing_browser_not_ready';
+                    if (location.href !== args.observed) return 'pairing_target_changed';
+                    location.assign(args.destination);
+                    return '';
+                }})()"#
+            ))
+            .await?
+            .into_value::<String>()?;
+        if !refused.is_empty() {
+            bail!("{refused}");
+        }
+        Ok(())
+    }
+
     pub(crate) async fn align_chatgpt_conversation_target(
         &self,
         key: &str,

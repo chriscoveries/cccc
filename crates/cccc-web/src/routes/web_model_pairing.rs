@@ -367,10 +367,12 @@ async fn prepare_destination(
 ) -> Result<(), ApiError> {
     let surfaces = &state.browser_surfaces;
     let key = super::web_model_browser::key(group, actor);
-    super::web_model_browser::open_actor_surface(state, group, actor, 1366, 900, Some(url))
-        .await
-        .map_err(|_| pairing_error("pairing_browser_required"))?;
-    let mut navigated = false;
+    let surface =
+        super::web_model_browser::open_actor_surface(state, group, actor, 1366, 900, Some(url))
+            .await
+            .map_err(|_| pairing_error("pairing_browser_required"))?;
+    let target_id = surface["target_id"].as_str().unwrap_or_default();
+    let mut navigated_from = None;
     loop {
         let snapshot = surfaces
             .prompt_readiness(&key)
@@ -385,7 +387,10 @@ async fn prepare_destination(
         if super::web_model_reconcile::composer_occupied(&snapshot) {
             return Err(pairing_error("pairing_composer_occupied"));
         }
-        if category == "loading" || matches && category == "page_not_ready" {
+        if category == "loading"
+            || matches && category == "page_not_ready"
+            || navigated_from.as_deref() == Some(observed)
+        {
             tokio::time::sleep(Duration::from_millis(250)).await;
             continue;
         }
@@ -393,7 +398,7 @@ async fn prepare_destination(
             && snapshot["composer_has_attachments"] == false
             && snapshot["running"] == false;
         if !matches
-            && !navigated
+            && navigated_from.is_none()
             && empty
             && matches!(
                 category,
@@ -401,10 +406,16 @@ async fn prepare_destination(
             )
         {
             surfaces
-                .navigate_to_url(&key, url)
+                .navigate_pairing_destination(
+                    &key,
+                    target_id,
+                    observed,
+                    url,
+                    category != "conversation_load_failed",
+                )
                 .await
-                .map_err(|_| pairing_error("pairing_browser_not_ready"))?;
-            navigated = true;
+                .map_err(|error| pairing_error(&error.to_string()))?;
+            navigated_from = Some(observed.to_owned());
             continue;
         }
         return Err(
