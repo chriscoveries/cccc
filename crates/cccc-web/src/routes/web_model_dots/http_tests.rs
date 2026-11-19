@@ -1,6 +1,7 @@
 //! Shared-entrance tests use an owned Home and in-process HTTP router. No
 //! browser, provider CLI, callback connection or global environment is used.
 use super::*;
+use crate::test_daemon::TestDaemon;
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
@@ -18,7 +19,7 @@ struct Fixture {
     connector_id: String,
     secret: String,
     admin: String,
-    daemon: Option<tokio::task::JoinHandle<()>>,
+    daemon: Option<TestDaemon>,
 }
 
 impl Fixture {
@@ -111,30 +112,7 @@ impl Fixture {
     }
 
     async fn start_daemon(&mut self) {
-        let home = self.state.home.clone();
-        self.daemon = Some(tokio::spawn(async move {
-            cccc_daemon::run(home).await.expect("owned daemon");
-        }));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if self
-                    .state
-                    .client
-                    .call(&DaemonRequest {
-                        v: 1,
-                        op: "ping".into(),
-                        args: Default::default(),
-                    })
-                    .await
-                    .is_ok()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("daemon ready");
+        self.daemon = Some(TestDaemon::start(&self.state.home).await);
     }
 
     fn connector(&self) -> Value {
@@ -214,19 +192,7 @@ impl Fixture {
     async fn close(&mut self) {
         let _ = self.state.shutdown.send(());
         if let Some(daemon) = self.daemon.take() {
-            self.state
-                .client
-                .call(&DaemonRequest {
-                    v: 1,
-                    op: "shutdown".into(),
-                    args: Default::default(),
-                })
-                .await
-                .expect("owned shutdown");
-            tokio::time::timeout(Duration::from_secs(5), daemon)
-                .await
-                .expect("shutdown timeout")
-                .expect("daemon task");
+            daemon.stop().await;
         }
     }
 }
@@ -234,9 +200,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = self.state.shutdown.send(());
-        if let Some(daemon) = self.daemon.take() {
-            daemon.abort();
-        }
+        drop(self.daemon.take());
     }
 }
 

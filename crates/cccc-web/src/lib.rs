@@ -17,6 +17,8 @@ mod request_origin;
 mod routes;
 mod security_headers;
 mod shutdown;
+#[cfg(test)]
+mod test_daemon;
 mod web_banner;
 mod web_listener;
 mod web_push;

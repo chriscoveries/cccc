@@ -105,27 +105,8 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
         event
     };
     let first = message("claimed before a target fence");
-    let daemon_home = home.clone();
-    let daemon = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
+    let daemon = crate::test_daemon::TestDaemon::start(&home).await;
     let client = cccc_client::DaemonClient::new(home.clone());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if client
-                .call(&DaemonRequest {
-                    v: 1,
-                    op: "ping".into(),
-                    args: Default::default(),
-                })
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("daemon ready");
     let call = |op: &'static str, extra: Value| {
         let client = client.clone();
         let group_id = group.group_id.clone();
@@ -618,15 +599,7 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
     surfaces.close(&session_key).await.expect("close browser");
     let _ = shutdown.send(());
     server.abort();
-    client
-        .call(&DaemonRequest {
-            v: 1,
-            op: "shutdown".into(),
-            args: Default::default(),
-        })
-        .await
-        .expect("stop daemon");
-    daemon.await.expect("daemon task").expect("daemon stopped");
+    daemon.stop().await;
 }
 
 #[tokio::test]
