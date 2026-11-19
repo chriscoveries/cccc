@@ -8,8 +8,8 @@ use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::BrowserSurfaces;
 use super::navigation::goto_dom_content_loaded;
+use super::{BrowserSurfaces, PairingRefusal};
 
 const COMPOSER_SELECTOR: &str = "[data-cccc-web-model-composer=\"cccc-web-model-composer\"]";
 const COMPOSER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -52,6 +52,7 @@ struct ComposerCandidate {
 #[serde(default)]
 struct ReadinessSnapshot {
     url: String,
+    ready_state: String,
     candidate: ComposerCandidate,
     submission: SubmissionSnapshot,
     attachments: bool,
@@ -738,24 +739,31 @@ impl BrowserSurfaces {
             .evaluate(format!(
                 r#"(() => {{
                     const args = {args};
-                    if (location.href !== args.observed) return 'pairing_target_changed';
+                    const observation = {{tab_url: location.href, ready_state: document.readyState}};
+                    const refuse = code => ({{code, observation}});
+                    if (location.href !== args.observed) return refuse('pairing_target_changed');
                     const candidate = ({SELECT_COMPOSER_SCRIPT})();
                     const snapshot = ({INSPECT_SUBMISSION_SCRIPT})({{}}, []);
-                    if (snapshot.composer_chars > 0 || ({COMPOSER_ATTACHMENTS_SCRIPT})())
-                        return 'pairing_composer_occupied';
+                    const attachments = snapshot.composer_chars > 0 ? null : ({COMPOSER_ATTACHMENTS_SCRIPT})();
+                    Object.assign(observation, {{composer_present: Boolean(candidate.selector),
+                        composer_chars: snapshot.composer_chars, composer_has_attachments: attachments,
+                        running: snapshot.running, login_required: Boolean(candidate.login_required),
+                        verification_required: Boolean(candidate.verification_required)}});
+                    if (snapshot.composer_chars > 0 || attachments)
+                        return refuse('pairing_composer_occupied');
                     if (snapshot.running || candidate.login_required || candidate.verification_required
                         || (args.require_composer && !candidate.selector)
                         || document.readyState === 'loading')
-                        return 'pairing_browser_not_ready';
-                    if (location.href !== args.observed) return 'pairing_target_changed';
+                        return refuse('pairing_browser_not_ready');
+                    if (location.href !== args.observed) return refuse('pairing_target_changed');
                     location.assign(args.destination);
-                    return '';
+                    return {{code: '', observation}};
                 }})()"#
             ))
             .await?
-            .into_value::<String>()?;
-        if !refused.is_empty() {
-            bail!("{refused}");
+            .into_value::<PairingRefusal>()?;
+        if !refused.code.is_empty() {
+            return Err(refused.into());
         }
         Ok(())
     }
@@ -856,7 +864,11 @@ impl BrowserSurfaces {
     }
 
     pub(super) async fn inspect_prompt_readiness(page: &Page) -> Result<Value> {
-        let url = page.url().await?.unwrap_or_default();
+        let url = page
+            .url()
+            .await
+            .context("read browser URL before readiness inspection")?
+            .unwrap_or_default();
         // A new window may still be waiting for response headers. It cannot
         // contain a composer, and evaluating JS there can wait for navigation.
         let loading = matches!(url.as_str(), "" | "about:blank");
@@ -867,10 +879,11 @@ impl BrowserSurfaces {
             page.evaluate(format!(
                 r#"(() => {{
                     const url = location.href;
+                    const ready_state = document.readyState;
                     const candidate = ({SELECT_COMPOSER_SCRIPT})();
                     const submission = ({INSPECT_SUBMISSION_SCRIPT})({{}}, ({messages})());
                     const attachments = ({COMPOSER_ATTACHMENTS_SCRIPT})();
-                    return {{url, candidate, submission, attachments}};
+                    return {{url, ready_state, candidate, submission, attachments}};
                 }})()"#,
             ))
             .await
@@ -880,27 +893,31 @@ impl BrowserSurfaces {
         };
         let ReadinessSnapshot {
             url: observed_url,
+            ready_state,
             candidate,
             submission: snapshot,
             attachments,
         } = observed;
-        let ready = !candidate.selector.is_empty();
+        let composer_present = !candidate.selector.is_empty();
         // cwf#821: a page with no composer may be ChatGPT's "Could not load
         // this conversation" page (often an account-wide 429). Report it
         // distinctly so delivery can wait and recover instead of stalling.
-        let load_error =
-            if loading || ready || candidate.login_required || candidate.verification_required {
-                None
-            } else {
-                super::load_error::probe_load_error(page)
-                    .await
-                    .ok()
-                    .and_then(|probe| super::load_error::classify_load_error(&probe))
-            };
+        let load_error = if loading
+            || composer_present
+            || candidate.login_required
+            || candidate.verification_required
+        {
+            None
+        } else {
+            super::load_error::probe_load_error(page)
+                .await
+                .ok()
+                .and_then(|probe| super::load_error::classify_load_error(&probe))
+        };
         // cwf#853: ChatGPT keeps the composer on a conversation that hit its
         // maximum length, but refuses every turn. Treat it as not ready so
         // delivery never claims queued work for a dead conversation.
-        let conversation_limit = if ready {
+        let conversation_limit = if composer_present {
             super::conversation_limit::probe_conversation_limit(page)
                 .await
                 .ok()
@@ -911,8 +928,10 @@ impl BrowserSurfaces {
         if !loading {
             let current_url = page
                 .evaluate("location.href")
-                .await?
-                .into_value::<String>()?;
+                .await
+                .context("read browser URL after readiness inspection")?
+                .into_value::<String>()
+                .context("decode browser URL after readiness inspection")?;
             if snapshot.url != observed_url || current_url != observed_url {
                 return Ok(json!({
                     "ready":false,"state":"page_changed","tab_url":current_url,
@@ -922,9 +941,11 @@ impl BrowserSurfaces {
             }
         }
         let conversation_full = conversation_limit.is_some();
-        let ready = ready && !conversation_full;
+        let ready = composer_present && !conversation_full;
         let readiness = json!({
             "ready":ready,
+            "ready_state":ready_state,
+            "composer_present":composer_present,
             "composer_chars":snapshot.composer_chars,
             "composer_has_attachments":attachments,
             "running":snapshot.running,

@@ -91,6 +91,20 @@ pub(crate) struct PairingPage {
     conversation: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct PairingRefusal {
+    pub(crate) code: String,
+    pub(crate) observation: Value,
+}
+
+impl std::fmt::Display for PairingRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.code)
+    }
+}
+
+impl std::error::Error for PairingRefusal {}
+
 impl BrowserSurfaces {
     // The route holds the actor work permit. The surface lock also excludes
     // viewer commands, replacement and retirement while inspecting this draft.
@@ -186,7 +200,11 @@ impl BrowserSurfaces {
             bail!(super::conversation_limit::PAIRING_CONVERSATION_FULL);
         }
         if readiness["ready"] != true || readiness["running"] == true {
-            bail!("pairing_browser_not_ready");
+            return Err(PairingRefusal {
+                code: "pairing_browser_not_ready".into(),
+                observation: readiness,
+            }
+            .into());
         }
         if readiness["composer_chars"].as_u64().unwrap_or(0) > 0 {
             target.clear_stale_prompt(self, key).await?;

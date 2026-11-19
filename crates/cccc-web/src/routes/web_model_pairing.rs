@@ -3,7 +3,7 @@ use super::{web_model_connector_store as store, web_model_delivery_completion::c
 use crate::{
     AppState,
     api::{ApiError, ApiResult, success},
-    browser_surface::{PairingPage, PromptSubmissionOutcome, pairing_destination},
+    browser_surface::{PairingPage, PairingRefusal, PromptSubmissionOutcome, pairing_destination},
 };
 use axum::{Json, Router, extract::State, routing::post};
 use cccc_core::web_model_connectors;
@@ -16,6 +16,8 @@ use std::{
 
 static CONNECTING: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const DESTINATION_TIMEOUT: Duration = Duration::from_secs(20);
+const DESTINATION_POLL: Duration = Duration::from_millis(250);
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/v1/web-model/pairing", post(change))
@@ -252,22 +254,21 @@ async fn start_connection(
     }
     let key = super::web_model_browser::key(group, actor);
     if let Some(url) = destination.as_deref() {
-        tokio::time::timeout(
-            Duration::from_secs(20),
-            prepare_destination(state, group, actor, url),
-        )
-        .await
-        .map_err(|_| pairing_error("pairing_browser_not_ready"))??;
+        prepare_destination(state, group, actor, url).await?;
     }
     let target = state
         .browser_surfaces
         .pairing_page(&key)
         .await
-        .map_err(|e| pairing_error(&e.to_string()))?;
+        .map_err(|error| surface_pairing_error("pairing_page", error, &Value::Null))?;
     if let Some(url) = destination.as_deref()
         && !destination_matches(url, target.initial_url())
     {
-        return Err(pairing_error("pairing_target_changed"));
+        return Err(pairing_readiness_error(
+            "pairing_target_changed",
+            "pairing_page",
+            &json!({"tab_url":target.initial_url()}),
+        ));
     }
     args.insert("url".into(), json!(target.initial_url()));
     let pair = call(state, "web_model_pairing_begin", args.clone()).await?;
@@ -367,63 +368,143 @@ async fn prepare_destination(
 ) -> Result<(), ApiError> {
     let surfaces = &state.browser_surfaces;
     let key = super::web_model_browser::key(group, actor);
-    let surface =
-        super::web_model_browser::open_actor_surface(state, group, actor, 1366, 900, Some(url))
-            .await
-            .map_err(|_| pairing_error("pairing_browser_required"))?;
-    let target_id = surface["target_id"].as_str().unwrap_or_default();
-    let mut navigated_from = None;
-    loop {
-        let snapshot = surfaces
-            .prompt_readiness(&key)
-            .await
-            .map_err(|_| pairing_error("pairing_browser_not_ready"))?;
-        let observed = snapshot["tab_url"].as_str().unwrap_or_default();
-        let category = snapshot["state"].as_str().unwrap_or_default();
-        let matches = destination_matches(url, observed);
-        if matches && category == "ready" && snapshot["running"] == false {
-            return Ok(());
-        }
-        if super::web_model_reconcile::composer_occupied(&snapshot) {
-            return Err(pairing_error("pairing_composer_occupied"));
-        }
-        if category == "loading"
-            || matches && category == "page_not_ready"
-            || navigated_from.as_deref() == Some(observed)
-        {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            continue;
-        }
-        let empty = snapshot["composer_chars"].as_u64() == Some(0)
-            && snapshot["composer_has_attachments"] == false
-            && snapshot["running"] == false;
-        if !matches
-            && navigated_from.is_none()
-            && empty
-            && matches!(
-                category,
-                "ready" | "conversation_load_failed" | "conversation_length_exceeded"
-            )
-        {
-            surfaces
-                .navigate_pairing_destination(
-                    &key,
-                    target_id,
-                    observed,
-                    url,
-                    category != "conversation_load_failed",
-                )
+    let mut phase = "open_browser";
+    let mut last_observation = Value::Null;
+    let mut inspection_error = None;
+    let result = tokio::time::timeout(DESTINATION_TIMEOUT, async {
+        let surface =
+            super::web_model_browser::open_actor_surface(state, group, actor, 1366, 900, Some(url))
                 .await
-                .map_err(|error| pairing_error(&error.to_string()))?;
-            navigated_from = Some(observed.to_owned());
-            continue;
+                .map_err(|error| {
+                    pairing_readiness_error(
+                        "pairing_browser_required",
+                        phase,
+                        &json!({"state":error.code()}),
+                    )
+                })?;
+        let target_id = surface["target_id"].as_str().unwrap_or_default();
+        let mut navigated_from: Option<String> = None;
+        phase = "source_readiness";
+        loop {
+            match surfaces.prompt_readiness(&key).await {
+                Ok(snapshot) => {
+                    last_observation = snapshot;
+                    inspection_error = None;
+                }
+                Err(error) if navigated_from.is_some() => {
+                    // The old execution context can disappear between any two
+                    // reads after location.assign. Probe only, never navigate again.
+                    inspection_error = Some(error.to_string());
+                    tokio::time::sleep(DESTINATION_POLL).await;
+                    continue;
+                }
+                Err(error) => {
+                    let mut details = readiness_details(phase, &last_observation);
+                    details["inspection_error"] = json!(error.to_string());
+                    return Err(pairing_error("pairing_browser_not_ready").with_details(details));
+                }
+            }
+            let snapshot = &last_observation;
+            let observed = snapshot["tab_url"].as_str().unwrap_or_default();
+            let category = snapshot["state"].as_str().unwrap_or_default();
+            let matches = destination_matches(url, observed);
+            let document_available = matches!(
+                snapshot["ready_state"].as_str(),
+                Some("interactive" | "complete")
+            );
+            if matches && category == "ready" && document_available && snapshot["running"] == false
+            {
+                return Ok(());
+            }
+            if super::web_model_reconcile::composer_occupied(snapshot) {
+                return Err(pairing_readiness_error(
+                    "pairing_composer_occupied",
+                    phase,
+                    snapshot,
+                ));
+            }
+            if category == "loading"
+                || matches
+                    && (category == "page_not_ready" || category == "ready" && !document_available)
+                || navigated_from.is_some() && category == "page_changed"
+                || navigated_from.as_deref() == Some(observed)
+            {
+                tokio::time::sleep(DESTINATION_POLL).await;
+                continue;
+            }
+            let empty = snapshot["composer_chars"].as_u64() == Some(0)
+                && snapshot["composer_has_attachments"] == false
+                && snapshot["running"] == false;
+            if !matches
+                && navigated_from.is_none()
+                && empty
+                && matches!(
+                    category,
+                    "ready" | "conversation_load_failed" | "conversation_length_exceeded"
+                )
+            {
+                phase = "navigation_guard";
+                surfaces
+                    .navigate_pairing_destination(
+                        &key,
+                        target_id,
+                        observed,
+                        url,
+                        category != "conversation_load_failed",
+                    )
+                    .await
+                    .map_err(|error| surface_pairing_error(phase, error, snapshot))?;
+                navigated_from = Some(observed.to_owned());
+                phase = "destination_readiness";
+                continue;
+            }
+            return Err(pairing_readiness_error(
+                "pairing_browser_not_ready",
+                phase,
+                snapshot,
+            ));
         }
-        return Err(
-            pairing_error("pairing_browser_not_ready").with_details(json!({
-                "browser_state":category,
-                "observed_url":pairing_destination(observed).ok()
-            })),
-        );
+    })
+    .await;
+    match result {
+        Ok(result) => result,
+        Err(_) => {
+            let mut details = readiness_details(phase, &last_observation);
+            details["timed_out"] = json!(true);
+            details["expected_url"] = json!(url);
+            details["inspection_error"] = json!(inspection_error);
+            Err(pairing_error("pairing_browser_not_ready").with_details(details))
+        }
+    }
+}
+
+fn readiness_details(phase: &str, snapshot: &Value) -> Value {
+    json!({
+        "phase":phase,
+        "browser_state":snapshot["state"],
+        "observed_url":snapshot["tab_url"].as_str().and_then(|url| pairing_destination(url).ok()),
+        "ready_state":snapshot["ready_state"],
+        "composer_present":snapshot["composer_present"],
+        "composer_chars":snapshot["composer_chars"],
+        "composer_has_attachments":snapshot["composer_has_attachments"],
+        "running":snapshot["running"],
+        "login_required":snapshot["login_required"],
+        "verification_required":snapshot["verification_required"],
+    })
+}
+
+fn pairing_readiness_error(code: &str, phase: &str, snapshot: &Value) -> ApiError {
+    let mut details = readiness_details(phase, snapshot);
+    if code == "pairing_composer_occupied" {
+        details["reason"] = json!("composer_occupied");
+    }
+    pairing_error(code).with_details(details)
+}
+
+fn surface_pairing_error(phase: &str, error: anyhow::Error, fallback: &Value) -> ApiError {
+    match error.downcast_ref::<PairingRefusal>() {
+        Some(refusal) => pairing_readiness_error(&refusal.code, phase, &refusal.observation),
+        None => pairing_readiness_error(&error.to_string(), phase, fallback),
     }
 }
 

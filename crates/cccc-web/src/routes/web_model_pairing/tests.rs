@@ -1,4 +1,5 @@
 use super::*;
+use axum::response::IntoResponse;
 use base64::Engine;
 use cccc_contracts::{Actor, ActorRuntime, DaemonRequest};
 use cccc_core::{GroupStore, HomeLayout};
@@ -1283,6 +1284,14 @@ async fn explicit_pairing_repairs_a_stale_binding_and_preserves_a_project_chat_b
         .await
         .expect_err("draft at navigation time blocks replacement");
     assert_eq!(refused.code(), "pairing_composer_occupied");
+    let body = axum::body::to_bytes(refused.into_response().into_body(), 4096)
+        .await
+        .expect("refusal body");
+    let error: Value = serde_json::from_slice(&body).expect("refusal JSON");
+    let details = &error["error"]["details"];
+    assert_eq!(details["phase"], "navigation_guard");
+    assert_eq!(details["observed_url"], project_url);
+    assert_eq!(details["reason"], "composer_occupied");
     assert_eq!(page_value(&page, "location.href").await, project_url);
     assert_eq!(
         page_value(&page, "document.querySelector('textarea').value").await,
@@ -1311,7 +1320,7 @@ async fn explicit_pairing_repairs_a_stale_binding_and_preserves_a_project_chat_b
             eprintln!("pairing readiness {phase}: snapshot timed out");
         }
     }
-    result.expect("one replacement request");
+    let _ = result.expect("one replacement request");
     assert_eq!(
         binding(),
         before_repair,
