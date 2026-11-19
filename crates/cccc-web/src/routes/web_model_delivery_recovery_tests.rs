@@ -190,6 +190,24 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
                "browser_delivery":{"state":"ambiguous","detail":"daemon restarted"}}),
     )
     .await;
+    // Opening a shared actor page starts navigation before its document is ready.
+    let fixture_ready = format!(
+        "location.href === {} && \
+         ['interactive', 'complete'].includes(document.readyState) && \
+         !!document.querySelector('textarea#prompt-textarea') && window.attempts === 0",
+        json!(url)
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !page
+            .evaluate(fixture_ready.as_str())
+            .await
+            .is_ok_and(|result| result.into_value::<bool>().unwrap_or(false))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("fixture document and composer ready");
     let outcome = deliver_pending(&state, &group.group_id, "browser-test")
         .await
         .expect("recover");
