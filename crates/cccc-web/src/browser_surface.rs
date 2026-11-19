@@ -67,11 +67,24 @@ pub(crate) fn actor_identity(actor: &cccc_contracts::Actor) -> String {
 pub struct BrowserSurfaces {
     pub(super) sessions: Mutex<HashMap<String, Session>>,
     owners: Mutex<HashMap<PathBuf, Arc<RwLock<BrowserOwner>>>>,
-    key_operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    key_operations: Mutex<HashMap<String, Arc<KeyOperation>>>,
     profile_operations: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     key_profiles: Mutex<HashMap<String, PathBuf>>,
     shutting_down: AtomicBool,
     closed_pages: Mutex<HashMap<String, RetiredPage>>,
+}
+
+#[derive(Default)]
+struct KeyOperation {
+    mutex: Mutex<()>,
+    // Streams resolve frames and commands by key, so their guard survives page replacement.
+    viewers: Arc<AtomicUsize>,
+}
+
+impl KeyOperation {
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.mutex.lock().await
+    }
 }
 
 struct RetiredPage {
@@ -496,19 +509,22 @@ impl BrowserSurfaces {
         self.bind_profile(key, &profile).await?;
         self.closed_pages.lock().await.remove(key);
         let result = self
-            .open_registered(OpenRequest {
-                key,
-                profile: &profile,
-                url,
-                width,
-                height,
-                storage_state,
-                reuse_existing,
-                track_initial_url,
-                mode,
-                shared_browser,
-                actor_identity,
-            })
+            .open_registered(
+                OpenRequest {
+                    key,
+                    profile: &profile,
+                    url,
+                    width,
+                    height,
+                    storage_state,
+                    reuse_existing,
+                    track_initial_url,
+                    mode,
+                    shared_browser,
+                    actor_identity,
+                },
+                &key_operation.viewers,
+            )
             .await;
         // Process/profile registration is serialized; a slow page navigation
         // must not hold the shared profile lock and block another Actor window.
@@ -558,7 +574,11 @@ impl BrowserSurfaces {
         Ok(value)
     }
 
-    async fn open_registered(&self, request: OpenRequest<'_>) -> Result<(Value, Option<Page>)> {
+    async fn open_registered(
+        &self,
+        request: OpenRequest<'_>,
+        viewers: &Arc<AtomicUsize>,
+    ) -> Result<(Value, Option<Page>)> {
         let OpenRequest {
             key,
             profile,
@@ -726,7 +746,7 @@ impl BrowserSurfaces {
             strategy: resource.strategy.clone(),
             metadata,
             recover_closed_page: !shared_browser && matches!(mode, BrowserMode::Headless),
-            viewers: Arc::default(),
+            viewers: Arc::clone(viewers),
             idle_since: None,
             renderer_timeouts: 0,
             last_observed_busy: false,
@@ -1054,13 +1074,9 @@ impl BrowserSurfaces {
         Ok(())
     }
 
-    async fn key_operation(&self, key: &str) -> Arc<Mutex<()>> {
+    async fn key_operation(&self, key: &str) -> Arc<KeyOperation> {
         let mut operations = self.key_operations.lock().await;
-        Arc::clone(
-            operations
-                .entry(key.to_owned())
-                .or_insert_with(|| Arc::new(Mutex::new(()))),
-        )
+        Arc::clone(operations.entry(key.to_owned()).or_default())
     }
 
     async fn release_inactive_profile(&self, key: &str, profile: &Path) {

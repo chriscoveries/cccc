@@ -22,14 +22,14 @@ impl Drop for Viewer {
 }
 
 impl BrowserSurfaces {
-    pub(super) async fn register_viewer(&self, key: &str) -> Option<Viewer> {
+    pub(super) async fn register_viewer(&self, key: &str) -> Viewer {
         let operation = self.key_operation(key).await;
         let _operation = operation.lock().await;
-        let mut sessions = self.sessions.lock().await;
-        let session = sessions.get_mut(key)?;
-        session.idle_since = None;
-        session.viewers.fetch_add(1, Ordering::AcqRel);
-        Some(Viewer(Arc::clone(&session.viewers)))
+        if let Some(session) = self.sessions.lock().await.get_mut(key) {
+            session.idle_since = None;
+        }
+        operation.viewers.fetch_add(1, Ordering::AcqRel);
+        Viewer(Arc::clone(&operation.viewers))
     }
 
     pub(crate) async fn actor_probe_timed_out(
