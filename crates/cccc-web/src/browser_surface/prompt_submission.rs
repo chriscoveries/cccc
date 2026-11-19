@@ -52,10 +52,23 @@ struct ComposerCandidate {
 #[serde(default)]
 struct ReadinessSnapshot {
     url: String,
-    ready_state: String,
+    ready_state: Option<String>,
     candidate: ComposerCandidate,
     submission: SubmissionSnapshot,
     attachments: bool,
+}
+
+fn readiness_inspection_error(
+    error: impl Into<anyhow::Error>,
+    inspect_document: bool,
+    context: &'static str,
+) -> anyhow::Error {
+    let error = error.into();
+    if inspect_document {
+        error.context(context)
+    } else {
+        error
+    }
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -847,10 +860,29 @@ impl BrowserSurfaces {
     }
 
     pub(crate) async fn prompt_readiness(&self, key: &str) -> Result<Value> {
+        Ok(self.read_prompt_readiness(key, false).await?.0)
+    }
+
+    pub(crate) async fn pairing_prompt_readiness(&self, key: &str) -> Result<Value> {
+        let (mut readiness, ready_state) = self.read_prompt_readiness(key, true).await?;
+        let composer_present = readiness["input_selector"]
+            .as_str()
+            .map(|selector| !selector.is_empty());
+        // These observations belong to the pairing reply, outside cached readiness.
+        readiness["ready_state"] = json!(ready_state);
+        readiness["composer_present"] = json!(composer_present);
+        Ok(readiness)
+    }
+
+    async fn read_prompt_readiness(
+        &self,
+        key: &str,
+        inspect_document: bool,
+    ) -> Result<(Value, Option<String>)> {
         let page = self.page(key).await?;
-        let readiness = Self::inspect_prompt_readiness(&page).await;
+        let readiness = Self::inspect_prompt_readiness_with_document(&page, inspect_document).await;
         let snapshot = match &readiness {
-            Ok(value) => value.clone(),
+            Ok((value, _)) => value.clone(),
             Err(_) => json!({
                 "ready":false,"login_required":false,"verification_required":false,
                 "state":"inspection_failed","checked_at":cccc_contracts::utc_now(),
@@ -864,10 +896,25 @@ impl BrowserSurfaces {
     }
 
     pub(super) async fn inspect_prompt_readiness(page: &Page) -> Result<Value> {
+        Ok(Self::inspect_prompt_readiness_with_document(page, false)
+            .await?
+            .0)
+    }
+
+    async fn inspect_prompt_readiness_with_document(
+        page: &Page,
+        inspect_document: bool,
+    ) -> Result<(Value, Option<String>)> {
         let url = page
             .url()
             .await
-            .context("read browser URL before readiness inspection")?
+            .map_err(|error| {
+                readiness_inspection_error(
+                    error,
+                    inspect_document,
+                    "read browser URL before readiness inspection",
+                )
+            })?
             .unwrap_or_default();
         // A new window may still be waiting for response headers. It cannot
         // contain a composer, and evaluating JS there can wait for navigation.
@@ -876,14 +923,18 @@ impl BrowserSurfaces {
             ReadinessSnapshot::default()
         } else {
             let messages = super::chatgpt_dom::MESSAGES_SCRIPT;
+            let document_field = if inspect_document {
+                "ready_state: document.readyState, "
+            } else {
+                ""
+            };
             page.evaluate(format!(
                 r#"(() => {{
                     const url = location.href;
-                    const ready_state = document.readyState;
                     const candidate = ({SELECT_COMPOSER_SCRIPT})();
                     const submission = ({INSPECT_SUBMISSION_SCRIPT})({{}}, ({messages})());
                     const attachments = ({COMPOSER_ATTACHMENTS_SCRIPT})();
-                    return {{url, ready_state, candidate, submission, attachments}};
+                    return {{url, {document_field}candidate, submission, attachments}};
                 }})()"#,
             ))
             .await
@@ -898,26 +949,23 @@ impl BrowserSurfaces {
             submission: snapshot,
             attachments,
         } = observed;
-        let composer_present = !candidate.selector.is_empty();
+        let ready = !candidate.selector.is_empty();
         // cwf#821: a page with no composer may be ChatGPT's "Could not load
         // this conversation" page (often an account-wide 429). Report it
         // distinctly so delivery can wait and recover instead of stalling.
-        let load_error = if loading
-            || composer_present
-            || candidate.login_required
-            || candidate.verification_required
-        {
-            None
-        } else {
-            super::load_error::probe_load_error(page)
-                .await
-                .ok()
-                .and_then(|probe| super::load_error::classify_load_error(&probe))
-        };
+        let load_error =
+            if loading || ready || candidate.login_required || candidate.verification_required {
+                None
+            } else {
+                super::load_error::probe_load_error(page)
+                    .await
+                    .ok()
+                    .and_then(|probe| super::load_error::classify_load_error(&probe))
+            };
         // cwf#853: ChatGPT keeps the composer on a conversation that hit its
         // maximum length, but refuses every turn. Treat it as not ready so
         // delivery never claims queued work for a dead conversation.
-        let conversation_limit = if composer_present {
+        let conversation_limit = if ready {
             super::conversation_limit::probe_conversation_limit(page)
                 .await
                 .ok()
@@ -929,23 +977,36 @@ impl BrowserSurfaces {
             let current_url = page
                 .evaluate("location.href")
                 .await
-                .context("read browser URL after readiness inspection")?
+                .map_err(|error| {
+                    readiness_inspection_error(
+                        error,
+                        inspect_document,
+                        "read browser URL after readiness inspection",
+                    )
+                })?
                 .into_value::<String>()
-                .context("decode browser URL after readiness inspection")?;
+                .map_err(|error| {
+                    readiness_inspection_error(
+                        error,
+                        inspect_document,
+                        "decode browser URL after readiness inspection",
+                    )
+                })?;
             if snapshot.url != observed_url || current_url != observed_url {
-                return Ok(json!({
-                    "ready":false,"state":"page_changed","tab_url":current_url,
-                    "checked_at":cccc_contracts::utc_now(),
-                    "message":"The conversation changed during inspection. Checking again before delivery."
-                }));
+                return Ok((
+                    json!({
+                        "ready":false,"state":"page_changed","tab_url":current_url,
+                        "checked_at":cccc_contracts::utc_now(),
+                        "message":"The conversation changed during inspection. Checking again before delivery."
+                    }),
+                    None,
+                ));
             }
         }
         let conversation_full = conversation_limit.is_some();
-        let ready = composer_present && !conversation_full;
+        let ready = ready && !conversation_full;
         let readiness = json!({
             "ready":ready,
-            "ready_state":ready_state,
-            "composer_present":composer_present,
             "composer_chars":snapshot.composer_chars,
             "composer_has_attachments":attachments,
             "running":snapshot.running,
@@ -976,7 +1037,7 @@ impl BrowserSurfaces {
                 "The conversation input is not available yet. Check the page before retrying."
             }
         });
-        Ok(readiness)
+        Ok((readiness, ready_state))
     }
 
     async fn record_prompt_readiness(&self, key: &str, page: &Page, readiness: &Value) {

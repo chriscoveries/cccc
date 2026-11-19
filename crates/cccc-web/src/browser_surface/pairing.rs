@@ -183,7 +183,7 @@ impl BrowserSurfaces {
             initial_url,
             conversation,
         };
-        let readiness = self.prompt_readiness(key).await?;
+        let readiness = self.pairing_prompt_readiness(key).await?;
         // A page that is not ready, or still answering, is the reason to report:
         // nothing in its composer is touched then.
         // cwf#821: say why the page is not ready when it is ChatGPT's

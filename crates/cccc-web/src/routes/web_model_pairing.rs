@@ -386,7 +386,7 @@ async fn prepare_destination(
         let mut navigated_from: Option<String> = None;
         phase = "source_readiness";
         loop {
-            match surfaces.prompt_readiness(&key).await {
+            match surfaces.pairing_prompt_readiness(&key).await {
                 Ok(snapshot) => {
                     last_observation = snapshot;
                     inspection_error = None;
@@ -408,11 +408,15 @@ async fn prepare_destination(
             let observed = snapshot["tab_url"].as_str().unwrap_or_default();
             let category = snapshot["state"].as_str().unwrap_or_default();
             let matches = destination_matches(url, observed);
-            let document_available = matches!(
-                snapshot["ready_state"].as_str(),
-                Some("interactive" | "complete")
-            );
-            if matches && category == "ready" && document_available && snapshot["running"] == false
+            let waiting_for_document = navigated_from.is_some()
+                && !matches!(
+                    snapshot["ready_state"].as_str(),
+                    Some("interactive" | "complete")
+                );
+            if matches
+                && category == "ready"
+                && !waiting_for_document
+                && snapshot["running"] == false
             {
                 return Ok(());
             }
@@ -425,7 +429,7 @@ async fn prepare_destination(
             }
             if category == "loading"
                 || matches
-                    && (category == "page_not_ready" || category == "ready" && !document_available)
+                    && (category == "page_not_ready" || category == "ready" && waiting_for_document)
                 || navigated_from.is_some() && category == "page_changed"
                 || navigated_from.as_deref() == Some(observed)
             {

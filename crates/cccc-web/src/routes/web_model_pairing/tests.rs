@@ -1292,6 +1292,11 @@ async fn explicit_pairing_repairs_a_stale_binding_and_preserves_a_project_chat_b
     assert_eq!(details["phase"], "navigation_guard");
     assert_eq!(details["observed_url"], project_url);
     assert_eq!(details["reason"], "composer_occupied");
+    let surface = surfaces.info(&key).await;
+    let cached = &surface["metadata"]["prompt_readiness"];
+    assert_eq!(cached["ready"], true);
+    assert!(cached.get("ready_state").is_none());
+    assert!(cached.get("composer_present").is_none());
     assert_eq!(page_value(&page, "location.href").await, project_url);
     assert_eq!(
         page_value(&page, "document.querySelector('textarea').value").await,
