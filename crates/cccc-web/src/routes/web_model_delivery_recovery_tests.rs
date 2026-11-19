@@ -190,12 +190,20 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
                "browser_delivery":{"state":"ambiguous","detail":"daemon restarted"}}),
     )
     .await;
-    assert!(matches!(
-        deliver_pending(&state, &group.group_id, "browser-test")
-            .await
-            .expect("recover"),
-        DeliveryOutcome::Ambiguous
-    ));
+    let outcome = deliver_pending(&state, &group.group_id, "browser-test")
+        .await
+        .expect("recover");
+    let outcome_name = match outcome {
+        DeliveryOutcome::Ambiguous => "Ambiguous",
+        DeliveryOutcome::Deferred(_) => "Deferred",
+        DeliveryOutcome::Idle => "Idle",
+        DeliveryOutcome::Stopped => "Stopped",
+        DeliveryOutcome::Submitted => "Submitted",
+    };
+    assert_eq!(
+        outcome_name, "Ambiguous",
+        "interrupted browser turn recovery"
+    );
     let target = load_target(&state, &group.group_id, "browser-test").expect("target");
     let expected_id = browser_delivery_id("browser-test", turn["turn_id"].as_str().expect("turn"));
     assert_eq!(target["last_delivery_status"], "submission_ambiguous");
