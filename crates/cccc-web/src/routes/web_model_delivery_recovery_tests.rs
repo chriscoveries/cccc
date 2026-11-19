@@ -170,7 +170,12 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
     });
     let session_key = key(&group.group_id, "browser-test");
     surfaces
-        .open(&session_key, &temp.path().join("profile"), &url, 800, 600)
+        .open_shared_actor_fixture(
+            &session_key,
+            &temp.path().join("profile"),
+            &url,
+            &crate::browser_surface::actor_identity(&group.actors[0]),
+        )
         .await
         .expect("browser");
     let page = surfaces
@@ -464,6 +469,151 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
             .expect("queue drained"),
         DeliveryOutcome::Idle
     ));
+
+    // A previous delivery can be settled while its staged draft still occupies the composer.
+    let old = message("leave the staged batch in the composer");
+    page.evaluate("document.querySelector('button').disabled = true")
+        .await
+        .expect("disable submit while staging");
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("stage without dispatch"),
+        DeliveryOutcome::Deferred(_)
+    ));
+    let deferred = load_target(&state, &group.group_id, "browser-test").expect("staged attempt");
+    assert_eq!(deferred["last_delivery_event_ids"], json!([old.id]));
+    let delivery_id = required(&deferred, "last_delivery_id").expect("delivery ID");
+    let turn_id = required(&deferred, "last_delivery_turn_id").expect("turn ID");
+    let draft = || async {
+        page.evaluate("document.querySelector('textarea').value")
+            .await
+            .expect("read composer")
+            .into_value::<String>()
+            .expect("composer text")
+    };
+    let staged = draft().await;
+    assert!(staged.contains(&old.id));
+    assert_eq!(
+        deferred["staged_draft"]["sha256"].as_str(),
+        Some(format!("{:x}", Sha256::digest(staged.as_bytes())).as_str())
+    );
+
+    // Settle through the worker's retry-budget completion path without waiting for its timers.
+    let evidence = json!({
+        "submitted": false,
+        "submission_evidence": "deferred_retry_budget_exhausted",
+        "send_not_dispatched": true
+    });
+    assert!(matches!(
+        complete_ambiguous_attempt(
+            &state,
+            &group.group_id,
+            "browser-test",
+            DeliveryAttempt {
+                turn_id,
+                event_ids: deferred["last_delivery_event_ids"].clone(),
+                delivery_id,
+            },
+            evidence,
+            "deferred retry budget exhausted",
+        )
+        .await
+        .expect("settle the unsent attempt"),
+        DeliveryOutcome::Ambiguous
+    ));
+    let old_receipts = || {
+        std::fs::read_to_string(&ledger_path)
+            .expect("ledger")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("ledger event"))
+            .filter(|event| {
+                event["data"]["source_event_id"] == old.id
+                    || event["data"]["turn_id"] == turn_id
+                    || event["data"]["delivery_id"] == delivery_id
+            })
+            .collect::<Vec<_>>()
+    };
+    let settled_receipts = old_receipts();
+    assert!(settled_receipts.iter().any(|event| {
+        event["kind"] == "runtime.delivery" && event["data"]["state"] == "ambiguous"
+    }));
+    assert_eq!(
+        call("headless_status", json!({})).await["state"]["active_turn_id"],
+        ""
+    );
+
+    // Edit only the text, leaving the managed target and the stored proof intact.
+    let edited = staged.replacen("leave the staged batch", "Leave the staged batch", 1);
+    assert_ne!(edited, staged);
+    page.evaluate(format!(
+        r#"(() => {{
+            document.querySelector('button').disabled = false;
+            const box = document.querySelector('textarea');
+            box.value = {};
+            window.laterSubmissions = [];
+            box.form.addEventListener('submit', () => window.laterSubmissions.push(box.value), true);
+        }})()"#,
+        json!(edited)
+    ))
+    .await
+    .expect("edit the draft and track later submissions");
+    let later = message("deliver only this later event");
+    let later_submissions = || async {
+        page.evaluate("window.laterSubmissions")
+            .await
+            .expect("submissions")
+            .into_value::<Vec<String>>()
+            .expect("submitted prompts")
+    };
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("preserve the edit"),
+        DeliveryOutcome::Ambiguous
+    ));
+    assert_eq!(draft().await, edited);
+    assert!(later_submissions().await.is_empty());
+    assert_eq!(
+        call("headless_status", json!({})).await["state"]["active_turn_id"],
+        ""
+    );
+
+    page.evaluate(format!(
+        "document.querySelector('textarea').value={}",
+        json!(staged)
+    ))
+    .await
+    .expect("restore the exact staged text");
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("automatically clear the owned draft"),
+        DeliveryOutcome::Idle
+    ));
+    assert_eq!(draft().await, "");
+    assert!(later_submissions().await.is_empty());
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("deliver the later event"),
+        DeliveryOutcome::Submitted
+    ));
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("poll the drained queue"),
+        DeliveryOutcome::Idle
+    ));
+    let submitted = later_submissions().await;
+    assert_eq!(submitted.len(), 1);
+    assert!(submitted[0].contains(&later.id));
+    assert!(!submitted[0].contains(&old.id));
+    let later_states =
+        cccc_core::inbox::delivery_states(&home, &group, &["browser-test".into()], &later.id)
+            .expect("later delivery state");
+    assert_eq!(later_states["browser-test"].0, "accepted");
+    assert_eq!(old_receipts(), settled_receipts);
 
     surfaces.close(&session_key).await.expect("close browser");
     let _ = shutdown.send(());
