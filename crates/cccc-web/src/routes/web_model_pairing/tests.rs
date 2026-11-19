@@ -1139,6 +1139,7 @@ async fn explicit_pairing_repairs_a_stale_binding_and_preserves_a_project_chat_b
     assert!(prompt.contains("First message after moving the chat"));
     assert!(!prompt.contains("Session bootstrap"));
     assert!(!prompt.contains("Message before the Project move"));
+    let before_repair = binding();
 
     // Drive the daemon's real claim and completion APIs to leave a settled
     // ambiguous delivery with the same persisted evidence as a browser send.
@@ -1210,7 +1211,7 @@ async fn explicit_pairing_repairs_a_stale_binding_and_preserves_a_project_chat_b
             page_value(&page, "document.querySelector('textarea').value").await,
             draft
         );
-        assert_eq!(binding(), moved);
+        assert_eq!(binding(), before_repair);
         assert_eq!(target(), ambiguous);
     }
     page_value(&page, "document.querySelector('textarea').value=''").await;
@@ -1242,14 +1243,18 @@ async fn explicit_pairing_repairs_a_stale_binding_and_preserves_a_project_chat_b
         page_value(&page, "document.querySelector('textarea').value").await,
         "Draft just before navigation"
     );
-    assert_eq!(binding(), moved);
+    assert_eq!(binding(), before_repair);
     assert_eq!(target(), ambiguous);
     page_value(&page, "document.querySelector('textarea').value=''").await;
 
     change(State(state.clone()), Json(repair))
         .await
         .expect("one replacement request");
-    assert_eq!(binding(), moved, "old route survives until confirmation");
+    assert_eq!(
+        binding(),
+        before_repair,
+        "old route survives until confirmation"
+    );
     finish_pairing(&state, group_id, actor_id, &page).await;
     let repaired = binding();
     assert_eq!(repaired["url"], replacement_url);
