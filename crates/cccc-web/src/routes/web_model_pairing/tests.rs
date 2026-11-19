@@ -118,6 +118,51 @@ async fn page_value(page: &Page, script: &str) -> Value {
         .into_value()
         .unwrap_or(Value::Null)
 }
+async fn log_replacement_readiness(page: &Page, phase: &str) {
+    // Observe the fixture without marking the composer or changing the page.
+    match page
+        .evaluate(
+            r#"(() => {
+                const box = document.querySelector('#prompt-textarea');
+                const visible = node => {
+                    if (!node || node.closest('[aria-hidden="true"], [inert]')) return false;
+                    const rect = node.getBoundingClientRect();
+                    const style = getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+                        && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
+                };
+                const rect = box?.getBoundingClientRect();
+                const composerVisible = visible(box) && rect.width >= 16 && rect.height >= 16
+                    && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
+                const running = [...document.querySelectorAll('button, [role="button"]')]
+                    .filter(visible)
+                    .some(node => {
+                        const label = [node.getAttribute('aria-label'), node.getAttribute('title'),
+                            node.getAttribute('data-testid'), node.id, node.innerText || node.textContent]
+                            .join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
+                        return /\bstop\b|停止|中止|cancel generation|interrupt/.test(label);
+                    });
+                return {
+                    url: location.href,
+                    ready_state: document.readyState,
+                    composer_present: box !== null,
+                    composer_visible: composerVisible,
+                    composer_empty: box ? box.value.trim() === '' : null,
+                    composer_disabled: box ? box.disabled || box.readOnly : null,
+                    running,
+                };
+            })()"#,
+        )
+        .await
+    {
+        Ok(snapshot) => eprintln!(
+            "pairing readiness {phase}: {:?}",
+            snapshot.into_value::<Value>()
+        ),
+        Err(error) => eprintln!("pairing readiness {phase}: {error:#}"),
+    }
+}
+
 async fn wait_page(page: &Page, script: &str) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while page_value(page, script).await != true {
@@ -1247,52 +1292,26 @@ async fn explicit_pairing_repairs_a_stale_binding_and_preserves_a_project_chat_b
     assert_eq!(target(), ambiguous);
     page_value(&page, "document.querySelector('textarea').value=''").await;
 
-    // Observe the fixture without marking the composer or touching the retry.
-    match page
-        .evaluate(
-            r#"(() => {
-                const box = document.querySelector('#prompt-textarea');
-                const visible = node => {
-                    if (!node || node.closest('[aria-hidden="true"], [inert]')) return false;
-                    const rect = node.getBoundingClientRect();
-                    const style = getComputedStyle(node);
-                    return rect.width > 0 && rect.height > 0 && style.display !== 'none'
-                        && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
-                };
-                const rect = box?.getBoundingClientRect();
-                const composerVisible = visible(box) && rect.width >= 16 && rect.height >= 16
-                    && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
-                const running = [...document.querySelectorAll('button, [role="button"]')]
-                    .filter(visible)
-                    .some(node => {
-                        const label = [node.getAttribute('aria-label'), node.getAttribute('title'),
-                            node.getAttribute('data-testid'), node.id, node.innerText || node.textContent]
-                            .join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
-                        return /\bstop\b|停止|中止|cancel generation|interrupt/.test(label);
-                    });
-                return {
-                    url: location.href,
-                    ready_state: document.readyState,
-                    composer_present: box !== null,
-                    composer_visible: composerVisible,
-                    composer_empty: box ? box.value.trim() === '' : null,
-                    composer_disabled: box ? box.disabled || box.readOnly : null,
-                    running,
-                };
-            })()"#,
+    log_replacement_readiness(&page, "before replacement retry").await;
+    let started = std::time::Instant::now();
+    let result = change(State(state.clone()), Json(repair)).await;
+    let elapsed_ms = started.elapsed().as_millis();
+    if result
+        .as_ref()
+        .is_err_and(|error| error.code() == "pairing_browser_not_ready")
+    {
+        let phase = format!("after replacement retry (elapsed_ms={elapsed_ms})");
+        if tokio::time::timeout(
+            Duration::from_secs(2),
+            log_replacement_readiness(&page, &phase),
         )
         .await
-    {
-        Ok(snapshot) => eprintln!(
-            "pairing readiness before replacement retry: {:?}",
-            snapshot.into_value::<Value>()
-        ),
-        Err(error) => eprintln!("pairing readiness before replacement retry: {error:#}"),
+        .is_err()
+        {
+            eprintln!("pairing readiness {phase}: snapshot timed out");
+        }
     }
-
-    change(State(state.clone()), Json(repair))
-        .await
-        .expect("one replacement request");
+    result.expect("one replacement request");
     assert_eq!(
         binding(),
         before_repair,
