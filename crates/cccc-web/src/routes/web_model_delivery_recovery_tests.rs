@@ -1311,7 +1311,7 @@ impl RecoveryFixture {
         }
     }
 
-    fn queue(&self) {
+    fn queue(&self) -> Event {
         let store = GroupStore::new(self.state.home.clone()).expect("store");
         let mut event = Event::new("chat.message", &self.group.group_id);
         event.by = "user".into();
@@ -1325,6 +1325,7 @@ impl RecoveryFixture {
             &event,
         )
         .expect("message");
+        event
     }
 
     async fn open(&self, url: &str) -> String {
@@ -1475,6 +1476,171 @@ async fn closed_idle_and_unresponsive_pages_reopen_only_on_their_own_managed_tar
     );
     surfaces.shutdown_all().await.expect("close shared browser");
     server.abort();
+}
+
+#[tokio::test]
+async fn renderer_loss_reopens_the_bound_chat_and_delivers_once() {
+    use chromiumoxide::cdp::browser_protocol::{
+        inspector::{EnableParams, EventTargetCrashed},
+        page::CrashParams,
+    };
+    use futures_util::StreamExt;
+    use std::time::Duration;
+
+    if crate::system_browser_path().is_none() {
+        return;
+    }
+    let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
+    let (base, server) = local_recovery_server(
+        Router::new()
+            .route("/", get(|| async { Html("<p>Neighboring tab</p>") }))
+            .route("/c/renderer-recovery", get(|| async {
+                Html(r#"<main><form onsubmit="event.preventDefault();window.attempts++;const t=document.querySelector('textarea');const a=document.createElement('article');a.dataset.messageAuthorRole='user';a.textContent=t.value;document.querySelector('main').append(a);t.value=''"><textarea id="prompt-textarea" style="width:500px;height:120px"></textarea><button type="submit">Send</button></form></main><script>window.attempts=0</script>"#)
+            })),
+    )
+    .await;
+    let url = format!("{base}c/renderer-recovery");
+    let fixture = RecoveryFixture::new();
+    let state = &fixture.state;
+    let group = &fixture.group.group_id;
+    let daemon = crate::test_daemon::TestDaemon::start(&state.home).await;
+    let session_key = fixture.open(&url).await;
+    let surfaces = &state.browser_surfaces;
+    assert_eq!(
+        surfaces
+            .prompt_readiness(&session_key)
+            .await
+            .expect("healthy composer")["ready"],
+        true
+    );
+    let binding = || {
+        super::super::web_model_connector_store::for_actor(state, group, RECOVERY_ACTOR)
+            .expect("saved binding")
+    };
+    let revision = binding()["revision"].clone();
+    let profile = super::super::web_model_shared_browser::profile(state, "chatgpt_web");
+    let sibling_url = base.replacen("127.0.0.1", "localhost", 1);
+    let sibling = surfaces
+        .open_shared_actor_fixture("renderer-loss-sibling", &profile, &sibling_url, "sibling")
+        .await
+        .expect("neighboring page");
+    fixture
+        .wait_for_page("renderer-loss-sibling", &sibling_url)
+        .await;
+    let initial = surfaces.info(&session_key).await;
+    let page = surfaces.sessions.lock().await[&session_key].page.clone();
+    let mut crashes = page
+        .event_listener::<EventTargetCrashed>()
+        .await
+        .expect("crash events");
+    page.execute(EnableParams::default())
+        .await
+        .expect("enable crash events");
+    // Crash the renderer for this tab in the fixture browser. Chrome leaves the
+    // target registered, so this exercises readiness instead of target removal.
+    let crash = tokio::spawn(async move { page.execute(CrashParams::default()).await });
+    tokio::time::timeout(Duration::from_secs(10), crashes.next())
+        .await
+        .expect("renderer crash notification timed out")
+        .expect("renderer crashed");
+    crash.abort();
+    let listed = surfaces.info(&session_key).await;
+    assert_eq!(
+        listed["active"], true,
+        "crashed target must still be listed"
+    );
+    assert_eq!(listed["target_id"], initial["target_id"]);
+    let queued = fixture.queue();
+
+    for _ in 0..2 {
+        assert!(matches!(
+            deliver_pending(state, group, RECOVERY_ACTOR)
+                .await
+                .expect("inspect crashed page"),
+            DeliveryOutcome::Idle
+        ));
+        let waiting = surfaces.info(&session_key).await;
+        assert_eq!(waiting["target_id"], initial["target_id"]);
+        assert_eq!(
+            waiting["metadata"]["prompt_readiness"]["state"],
+            "inspection_failed"
+        );
+    }
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("retire crashed page"),
+        DeliveryOutcome::Idle
+    ));
+    let retired = surfaces.info(&session_key).await;
+    assert_eq!(retired["closed_reason"], "renderer_unresponsive");
+    assert!(
+        super::super::web_model_supervisor::reopen_on_demand(
+            state,
+            group,
+            RECOVERY_ACTOR,
+            &retired
+        )
+        .await
+    );
+    fixture.wait_for_page(&session_key, &url).await;
+    assert_ne!(
+        surfaces.info(&session_key).await["target_id"],
+        initial["target_id"]
+    );
+    assert_eq!(binding()["url"], url);
+    assert_eq!(binding()["revision"], revision);
+    assert_eq!(
+        surfaces.info("renderer-loss-sibling").await["target_id"],
+        sibling["target_id"]
+    );
+    fixture
+        .wait_for_page("renderer-loss-sibling", &sibling_url)
+        .await;
+
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("deliver queued event"),
+        DeliveryOutcome::Submitted
+    ));
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("check for replay"),
+        DeliveryOutcome::Idle
+    ));
+    let page = surfaces.sessions.lock().await[&session_key].page.clone();
+    assert_eq!(
+        page.evaluate("window.attempts")
+            .await
+            .expect("attempts")
+            .into_value::<u32>()
+            .expect("count"),
+        1
+    );
+    let target = load_target(state, group, RECOVERY_ACTOR).expect("settled target");
+    assert_eq!(target["last_delivery_status"], "submitted");
+    assert_eq!(target["last_delivery_event_ids"], json!([queued.id]));
+    let store = GroupStore::new(state.home.clone()).expect("store");
+    let events =
+        std::fs::read_to_string(store.ledger_path(group).expect("ledger path")).expect("ledger");
+    let settlements = events
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("ledger event"))
+        .filter(|event| {
+            event["kind"] == "runtime.delivery"
+                && event["data"]["source_event_id"] == queued.id
+                && event["data"]["state"] == "accepted"
+        })
+        .count();
+    assert_eq!(settlements, 1);
+    surfaces
+        .shutdown_all()
+        .await
+        .expect("close fixture browser");
+    server.abort();
+    daemon.stop().await;
 }
 
 #[tokio::test]
