@@ -10,7 +10,12 @@ use std::path::Path;
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn preview_and_saved_alignment_preserve_attachment_only_drafts() {
-    if crate::system_browser_path().is_none() || !Path::new("/usr/bin/Xvfb").is_file() {
+    if crate::system_browser_path().is_none() {
+        crate::browser_surface::strict_prereq_missing("system browser");
+        return;
+    }
+    if !Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::strict_prereq_missing("Xvfb at /usr/bin/Xvfb");
         return;
     }
     let _chrome = crate::browser_surface::chrome_test_guard().await;

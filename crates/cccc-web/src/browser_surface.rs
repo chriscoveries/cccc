@@ -53,6 +53,31 @@ pub(crate) fn system_browser_path() -> Option<PathBuf> {
     system_browser::find_system_browser().map(|(path, _)| path)
 }
 
+/// CCCC_REQUIRE_BROWSER=1|true|yes|on turns every browser-fixture
+/// prerequisite skip into a hard failure: the gated strict CI job must
+/// refuse, not silently pass. Unset or any other value keeps the
+/// dev-host skip behavior.
+#[cfg(test)]
+pub(crate) fn strict_browser_mode() -> bool {
+    std::env::var("CCCC_REQUIRE_BROWSER")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Under strict mode a missing prerequisite panics so the fixture fails;
+/// otherwise returns and the caller keeps its skip path.
+#[cfg(test)]
+pub(crate) fn strict_prereq_missing(what: &str) {
+    if strict_browser_mode() {
+        panic!("CCCC_REQUIRE_BROWSER set: missing browser test prerequisite: {what}");
+    }
+}
+
 // Browser ownership includes the provider: changing runtime must retire the old
 // window and its manual-close marker without changing the Actor's task identity.
 pub(crate) fn actor_identity(actor: &cccc_contracts::Actor) -> String {
