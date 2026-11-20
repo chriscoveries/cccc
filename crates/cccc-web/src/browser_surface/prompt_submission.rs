@@ -1579,6 +1579,9 @@ fn note_turn_edge(metadata: &mut Value, running: bool, now: &str) {
     } else {
         if !metadata["busy_since"].is_null() {
             metadata["last_turn_finished_at"] = json!(now);
+            // The busy-period start survives the clear so observers can
+            // tell how long the finished turn ran, not only when it ended.
+            metadata["last_turn_busy_since"] = metadata["busy_since"].clone();
         }
         metadata["busy_since"] = Value::Null;
     }
@@ -2775,9 +2778,11 @@ mod turn_edge_tests {
         note_turn_edge(&mut metadata, true, "2026-01-01T00:01:00Z");
         assert_eq!(metadata["busy_since"], "2026-01-01T00:00:00Z");
         assert!(metadata["last_turn_finished_at"].is_null());
-        // The running→idle edge stamps when the turn finished.
+        // The running→idle edge stamps when the turn finished and keeps
+        // the busy-period start for duration/correlation.
         note_turn_edge(&mut metadata, false, "2026-01-01T00:02:00Z");
         assert_eq!(metadata["last_turn_finished_at"], "2026-01-01T00:02:00Z");
+        assert_eq!(metadata["last_turn_busy_since"], "2026-01-01T00:00:00Z");
         assert!(metadata["busy_since"].is_null());
         // Idle probes do not restamp the finish time.
         note_turn_edge(&mut metadata, false, "2026-01-01T00:03:00Z");
@@ -2787,5 +2792,6 @@ mod turn_edge_tests {
         note_turn_edge(&mut metadata, false, "2026-01-01T00:05:00Z");
         assert!(metadata["busy_since"].is_null());
         assert_eq!(metadata["last_turn_finished_at"], "2026-01-01T00:05:00Z");
+        assert_eq!(metadata["last_turn_busy_since"], "2026-01-01T00:04:00Z");
     }
 }
