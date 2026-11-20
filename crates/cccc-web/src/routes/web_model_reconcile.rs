@@ -83,7 +83,7 @@ pub(super) fn occupied_error() -> ApiError {
     ApiError::bad_code(
         "composer_occupied",
         "The conversation has an unsent draft. Check the message box and try again.",
-        json!({"reason":"composer_occupied"}),
+        json!({"reason":"composer_occupied","retryable":true}),
     )
 }
 

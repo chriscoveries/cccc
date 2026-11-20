@@ -272,7 +272,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         result
             .expect_err("must protect draft")
             .to_string()
-            .contains("pairing_composer_occupied")
+            .contains("composer_occupied: The conversation")
     );
     assert!(stored_pair(&state, gid, "alpha").is_none());
     assert_eq!(
@@ -290,7 +290,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         .await
         .expect_err("pending attachment")
         .to_string()
-        .contains("pairing_composer_occupied")
+        .contains("composer_occupied: The conversation")
     );
     // A pending attachment is checked before the stale-prompt clear. The
     // attachment and the text must both survive the refusal.
@@ -342,7 +342,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         .await
         .expect_err("added text may be a human's")
         .to_string()
-        .contains("pairing_composer_occupied")
+        .contains("composer_occupied: The conversation")
     );
     assert_eq!(
         page_value(&a, "document.querySelector('textarea').value").await,
@@ -380,7 +380,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
             .await
             .expect_err("changed while focusing")
             .to_string()
-            .contains("pairing_composer_occupied")
+            .contains("composer_occupied: The conversation")
         );
         assert_eq!(
             page_value(
@@ -955,4 +955,18 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         .await
         .expect("shutdown");
     daemon.await.expect("task").expect("daemon");
+}
+
+#[test]
+fn composer_occupied_has_one_blocking_envelope_across_routes() {
+    // resume and remove share the delivery-side error; connect normalizes
+    // its pairing-specific reason into the same code, detail preserved.
+    let resume = super::super::web_model_reconcile::occupied_error();
+    let connect = pairing_error("pairing_composer_occupied");
+    for error in [&resume, &connect] {
+        assert_eq!(error.code(), "composer_occupied");
+        assert_eq!(error.details()["reason"], "composer_occupied");
+        assert_eq!(error.details()["retryable"], true);
+    }
+    assert_eq!(connect.details()["detail"], "pairing_composer_occupied");
 }

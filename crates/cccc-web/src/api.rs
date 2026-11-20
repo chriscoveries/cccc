@@ -25,6 +25,11 @@ impl ApiError {
         &self.code
     }
 
+    #[cfg(test)]
+    pub(crate) fn details(&self) -> &Value {
+        &self.details
+    }
+
     pub(crate) fn with_details(mut self, details: Value) -> Self {
         self.details = details;
         self
