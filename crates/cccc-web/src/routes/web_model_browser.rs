@@ -511,6 +511,7 @@ pub(super) async fn payload(
         | "submission_ambiguous_completion_pending"
         | "completion_ambiguous"
         | "legacy_submission_unverified" => "ambiguous",
+        "abandoned_unresolved" => "abandoned",
         "deferred" | "preflight_deferred" | "legacy_recovery_submitting" => "submitting",
         value => value,
     };
@@ -535,6 +536,8 @@ pub(super) async fn payload(
         | "completion_ambiguous"
         | "legacy_submission_unverified"
         | "ambiguous" => "ambiguous",
+        // cwf#855: terminal, never replayed — not pending work to resume.
+        "abandoned_unresolved" => "abandoned",
         "draft_blocked" => "blocked",
         "conversation_length_exceeded" => "conversation_full",
         "failed" | "completion_conflict" => "failed",
@@ -607,6 +610,14 @@ pub(super) async fn payload(
             "Delivery unverified",
             if last_error.is_empty() {
                 "CCCC attempted to submit the prompt, but could not verify whether the website accepted it."
+            } else {
+                last_error
+            },
+        ),
+        "abandoned" => (
+            "Delivery abandoned",
+            if last_error.is_empty() {
+                "The owner chose to remove the binding without resolving this delivery; it is preserved as evidence and will not be replayed."
             } else {
                 last_error
             },
