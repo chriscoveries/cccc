@@ -761,6 +761,113 @@ fn terminal_actor_requires_an_attached_project_scope() {
     );
 }
 
+#[test]
+fn browser_turn_finished_is_a_durable_idempotent_observation() {
+    let (_temp, home, group_id, _instructions) = web_instruction_fixture();
+    let observe = |extra: Value| {
+        let mut args = json!({"group_id":group_id,"actor_id":"web1","by":"web1"});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        raw_call(&home, "runtime_observe_turn_finished", args)
+    };
+    // Timestamp and permission validation happen before any ledger write.
+    let bad_time = observe(json!({"finished_at":"not-a-time"}));
+    assert!(!bad_time.ok);
+    assert_eq!(
+        bad_time.error.as_ref().map(|error| error.code.as_str()),
+        Some("invalid_finished_at")
+    );
+    let denied = raw_call(
+        &home,
+        "runtime_observe_turn_finished",
+        json!({"group_id":group_id,"actor_id":"web1","by":"intruder","finished_at":"2026-11-20T22:00:00Z"}),
+    );
+    assert!(!denied.ok);
+    assert_eq!(
+        denied.error.as_ref().map(|error| error.code.as_str()),
+        Some("permission_denied")
+    );
+
+    let recorded = observe(json!({
+        "finished_at":"2026-11-20T22:00:00.123456Z",
+        "busy_since":"2026-11-20T21:00:00Z",
+        "turn_id":"turn-1","delivery_id":"delivery-1"
+    }));
+    assert!(recorded.ok, "{:?}", recorded.error);
+    assert_eq!(recorded.result["deduplicated"], false);
+    let event = &recorded.result["event"];
+    assert_eq!(event["kind"], "runtime.turn.finished");
+    assert_eq!(event["by"], "system");
+    assert_eq!(event["data"]["actor_id"], "web1");
+    assert_eq!(event["data"]["finished_at"], "2026-11-20T22:00:00.123456Z");
+    assert_eq!(event["data"]["busy_since"], "2026-11-20T21:00:00Z");
+    assert_eq!(event["data"]["turn_id"], "turn-1");
+    assert_eq!(event["data"]["delivery_id"], "delivery-1");
+    assert_eq!(event["data"]["source"], "browser_observed");
+
+    // A retried observation of the same edge deduplicates on the
+    // deterministic event id instead of writing a second ledger entry.
+    let again = observe(json!({
+        "finished_at":"2026-11-20T22:00:00.123456Z",
+        "busy_since":"2026-11-20T21:00:00Z",
+        "turn_id":"turn-1","delivery_id":"delivery-1"
+    }));
+    assert!(again.ok, "{:?}", again.error);
+    assert_eq!(again.result["deduplicated"], true);
+    assert_eq!(again.result["event"]["id"], event["id"]);
+
+    let ledger_path = GroupStore::new(home.clone())
+        .expect("group store")
+        .ledger_path(&group_id)
+        .expect("ledger path");
+    let finished = cccc_core::ledger::read_all(&ledger_path)
+        .expect("ledger")
+        .into_iter()
+        .filter(|event| event.kind == "runtime.turn.finished")
+        .count();
+    assert_eq!(finished, 1);
+
+    // A later edge is a distinct observation.
+    let next = observe(json!({"finished_at":"2026-11-20T23:30:00Z"}));
+    assert!(next.ok, "{:?}", next.error);
+    assert_eq!(next.result["deduplicated"], false);
+    assert_ne!(next.result["event"]["id"], event["id"]);
+}
+
+#[test]
+fn turn_finished_observation_rejects_non_browser_web_models() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let created = call(&home, "group_create", json!({"title":"dots turn finished"}));
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id")
+        .to_owned();
+    call(
+        &home,
+        "actor_add",
+        json!({"group_id":group_id,"actor_id":"dots1","runtime":"chatgpt_dots","by":"user"}),
+    );
+    GroupStore::new(home.clone())
+        .expect("group store")
+        .mutate(&group_id, |group| {
+            group.running = true;
+            Ok(())
+        })
+        .expect("running group");
+    let rejected = raw_call(
+        &home,
+        "runtime_observe_turn_finished",
+        json!({"group_id":group_id,"actor_id":"dots1","by":"dots1","finished_at":"2026-11-20T22:00:00Z"}),
+    );
+    assert!(!rejected.ok);
+    assert_eq!(
+        rejected.error.as_ref().map(|error| error.code.as_str()),
+        Some("invalid_actor_runtime")
+    );
+}
+
 fn call(home: &HomeLayout, op: &str, args: Value) -> DaemonResponse {
     let response = raw_call(home, op, args);
     assert!(response.ok, "{op}: {:?}", response.error);

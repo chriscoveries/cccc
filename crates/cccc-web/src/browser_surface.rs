@@ -90,6 +90,7 @@ impl KeyOperation {
 struct RetiredPage {
     generation: Option<String>,
     reason: &'static str,
+    closed_at: String,
 }
 
 #[derive(Debug)]
@@ -822,6 +823,7 @@ impl BrowserSurfaces {
                 let retired = RetiredPage {
                     generation,
                     reason: "target_closed",
+                    closed_at: cccc_contracts::utc_now(),
                 };
                 let payload = closed(&retired);
                 if session_actor(key).is_some() {
@@ -1222,6 +1224,7 @@ fn closed(retired: &RetiredPage) -> Value {
     };
     json!({
         "active":false,"state":"closed","message":message,"closed_reason":retired.reason,
+        "closed_at":retired.closed_at,
         "width":0,"height":0,"last_frame_seq":0,"controller_attached":false,
         "viewer":{"kind":"screencast","vnc":{"available":false,"error":"Browser surface was closed"}}
     })

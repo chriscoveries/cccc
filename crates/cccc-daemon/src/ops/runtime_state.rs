@@ -95,6 +95,7 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         "web_model_runtime_recover_turn" => Operation::new(Read, recover_turn),
         "web_model_browser_delivery_record" => Operation::new(Write, record_browser_delivery),
         "runtime_complete_turn" => Operation::new(Write, complete_turn),
+        "runtime_observe_turn_finished" => Operation::new(Write, observe_turn_finished),
         _ => return None,
     })
 }
@@ -967,6 +968,91 @@ fn record_browser_delivery(home: &HomeLayout, request: &DaemonRequest) -> OpResu
         }
     }
     object(json!({"event":event}))
+}
+
+/// cwf#825: record a browser-observed running→idle edge as a durable
+/// `runtime.turn.finished` ledger event. `runtime.turn.completed` marks the
+/// moment cccc handed the turn to the provider; this event marks the moment
+/// the page actually went idle, which is what distinguishes a busy lane from
+/// a stalled one. The observation is best-effort: the web supervisor emits it
+/// when its readiness probe sees the edge, so a missed probe loses the event
+/// but never blocks delivery.
+fn observe_turn_finished(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    let (group, actor_id) = group_actor(home, request)?;
+    let actor = require_web_model_actor(&group, &actor_id)?;
+    if !actor.runtime.is_browser_web_model() {
+        return Err(OpError::new(
+            "invalid_actor_runtime",
+            "turn-finished observations apply to ChatGPT browser Actors only",
+        ));
+    }
+    let by = string_arg(request, "by").unwrap_or_else(|| actor_id.clone());
+    if by != actor_id {
+        return Err(OpError::new(
+            "permission_denied",
+            "turn observations must be recorded for the observed Actor",
+        ));
+    }
+    let finished_at = required_arg(request, "finished_at")?;
+    if chrono::DateTime::parse_from_rfc3339(&finished_at).is_err() {
+        return Err(OpError::new(
+            "invalid_finished_at",
+            "finished_at must be an RFC3339 timestamp",
+        ));
+    }
+    let optional = |key: &str| {
+        string_arg(request, key)
+            .map(|value| value.chars().take(256).collect::<String>())
+            .filter(|value| !value.is_empty())
+    };
+    let busy_since = optional("busy_since");
+    if let Some(value) = &busy_since
+        && chrono::DateTime::parse_from_rfc3339(value).is_err()
+    {
+        return Err(OpError::new(
+            "invalid_busy_since",
+            "busy_since must be an RFC3339 timestamp",
+        ));
+    }
+    let turn_id = optional("turn_id");
+    let delivery_id = optional("delivery_id");
+    // Deterministic id makes a retried observation idempotent: the same
+    // finished_at for the same turn can only describe one edge.
+    let digest = Sha256::digest(format!(
+        "runtime-turn-finished\0{}\0{}\0{}\0{}",
+        group.group_id,
+        actor_id,
+        finished_at,
+        turn_id.as_deref().unwrap_or("-"),
+    ));
+    let event_id = format!("{digest:x}")[..32].to_owned();
+    let path = GroupStore::new(home.clone())
+        .map_err(OpError::io)?
+        .ledger_path(&group.group_id)
+        .map_err(OpError::io)?;
+    if let Some(existing) = ledger::find_event(&path, &event_id).map_err(OpError::io)? {
+        return object(json!({"status":"recorded","deduplicated":true,"event":existing}));
+    }
+    let mut data = serde_json::Map::from_iter([
+        ("actor_id".into(), json!(actor_id)),
+        ("finished_at".into(), json!(finished_at)),
+        ("source".into(), json!("browser_observed")),
+    ]);
+    if let Some(value) = busy_since {
+        data.insert("busy_since".into(), json!(value));
+    }
+    if let Some(value) = turn_id {
+        data.insert("turn_id".into(), json!(value));
+    }
+    if let Some(value) = delivery_id {
+        data.insert("delivery_id".into(), json!(value));
+    }
+    let mut event = Event::new("runtime.turn.finished", group.group_id.as_str());
+    event.id = event_id;
+    event.by = "system".into();
+    event.data = data;
+    ledger::append(&path, &event).map_err(OpError::io)?;
+    object(json!({"status":"recorded","deduplicated":false,"event":event}))
 }
 
 fn normalized_required_event_ids(request: &DaemonRequest) -> Result<Vec<String>, OpError> {

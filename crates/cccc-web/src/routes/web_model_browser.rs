@@ -750,6 +750,9 @@ pub(super) async fn payload(
     // runtime delivery for this Actor, read from the warm inbox projection.
     let (oldest_undelivered_at, oldest_undelivered_age_secs) =
         oldest_undelivered(state, &store, group_id, actor_id);
+    // cwf#825: name the hold when deliveries are paused so "busy" reads
+    // differently from "stuck" without guessing from timestamps.
+    let paused_reason = paused_reason(&delivery_state, &target_state);
     let health = json!({
         "schema":"cccc.web_model.health.v1","group_id":group_id,"actor_id":actor_id,
         "tone":tone,
@@ -769,7 +772,11 @@ pub(super) async fn payload(
             "last_frame_at":surface["last_frame_at"],
             "rate_limit":rate_limit,
             "closed_reason":surface["closed_reason"],
+            "session_closed_since":surface["closed_at"],
             "composer_occupied_since":if composer_occupied {metadata["composer_occupied_since"].clone()} else {Value::Null},
+            "busy_since":metadata["busy_since"].clone(),
+            "last_turn_finished_at":metadata["last_turn_finished_at"].clone(),
+            "last_turn_busy_since":metadata["last_turn_busy_since"].clone(),
             "conversation_limit":readiness.get("conversation_limit").cloned().unwrap_or(Value::Null)
         },
         "target":{
@@ -787,6 +794,7 @@ pub(super) async fn payload(
             "last_submitted_at":target["last_submitted_at"],
             "oldest_undelivered_at":oldest_undelivered_at,
             "oldest_undelivered_age_secs":oldest_undelivered_age_secs,
+            "paused_reason":paused_reason,
             "last_submission_evidence":submission_evidence,
             "last_send_selector":send_selector,
             "last_error":if delivery_state == "pending_bind" && last_error == "conversation_url_pending" {""} else {last_error},
@@ -855,6 +863,22 @@ pub(super) async fn payload(
         "browser_session":browser,"browser_surface":surface,"health_snapshot":health,
         "pairing":pairing_state(state,group_id,actor_id)?
     })))
+}
+
+/// cwf#825: the hold keeping queued deliveries from moving, when one
+/// exists. `None` means the lane is not paused — it is idle, submitting,
+/// or already delivered.
+fn paused_reason(delivery_state: &str, target_state: &str) -> Option<&'static str> {
+    match target_state {
+        "unavailable" => Some("bound_chat_unavailable"),
+        "invalid" => Some("invalid_target"),
+        _ => match delivery_state {
+            "ambiguous" => Some("submission_unverified"),
+            "conversation_full" => Some("conversation_full"),
+            "blocked" => Some("unsent_draft"),
+            _ => None,
+        },
+    }
 }
 
 fn oldest_undelivered(
@@ -1080,6 +1104,50 @@ mod startup_url_tests {
             ).expect("ChatGPT URL"),
             "https://chatgpt.com/c/bound"
         );
+    }
+}
+
+#[cfg(test)]
+mod stall_health_tests {
+    #[test]
+    fn paused_reason_names_the_hold_or_stays_empty() {
+        // Target-level blocks win: nothing reaches the chat at all.
+        assert_eq!(
+            super::paused_reason("submitted", "unavailable"),
+            Some("bound_chat_unavailable")
+        );
+        assert_eq!(
+            super::paused_reason("submitted", "invalid"),
+            Some("invalid_target")
+        );
+        // Delivery-level holds.
+        assert_eq!(
+            super::paused_reason("ambiguous", "bound"),
+            Some("submission_unverified")
+        );
+        assert_eq!(
+            super::paused_reason("conversation_full", "bound"),
+            Some("conversation_full")
+        );
+        assert_eq!(
+            super::paused_reason("blocked", "bound"),
+            Some("unsent_draft")
+        );
+        // Busy, submitting, failed and idle lanes are not "paused".
+        for (delivery, target) in [
+            ("submitted", "bound"),
+            ("submitting", "bound"),
+            ("pending_bind", "new_chat_pending"),
+            ("failed", "bound"),
+            ("idle", "missing"),
+            ("bound", "bound"),
+        ] {
+            assert_eq!(
+                super::paused_reason(delivery, target),
+                None,
+                "{delivery}/{target}"
+            );
+        }
     }
 }
 

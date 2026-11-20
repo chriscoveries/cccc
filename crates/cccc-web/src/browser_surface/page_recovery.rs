@@ -196,6 +196,7 @@ impl BrowserSurfaces {
                         .as_str()
                         .map(str::to_owned),
                     reason,
+                    closed_at: cccc_contracts::utc_now(),
                 },
             );
             tracing::info!(key, reason, "Retired managed actor browser page");
