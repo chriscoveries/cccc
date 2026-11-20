@@ -398,19 +398,25 @@ fn candidate(state: &AppState, args: &Map<String, Value>) -> Result<Value, &'sta
 }
 
 fn pairing_error(code: &str) -> ApiError {
+    // cwf#916: an occupied composer is the same terminal block on every
+    // route — resume, remove and connect all answer `composer_occupied`.
+    // The operation-specific reason stays in `detail`.
+    if code == "pairing_composer_occupied" {
+        return ApiError::bad_code(
+            "composer_occupied",
+            "The conversation has an unsent draft. Check the message box and try again.",
+            json!({"reason":"composer_occupied","detail":"pairing_composer_occupied","retryable":true}),
+        );
+    }
     let code = match code {
         "pairing_browser_required" => "pairing_browser_required",
         "pairing_browser_not_ready" => "pairing_browser_not_ready",
         "pairing_browser_rate_limited" => "pairing_browser_rate_limited",
         "pairing_browser_load_failed" => "pairing_browser_load_failed",
         "pairing_browser_conversation_full" => "pairing_browser_conversation_full",
-        "pairing_composer_occupied" => "pairing_composer_occupied",
         "pairing_target_changed" => "pairing_target_changed",
         _ => "pairing_failed",
     };
-    if code == "pairing_composer_occupied" {
-        return ApiError::bad_code(code, code, json!({"reason":"composer_occupied"}));
-    }
     ApiError::bad_code(code, code, json!({}))
 }
 
