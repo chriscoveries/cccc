@@ -72,6 +72,7 @@ fn rejected_session_guards_do_not_release_the_active_owner() {
 #[tokio::test]
 async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() {
     if crate::system_browser_path().is_none() {
+        crate::browser_surface::refuse_silent_browser_skip();
         return;
     }
     let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -605,6 +606,7 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
 #[tokio::test]
 async fn verified_legacy_draft_recovers_through_rebuilt_prompt_once() {
     if crate::system_browser_path().is_none() {
+        crate::browser_surface::refuse_silent_browser_skip();
         return;
     }
     let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -782,6 +784,7 @@ async fn contended_worker_recovers_manual_send_and_only_delivers_later_work() {
     use futures_util::StreamExt;
 
     if crate::system_browser_path().is_none() {
+        crate::browser_surface::refuse_silent_browser_skip();
         return;
     }
     let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -1358,6 +1361,7 @@ async fn closed_idle_and_unresponsive_pages_reopen_only_on_their_own_managed_tar
     use std::time::Duration;
 
     if crate::system_browser_path().is_none() {
+        crate::browser_surface::refuse_silent_browser_skip();
         return;
     }
     let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -1456,6 +1460,7 @@ async fn load_error_is_retried_before_ambiguous_review_and_exhausts_visibly() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     if crate::system_browser_path().is_none() {
+        crate::browser_surface::refuse_silent_browser_skip();
         return;
     }
     let _chrome_guard = crate::browser_surface::chrome_test_guard().await;

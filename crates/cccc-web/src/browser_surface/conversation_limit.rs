@@ -245,6 +245,7 @@ mod tests {
     #[tokio::test]
     async fn script_reads_the_banner_but_not_a_quoted_message() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::refuse_silent_browser_skip();
             return;
         }
         let _chrome_guard = super::super::chrome_test_guard().await;

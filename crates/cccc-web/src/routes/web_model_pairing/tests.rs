@@ -207,6 +207,7 @@ async fn offline_entry() -> (String, tokio::task::JoinHandle<()>) {
 #[tokio::test]
 async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_and_cancellation() {
     if crate::system_browser_path().is_none() {
+        crate::browser_surface::refuse_silent_browser_skip();
         return;
     }
     let _chrome = crate::browser_surface::chrome_test_guard().await;
@@ -1030,6 +1031,7 @@ async fn explicit_pairing_repairs_a_stale_binding_and_preserves_a_project_chat_b
     use cccc_contracts::GroupState;
 
     if crate::system_browser_path().is_none() {
+        crate::browser_surface::refuse_silent_browser_skip();
         return;
     }
     let _chrome = crate::browser_surface::chrome_test_guard().await;

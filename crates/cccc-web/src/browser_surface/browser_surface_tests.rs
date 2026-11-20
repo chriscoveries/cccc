@@ -5,6 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 macro_rules! require_chrome {
     () => {
         if !chrome_available() {
+            crate::browser_surface::refuse_silent_browser_skip();
             return;
         }
         let _chrome_guard = chrome_test_guard().await;
@@ -120,6 +121,7 @@ async fn composer_readiness_waits_for_login_and_interactive_verification() {
 async fn interactive_system_browser_keeps_native_mode_and_reuses_its_session() {
     require_chrome!();
     if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::refuse_silent_browser_skip();
         return;
     }
     let (url, server) = local_page("<textarea id='prompt-textarea'></textarea>").await;
