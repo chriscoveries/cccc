@@ -92,6 +92,7 @@ pub fn begin_dots_pairing(home: &HomeLayout, id: &str) -> io::Result<Option<Valu
             binding["actor_id"].as_str().expect("actor"),
             binding["generation"].as_str().expect("generation"),
             false,
+            binding["revision"].clone(),
         );
         pair["transport"] = json!("mcp_events");
         pair["revision"] = binding["revision"].clone();
