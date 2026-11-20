@@ -1163,7 +1163,7 @@ async fn explicit_pairing_repairs_a_stale_binding_and_preserves_a_project_chat_b
     page.goto(project_url)
         .await
         .expect("chat moved into a Project");
-    change(State(state.clone()), Json(replacement(project_url)))
+    let _ = change(State(state.clone()), Json(replacement(project_url)))
         .await
         .expect("select the moved chat");
     finish_pairing(&state, group_id, actor_id, &page).await;
