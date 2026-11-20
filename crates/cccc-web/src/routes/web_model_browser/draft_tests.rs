@@ -11,6 +11,7 @@ use std::path::Path;
 #[tokio::test]
 async fn preview_and_saved_alignment_preserve_attachment_only_drafts() {
     if crate::system_browser_path().is_none() || !Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::refuse_silent_browser_skip();
         return;
     }
     let _chrome = crate::browser_surface::chrome_test_guard().await;
