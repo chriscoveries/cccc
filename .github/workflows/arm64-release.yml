@@ -1,0 +1,54 @@
+name: arm64 release build
+
+on:
+  push:
+    branches: [arm64-release-build]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: v0.4.58
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.19.0"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake perl
+      - name: Verify release identity
+        run: python scripts/check_release_versions.py --tag v0.4.58
+      - name: Build web assets
+        run: node scripts/prepare_rust_web_assets.mjs --install-deps
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: Build release binary
+        run: |
+          touch web/dist/index.html
+          cargo build --release --locked --features standalone -p cccc --bin cccc
+          strip target/release/cccc
+          python scripts/check_release_versions.py --rust-binary target/release/cccc
+          python scripts/verify_standalone_binary.py --platform linux target/release/cccc
+      - name: Package tarball and checksum
+        run: |
+          python scripts/build_standalone_archive.py \
+            target/release/cccc \
+            --target aarch64-unknown-linux-gnu \
+            --output-dir dist
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cccc-v0.4.58-aarch64-unknown-linux-gnu
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
