@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chromiumoxide::cdp::browser_protocol::target::{CloseTargetParams, GetTargetsParams};
 use chromiumoxide::error::{CdpError, ChannelError};
 use chromiumoxide::{Browser, Page};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;

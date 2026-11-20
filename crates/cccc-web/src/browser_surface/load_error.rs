@@ -263,8 +263,7 @@ impl BrowserSurfaces {
             .get(key)?
             .initial_retry_after
             .clone();
-        let value = hint.lock().await.take();
-        value
+        hint.lock().await.take()
     }
 
     pub(crate) async fn reload_conversation(
