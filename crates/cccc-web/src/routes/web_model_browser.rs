@@ -775,6 +775,7 @@ pub(super) async fn payload(
             "session_closed_since":surface["closed_at"],
             "composer_occupied_since":if composer_occupied {metadata["composer_occupied_since"].clone()} else {Value::Null},
             "busy_since":metadata["busy_since"].clone(),
+            "last_turn_finished_at":metadata["last_turn_finished_at"].clone(),
             "conversation_limit":readiness.get("conversation_limit").cloned().unwrap_or(Value::Null)
         },
         "target":{

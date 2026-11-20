@@ -930,14 +930,13 @@ impl BrowserSurfaces {
                 session.idle_since = None;
             }
             // cwf#825: stamp when the tab's turn is running (stop control
-            // visible) so health can tell a busy lane from a stalled one.
-            if readiness["running"] == true {
-                if session.metadata["busy_since"].is_null() {
-                    session.metadata["busy_since"] = json!(cccc_contracts::utc_now());
-                }
-            } else {
-                session.metadata["busy_since"] = Value::Null;
-            }
+            // visible) so health can tell a busy lane from a stalled one;
+            // the running→idle edge stamps when the last turn finished.
+            note_turn_edge(
+                &mut session.metadata,
+                readiness["running"] == true,
+                &cccc_contracts::utc_now(),
+            );
             let occupied = readiness["ready"] == true
                 && readiness["running"] == false
                 && (readiness["composer_chars"].as_u64().unwrap_or(0) > 0
@@ -1566,6 +1565,23 @@ pub(super) fn composer_is_idle(readiness: &Value) -> bool {
         && readiness["running"] == false
         && readiness["composer_chars"].as_u64() == Some(0)
         && readiness["composer_has_attachments"] == false
+}
+
+/// cwf#825: track the observed running→idle edge on session metadata.
+/// `busy_since` marks the start of the current busy period; the edge out
+/// of it stamps `last_turn_finished_at` so health can say when the last
+/// turn ended, not only whether one is running now.
+fn note_turn_edge(metadata: &mut Value, running: bool, now: &str) {
+    if running {
+        if metadata["busy_since"].is_null() {
+            metadata["busy_since"] = json!(now);
+        }
+    } else {
+        if !metadata["busy_since"].is_null() {
+            metadata["last_turn_finished_at"] = json!(now);
+        }
+        metadata["busy_since"] = Value::Null;
+    }
 }
 
 const SELECT_COMPOSER_SCRIPT: &str = r#"() => {
@@ -2742,5 +2758,34 @@ mod readiness_tests {
         assert!(!candidate.selector.is_empty());
         manager.close("composer").await.expect("close");
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod turn_edge_tests {
+    use super::*;
+
+    #[test]
+    fn running_idle_edge_stamps_last_turn_finished_once_per_busy_period() {
+        let mut metadata = json!({});
+        note_turn_edge(&mut metadata, true, "2026-01-01T00:00:00Z");
+        assert_eq!(metadata["busy_since"], "2026-01-01T00:00:00Z");
+        assert!(metadata["last_turn_finished_at"].is_null());
+        // Still running: busy_since keeps its first stamp, no finish yet.
+        note_turn_edge(&mut metadata, true, "2026-01-01T00:01:00Z");
+        assert_eq!(metadata["busy_since"], "2026-01-01T00:00:00Z");
+        assert!(metadata["last_turn_finished_at"].is_null());
+        // The running→idle edge stamps when the turn finished.
+        note_turn_edge(&mut metadata, false, "2026-01-01T00:02:00Z");
+        assert_eq!(metadata["last_turn_finished_at"], "2026-01-01T00:02:00Z");
+        assert!(metadata["busy_since"].is_null());
+        // Idle probes do not restamp the finish time.
+        note_turn_edge(&mut metadata, false, "2026-01-01T00:03:00Z");
+        assert_eq!(metadata["last_turn_finished_at"], "2026-01-01T00:02:00Z");
+        // A fresh busy period gets its own edge stamp.
+        note_turn_edge(&mut metadata, true, "2026-01-01T00:04:00Z");
+        note_turn_edge(&mut metadata, false, "2026-01-01T00:05:00Z");
+        assert!(metadata["busy_since"].is_null());
+        assert_eq!(metadata["last_turn_finished_at"], "2026-01-01T00:05:00Z");
     }
 }
