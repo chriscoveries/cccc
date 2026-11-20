@@ -137,9 +137,12 @@ mod tests {
 
     #[tokio::test]
     async fn closing_login_keeps_actor_page_draft_and_shared_login() {
-        if crate::system_browser_path().is_none()
-            || !std::path::Path::new("/usr/bin/Xvfb").is_file()
-        {
+        if crate::system_browser_path().is_none() {
+            crate::browser_surface::strict_prereq_missing("system browser");
+            return;
+        }
+        if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+            crate::browser_surface::strict_prereq_missing("Xvfb at /usr/bin/Xvfb");
             return;
         }
         let _chrome = crate::browser_surface::chrome_test_guard().await;

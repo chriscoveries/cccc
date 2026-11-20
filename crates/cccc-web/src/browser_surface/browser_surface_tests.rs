@@ -5,6 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 macro_rules! require_chrome {
     () => {
         if !chrome_available() {
+            strict_prereq_missing("system browser (chromium/google-chrome)");
             return;
         }
         let _chrome_guard = chrome_test_guard().await;
@@ -120,6 +121,7 @@ async fn composer_readiness_waits_for_login_and_interactive_verification() {
 async fn interactive_system_browser_keeps_native_mode_and_reuses_its_session() {
     require_chrome!();
     if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        strict_prereq_missing("Xvfb at /usr/bin/Xvfb");
         return;
     }
     let (url, server) = local_page("<textarea id='prompt-textarea'></textarea>").await;
@@ -851,15 +853,17 @@ async fn scroll_command_targets_the_nested_container_under_the_pointer() {
     server.abort();
 }
 
+const CHROME_CANDIDATES: [&str; 4] = [
+    "/opt/homebrew/bin/chromium",
+    "/usr/bin/chromium",
+    "/usr/bin/google-chrome",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+];
+
 fn chrome_available() -> bool {
-    [
-        "/opt/homebrew/bin/chromium",
-        "/usr/bin/chromium",
-        "/usr/bin/google-chrome",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    ]
-    .iter()
-    .any(|path| std::path::Path::new(path).is_file())
+    CHROME_CANDIDATES
+        .iter()
+        .any(|path| std::path::Path::new(path).is_file())
 }
 
 #[test]
