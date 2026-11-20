@@ -213,6 +213,22 @@ async fn start_connection(
         .pairing_page(&key)
         .await
         .map_err(|e| pairing_error(&e.to_string()))?;
+    // cwf#855: when the actor's bound conversation is not the tab's current
+    // conversation the saved chat is unreachable for this attempt, so the
+    // connect becomes an explicit-style replace instead of `already_paired`.
+    // The old binding still stands until the new pairing confirms.
+    if !replace {
+        let bound_url = web_model_connectors::binding_for_actor(
+            &connector,
+            group,
+            actor,
+            &cccc_core::actors::generation_identity(config),
+        )
+        .and_then(|b| b["url"].as_str().map(str::to_owned));
+        if bound_chat_unavailable(bound_url.as_deref(), target.conversation()) {
+            args.insert("replace".into(), json!(true));
+        }
+    }
     let pair = call(state, "web_model_pairing_begin", args.clone()).await?;
     let id = pair["pairing_id"]
         .as_str()
@@ -395,6 +411,15 @@ fn candidate(state: &AppState, args: &Map<String, Value>) -> Result<Value, &'sta
         return Err("pairing_interrupted");
     }
     Ok(pair)
+}
+
+/// cwf#855: the bound chat counts as unavailable when its saved URL
+/// normalizes to a conversation the pairing tab is not on. An
+/// unparseable saved URL stays conservative — no auto-replace.
+fn bound_chat_unavailable(bound_url: Option<&str>, current: Option<&str>) -> bool {
+    bound_url
+        .and_then(|u| web_model_connectors::conversation_url(u).ok())
+        .is_some_and(|saved| current != Some(saved.as_str()))
 }
 
 fn pairing_error(code: &str) -> ApiError {
