@@ -408,23 +408,61 @@ async fn deliver_once(
         if target["kind"] == "new_chat" {
             return resolve_pending_new_chat(state, group_id, actor_id, session_key, &target).await;
         }
-        // cwf#825 (opt-in): after CCCC_WEB_MODEL_AUTO_RESUME_AMBIGUOUS_MIN
-        // minutes, resume it with the manual route's checks. Never replays.
+        // cwf#825 (opt-in) + cwf#916: after
+        // CCCC_WEB_MODEL_AUTO_RESUME_AMBIGUOUS_MIN minutes the worker may
+        // resume with the manual route's checks. Attempts are recorded on
+        // the durable target: exponential backoff, a hard cap, and
+        // review_required when the blocker needs a human. Never replays.
         let after = super::web_model_reconcile::auto_resume_after(
             std::env::var(super::web_model_reconcile::ENV_AUTO_RESUME_MIN)
                 .ok()
                 .as_deref(),
         );
-        if super::web_model_reconcile::auto_resume_due(&target, after, chrono::Utc::now())
-            && let Some(delivery_id) = super::web_model_reconcile::reconcilable(&target)
-        {
-            match resume_reviewed_locked(state, group_id, actor_id, &delivery_id).await {
-                Ok(()) => {
-                    tracing::info!(group_id, actor_id, %delivery_id, "Web-model ambiguous delivery resumed automatically");
-                    return Ok(DeliveryOutcome::Idle);
-                }
-                Err(error) => {
-                    tracing::debug!(group_id, actor_id, %error, "Web-model automatic resume not safe yet");
+        if let Some(after) = after {
+            if target["repair"].is_null() {
+                let _ = update_target(
+                    state,
+                    group_id,
+                    actor_id,
+                    super::web_model_reconcile::repair_detected(&target),
+                )
+                .await;
+            }
+            if super::web_model_reconcile::repair_due(&target, Some(after), chrono::Utc::now())
+                && let Some(delivery_id) = super::web_model_reconcile::reconcilable(&target)
+            {
+                match resume_reviewed_locked(state, group_id, actor_id, &delivery_id).await {
+                    Ok(()) => {
+                        let _ = update_target(
+                            state,
+                            group_id,
+                            actor_id,
+                            super::web_model_reconcile::repair_cleared(),
+                        )
+                        .await;
+                        tracing::info!(group_id, actor_id, %delivery_id, "Web-model ambiguous delivery resumed automatically");
+                        return Ok(DeliveryOutcome::Idle);
+                    }
+                    Err(error) => {
+                        let _ = update_target(
+                            state,
+                            group_id,
+                            actor_id,
+                            super::web_model_reconcile::repair_note_attempt(
+                                &target,
+                                error.code(),
+                                after,
+                                chrono::Utc::now(),
+                            ),
+                        )
+                        .await;
+                        tracing::debug!(
+                            group_id,
+                            actor_id,
+                            code = error.code(),
+                            "Web-model automatic resume not safe yet"
+                        );
+                    }
                 }
             }
         }

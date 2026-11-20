@@ -36,6 +36,115 @@ pub(super) fn auto_resume_after(value: Option<&str>) -> Option<Duration> {
         .map(|m| Duration::from_secs(m.min(24 * 60) * 60))
 }
 
+// cwf#916: durable bounded repair state, kept on the delivery target record
+// so attempts survive restarts and worker races. `scheduled` retries with
+// exponential backoff, `review_required` stops auto-repair when the blocker
+// needs a human (an unprovable draft), `exhausted` stops it at the cap.
+pub(super) const REPAIR_MAX_ATTEMPTS: u32 = 8;
+const REPAIR_MAX_BACKOFF_MS: i64 = 4 * 60 * 60 * 1000;
+
+/// Spacing before the retry after `attempts` recorded attempts:
+/// base * 2^(attempts-1), capped. Attempt 1 waits `base`.
+pub(super) fn repair_backoff_ms(attempts: u32, base_ms: i64) -> i64 {
+    let shift = attempts.saturating_sub(1).min(20);
+    base_ms
+        .saturating_mul(1i64 << shift)
+        .min(REPAIR_MAX_BACKOFF_MS)
+}
+
+/// First sight of the wedge: record detection once, before any attempt.
+pub(super) fn repair_detected(target: &Value) -> Value {
+    json!({"repair":{
+        "reason":"submission_ambiguous",
+        "status":"scheduled",
+        "attempts":0,
+        "first_detected_at":target["last_delivery_at"],
+        "last_attempt_at":Value::Null,
+        "next_retry_at_ms":Value::Null,
+        "last_result":Value::Null,
+    }})
+}
+
+/// A delivery reviewed after it went ambiguous belongs to the reviewer.
+fn reviewed_after_ambiguous(target: &Value) -> bool {
+    let Some(at) = target["last_delivery_at"]
+        .as_str()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+    else {
+        return false;
+    };
+    target["last_delivery_reviewed_at"]
+        .as_str()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .is_some_and(|reviewed| reviewed >= at)
+}
+
+/// An automatic repair attempt is due: the wedge must still stand, a human
+/// review closes it for good, terminal states never retry, scheduled
+/// retries wait for next_retry_at_ms, and the first attempt keeps the
+/// operator's minimum-age gate.
+pub(super) fn repair_due(
+    target: &Value,
+    after: Option<Duration>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if reconcilable(target).is_none() || reviewed_after_ambiguous(target) {
+        return false;
+    }
+    let repair = &target["repair"];
+    if matches!(
+        repair["status"].as_str(),
+        Some("review_required" | "exhausted")
+    ) {
+        return false;
+    }
+    if let Some(next) = repair["next_retry_at_ms"].as_i64() {
+        return now.timestamp_millis() >= next;
+    }
+    auto_resume_due(target, after, now)
+}
+
+/// Record one attempt's outcome. An occupied composer the ownership proof
+/// cannot clear is `review_required` — a human must look; anything else
+/// retries on backoff until the cap.
+pub(super) fn repair_note_attempt(
+    target: &Value,
+    result: &str,
+    base: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    let repair = &target["repair"];
+    let attempts = repair["attempts"].as_u64().unwrap_or(0) as u32 + 1;
+    let unsafe_draft = result == "composer_occupied";
+    let status = if unsafe_draft {
+        "review_required"
+    } else if attempts >= REPAIR_MAX_ATTEMPTS {
+        "exhausted"
+    } else {
+        "scheduled"
+    };
+    let now_ms = now.timestamp_millis();
+    json!({"repair":{
+        "reason":"submission_ambiguous",
+        "status":status,
+        "attempts":attempts,
+        "first_detected_at":if repair["first_detected_at"].is_null() {
+            target["last_delivery_at"].clone()
+        } else {
+            repair["first_detected_at"].clone()
+        },
+        "last_attempt_at":cccc_contracts::utc_now(),
+        "next_retry_at_ms":(status == "scheduled")
+            .then(|| now_ms + repair_backoff_ms(attempts, base.as_millis() as i64)),
+        "last_result":result,
+    }})
+}
+
+/// The wedge resolved; drop the repair record.
+pub(super) fn repair_cleared() -> Value {
+    json!({"repair":Value::Null})
+}
+
 /// Has this ambiguous delivery waited long enough for an automatic resume?
 pub(super) fn auto_resume_due(
     target: &Value,
@@ -52,12 +161,7 @@ pub(super) fn auto_resume_due(
     else {
         return false;
     };
-    // A delivery reviewed after it went ambiguous belongs to the reviewer.
-    if target["last_delivery_reviewed_at"]
-        .as_str()
-        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-        .is_some_and(|reviewed| reviewed >= at)
-    {
+    if reviewed_after_ambiguous(target) {
         return false;
     }
     now.signed_duration_since(at.with_timezone(&chrono::Utc))
@@ -261,5 +365,88 @@ mod tests {
             &json!({"ready":true,"composer_has_attachments":true}),
             true
         ));
+    }
+
+    #[test]
+    fn repair_backoff_is_exponential_and_capped() {
+        let base = 60_000i64;
+        assert_eq!(repair_backoff_ms(1, base), base);
+        assert_eq!(repair_backoff_ms(2, base), 2 * base);
+        assert_eq!(repair_backoff_ms(3, base), 4 * base);
+        assert_eq!(repair_backoff_ms(20, base), REPAIR_MAX_BACKOFF_MS);
+        assert_eq!(repair_backoff_ms(0, base), base);
+    }
+
+    #[test]
+    fn repair_due_gates_on_recorded_state() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-15T08:00:00Z")
+            .expect("valid RFC 3339 time")
+            .with_timezone(&chrono::Utc);
+        let after = Some(Duration::from_secs(20 * 60));
+        let mut target = ambiguous("2026-11-15T07:30:00Z");
+        // No record: the first attempt keeps the minimum-age gate.
+        assert!(repair_due(&target, after, now));
+        target["last_delivery_at"] = json!("2026-11-15T07:55:00Z");
+        assert!(!repair_due(&target, after, now));
+        // Detection alone does not make it due early.
+        let mut detected = ambiguous("2026-11-15T07:30:00Z");
+        detected["repair"] = repair_detected(&detected)["repair"].clone();
+        assert!(repair_due(&detected, after, now));
+        // A scheduled retry waits for its timestamp, then fires.
+        let mut retry = ambiguous("2026-11-15T07:30:00Z");
+        retry["repair"] = json!({"status":"scheduled","attempts":2,
+            "next_retry_at_ms":now.timestamp_millis() + 60_000});
+        assert!(!repair_due(&retry, after, now));
+        retry["repair"]["next_retry_at_ms"] = json!(now.timestamp_millis() - 1);
+        assert!(repair_due(&retry, after, now));
+        // Terminal states and a human review never retry.
+        for status in ["review_required", "exhausted"] {
+            let mut terminal = ambiguous("2026-11-15T07:30:00Z");
+            terminal["repair"] = json!({"status":status,"attempts":1,
+                "next_retry_at_ms":0});
+            assert!(!repair_due(&terminal, after, now));
+        }
+        let mut reviewed = ambiguous("2026-11-15T07:30:00Z");
+        reviewed["repair"] = json!({"status":"scheduled","attempts":1,
+            "next_retry_at_ms":0});
+        reviewed["last_delivery_reviewed_at"] = json!("2026-11-15T07:31:00Z");
+        assert!(!repair_due(&reviewed, after, now));
+        // The wedge gone means the record is inert.
+        let mut resolved = ambiguous("2026-11-15T07:30:00Z");
+        resolved["last_delivery_status"] = json!("resolved");
+        resolved["repair"] = json!({"status":"scheduled","attempts":1,
+            "next_retry_at_ms":0});
+        assert!(!repair_due(&resolved, after, now));
+    }
+
+    #[test]
+    fn repair_attempts_record_backoff_and_stop() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-15T08:00:00Z")
+            .expect("valid RFC 3339 time")
+            .with_timezone(&chrono::Utc);
+        let base = Duration::from_secs(20 * 60);
+        let mut target = ambiguous("2026-11-15T07:30:00Z");
+        target["repair"] = repair_detected(&target)["repair"].clone();
+        let patch = repair_note_attempt(&target, "invalid_request", base, now);
+        let repair = &patch["repair"];
+        assert_eq!(repair["attempts"], 1);
+        assert_eq!(repair["status"], "scheduled");
+        assert_eq!(
+            repair["next_retry_at_ms"].as_i64().unwrap() - now.timestamp_millis(),
+            base.as_millis() as i64
+        );
+        assert_eq!(repair["first_detected_at"], "2026-11-15T07:30:00Z");
+        // An unprovable draft is review_required, never retried.
+        let patch = repair_note_attempt(&target, "composer_occupied", base, now);
+        assert_eq!(patch["repair"]["status"], "review_required");
+        assert!(patch["repair"]["next_retry_at_ms"].is_null());
+        // The cap exhausts scheduled retries.
+        let mut tired = target.clone();
+        tired["repair"]["attempts"] = json!(REPAIR_MAX_ATTEMPTS - 1);
+        let patch = repair_note_attempt(&tired, "invalid_request", base, now);
+        assert_eq!(patch["repair"]["status"], "exhausted");
+        assert!(patch["repair"]["next_retry_at_ms"].is_null());
+        // Success clears the record.
+        assert!(repair_cleared()["repair"].is_null());
     }
 }
