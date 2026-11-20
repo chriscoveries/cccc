@@ -929,6 +929,15 @@ impl BrowserSurfaces {
             if session.last_observed_busy {
                 session.idle_since = None;
             }
+            // cwf#825: stamp when the tab's turn is running (stop control
+            // visible) so health can tell a busy lane from a stalled one.
+            if readiness["running"] == true {
+                if session.metadata["busy_since"].is_null() {
+                    session.metadata["busy_since"] = json!(cccc_contracts::utc_now());
+                }
+            } else {
+                session.metadata["busy_since"] = Value::Null;
+            }
             let occupied = readiness["ready"] == true
                 && readiness["running"] == false
                 && (readiness["composer_chars"].as_u64().unwrap_or(0) > 0
