@@ -90,6 +90,14 @@ pub(crate) struct PairingPage {
     conversation: Option<String>,
 }
 
+impl PairingPage {
+    /// The normalized `/c/<id>` conversation this page settled on, when the
+    /// tab is on one; `None` on a fresh-chat or non-conversation page.
+    pub(crate) fn conversation(&self) -> Option<&str> {
+        self.conversation.as_deref()
+    }
+}
+
 impl BrowserSurfaces {
     // The route holds the actor work permit. The surface lock also excludes
     // viewer commands, replacement and retirement while inspecting this draft.

@@ -970,3 +970,22 @@ fn composer_occupied_has_one_blocking_envelope_across_routes() {
     }
     assert_eq!(connect.details()["detail"], "pairing_composer_occupied");
 }
+
+#[test]
+fn bound_chat_unavailable_only_when_the_tab_left_the_bound_conversation() {
+    let bound = "https://chatgpt.com/c/abc-123-def?utm=1";
+    // Same conversation after URL normalization: already_paired stands.
+    assert!(!bound_chat_unavailable(
+        Some(bound),
+        Some("https://chatgpt.com/c/abc-123-def")
+    ));
+    // A different conversation or a fresh-chat page: unavailable.
+    assert!(bound_chat_unavailable(
+        Some(bound),
+        Some("https://chatgpt.com/c/other-9")
+    ));
+    assert!(bound_chat_unavailable(Some(bound), None));
+    // No binding or an unparseable saved URL stays conservative.
+    assert!(!bound_chat_unavailable(None, None));
+    assert!(!bound_chat_unavailable(Some("not a url"), None));
+}
