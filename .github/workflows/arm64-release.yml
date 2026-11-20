@@ -3,6 +3,7 @@ name: arm64 release build
 on:
   push:
     branches: [arm64-release-build]
+  pull_request:
 
 permissions:
   contents: read
