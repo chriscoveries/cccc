@@ -105,6 +105,12 @@ async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
         ));
     }
     if action == "remove" {
+        // cwf#855: an explicit preserve-and-abandon decision skips the
+        // resume-first reconcile — the operator already reviewed the
+        // unresolved delivery and elected not to replay it.
+        if body["preserve_unresolved"] == true {
+            return remove_preserve_unresolved(&state, &group, &actor, &body, &connector).await;
+        }
         // cwf#825: an ambiguous ("delivery busy") lane is reconciled first with
         // the resume-delivery checks, so remove is not refused with
         // delivery_unresolved when the tab shows nothing pending. If the tab
@@ -145,6 +151,58 @@ async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
     start_connection(&state, &group, &actor, false, replace)
         .await
         .map(success)
+}
+
+/// cwf#855: explicit preserve-and-abandon remove. The operator reviewed the
+/// unresolved delivery and elected to terminalize it without replay; the
+/// daemon re-verifies every identity field inside its write transaction and
+/// returns typed refusals (`delivery_changed`, `binding_revision_changed`,
+/// `delivery_active`, `preserve_reason_required`, `resolution_conflict`).
+async fn remove_preserve_unresolved(
+    state: &AppState,
+    group: &str,
+    actor: &str,
+    body: &Value,
+    connector: &Value,
+) -> ApiResult {
+    let mut args = json!({
+        "by":"user","group_id":group,"actor_id":actor,
+        "connector_id":connector["connector_id"],
+        "acknowledge_unresolved":body["acknowledge_unresolved"] == true,
+    })
+    .as_object()
+    .expect("literal JSON object")
+    .clone();
+    for key in [
+        "binding_revision",
+        "pairing_id",
+        "expected_delivery_id",
+        "reason",
+        "rationale",
+        "idempotency_key",
+    ] {
+        args.insert(
+            key.into(),
+            json!(super::web_model_connectors::required(body, key)?),
+        );
+    }
+    let _control = super::web_model_delivery::control_guard_wait(
+        group,
+        actor,
+        super::web_model_reconcile::REMOVE_BUSY_WAIT,
+    )
+    .await?;
+    if body["require_browser_ready"] == true {
+        let key = super::web_model_browser::key(group, actor);
+        state
+            .browser_surfaces
+            .pairing_page(&key)
+            .await
+            .map_err(|e| pairing_error(&e.to_string()))?;
+    }
+    Ok(success(
+        call(state, "web_model_binding_remove_preserve_unresolved", args).await?,
+    ))
 }
 
 /// The first attempt follows normal Actor startup. An existing attempt, even

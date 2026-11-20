@@ -20,6 +20,9 @@ pub(super) fn target(state: &AppState, group_id: &str, actor_id: &str) -> Result
             target = json!({});
         }
         target["binding_revision"] = binding["revision"].clone();
+        // cwf#855: the bound pairing id completes the remove identity tuple
+        // (revision + pairing + delivery) the preserve path CAS-verifies.
+        target["pairing_id"] = binding["pairing_id"].clone();
         target["url"] = binding["url"].clone();
         target["kind"] = json!("existing_chat");
         target["state"] = json!("bound_existing_chat");

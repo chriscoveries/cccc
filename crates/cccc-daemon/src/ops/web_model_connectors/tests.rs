@@ -525,3 +525,268 @@ fn explicit_rotation_ignores_supplied_attribution_and_records_the_daemon_princip
     assert_eq!(stale.code, "rotation_confirmation_stale");
     assert_eq!(store::load(&home).expect("load"), after, "nothing rotated");
 }
+
+struct PreserveFixture {
+    _temp: tempfile::TempDir,
+    home: HomeLayout,
+    groups: GroupStore,
+    group_id: String,
+    connector_id: String,
+    binding_revision: String,
+    pairing_id: String,
+}
+
+fn preserve_fixture(status: &str, delivery_id: &str) -> PreserveFixture {
+    let temp = tempfile::tempdir().expect("valid test fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("valid test fixture");
+    home.initialize().expect("valid test fixture");
+    let groups = GroupStore::new(home.clone()).expect("valid test fixture");
+    let mut group = groups.create("preserve", "").expect("valid test fixture");
+    let mut actor = Actor::new("a");
+    actor.runtime = ActorRuntime::WebModel;
+    actor.enabled = true;
+    cccc_core::actors::add(&mut group, actor).expect("valid test fixture");
+    groups.save(&group).expect("valid test fixture");
+    let configured = execute(
+        &home,
+        &request("web_model_connector_configure", json!({"by":"user"})),
+    )
+    .expect("valid test fixture");
+    let connector_id = configured["connector"]["connector_id"]
+        .as_str()
+        .expect("valid test fixture")
+        .to_owned();
+    groups
+        .mutate(&group.group_id, |g| {
+            g.actors[0].enabled = false;
+            Ok(())
+        })
+        .expect("valid test fixture");
+    integration_state::group_update(&groups, &group.group_id, "web_model_browser_targets", |v| {
+        *v = json!({"a":{
+            "url":"https://chatgpt.com/c/saved","kind":"existing_chat",
+            "last_delivery_status":status,"last_delivery_id":delivery_id,
+            "last_delivery_turn_id":"turn-1","last_delivery_event_ids":["e1","e2"],
+            "last_delivery_at":"2026-11-20T00:00:00Z",
+            "last_submission_evidence":{"submission_evidence":"message_echo"}
+        }});
+        Ok(())
+    })
+    .expect("valid test fixture");
+    let args =
+        json!({"by":"user","connector_id":connector_id,"group_id":group.group_id,"actor_id":"a"});
+    let pair = execute(&home, &request("web_model_pairing_begin", args.clone()))
+        .expect("valid test fixture");
+    execute(
+        &home,
+        &request(
+            "web_model_pairing_accept",
+            json!({"by":"user","connector_id":connector_id,"code":pair["code"],"session_key":"host-key"}),
+        ),
+    )
+    .expect("valid test fixture");
+    let mut confirm = args.clone();
+    confirm["pairing_id"] = pair["pairing_id"].clone();
+    confirm["url"] = json!("https://chatgpt.com/c/saved");
+    execute(&home, &request("web_model_pairing_confirm", confirm)).expect("valid test fixture");
+    let connector = store::load(&home).expect("valid test fixture").remove(0);
+    let group = groups.load(&group.group_id).expect("valid test fixture");
+    let actor = group
+        .actors
+        .iter()
+        .find(|a| a.id == "a")
+        .expect("valid test fixture");
+    let generation = cccc_core::actors::generation_identity(actor);
+    let binding = store::binding_for_actor(&connector, &group.group_id, "a", &generation)
+        .expect("valid test fixture");
+    PreserveFixture {
+        _temp: temp,
+        home,
+        groups,
+        group_id: group.group_id.clone(),
+        connector_id,
+        binding_revision: binding["revision"].as_str().unwrap().to_owned(),
+        pairing_id: binding["pairing_id"].as_str().unwrap().to_owned(),
+    }
+}
+
+fn preserve_args(f: &PreserveFixture, delivery_id: &str, key: &str) -> Value {
+    json!({
+        "by":"user","connector_id":f.connector_id,"group_id":f.group_id,"actor_id":"a",
+        "binding_revision":f.binding_revision,"pairing_id":f.pairing_id,
+        "expected_delivery_id":delivery_id,
+        "reason":"bound_conversation_unavailable","rationale":"bound chat deleted upstream",
+        "acknowledge_unresolved":true,"idempotency_key":key
+    })
+}
+
+fn binding_present(f: &PreserveFixture) -> bool {
+    let connector = store::load(&f.home).expect("load").remove(0);
+    let group = f.groups.load(&f.group_id).expect("group");
+    let actor = group.actors.iter().find(|a| a.id == "a").expect("actor");
+    let generation = cccc_core::actors::generation_identity(actor);
+    store::binding_for_actor(&connector, &f.group_id, "a", &generation).is_some()
+}
+
+#[test]
+fn preserve_remove_terminalizes_the_reviewed_delivery_and_retires_the_binding() {
+    let f = preserve_fixture("submission_ambiguous", "d-1");
+    let result = execute(
+        &f.home,
+        &request(
+            "web_model_binding_remove_preserve_unresolved",
+            preserve_args(&f, "d-1", "k-1"),
+        ),
+    )
+    .expect("preserve remove");
+    assert_eq!(result["removed"], true);
+    assert_eq!(result["status"], "abandoned_unresolved");
+    assert_eq!(result["delivery_id"], "d-1");
+    assert_eq!(result["prior_status"], "submission_ambiguous");
+    assert_eq!(
+        result["binding_revision"].as_str().unwrap(),
+        f.binding_revision
+    );
+    assert_eq!(result["replay_performed"], false);
+    assert!(
+        result["resolution_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("wmres_")
+    );
+    assert!(!binding_present(&f), "binding retired");
+    let targets = integration_state::group_get(&f.groups, &f.group_id, "web_model_browser_targets")
+        .expect("targets");
+    let t = &targets["a"];
+    assert_eq!(t["last_delivery_status"], "abandoned_unresolved");
+    assert_eq!(t["last_delivery_id"], "d-1");
+    assert_eq!(t["last_delivery_turn_id"], "turn-1");
+    assert_eq!(t["last_delivery_event_ids"], json!(["e1", "e2"]));
+    assert_eq!(t["url"], "https://chatgpt.com/c/saved");
+    assert_eq!(t["last_delivery_resolution_id"], result["resolution_id"]);
+    let resolutions =
+        integration_state::group_get(&f.groups, &f.group_id, RESOLUTIONS_KEY).expect("resolutions");
+    let records: Vec<&Value> = resolutions.as_object().unwrap().values().collect();
+    assert_eq!(records.len(), 1);
+    let record = records[0];
+    assert_eq!(record["state"], "committed");
+    assert_eq!(record["outcome"], "unresolved_preserved_no_replay");
+    assert_eq!(record["reason"], "bound_conversation_unavailable");
+    assert_eq!(record["rationale"], "bound chat deleted upstream");
+    assert_eq!(record["operator"], "user");
+    assert_eq!(record["delivery_id"], "d-1");
+    assert_eq!(record["previous_status"], "submission_ambiguous");
+    assert_eq!(record["source_event_ids"], json!(["e1", "e2"]));
+    assert_eq!(record["receipt"]["resolution_id"], result["resolution_id"]);
+}
+
+#[test]
+fn preserve_remove_refuses_stale_ineligible_and_unacknowledged_requests() {
+    let f = preserve_fixture("submission_ambiguous", "d-1");
+    let mut args = preserve_args(&f, "d-OTHER", "k-1");
+    let error = execute(
+        &f.home,
+        &request("web_model_binding_remove_preserve_unresolved", args.clone()),
+    )
+    .expect_err("stale delivery refused");
+    assert_eq!(error.code, "delivery_changed");
+    args = preserve_args(&f, "d-1", "k-1");
+    args["binding_revision"] = json!("stale");
+    let error = execute(
+        &f.home,
+        &request("web_model_binding_remove_preserve_unresolved", args),
+    )
+    .expect_err("stale binding refused");
+    assert_eq!(error.code, "binding_revision_changed");
+    assert!(binding_present(&f));
+
+    let active = preserve_fixture("submitting", "d-2");
+    let error = execute(
+        &active.home,
+        &request(
+            "web_model_binding_remove_preserve_unresolved",
+            preserve_args(&active, "d-2", "k-2"),
+        ),
+    )
+    .expect_err("in-flight work is not abandonable");
+    assert_eq!(error.code, "delivery_active");
+    assert!(binding_present(&active));
+
+    let gated = preserve_fixture("ambiguous", "d-3");
+    for (key, value) in [
+        ("acknowledge_unresolved", json!(false)),
+        ("reason", json!("whatever")),
+        ("rationale", json!("   ")),
+    ] {
+        let mut args = preserve_args(&gated, "d-3", "k-3");
+        args[key] = value;
+        let error = execute(
+            &gated.home,
+            &request("web_model_binding_remove_preserve_unresolved", args),
+        )
+        .expect_err("unacknowledged preserve refused");
+        assert_eq!(error.code, "preserve_reason_required", "{key}");
+    }
+    assert!(binding_present(&gated));
+    let targets =
+        integration_state::group_get(&gated.groups, &gated.group_id, "web_model_browser_targets")
+            .expect("targets");
+    assert_eq!(targets["a"]["last_delivery_status"], "ambiguous");
+}
+
+#[test]
+fn preserve_remove_retries_return_the_same_receipt_and_conflicts_on_changed_identity() {
+    let f = preserve_fixture("completion_ambiguous", "d-1");
+    let first = execute(
+        &f.home,
+        &request(
+            "web_model_binding_remove_preserve_unresolved",
+            preserve_args(&f, "d-1", "k-1"),
+        ),
+    )
+    .expect("first attempt");
+    let retry = execute(
+        &f.home,
+        &request(
+            "web_model_binding_remove_preserve_unresolved",
+            preserve_args(&f, "d-1", "k-1"),
+        ),
+    )
+    .expect("idempotent retry");
+    assert_eq!(first, retry);
+    let error = execute(
+        &f.home,
+        &request(
+            "web_model_binding_remove_preserve_unresolved",
+            preserve_args(&f, "d-OTHER", "k-1"),
+        ),
+    )
+    .expect_err("changed identity on a used key");
+    assert_eq!(error.code, "resolution_conflict");
+    let resolutions =
+        integration_state::group_get(&f.groups, &f.group_id, RESOLUTIONS_KEY).expect("resolutions");
+    assert_eq!(resolutions.as_object().unwrap().len(), 1);
+}
+
+#[test]
+fn preserve_remove_refuses_an_active_turn() {
+    let f = preserve_fixture("submission_ambiguous", "d-1");
+    integration_state::group_update(&f.groups, &f.group_id, "runtime_states", |v| {
+        *v = json!({"a":{"active_turn_id":"t-9","status":"working","active_event_ids":["e"]}});
+        Ok(())
+    })
+    .expect("runtime state");
+    let error = execute(
+        &f.home,
+        &request(
+            "web_model_binding_remove_preserve_unresolved",
+            preserve_args(&f, "d-1", "k-1"),
+        ),
+    )
+    .expect_err("active turn refused");
+    assert_eq!(error.code, "delivery_active");
+    assert!(binding_present(&f));
+    let targets = integration_state::group_get(&f.groups, &f.group_id, "web_model_browser_targets")
+        .expect("targets");
+    assert_eq!(targets["a"]["last_delivery_status"], "submission_ambiguous");
+}
