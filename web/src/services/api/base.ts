@@ -1,6 +1,7 @@
 import type {
   AgentState,
   ActorRuntimeState,
+  BacklogSource,
   ContextDetailLevel,
   GroupContext,
   GroupPresentation,
@@ -73,6 +74,17 @@ function clearAllReadRequestCaches(): void {
   recentReadGenerations.clear();
 }
 
+const authChangeListeners = new Set<() => void>();
+
+/** Run `listener` whenever this browser's credentials change: a sign-in, a sign-out, or a
+ *  session the server stopped accepting. What belonged to the previous person is dropped there. */
+export function onAuthChange(listener: () => void): () => void {
+  authChangeListeners.add(listener);
+  return () => {
+    authChangeListeners.delete(listener);
+  };
+}
+
 export function setAuthToken(token: string): void {
   clearAllReadRequestCaches();
   cachedToken = token;
@@ -81,6 +93,7 @@ export function setAuthToken(token: string): void {
   } catch {
     void 0;
   }
+  authChangeListeners.forEach((listener) => listener());
 }
 
 export function clearAuthToken(): void {
@@ -91,6 +104,7 @@ export function clearAuthToken(): void {
   } catch {
     void 0;
   }
+  authChangeListeners.forEach((listener) => listener());
 }
 
 export function setForceTokenLogin(): void {
@@ -352,6 +366,17 @@ export function asStringArray(value: unknown): string[] {
   return value.map((item) => asString(item).trim()).filter(Boolean);
 }
 
+/** A source is whole or absent: a part of one cannot find its entry. */
+export function normalizeBacklogSource(value: unknown): BacklogSource | null {
+  const record = asRecord(value);
+  const source = {
+    scope_key: asString(record?.scope_key),
+    path: asString(record?.path),
+    entry_id: asString(record?.entry_id),
+  };
+  return source.scope_key && source.path && source.entry_id ? source : null;
+}
+
 function formatDaemonEndpoint(details: UnknownRecord | null): string {
   const endpoint = asRecord(details?.endpoint);
   if (!endpoint) return "";
@@ -461,6 +486,9 @@ export function normalizeTask(value: unknown): Task | null {
     priority: asOptionalString(record.priority),
     parent_id: asOptionalString(record.parent_id),
     blocked_by: asStringArray(record.blocked_by),
+    open_blocked_by: Array.isArray(record.open_blocked_by)
+      ? asStringArray(record.open_blocked_by)
+      : undefined,
     waiting_on: asString(record.waiting_on).trim() || undefined,
     handoff_to: asOptionalString(record.handoff_to),
     task_type: asOptionalString(record.task_type),
@@ -469,6 +497,7 @@ export function normalizeTask(value: unknown): Task | null {
     created_at: asOptionalString(record.created_at),
     updated_at: asOptionalString(record.updated_at),
     archived_from: asOptionalString(record.archived_from),
+    source: normalizeBacklogSource(record.source),
     progress:
       typeof record.progress === "number"
         ? record.progress
@@ -606,28 +635,6 @@ export function normalizeContext(raw: unknown): GroupContext {
           }
         : null,
       tasks,
-      recent_decisions: Array.isArray(coordination.recent_decisions)
-        ? coordination.recent_decisions
-            .map((item) => asRecord(item))
-            .filter((item): item is UnknownRecord => !!item)
-            .map((item) => ({
-              at: asOptionalString(item.at),
-              by: asOptionalString(item.by),
-              summary: asString(item.summary),
-              task_id: asOptionalString(item.task_id),
-            }))
-        : [],
-      recent_handoffs: Array.isArray(coordination.recent_handoffs)
-        ? coordination.recent_handoffs
-            .map((item) => asRecord(item))
-            .filter((item): item is UnknownRecord => !!item)
-            .map((item) => ({
-              at: asOptionalString(item.at),
-              by: asOptionalString(item.by),
-              summary: asString(item.summary),
-              task_id: asOptionalString(item.task_id),
-            }))
-        : [],
     },
     agent_states: agentStates,
     actors_runtime: actorsRuntime,

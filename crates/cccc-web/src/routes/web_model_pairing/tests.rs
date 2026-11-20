@@ -17,7 +17,7 @@ window.submits=0; window.holdReceipt=true; window.holdCall=false;
 async function send(e) {
  e.preventDefault(); const t=document.querySelector('textarea'); const text=t.value; window.submits++;
  const u=document.createElement('article'); u.dataset.messageAuthorRole='user';u.textContent=text;document.querySelector('main').append(u);t.value='';
- if(location.pathname==='/') history.replaceState(null,'','/c/WEB:00000000-0000-4000-8000-000000000001');
+ if(location.pathname==='/') history.replaceState(null,'',window.provisionalPath || '/c/WEB:00000000-0000-4000-8000-000000000001');
  if(window.holdCall) return;
  const match=text.match(/wm_pair_[a-f0-9]+/);
  if(!match) { (window.business ||= []).push(text); return; }
@@ -257,6 +257,93 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     .await;
     // A connector icon and the upload button are not unsent user attachments.
     page_value(&a, "document.querySelector('form').insertAdjacentHTML('beforeend','<img alt=CCCC width=24 height=24 src=/connector-icon.png><button type=button data-testid=attachment-button>Add files</button>')").await;
+    // An interrupted attempt's unsent setup message is CCCC's own, and a retry
+    // removes it without sending it. With anything added it may be a human's.
+    let stale = crate::browser_surface::pairing_prompt(&format!(
+        "wm_pair_{}",
+        "0123456789abcdef".repeat(4)
+    ));
+    let amended = format!("{stale} Also check the build.");
+    page_value(
+        &a,
+        &format!(
+            "document.querySelector('textarea').value={}",
+            json!(amended)
+        ),
+    )
+    .await;
+    assert!(
+        change(
+            State(state.clone()),
+            Json(json!({"group_id":gid,"actor_id":"alpha","action":"connect"}))
+        )
+        .await
+        .expect_err("added text may be a human's")
+        .to_string()
+        .contains("pairing_composer_occupied")
+    );
+    assert_eq!(
+        page_value(&a, "document.querySelector('textarea').value").await,
+        json!(amended)
+    );
+    assert!(stored_pair(&state, gid, "alpha").is_none());
+    // The page's own focus handling can change the box after the first read, so the
+    // last checks come after focusing: text rewritten or a file added then is kept.
+    // A one-time focus() replacement stands for such a handler, as a page whose
+    // window lacks focus may not dispatch the event; its removal shows the clear ran.
+    for (on_focus, kept) in [
+        (
+            "this.value = 'Typed while connecting'",
+            json!("Typed while connecting"),
+        ),
+        (
+            "this.form.insertAdjacentHTML('beforeend', '<div data-testid=attachment>Unsent file</div>')",
+            json!(stale),
+        ),
+    ] {
+        page_value(
+            &a,
+            &format!(
+                "() => {{ const t = document.querySelector('textarea'); t.value = {}; \
+                 t.focus = function () {{ delete this.focus; this.focus(); {on_focus}; }}; }}",
+                json!(stale)
+            ),
+        )
+        .await;
+        assert!(
+            change(
+                State(state.clone()),
+                Json(json!({"group_id":gid,"actor_id":"alpha","action":"connect"}))
+            )
+            .await
+            .expect_err("changed while focusing")
+            .to_string()
+            .contains("pairing_composer_occupied")
+        );
+        assert_eq!(
+            page_value(
+                &a,
+                "Object.hasOwn(document.querySelector('textarea'), 'focus')"
+            )
+            .await,
+            false
+        );
+        assert_eq!(
+            page_value(&a, "document.querySelector('textarea').value").await,
+            kept
+        );
+        assert!(stored_pair(&state, gid, "alpha").is_none());
+    }
+    page_value(
+        &a,
+        "document.querySelector('[data-testid=attachment]').remove()",
+    )
+    .await;
+    page_value(
+        &a,
+        &format!("document.querySelector('textarea').value={}", json!(stale)),
+    )
+    .await;
     let started = connect_actor(&state, gid, "alpha").await;
     assert!(
         started["code"].is_null(),
@@ -319,7 +406,7 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     // B can pair independently through the same connector, including a new chat.
     page_value(
         &b,
-        "history.replaceState(null,'','/');window.holdReceipt=false",
+        "history.replaceState(null,'','/');window.holdReceipt=false;window.provisionalPath='/c/local-chatgpt%3A00000000-0000-4000-8000-000000000001'",
     )
     .await;
     let beta_key = super::super::web_model_browser::key(gid, "beta");
@@ -328,28 +415,33 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
         .pairing_page(&beta_key)
         .await
         .expect("new chat");
-    // Real ChatGPT first exposes /c/WEB:<uuid>, then replaces it with the
-    // server conversation ID. Before MCP acceptance this must remain pending.
-    page_value(
-        &b,
-        "history.replaceState(null,'','/c/WEB:00000000-0000-4000-8000-000000000001')",
-    )
-    .await;
-    assert!(
-        new_chat
-            .receipt_url(&state.browser_surfaces, &beta_key, "not sent yet", None)
-            .await
-            .expect("provisional new chat is not a target change")
-            .is_none()
-    );
-    assert!(
-        state
-            .browser_surfaces
-            .pairing_page(&beta_key)
-            .await
-            .is_err(),
-        "a provisional URL cannot start a separate pairing"
-    );
+    // Both provisional URL families must wait for a stable server ID.
+    for path in [
+        "/c/WEB:00000000-0000-4000-8000-000000000001",
+        "/c/local-chatgpt:00000000-0000-4000-8000-000000000001",
+        "/c/local-chatgpt%3A00000000-0000-4000-8000-000000000001",
+    ] {
+        page_value(
+            &b,
+            &format!("history.replaceState(null,'',{})", json!(path)),
+        )
+        .await;
+        assert!(
+            new_chat
+                .receipt_url(&state.browser_surfaces, &beta_key, "not sent yet", None)
+                .await
+                .expect("provisional new chat is not a target change")
+                .is_none()
+        );
+        assert!(
+            state
+                .browser_surfaces
+                .pairing_page(&beta_key)
+                .await
+                .is_err(),
+            "a provisional URL cannot start a separate pairing"
+        );
+    }
     page_value(&b, "history.replaceState(null,'','/')").await;
     connect_actor(&state, gid, "beta").await;
     wait_page(&b, "!!window.reply?.receipt").await;
@@ -382,6 +474,41 @@ async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_a
     page_value(&b, "history.replaceState(null,'','/c/new-fixture')").await;
     wait_pair(&state, gid, "beta", "bound").await;
     assert_eq!(page_value(&b, "window.submits").await, 1);
+    // Moving a bound chat into a Project must preserve its exact-batch receipt
+    // without navigating away from the current page or sending a second time.
+    let marker = "[cccc] Browser batch project-fixture events=fixture actor=beta";
+    page_value(&b, &format!("history.replaceState(null,'','/g/g-p-fixture/c/new-fixture');const m=document.createElement('article');m.dataset.messageAuthorRole='user';m.textContent={};document.querySelector('main').append(m)",json!(marker))).await;
+    state
+        .browser_surfaces
+        .align_chatgpt_conversation_target(
+            &beta_key,
+            "https://chatgpt.com/c/new-fixture",
+            Duration::from_millis(50),
+        )
+        .await
+        .expect("Project route retains the bound conversation");
+    assert_eq!(
+        page_value(&b, "location.pathname").await,
+        "/g/g-p-fixture/c/new-fixture"
+    );
+    assert!(
+        state
+            .browser_surfaces
+            .inspect_delivery_receipt(&beta_key, "https://chatgpt.com/c/new-fixture", marker)
+            .await
+            .expect("same conversation receipt")
+            .is_some()
+    );
+    assert!(
+        state
+            .browser_surfaces
+            .inspect_delivery_receipt(&beta_key, "https://chatgpt.com/c/other-fixture", marker)
+            .await
+            .expect("different conversation is not a receipt")
+            .is_none()
+    );
+    assert_eq!(page_value(&b, "window.submits").await, 1);
+    page_value(&b, "history.replaceState(null,'','/c/new-fixture')").await;
     let stable_beta = state
         .browser_surfaces
         .pairing_page(&beta_key)

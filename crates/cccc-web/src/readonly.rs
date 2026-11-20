@@ -72,7 +72,9 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
 
 fn is_read_only_safe(method: &Method, path: &str) -> bool {
     match *method {
-        Method::GET | Method::HEAD => !is_mutating_get(path) && !is_user_obligation_get(path),
+        Method::GET | Method::HEAD => {
+            !is_mutating_get(path) && !is_user_obligation_get(path) && !is_backlog_path(path)
+        }
         Method::OPTIONS => true,
         _ => false,
     }
@@ -95,7 +97,7 @@ fn is_mutating_get(path: &str) -> bool {
             })
 }
 
-/// The user's open reply requests, message pins and notification subscriptions.
+/// The user's open reply requests, message pins, reply templates and notification subscriptions.
 /// An exhibit's viewers are spectators, not the Group's user, so these reads
 /// are refused there, not only the changes.
 fn is_user_obligation_get(path: &str) -> bool {
@@ -103,12 +105,23 @@ fn is_user_obligation_get(path: &str) -> bool {
         || path.starts_with("/api/v1/chet/")
         || path == "/api/v1/reply-requests/summary"
         || path == "/api/v1/push/config"
+        || path == "/api/v1/quick-reply-templates"
         || path
             .strip_prefix("/api/v1/groups/")
             .and_then(|rest| rest.split_once('/'))
             .is_some_and(|(group_id, tail)| {
                 !group_id.is_empty() && matches!(tail, "reply-requests/pending" | "pins")
             })
+}
+
+/// A backlog holds the project's unfinished ideas, which its owner may keep out
+/// of Git; an exhibit shows none of it.
+fn is_backlog_path(path: &str) -> bool {
+    path.strip_prefix("/api/v1/groups/")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(group_id, tail)| {
+            !group_id.is_empty() && (tail == "backlog" || tail.starts_with("backlog/"))
+        })
 }
 
 fn read_only_response() -> Response {
@@ -199,6 +212,13 @@ mod tests {
     }
 
     #[test]
+    fn read_only_refuses_reply_templates_for_reads_and_writes() {
+        for method in [Method::GET, Method::HEAD, Method::PUT] {
+            assert!(!is_read_only_safe(&method, "/api/v1/quick-reply-templates"));
+        }
+    }
+
+    #[test]
     fn read_only_refuses_private_recovery_records_even_for_reads() {
         for method in [Method::GET, Method::HEAD, Method::POST] {
             for suffix in ["daemon", "web", "web/retry", "web/accept"] {
@@ -208,6 +228,27 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn read_only_refuses_the_backlog_for_reads_and_writes() {
+        for method in [Method::GET, Method::HEAD, Method::POST] {
+            for path in [
+                "/api/v1/groups/g_1/backlog",
+                "/api/v1/groups/g_1/backlog/edit",
+                "/api/v1/groups/g_1/backlog/promote",
+            ] {
+                assert!(!is_read_only_safe(&method, path), "{method} {path}");
+            }
+        }
+        assert!(is_read_only_safe(
+            &Method::GET,
+            "/api/v1/groups/g_1/context"
+        ));
+        assert!(is_read_only_safe(
+            &Method::GET,
+            "/api/v1/groups/g_1/backlogs"
+        ));
     }
 
     #[test]

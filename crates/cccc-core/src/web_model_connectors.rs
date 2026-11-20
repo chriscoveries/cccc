@@ -106,15 +106,20 @@ fn update<T>(home: &HomeLayout, change: impl FnOnce(&mut Value) -> io::Result<T>
 }
 
 pub fn load(home: &HomeLayout) -> io::Result<Vec<Value>> {
-    fs::with_exclusive_lock(&lock_path(home), || {
-        let root = read(home)?;
-        Ok(root["connectors"]
-            .as_object()
-            .expect("validated store")
-            .values()
-            .cloned()
-            .collect())
-    })
+    fs::with_exclusive_lock(&lock_path(home), || snapshot(home))
+}
+
+/// Read one published connector document without creating or waiting for its
+/// write lock. Writers publish atomically; this is an observation, not a fence
+/// for a later mutation or an authorization decision.
+pub fn snapshot(home: &HomeLayout) -> io::Result<Vec<Value>> {
+    let root = read(home)?;
+    Ok(root["connectors"]
+        .as_object()
+        .expect("validated store")
+        .values()
+        .cloned()
+        .collect())
 }
 
 pub fn requires_reconfiguration(home: &HomeLayout) -> io::Result<bool> {
@@ -153,6 +158,36 @@ pub fn create_provider_if_absent(home: &HomeLayout, provider: &str) -> io::Resul
     configure_inner(home, provider, false)
 }
 
+/// Replace only an active connector's credential, preserving its routes and
+/// pairings. A missing or revoked connector must be created explicitly.
+pub fn rotate_provider(home: &HomeLayout, provider: &str) -> io::Result<Value> {
+    if !matches!(provider, "chatgpt_web" | "grok_web") {
+        return Err(error("invalid_web_model_provider"));
+    }
+    update(home, |root| {
+        let connector = root["connectors"]
+            .get_mut(provider)
+            .filter(|item| item.is_object() && item["revoked"] != true)
+            .ok_or_else(|| error("connector_unavailable"))?;
+        let secret = install_secret(connector, &cccc_contracts::utc_now());
+        Ok(json!({"outcome":"rotated","connector":connector,"secret":secret}))
+    })
+}
+
+fn install_secret(connector: &mut Value, now: &str) -> String {
+    let secret = format!(
+        "wmcs_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    connector["secret_hash"] = json!(hash(&secret));
+    connector["secret_preview"] =
+        json!(format!("{}…{}", &secret[..6], &secret[secret.len() - 4..]));
+    connector["updated_at"] = json!(now);
+    connector["revoked"] = json!(false);
+    secret
+}
+
 fn configure_inner(
     home: &HomeLayout,
     provider: &str,
@@ -172,16 +207,8 @@ fn configure_inner(
         } else {
             json!({"connector_id":format!("wmc_{}",Uuid::new_v4().simple()),"kind":"web_model_connector","routing_mode":if provider == "grok_web" {"credential"} else {"session"},"provider":provider,"routing_salt":Uuid::new_v4().to_string(),"created_at":now,"bindings":{},"pairings":{}})
         };
-        let secret = format!(
-            "wmcs_{}{}",
-            Uuid::new_v4().simple(),
-            Uuid::new_v4().simple()
-        );
-        connector["secret_hash"] = json!(hash(&secret));
-        connector["secret_preview"] =
-            json!(format!("{}…{}", &secret[..6], &secret[secret.len() - 4..]));
-        connector["updated_at"] = json!(now);
-        connector["revoked"] = json!(false);
+        let existed = old.is_object() && old["revoked"] != true;
+        let secret = install_secret(&mut connector, &now);
         if provider == "grok_web" && !connector["routing_key"].is_string() {
             connector["routing_key"] = json!(format!(
                 "{}{}",
@@ -193,7 +220,9 @@ fn configure_inner(
         if provider == "chatgpt_web" {
             root["requires_reconfiguration"] = json!(false);
         }
-        Ok(Some(json!({"connector":connector,"secret":secret})))
+        Ok(Some(
+            json!({"outcome":if existed {"rotated"} else {"created"},"connector":connector,"secret":secret}),
+        ))
     })
 }
 

@@ -21,6 +21,7 @@ pub fn routes() -> Router<AppState> {
             post(allowlist_validate),
         )
         .route("/api/v1/capabilities/block", post(block))
+        .route("/api/v1/capabilities/update", post(update))
         .route("/api/v1/groups/{group_id}/capabilities/state", get(state))
         .route(
             "/api/v1/groups/{group_id}/capabilities/enable",
@@ -54,11 +55,11 @@ pub fn routes() -> Router<AppState> {
 
 #[derive(Default, Deserialize, Serialize)]
 struct OverviewQuery {
+    locale: Option<String>,
     query: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
     include_indexed: Option<bool>,
-    include_source_instances: Option<bool>,
     kind: Option<String>,
     policy: Option<String>,
     source_id: Option<String>,
@@ -87,8 +88,13 @@ async fn allowlist_validate(State(state): State<AppState>, Json(body): Json<Valu
 async fn block(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult {
     call(&state, "capability_block", body_object(body)?).await
 }
+
+async fn update(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult {
+    call(&state, "capability_update", body_object(body)?).await
+}
 #[derive(Default, Deserialize)]
 struct StateQuery {
+    locale: Option<String>,
     actor_id: Option<String>,
     view: Option<String>,
     capability_id: Option<String>,
@@ -100,6 +106,9 @@ async fn state(
     Query(query): Query<StateQuery>,
 ) -> ApiResult {
     let mut args = object(json!({"group_id":group_id}));
+    if let Some(locale) = query.locale {
+        args.insert("locale".into(), json!(locale));
+    }
     if let Some(actor_id) = query.actor_id {
         args.insert("actor_id".into(), json!(actor_id));
     }

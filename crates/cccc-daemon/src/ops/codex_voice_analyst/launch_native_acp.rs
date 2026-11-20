@@ -11,26 +11,28 @@ impl AnalystSession {
         mut env: BTreeMap<String, String>,
         resume: Option<String>,
         purpose: SessionPurpose,
-        actor: Option<(&str, &str)>,
+        actor: Option<AcpActorLaunch<'_>>,
+        viewer: bool,
     ) -> io::Result<Self> {
         let options = native_acp::options(runtime, &command)?;
-        let private_values = env
-            .values()
-            .filter(|value| !value.is_empty())
-            .cloned()
-            .collect();
+        let admission = nonempty_environment_values(&env);
+        let private_values = match &actor {
+            Some(actor) => acp::PrivateValues::SeparateAdmission {
+                diagnostics: actor.diagnostic_values.to_vec(),
+                admission,
+            },
+            None => acp::PrivateValues::DiagnosticsAndAdmission(admission),
+        };
+        let actor = actor.map(|actor| actor.ids);
         if runtime == ActorRuntime::Auggie {
             env.insert("AUGMENT_DISABLE_AUTO_UPDATE".into(), "1".into());
-        }
-        if runtime == ActorRuntime::Hermes {
-            env.insert("HERMES_ACP_SKIP_CONFIGURED_MCP".into(), "1".into());
         }
         let identity_command = if command.is_empty() {
             cccc_runtime::default_command(runtime)
         } else {
             command.clone()
         };
-        let identity = super::super::runtime_session::native_acp::identity(
+        let (identity, launch_parts) = super::super::runtime_session::native_acp::launch(
             &binding.root,
             &identity_command,
             &env,
@@ -60,7 +62,7 @@ impl AnalystSession {
             })
             .transpose()?;
         let resume = if let Some(path) = &receipt_path {
-            super::super::runtime_session::native_acp::prepare(path, &identity)?
+            super::super::runtime_session::native_acp::prepare(path, &identity, &launch_parts)?
         } else {
             resume
         };
@@ -69,7 +71,7 @@ impl AnalystSession {
         if runtime == ActorRuntime::Copilot {
             if purpose == SessionPurpose::VoiceSecretary {
                 let executable = cccc_runtime::resolve_command_executable(&launch_command, &env);
-                let mut catalog = tokio::process::Command::new(&executable[0]);
+                let mut catalog = cccc_runtime::background_tokio_command(&executable[0]);
                 catalog
                     .args(["--no-auto-update", "mcp", "list", "--json"])
                     .current_dir(&binding.root)
@@ -144,6 +146,10 @@ impl AnalystSession {
             Err(error) => {
                 protocol.close().await;
                 process.stop()?;
+                let error = native_acp::setup_required(error, &launch_command, &env);
+                if native_acp::hermes_setup(&error).is_some() {
+                    return Err(error);
+                }
                 return Err(io::Error::new(
                     error.kind(),
                     format!(
@@ -156,7 +162,11 @@ impl AnalystSession {
         if purpose != SessionPurpose::VoiceSecretary {
             let receipt = if let Some(path) = receipt_path {
                 if let Err(error) = super::super::runtime_session::native_acp::record(
-                    &path, &identity, &id, resumed,
+                    &path,
+                    &identity,
+                    &launch_parts,
+                    &id,
+                    resumed,
                 ) {
                     protocol.close().await;
                     process.stop()?;
@@ -176,6 +186,7 @@ impl AnalystSession {
             };
             protocol.set_prompt_receipt(receipt);
         }
+        let native_tui_command = viewer.then(|| native_acp::hermes_viewer(&options, &id));
         Ok(Self {
             #[cfg(test)]
             binding,
@@ -188,7 +199,7 @@ impl AnalystSession {
             protocol: ManagedProtocol::Acp(protocol),
             process: Some(Arc::new(process)),
             auxiliary_processes: Vec::new(),
-            native_tui_command: None,
+            native_tui_command,
             cleanup_paths: Vec::new(),
             thread_resumed: resumed,
             delegations: tokio::sync::Mutex::new(HashMap::new()),

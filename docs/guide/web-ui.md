@@ -270,12 +270,13 @@ Collapse returns to the compact rail; closing the sidebar only hides it and keep
 
 ### Resource panel
 
-Workspace files (from **Files**, a path in a message, or a link inside a document), message
-attachments (images, videos, Markdown, text and PDF) and Presentation slots (from the slot list or
-a message's reference) open as tabs in one panel. Opening something that is already open selects
-its tab. Each Group keeps its own tabs. Refreshing the same browser tab restores their order,
-selection, side-by-side layout, and whether the panel was collapsed or maximized, when browser
-session storage is available. This also keeps the layout when you switch Groups and return.
+Workspace files (from **Files**, a path in a message, or a link inside a document) and
+Presentation slots (from the slot list or a message's reference) open as tabs in one panel.
+[Message attachments](#message-attachments) open as tabs when the desktop panel is visible.
+Opening something that is already open selects its tab. Each Group keeps its own tabs.
+Refreshing the same browser tab restores their order, selection, side-by-side layout, and
+whether the panel was open, collapsed, or maximized, when browser session storage is available.
+This also keeps the layout when you switch Groups and return.
 Renaming or moving a file or folder in **Files** takes its open tabs and unsaved edits along.
 
 Restoration saves resource references, not document contents or unsaved edits. Resources are read
@@ -288,21 +289,24 @@ guarantee recovery after closing a tab.
 The panel sits in one of two places. Docked right, the default, it takes the right-hand column.
 Docked left, it covers the message list and keeps the composer. The arrow button in the panel's
 bar moves it, and this browser remembers the choice. Docked left, the panel belongs to the
-message view: the terminal view hides it and the message view brings it back. **Maximize**
-covers the messages and the right column together, and its key stays pressed until you press it
-again or Escape to restore. While the panel covers the messages, docked left or maximized, they do
-not count as read, and the collapse key, the same in every position, shows how many arrived beside
-its icon. Collapsing hides the panel and keeps its tabs: the resource button in the Group header
-shows how many are open and brings them back. Escape collapses the panel only from its bar;
-editors and PDF viewers keep their own Escape.
+message view: the terminal view hides it and the message view brings it back. For an attachment
+tab shown alone, **View full screen** opens its preview over the page. With two resources shown side
+by side, or when viewing a workspace file or Presentation slot, **Maximize** covers the messages
+and the right column together. Press it again or Escape to restore. While the panel covers the
+messages, docked left or maximized, newly arrived messages stay unread, and the collapse key shows
+how many arrived. The resource button in the Group header shows how many tabs are open and opens
+or collapses the panel. An empty panel opens alongside the messages, where you can click an
+attachment to open it there. Escape collapses the panel only from its bar. Editors and PDF viewers
+keep their own Escape.
 
 When the tabs do not fit, the tab strip scrolls sideways, also with the mouse wheel. **All** lists every tab in order with a
 filter by name, path or sender, followed by **Recently closed**. Several tabs closed at once
 come back together, from that list or from the **Undo** notice that follows for eight seconds.
-When every tab is closed, the header's resource button stays, showing 0, until nothing is left
-to reopen. Right-click a tab for **Close**, **Close others**, **Close tabs to the right** and
-**Close all**; **All** also offers **Close others** and **Close all**. Delete closes the selected
-tab.
+Closing the last tab leaves the desktop panel open with **Recently closed** available inside it.
+If **Files** or **Presentation** is open in the right column, it takes that space again.
+Focus the tab strip and use the left and right arrow keys to select open tabs. Right-click a tab
+for **Close**, **Close others**, **Close tabs to the right** and **Close all**. **All** also offers
+**Close others** and **Close all**. Delete closes the selected tab.
 
 A file with unsaved edits never closes silently. Closing it asks whether to save, close
 without saving or cancel; closing several stops and offers to close only the saved ones.
@@ -551,12 +555,16 @@ Markdown renders with tables and Mermaid diagrams. CSV and TSV files open as tab
 including quoted cells and multiline values; the preview shows up to 200 rows and
 50 columns. Text-sized SVG, Markdown, CSV/TSV and HTML offer **View source** and
 **Preview**. Switching views preserves unsaved edits, and preview uses the current
-draft. The text/source limit remains 1 MiB. Downloads always contain the saved file.
+draft. The editor and the text view hold at most 1 MiB. HTML above that editing
+limit, up to 20 MiB, is read in full for **Preview**, while **View source** shows its
+first 1 MiB; the file stays read-only. Larger HTML shows its first 1 MiB as source
+only. Downloads always contain the saved file.
 
 HTML opens as a static, isolated document: scripts, forms, nested pages and linked
 stylesheets are disabled. Inline styles and workspace image/audio/video resources
-are supported; it is not a running website or application preview. Markdown and HTML
-resolve relative file links within the opened workspace and open them in Files.
+are supported; it is not a running website or application preview. Pages keep their
+own size and margins: wide slides stacked in a centered column start at the left and
+scroll sideways. Markdown and HTML resolve relative file links within the opened workspace and open them in Files.
 Section fragments such as `report.md#details` or `report.html#details` position the
 loaded preview at that section, including repeated same-file links. Positioning
 happens once per navigation; ordinary updates do not pull the reader back. A PDF
@@ -583,7 +591,7 @@ quoted snapshots share a static graphics viewer. Use **Fit**, **100%**, **+** or
 and workspace SVG previews can grow to fill the view. Ctrl/⌘ + wheel and a trackpad or touch pinch zoom at the
 pointer; the plain wheel keeps native scrolling and dragging pans enlarged content. A click
 on the content switches between fit and actual size; on touch screens, double-tap.
-Message images and videos open in the [resource panel](#resource-panel).
+See [Message attachments](#message-attachments) for opening images and videos from a message.
 Focus the viewport for `+`/`−`, `0` (fit),
 `1` (actual size) and native arrow-key scrolling. Closing a modal restores focus
 to its opener. Regular message scrolling, PDF controls and interactive browser
@@ -1227,17 +1235,37 @@ attachments, and delivery options remain those currently shown in the composer.
 
 ### Message attachments
 
-Click an image or a video's first frame to open it in the
-[resource panel](#resource-panel). Video frames load when their message comes into view;
-playback starts in the panel. The player uses native browser controls and pauses other
-message videos, and it pauses when its tab is no longer in front. **Show in messages** in the
-panel returns to the message. Downloads remain available when the browser cannot decode a
-video. Confirmed uploads play and download from the Group's stored blob, so they remain
-available after the local upload preview expires.
+Click an image, a video's first frame, or a previewable file name. It opens in the desktop
+[resource panel](#resource-panel) while that panel is visible. When the panel is collapsed or
+you are on a phone, the attachment opens in a full-screen preview. **View full screen** on an
+attachment tab opens a new preview, starting a PDF at its first page or a video at the beginning.
+Close the preview to return to the original tab and its reading or playback position.
 
-Markdown, PDF and common text files open in the panel when you click their name; their
-download sits next to it. Markdown is rendered, and text and logs stay plain. A long file
-shows its first 1 MiB. PDF uses the browser's own viewer, or CCCC's reader on touch devices and
+Use the previous and next buttons to browse the previewable attachments in the same message in
+order. On a wide screen the buttons flank the preview. On a narrow screen they sit beneath it.
+The left and right arrow keys also work when focus is on the preview's controls. Within a PDF
+or HTML frame, use the viewer's own controls. On desktop, **Open in a resource tab** opens
+the attachment shown in the preview in a resource tab.
+
+Video frames load when their message comes into view. Click a video to start playback, or
+press Play after reaching it with the previous and next buttons. The player uses native browser
+controls and pauses other message videos. A video also pauses when its tab is no longer in front.
+**Show in messages** in the panel returns to the message. Downloads remain available when the
+browser cannot decode a video. Confirmed uploads play and download from the Group's stored blob,
+so they remain available after the local upload preview expires.
+
+Markdown, HTML, PDF and common text files have a download button beside their name. Markdown
+renders by default. **View source** and **Preview** switch
+between its unchanged text and rendered view without downloading it again. Text and logs stay
+plain. HTML uses the same controls and opens as a static document: scripts, forms and external
+resources are disabled; inline styles and embedded images are supported. Links can be opened
+explicitly. An attachment has no directory for relative images, stylesheets or sibling files;
+it is not a running website or application preview. Download the original when you need those.
+A long Markdown or text file shows its first 1 MiB, and so does the source view of a long
+HTML file. HTML up to 20 MiB renders in full; larger HTML shows its first 1 MiB as source
+only. As in Files, wide slides stacked in a centered column start at the left and scroll
+sideways.
+PDF uses the browser's own viewer, or CCCC's reader on touch devices and
 in browsers without one, as for [workspace files](#workspace-files). Where neither can show it,
 download it or, unless CCCC is embedded through Connect, open it in a new tab. Other files stay
 downloads.
@@ -1254,7 +1282,7 @@ try it again, and its download remains available.
 An address that starts with `http://`, `https://` or `www.` is a link. Links to an image, audio
 or video file open a page-level preview and load only when you click them. Whether they show
 depends on the source and the browser, so the preview offers a way to open the original in a new
-tab. Markdown and text from `raw.githubusercontent.com` or `gist.githubusercontent.com` also
+tab. Markdown, static HTML and text from `raw.githubusercontent.com` or `gist.githubusercontent.com` also
 open there, as do full links to this site's Group files, with a download. Other links, including
 a PDF on another site, open in a new tab. Ctrl, ⌘, Shift and the middle button keep their usual
 behavior.
@@ -1271,7 +1299,8 @@ from another scope, where the same path would mean a different file.
 ### Message diagrams
 
 In Chat and Inbox messages, a fenced code block labeled `mermaid` is rendered as a diagram after
-the message is complete. Use **View source** to inspect or copy the original definition. Invalid or
+the message is complete. Markdown opened in the Files preview or shown in Presentation renders these
+blocks the same way. Use **View source** to inspect or copy the original definition. Invalid or
 oversized diagrams fall back to the source automatically; other Markdown surfaces continue to show
 Mermaid fences as ordinary code blocks. Flowchart image shapes (`@{ img: ... }`) also remain as
 source because Mermaid waits on browser image decoding before completing the diagram and can
@@ -1305,27 +1334,54 @@ For concrete delegated work that needs an owner, done criterion, evidence, hando
 Choose **Reply** on a message to quote it and reply in the composer.
 
 **Quick reply**, in the **More** menu of a message from one of the Group's agents, sends a ready
-reply at once without the composer: **Agree, go ahead**, **Explain why**, **Try another way** or
-**Give me choices**, each led by an emoji under the caption **Quick reply · sends immediately**.
-It goes to that agent alone, quotes the message, and a notice confirms it.
-Chet's messages, messages from or sent to another Group or CCCC instance and
-questions answered in their own card have no quick replies; reply to them in the composer. When
-CCCC cannot confirm that a quick reply was sent, the notice says so and offers **Retry**; check
-the messages first, because a retry can send the reply twice.
+reply at once without the composer, under the caption **Quick reply · sends immediately**. It
+goes to that agent alone, quotes the message, and a notice confirms it. Chet's messages,
+messages from or sent to another Group or CCCC instance and questions answered in their own card
+have no quick replies; reply to them in the composer. When CCCC cannot confirm that a quick reply
+was sent, the notice says so and offers **Retry**; check the messages first, because a retry can
+send the reply twice.
+
+The menu lists your quick replies in the order you saved them. A new list starts with four
+default replies, **Agree, go ahead**, **Explain why**, **Try another way** and **Give me
+choices**, each led by an emoji. Manage the list in **Settings › This instance › Quick Replies**:
+add, edit, reorder or delete up to 24 replies, the default ones included, each with a name and a
+text that is sent exactly as written, then **Save**. A default reply's name or text that you
+leave unchanged follows the interface language; one you change stays as written in every
+language, and the reply is shown without its emoji. **Restore default** puts a changed default
+reply back as it was, and a deleted one can be brought back from the same page: it returns at
+the end of the list, as its default, without changing the other replies. If the list was saved
+from another window or device in the meantime, your edits stay on screen and **Reload** replaces
+them with the saved list.
+
+Each time you open the menu or the template list, it reads your replies again and shows a change
+saved on another device once that read succeeds; if the read fails, it keeps what it showed.
+Before the first read succeeds, neither offers a reply; if that read fails, they say so, and
+opening them again tries again.
+
+To start from a reply and edit it first, use **Insert a template** next to **Attach file** in
+the composer. Pick one of your quick replies, filtering by name if you like, and its text is
+inserted at the cursor, replacing any selected text. The list opens above the input, near where
+you are typing, or across the input on a phone, and each row shows the name and the first
+non-empty line of the text. **Manage templates** at the bottom of the list opens the settings
+page.
+
+The daemon keeps your quick replies for each signed-in user: browsers and phones signed in as the
+same user see the same replies, and a browser on this computer that is not signed in has its own.
 
 ## Project Context
 
 Open **Project Context** from the clipboard button in the Group header. The
 header identifies the Group being viewed.
 
-A single navigation row opens **Tasks**, **AGENTS.md**, **Agent State**,
-**Coordination log**, or **Skills**. On narrow screens, scroll the row horizontally;
+A single navigation row opens **Tasks**, **AGENTS.md**, **Agent State**, or
+**Skills**. On narrow screens, scroll the row horizontally;
 keyboard users can move focus with Left/Right or Home/End and activate with
-Enter/Space. Switching sections retains summary/file drafts and task filters.
+Enter/Space. Switching sections retains brief and file drafts as well as task filters.
 
 - **Tasks** is the default section. The goal, current focus and warnings stay
-  visible above the board. Expand **Working summary** for background and
-  constraints, or use Edit directly. The disclosure stays open while editing.
+  visible above the board, except while editing, when the form holds them.
+  Expand **Coordination brief** for the project background and constraints, or
+  use Edit directly. The disclosure stays open while editing.
   While there are tasks to show, Planned, Active and Done stay as columns, empty
   ones included, so each remains a drop target; when there are none, or none
   match the search and attention filters, the board says so instead. Dragging a
@@ -1371,6 +1427,41 @@ Enter/Space. Switching sections retains summary/file drafts and task filters.
   together with its unexecuted subtasks; for other tasks the editor says why,
   and archiving is the alternative. A deletion is refused, deleting nothing, if
   any of it changed after you confirmed.
+
+  Above the board, **Tasks | Backlog** switches to the project's backlog, and
+  each Group keeps the view you left it on in this browser. The backlog is a
+  Markdown file in the Group's project folder for long-lived topics and ideas;
+  tasks made from a topic track the work on it. It stays an ordinary file: CCCC
+  reads and edits it in place, never exports or commits it, and any editor can
+  change it too. A Group without a project folder has no backlog. Until a file is
+  chosen, the view offers to create `BACKLOG.md`, which in a Git repository can
+  be listed in the clone's local exclude file so `git add -A` leaves it out
+  (`.gitignore` is not changed), or to use an existing file. Tasks work without
+  one.
+
+  `##` headings are sections, in your own names and order; only a section named
+  exactly `Closed` holds finished topics. `###` headings are topics, and headings
+  inside a topic use `####` or deeper. A topic is a row like a task's, with its
+  linked tasks under the title; open the row to read the topic, or a linked task
+  to open that task. **Create task…** makes a Planned task from it, or opens
+  the topic's unfinished task if it has one. **Edit**, **Move to…** and
+  **Close…** change the topic; closing asks for a one-line outcome, adds it with
+  the date and moves the topic to Closed, where **Reopen…** moves it back. The
+  first change here gives a topic a hidden ID comment in its heading, so it can
+  be renamed or moved and stay linked; task IDs are never written into the file.
+
+  A task made from a topic shows the topic's title in its editor. **Update the
+  entry…** takes the task's outcome to the topic, as a dated paragraph or by
+  closing it. **Put back in the backlog** adds the outcome to the topic, or saves
+  a task from no topic as a new topic and links them, then asks whether to
+  archive the task. Finishing a task never closes its topic.
+
+  Each change applies only to the file as this page read it. If the file changed
+  elsewhere, nothing is written and your text stays; reload and save again. A
+  draft whose topic itself changed is kept to copy, never written over the
+  change. The backlog is read when Project Context opens and again when shown
+  after a change made through CCCC; edits from another editor appear on
+  **Reload**. The read-only exhibit page has no backlog.
 - **AGENTS.md** views and edits the file in the current workspace root, showing
   its actual path. A missing file can be created explicitly; existing documents
   are not renamed, merged, or overwritten as part of setup. Each runtime controls
@@ -1382,7 +1473,6 @@ Enter/Space. Switching sections retains summary/file drafts and task filters.
   staleness. Focus, next action and blockers remain visible. Expand working context
   or recovery cues when needed. A task named in a report does not prove that its
   Runtime is currently working on it.
-- **Coordination log** has a dedicated page for recent decisions and handoffs.
   Viewing repository instructions or records does not keep a task board beneath them.
 - **Skills** shows self-evolving candidates originating in this Group. Instance
   capability governance has a wider scope; the two views do not replace each other.
@@ -1613,7 +1703,9 @@ Some records need offline review. Stop CCCC safely, then run
 followed by `retry --id <id> --version <version>` or
 `accept --id <id> --version <version> --accept-risk`. While CCCC Web is
 running, these commands refuse to change Web's records. Do not delete files
-under `CCCC_HOME` by hand.
+under `CCCC_HOME` by hand. On Linux, an agent that CCCC could not confirm after its
+launch is reviewed with `--owner session`; see
+[When CCCC cannot confirm an agent](operations.md#when-cccc-cannot-confirm-an-agent).
 
 Use one `CCCC_HOME` on one host or container at a time. Before moving or
 copying it elsewhere, make sure the work started from it has ended. On that

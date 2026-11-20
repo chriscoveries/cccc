@@ -56,7 +56,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "limit": {
           "type": "integer",
@@ -76,7 +76,7 @@
   },
   {
     "name": "cccc_message_history",
-    "description": "Inspect actor-visible chat history without changing Mail read state. Pass event_id from a native notification to read that exact message or system notice: delivery_text has its full text and instructions, and message has the event; mcp_omitted_fields lists fields omitted because they are already shown there. Do not combine event_id with filters or pagination. Otherwise list past Send, Send + Reply, or Mail messages; routine Mail handling should use cccc_inbox_read instead.",
+    "description": "Inspect actor-visible chat history without changing Mail read state. Pass event_id from a native notification to read that exact message or system notice: delivery_text has its full rendered text and receiving context, with native protocol instructions when due, and message has the event; mcp_omitted_fields lists fields omitted because they are already shown there. Do not combine event_id with filters or pagination. Otherwise list past Send, Send + Reply, or Mail messages; routine Mail handling should use cccc_inbox_read instead.",
     "annotations": {
       "readOnlyHint": true,
       "destructiveHint": false,
@@ -92,7 +92,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "mode": {
           "type": "string",
@@ -143,7 +143,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Your local Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Your local Actor ID; leave it out to use your own."
         },
         "instance_id": {
           "type": "string",
@@ -185,7 +185,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "dst_group_id": {
           "type": "string",
@@ -224,7 +224,7 @@
         },
         "idempotency_key": {
           "type": "string",
-          "description": "Stable retry key for a remote delivery. Reuse unchanged parameters after an uncertain tool response."
+          "description": "Stable retry key for this message, local or remote. Reuse it only with identical parameters after an uncertain tool response."
         },
         "refs": {
           "type": "array",
@@ -334,7 +334,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "title": {
           "type": "string",
@@ -448,7 +448,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "event_id": {
           "type": "string",
@@ -529,7 +529,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Sender actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Sender Actor ID; leave it out to send as yourself."
         },
         "source_event_id": {
           "type": "string",
@@ -573,7 +573,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Sender actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Sender Actor ID; leave it out to send as yourself."
         },
         "source_event_id": {
           "type": "string",
@@ -603,7 +603,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "action": {
           "type": "string",
@@ -649,7 +649,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "path": {
           "anyOf": [
@@ -709,7 +709,7 @@
         },
         "idempotency_key": {
           "type": "string",
-          "description": "Stable retry key across instances."
+          "description": "Stable retry key for this file message, local or remote. Reuse it only with identical parameters."
         }
       },
       "required": [
@@ -1279,7 +1279,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "action": {
           "type": "string",
@@ -1358,7 +1358,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "action": {
           "type": "string",
@@ -1510,7 +1510,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "limit": {
           "type": "integer",
@@ -1540,7 +1540,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "turn_id": {
           "type": "string"
@@ -1578,7 +1578,7 @@
   },
   {
     "name": "cccc_capability_search",
-    "description": "Search the configured local and built-in capability registry. Returns matching capabilities without enabling, installing or executing them. Unverified historical SkillsMP search snapshots are excluded; saved records and existing bindings are not changed.",
+    "description": "Find optional skills and MCP tools for the task at hand, such as research with cited sources, current web facts, papers, reading office files, spreadsheets, data checks, contract redlines, public repository questions and code that must match a library's version. Set recommended=true to browse CCCC's recommended entries for you without guessing a word. Otherwise search the local catalog, built-in packs and release recommendations by name or a short word; each space-separated term must appear in an entry (case-insensitive), and an empty query lists the whole catalog. Consider ones that fill a gap or improve quality or efficiency; keep your existing tools when the added option does not help. Returns summaries with use cases, cases to avoid, requirements, verification and suitability for you, without enabling, installing or executing them. Skill bodies and full tool schemas are not included; use cccc_capability_use with an exact capability_id for complete skill rules. Unverified historical SkillsMP search snapshots are excluded; saved records and existing bindings are unchanged.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1588,11 +1588,17 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "query": {
           "type": "string",
+          "description": "A capability or tool name, or one short word such as a file type; each space-separated term must appear in the entry (case-insensitive).",
           "default": ""
+        },
+        "recommended": {
+          "type": "boolean",
+          "description": "true lists CCCC's recommended entries for you, at most ten: blocked entries and ones known not to work for you are left out; entries that still need setup are listed with their requirements. A query narrows them as usual.",
+          "default": false
         }
       },
       "required": []
@@ -1735,7 +1741,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         }
       },
       "required": []
@@ -1795,7 +1801,7 @@
   },
   {
     "name": "cccc_capability_import",
-    "description": "Foreman/admin governance tool to import an agent-prepared normalized capability record (mcp_toolpack or skill). Alternatively pass source_uri for a GitHub skill repository; repositories containing multiple skills/*/SKILL.md files are expanded into one CCCC skill capability per SKILL.md and may be enabled together. Use source_id=agent_self_proposed and capability_id=skill:agent_self_proposed:<stable-slug> for low-risk autonomous capsule skill proposals. Self-proposed skills must include When to use, Avoid when, Procedure, Pitfalls, and Verification sections; reuse the same capability_id for updates instead of duplicating. record.source_id is optional; empty/unknown values are normalized to manual_import. Use dry_run before unclear-risk records or immediate enablement; reuse the same capability_id to update stale/incomplete/wrong self-proposed skills instead of duplicating; import results report scope/import_action/record_changed/already_active/active_after_import; import_action is the primary create/update/unchanged signal, while record_changed only compares an existing record; already_active is the pre-import binding and active_after_import is the post-import runnable binding; when active/readiness_preview.active, do not enable again; verify activation in capability_state and read the full capsule with cccc_capability_search; use scope=session for a temporary trial, scope=actor for cross-session reusable self-proposed skills, and scope=group only for shared team-wide behavior. Dry runs return readiness_preview; external capability actionability follows external capability safety mode.",
+    "description": "Foreman/admin governance tool to import an agent-prepared normalized capability record (mcp_toolpack or skill). Alternatively pass source_uri for a GitHub skill repository; repositories containing multiple skills/*/SKILL.md files are expanded into one CCCC skill capability per SKILL.md and may be enabled together. Use source_id=agent_self_proposed and capability_id=skill:agent_self_proposed:<stable-slug> for low-risk autonomous capsule skill proposals. Self-proposed skills must include When to use, Avoid when, Procedure, Pitfalls, and Verification sections; reuse the same capability_id for updates instead of duplicating. record.source_id is optional; empty/unknown values are normalized to manual_import. Use dry_run before unclear-risk records or immediate enablement; reuse the same capability_id to update stale/incomplete/wrong self-proposed skills instead of duplicating; import results report scope/import_action/record_changed/already_active/active_after_import; import_action is the primary create/update/unchanged signal, while record_changed only compares an existing record; already_active is the pre-import binding and active_after_import is the post-import runnable binding; when active/readiness_preview.active, do not enable again; verify activation in capability_state and read the full capsule with cccc_capability_use(capability_id=...); use scope=session for a temporary trial, scope=actor for cross-session reusable self-proposed skills, and scope=group only for shared team-wide behavior. Dry runs return readiness_preview; external capability actionability follows external capability safety mode.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1900,7 +1906,7 @@
                   }
                 }
               ],
-              "description": "Command mode shortcut; alternatively provide install_spec.command"
+              "description": "Command mode shortcut; alternatively provide install_spec.command. A string is one executable, never split by a shell; give arguments as an argv array such as [\"npx\",\"-y\",\"<package>\"]."
             },
             "command_candidates": {
               "type": "array",
@@ -2046,7 +2052,7 @@
   },
   {
     "name": "cccc_capability_use",
-    "description": "Use an existing capability: enable it and optionally call one target tool. This is the preferred path for built-in capability pack tools that may be hidden from tools/list. For skill:* capabilities this activates the skill and returns its rules in capsule_text, ready to follow; it is not a local package install. Use scope=session for temporary activation and scope=actor for reuse by the selected actor; group scope requires foreman. If a capability that adds tools returns activation_pending, relist/reconnect before claiming success; inspect diagnostics/resolution_plan for blockers.",
+    "description": "Use an optional skill or MCP capability, usually one found with cccc_capability_search, by its exact capability_id or an unambiguous tool name: enable it and optionally call one target tool. For an external MCP with an explicit capability_id, tool_name accepts its real name or its advertised cccc_ext_ name. This is the preferred path for built-in capability pack tools that may be hidden from tools/list. For skill:* capabilities this activates the skill and returns its rules in capsule_text, ready to follow; it is not a local package install. For a release recommendation, every result also carries CCCC's notes in avoid_when, gotchas and requirements_summary; read them before following the text or relying on a tool result. Use scope=session for temporary activation and scope=actor for reuse by the selected actor; group scope requires foreman. If a capability that adds tools returns activation_pending, relist/reconnect before claiming success; inspect diagnostics/resolution_plan for blockers.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2362,7 +2368,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "ops": {
           "type": "array",
@@ -2391,7 +2397,7 @@
   },
   {
     "name": "cccc_coordination",
-    "description": "Shared control-plane tool: action=get|update_brief|add_decision|add_handoff. get returns the brief, decisions, handoffs and task counts, with the tasks needing attention as summary rows, at most 10 per list; a longer list adds <list>_total. For blocked, waiting_user or pending_handoffs, use cccc_task with attention=blocked, waiting_user or handoff respectively and page through the results.",
+    "description": "Shared control-plane tool: action=get|update_brief. get returns the brief and task counts, with the tasks needing attention as summary rows, at most 10 per list; a longer list adds <list>_total. For blocked, waiting_user or pending_handoffs, use cccc_task with attention=blocked, waiting_user or handoff respectively and page through the results.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2401,15 +2407,13 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "action": {
           "type": "string",
           "enum": [
             "get",
-            "update_brief",
-            "add_decision",
-            "add_handoff"
+            "update_brief"
           ],
           "default": "get"
         },
@@ -2431,12 +2435,6 @@
         },
         "project_brief_stale": {
           "type": "boolean"
-        },
-        "summary": {
-          "type": "string"
-        },
-        "task_id": {
-          "type": "string"
         }
       },
       "required": []
@@ -2450,7 +2448,7 @@
   },
   {
     "name": "cccc_task",
-    "description": "Shared collaboration task hub (not runtime todo): action=list|create|update|move|restore|delete. Use for multi-actor, long-horizon, or user-tracked work. Lifecycle transitions are canonical via move; update with status auto-applies the matching lifecycle move. list returns planned and active tasks as one summary row each, with counts per status; pass task_id to read one task in full.",
+    "description": "Shared task board the user and teammates see; it survives restarts and context resets: action=list|create|update|move|restore|delete. Use it for user requests and commitments that need multiple steps, coordination or follow-up; keep one task per coherent piece of work, with routine steps in its checklist. Link a task to the backlog entry it works on with source; the entry stays in the file. Lifecycle transitions are canonical via move; update with status auto-applies the matching lifecycle move. list returns planned and active tasks as one summary row each, with counts per status; pass task_id to read one task in full, with its subtasks as summary rows that you read by their own task_id.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2460,7 +2458,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "action": {
           "type": "string",
@@ -2577,7 +2575,8 @@
             "user",
             "actor",
             "external"
-          ]
+          ],
+          "description": "Set user when the next step needs the user (a decision, a test, or an action only they can take); this marks the task but does not notify the user, so hand over the action in a message. Set external when it waits on something outside the Group, such as a contributor's report, and actor when it waits on another member; these two count the task as blocked. Set it back, usually to none, when the wait ends."
         },
         "handoff_to": {
           "type": "string",
@@ -2612,6 +2611,144 @@
               "text"
             ]
           }
+        },
+        "source": {
+          "type": "object",
+          "description": "Create or update: the backlog entry this task comes from, as cccc_backlog shows it. The entry is not read or changed.",
+          "properties": {
+            "scope_key": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "entry_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope_key",
+            "path",
+            "entry_id"
+          ]
+        }
+      },
+      "required": []
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "cccc_backlog",
+    "description": "The project's backlog file: long-lived topics and ideas; tasks made from an entry track the work on it. action=get|add|edit|move|close|promote|use|create|exclude. get lists the sections and entry titles with their linked tasks; pass entry to read one entry in full. The other actions need scope_key, scope_url and path from your last get (use and create take the path of the file to choose); edit, move, close and promote also need its sha256 as if_file_sha256, and a stale one returns backlog_file_conflict, so get again. promote starts a task from an entry, or returns the entry's unfinished task. close moves an entry to Closed with a one-line outcome. use and create choose the file, and exclude adds a local Git exclude rule for it (a file Git already tracks is refused); these three are for the foreman or the user.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "group_id": {
+          "type": "string",
+          "description": "Working group ID (optional if CCCC_GROUP_ID is set)"
+        },
+        "actor_id": {
+          "type": "string",
+          "description": "Actor ID; leave it out to act as yourself."
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "get",
+            "add",
+            "edit",
+            "move",
+            "close",
+            "promote",
+            "use",
+            "create",
+            "exclude"
+          ],
+          "default": "get"
+        },
+        "scope_key": {
+          "type": "string",
+          "description": "From get. On get, omit it to read the backlog of your own workspace scope."
+        },
+        "scope_url": {
+          "type": "string",
+          "description": "From get."
+        },
+        "path": {
+          "type": "string",
+          "description": "From get; for use or create, the file to choose, relative to the project root."
+        },
+        "if_file_sha256": {
+          "type": "string",
+          "description": "The sha256 from your last get."
+        },
+        "entry": {
+          "type": "object",
+          "description": "The entry to read or change: {\"id\": ...} for an entry with an id, or {\"line\": ...}, its heading line from get, for one without.",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "section": {
+          "type": "string",
+          "description": "add and move: a section name from get; \"\" is the part before the first section. Only close puts an entry in Closed."
+        },
+        "title": {
+          "type": "string",
+          "description": "add and edit: one line."
+        },
+        "body": {
+          "type": "string",
+          "description": "add and edit: the text under the title. Use #### for headings in it, never ## or ###."
+        },
+        "outcome": {
+          "type": "string",
+          "description": "close: one line, added to the entry with today's date."
+        },
+        "task": {
+          "type": "object",
+          "description": "promote: the task to create, with the cccc_task create fields; its source is set from the entry.",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "planned",
+                "active"
+              ]
+            },
+            "assignee": {
+              "type": "string"
+            },
+            "priority": {
+              "type": "string"
+            },
+            "notes": {
+              "type": "string"
+            },
+            "client_request_id": {
+              "type": "string",
+              "description": "Retrying with the same id returns the task already created."
+            }
+          }
+        },
+        "keep_local": {
+          "type": "boolean",
+          "default": true,
+          "description": "create, in a Git project: keep the new file out of Git through this clone's local exclude list."
         }
       },
       "required": []
@@ -2754,7 +2891,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor whose headless state to read or update; leave it out for your own."
         },
         "action": {
           "type": "string",
@@ -2801,7 +2938,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "action": {
           "type": "string",
@@ -2856,7 +2993,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor whose terminal to inspect; leave it out for your own."
         },
         "action": {
           "type": "string",
@@ -2908,7 +3045,7 @@
         },
         "actor_id": {
           "type": "string",
-          "description": "Actor ID (optional if CCCC_ACTOR_ID is set)"
+          "description": "Actor ID; leave it out to act as yourself."
         },
         "action": {
           "type": "string",

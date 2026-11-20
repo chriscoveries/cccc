@@ -15,7 +15,8 @@ pub(crate) use drain::{drain_group, pending_group_ids};
 pub use lifecycle::{
     ShutdownReason, shutdown_actor, shutdown_actor_for, shutdown_all, shutdown_group,
 };
-pub(super) use terminal::{submit_terminal_text, submit_terminal_text_for_session};
+pub(super) use terminal::submit_terminal_text;
+pub(crate) use terminal::{submit_terminal_text_for_session, submit_viewer_text};
 
 const QUEUE_CAPACITY: usize = 256;
 const COMPLETION_CAPACITY: usize = 4096;
@@ -275,6 +276,22 @@ pub(super) fn release_in_flight(job: &DeliveryJob) {
 }
 
 fn fail_job(job: &DeliveryJob, reason: &str) {
+    settle_failure(
+        job,
+        crate::ops::runtime_delivery::DeliveryOutcome::Failed(reason),
+    );
+}
+
+/// The runtime ran this delivery and its bounded retries failed too: the failure
+/// stays visible, and only an explicit delivery request starts it again.
+fn exhaust_job(job: &DeliveryJob, reason: &str) {
+    settle_failure(
+        job,
+        crate::ops::runtime_delivery::DeliveryOutcome::RetriesExhausted(reason),
+    );
+}
+
+fn settle_failure(job: &DeliveryJob, outcome: crate::ops::runtime_delivery::DeliveryOutcome<'_>) {
     if let Err(error) = crate::ops::runtime_delivery::append_state(
         &job.home,
         &job.group.group_id,
@@ -282,7 +299,7 @@ fn fail_job(job: &DeliveryJob, reason: &str) {
         &job.actor.created_at,
         &job.event.id,
         job.transport,
-        crate::ops::runtime_delivery::DeliveryOutcome::Failed(reason),
+        outcome,
     ) {
         tracing::warn!(
             message = %error.message,
@@ -979,9 +996,24 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
                 failed_turns.1 += 1;
                 if failed_turns.1 > FAILED_TURN_RETRIES && !batch.is_empty() {
                     let job = batch.remove(0);
-                    fail_job(&job, &reason);
+                    exhaust_job(&job, &reason);
                     tell_sender(&job, false);
                     failed_turns = (String::new(), 0);
+                } else if let Some(job) = batch.first_mut() {
+                    // A definitive native failure settles this attempt before
+                    // another claim can authorize the existing bounded retry.
+                    // Keep the in-flight worker slot throughout the backoff.
+                    match crate::ops::runtime_delivery::append_state(
+                        &job.home, &job.group.group_id, &job.actor.id,
+                        &job.actor.created_at, &job.event.id, job.transport,
+                        crate::ops::runtime_delivery::DeliveryOutcome::Failed(&reason),
+                    ) {
+                        Ok(_) => {
+                            job.claimed = false;
+                            attempted.remove(&job.event.id);
+                        }
+                        Err(error) => tracing::warn!(message = %error.message, "failed native outcome still awaits settlement"),
+                    }
                 }
                 deferred = batch;
                 deferred_failures = deferred_failures.saturating_add(1);
@@ -997,15 +1029,34 @@ fn spawn_worker(key: &Key) -> DeliveryWorker {
         let replacing = thread_replaced.load(Ordering::Acquire);
         for job in deferred.into_iter().chain(receiver.try_iter()) {
             let reason = "delivery worker stopped before runtime acceptance".to_owned();
-            // Only managed submission marks a job attempted; it decides, not
-            // the snapshot the job was queued with.
-            if replacing && attempted.contains(&job.event.id) {
+            if !job.claimed {
+                release_in_flight(&job);
+                continue;
+            }
+            if crate::session_owner::enabled(&job.home)
+                && crate::session_owner::maintenance_selected(&job.home)
+                && job.actor.external_session_id.is_empty()
+            {
+                if !attempted.contains(&job.event.id) {
+                    finish_job(&job, CompletedDelivery::Unsubmitted(reason));
+                } else {
+                    // The execution task belongs to its owner. The next
+                    // controller queries it before settling this durable claim.
+                    release_in_flight(&job);
+                }
+                continue;
+            }
+            // Each native handoff marks its own attempted input. A stopped
+            // whole-turn transport may have received it before any acceptance
+            // result; calling it failed would authorize an automatic replay.
+            if attempted.contains(&job.event.id) {
                 // The old runtime may already hold this input. Keep it for the
                 // replacement to review instead of submitting it twice.
                 finish_job(
                     &job,
                     CompletedDelivery::Ambiguous(
-                        "runtime replaced while this delivery was being submitted".into(),
+                        if replacing { "runtime replaced while this delivery was being submitted" }
+                        else { "runtime stopped after submission before its outcome was confirmed" }.into(),
                     ),
                 );
             } else if replacing && job.actor.external_session_id.is_empty() {
@@ -1248,6 +1299,102 @@ mod tests {
         assert_eq!(states, ["claimed", "failed"]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_worker_stop_after_deepseek_input_is_ambiguous_without_automatic_replay() {
+        let temp = tempfile::tempdir().expect("isolated test directory");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("resolve isolated home");
+        let store = GroupStore::new(home.clone()).expect("open isolated group store");
+        let mut group = store
+            .create("interrupted turn", "")
+            .expect("create fixture group");
+        let prompt_log = temp.path().join("prompts");
+        let script = r#"while IFS= read -r line; do
+if printf '%s' "$line" | grep -q '"method":"initialize"'; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"fake"}}}'
+elif printf '%s' "$line" | grep -q '"method":"session/new"'; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"fake-session"}}'
+else
+  printf '%s\n' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p' >> "$PROMPT_LOG"
+fi
+done"#;
+        let mut actor = Actor::new("interrupted");
+        actor.runtime = ActorRuntime::Deepseek;
+        actor.command = vec!["sh".into(), "-c".into(), script.into()];
+        actor.env.insert(
+            "PROMPT_LOG".into(),
+            prompt_log.to_string_lossy().into_owned(),
+        );
+        group.actors.push(actor.clone());
+        store.save(&group).expect("save fixture group");
+        crate::ops::deepseek_runtime::start(&home, &group, &actor, temp.path())
+            .expect("start fake DeepSeek runtime");
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "user".into();
+        event.data = json!({"to":[actor.id],"text":"interrupted work","message_mode":"send"})
+            .as_object()
+            .expect("object result")
+            .clone();
+        let ledger_path = store
+            .ledger_path(&group.group_id)
+            .expect("resolve group ledger");
+        ledger::append(&ledger_path, &event).expect("append delivery event");
+        let worker = spawn_worker(&(group.group_id.clone(), actor.id.clone()));
+        worker
+            .sender
+            .as_ref()
+            .expect("present fixture value")
+            .send(DeliveryJob {
+                home: home.clone(),
+                group: group.clone(),
+                actor: actor.clone(),
+                event: event.clone(),
+                claimed: false,
+                transport: "deepseek",
+            })
+            .expect("submit fixture delivery");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !std::fs::read_to_string(&prompt_log)
+            .is_ok_and(|methods| methods.lines().any(|method| method == "session/prompt"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "provider did not receive input"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        worker.shutdown();
+        drain_group(&home, &group.group_id);
+        crate::ops::deepseek_runtime::stop(&group.group_id, &actor.id);
+        let recorded = std::fs::read_to_string(prompt_log).expect("read provider method log");
+        let methods = recorded.lines().collect::<Vec<_>>();
+        eprintln!("fake provider methods: {methods:?}");
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| **method == "session/prompt")
+                .count(),
+            1
+        );
+        let events = ledger::read_all(&ledger_path).expect("read delivery ledger");
+        let states = events
+            .iter()
+            .filter(|record| {
+                record.kind == "runtime.delivery"
+                    && record.data.get("source_event_id") == Some(&json!(event.id))
+            })
+            .filter_map(|record| record.data.get("state").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(states, ["claimed", "ambiguous"]);
+        assert_eq!(
+            crate::ops::runtime_delivery::claim(
+                &home, &group, &actor, &event.id, "deepseek", false
+            )
+            .expect("claim fixture delivery"),
+            crate::ops::runtime_delivery::ClaimResult::Terminal("ambiguous".into())
+        );
+    }
+
     /// A non-credential provider failure is retried, then the next delivery
     /// gets its turn instead of waiting behind the failed one forever.
     #[cfg(unix)]
@@ -1382,8 +1529,60 @@ done"#;
             })
             .filter_map(|event| event.data.get("reason").and_then(serde_json::Value::as_str))
             .collect();
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("upstream stream ended (HTTP 503)"));
+        assert_eq!(failures.len(), 4);
+        assert!(
+            failures
+                .iter()
+                .all(|reason| reason.contains("upstream stream ended (HTTP 503)"))
+        );
+        let attempts = events
+            .iter()
+            .filter(|record| {
+                record.kind == "runtime.delivery"
+                    && record.data.get("source_event_id") == Some(&json!(event.id))
+            })
+            .filter_map(|record| record.data.get("state").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempts,
+            [
+                "claimed", "failed", "claimed", "failed", "claimed", "failed", "claimed", "failed"
+            ]
+        );
+        // Its retries are used up, so starting the Actor, resuming the Group or
+        // restarting the daemon must not run it again; an explicit retry may.
+        let still_pending =
+            crate::ops::runtime_delivery::pending_sources(&home, &group, &actor, 10)
+                .expect("pending sources")
+                .iter()
+                .any(|source| source.id == event.id);
+        let automatic = crate::ops::runtime_delivery::claim(
+            &home, &group, &actor, &event.id, "deepseek", false,
+        )
+        .expect("automatic claim");
+        assert!(
+            !still_pending
+                && automatic
+                    == crate::ops::runtime_delivery::ClaimResult::Terminal("failed".into()),
+            "used-up delivery: pending={still_pending}, automatic claim={automatic:?}"
+        );
+        let exhausted = events
+            .iter()
+            .rfind(|event| {
+                event.kind == "runtime.delivery"
+                    && event.data.get("state").and_then(serde_json::Value::as_str) == Some("failed")
+            })
+            .expect("failed record");
+        assert_eq!(exhausted.data.get("retryable"), Some(&json!(false)));
+        let (claimed, _) = crate::ops::runtime_delivery::claim_deliveries(
+            &home,
+            &group,
+            &[(&actor, "deepseek")],
+            &event.id,
+            false,
+        )
+        .expect("explicit claim");
+        assert!(claimed, "an explicit retry still claims a used-up delivery");
     }
 
     #[test]

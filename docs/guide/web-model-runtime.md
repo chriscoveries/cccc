@@ -10,7 +10,7 @@ MCP availability is determined by the selected ChatGPT model and account, not by
 
 There are two delivery transports behind the same agent identity:
 
-1. **Browser delivery**: CCCC claims a pending Send or Send + Reply batch and injects it into a bound ChatGPT web chat through the Web-owned shared browser with an agent-specific Page target. It waits while ChatGPT is responding and preserves unrelated unsent drafts. It never treats the visible Stop control or a similarly named control elsewhere on the page as a send target. A confirmed injection records `runtime.delivery=accepted`; an indeterminate post-click result records `ambiguous`, and neither is automatically submitted again. A definite pre-submit failure records `failed` and remains eligible for a later delivery attempt.
+1. **Browser delivery**: CCCC claims a pending Send or Send + Reply batch and injects it into a bound ChatGPT web chat through the shared browser with an agent-specific Page target. It waits while ChatGPT is responding and preserves unrelated unsent drafts. It never treats the visible Stop control or a similarly named control elsewhere on the page as a send target. A confirmed injection records `runtime.delivery=accepted`; an indeterminate post-click result records `ambiguous`, and neither is automatically submitted again. A definite pre-submit failure records `failed` and remains eligible for a later delivery attempt.
 2. **Remote-MCP pull**: ChatGPT calls `cccc_runtime_wait_next_turn` through MCP. Returning a turn records that the pull transport accepted it; `cccc_runtime_complete_turn` closes that exact active runtime turn after processing.
 
 Browser confirmation requires the current batch's complete marker in a user
@@ -75,6 +75,20 @@ unsaved draft. Creating a connector credential only creates its address: it does
 not prove that ChatGPT has added or used it. Shared settings separately show the
 last recorded connector request and the number of verified agent bindings.
 Credential replacement and revocation are under **Manage connector credential**.
+
+Creating is safe to repeat: an existing connector is returned unchanged, without
+its secret or a token URL. **Rotate** remains an explicit maintenance action with
+the existing confirmation dialog. It replaces the credential while preserving
+conversation pairings and Dots state. The old URL stops working; copy the new URL
+and update every external plugin using it.
+
+For API/IPC callers, a flagless create no longer rotates. Send the boolean
+`rotate=true` explicitly to replace an active credential. Create returns
+`outcome=created` with the secret once, or `outcome=existing` without it; rotation
+returns `outcome=rotated` with the replacement secret once. Existing
+`create_only` callers must accept the successful `existing` response instead of
+expecting `connector_exists`. Non-boolean flags and conflicting `rotate=true`
+and `create_only=true` are refused without changing the connector.
 
 ### Conversation pairing and diagnostics
 
@@ -157,7 +171,7 @@ Open a GPT-5.x chat, select Developer mode/tools, and enable the CCCC connector.
 3. Enable the same CCCC connector in the intended conversation and start the agent normally. Complete any login or connector approval in ChatGPT itself. CCCC automatically sends one setup message and verifies its reply before delivering queued tasks. You can send Group messages while connection is pending; they stay queued.
 4. Repeat for other agents using separate conversations. No additional connector, login or pairing action is required.
 
-Connection attempts last at most ten minutes. You may close settings while waiting, or cancel the attempt. Draft text and pending attachments are protected; before the first send, CCCC waits until the composer is available. After an attempted send, failure, cancellation, expiry or interruption requires **Retry connection**; background checks never replay it. Stopping an agent or pausing/stopping its Group invalidates an unfinished automatic handshake, including a rapid stop/start. Established bindings survive ordinary restarts. Status GETs only observe state; they do not send or resume anything.
+Connection attempts last at most ten minutes. You may close settings while waiting, or cancel the attempt. Draft text and pending attachments are protected. The one exception is CCCC's own setup message that an interrupted attempt left unsent: the next connection attempt removes it, without sending it, when the message box holds exactly that message and no file. Before the first send, CCCC waits until the composer is available. After an attempted send, failure, cancellation, expiry or interruption requires **Retry connection**; background checks never replay it. Stopping an agent or pausing/stopping its Group invalidates an unfinished automatic handshake, including a rapid stop/start. Established bindings survive ordinary restarts. Status GETs only observe state; they do not send or resume anything.
 
 For a new chat, connection also waits for ChatGPT to assign its permanent conversation address. Its temporary address during the first response is part of normal startup, not a request to select or pair the conversation manually.
 
@@ -209,7 +223,7 @@ For remote-MCP pull mode, prompt the model to use CCCC explicitly:
 
 ### ChatGPT Browser Delivery
 
-Browser delivery is the proactive path for ChatGPT web. CCCC uses one Web-owned Chrome/Edge browser process with a shared login and separate agent windows for settings, runtime inspection, optional manual reload, optional auto-reload recovery, and message delivery. Delivery submits CCCC message batches into the explicitly bound chat; the web model still uses the CCCC MCP connector for all visible replies and local work. Choose a GPT-5.x model/session that can see and use the CCCC connector for local execution. If the selected model cannot see MCP tools, switch to an MCP-capable GPT-5.x chat before assigning local work.
+Browser delivery is the proactive path for ChatGPT web. CCCC uses one shared Chrome/Edge browser process with a shared login and separate agent windows for settings, runtime inspection, optional manual reload, optional auto-reload recovery, and message delivery. Delivery submits CCCC message batches into the explicitly bound chat; the web model still uses the CCCC MCP connector for all visible replies and local work. Choose a GPT-5.x model/session that can see and use the CCCC connector for local execution. If the selected model cannot see MCP tools, switch to an MCP-capable GPT-5.x chat before assigning local work.
 
 The agent runtime panel provides two durable delivery modes:
 
@@ -226,7 +240,7 @@ A submission has no single overall time limit: page loads, composer waits, safe 
 
 Agent panels use **Page** view bound to their own target. Global login/maintenance additionally offers **Browser** view of the entire shared desktop on a CCCC-owned Xvfb display with `x11vnc` installed. That view can show other agent windows and is available only in global settings. Without VNC, the native browser and CDP page view remain available. The VNC server binds to localhost and remote access passes through the authenticated CCCC WebSocket bridge. `CCCC_PROJECTED_BROWSER_VNC=0` disables it.
 
-The shared process has one exclusive profile owner. Agent close/delete only closes its page; Web shutdown closes the owned process and display resources once. Other browser features keep their separate profile ownership. A browser crash affects all shared windows and recovery uses their explicit bindings; it never adopts an unrelated tab.
+The shared process has one exclusive profile owner. Agent close/delete only closes its page. On Linux and on Apple Silicon Macs running the native arm64 build, CCCC's session owner keeps the shared browser: restarting the Web, stopping the daemon with `cccc daemon stop --keep-agents`, or an update that keeps agents leaves the browser and its agent windows running, and the next Web reconnects to the same windows. On Linux the session owner also keeps the private virtual display; macOS uses none. When the Web loses its connection to the browser, the surface reports the lost connection and the browser keeps running; opening the window again reconnects. A normal `cccc daemon stop` closes the browser, and on Linux its display. With an Intel macOS build, Web shutdown closes the browser process and its resources. Other browser features keep their separate profile ownership. A browser crash affects all shared windows and recovery uses their explicit bindings; it never adopts an unrelated tab.
 
 The login and delivery paths share this profile:
 

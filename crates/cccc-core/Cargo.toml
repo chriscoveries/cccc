@@ -11,8 +11,8 @@ publish = false
 [dependencies]
 aws-lc-rs.workspace = true
 base64.workspace = true
-cccc-contracts = { package = "cccc-pair-contracts", version = "=0.4.53", path = "../cccc-contracts" }
-cccc-runtime = { package = "cccc-pair-runtime", version = "=0.4.53", path = "../cccc-runtime" }
+cccc-contracts = { package = "cccc-pair-contracts", version = "=0.4.58", path = "../cccc-contracts" }
+cccc-runtime = { package = "cccc-pair-runtime", version = "=0.4.58", path = "../cccc-runtime" }
 chrono.workspace = true
 chrono-tz.workspace = true
 cron.workspace = true
@@ -40,10 +40,6 @@ uuid.workspace = true
 unicase.workspace = true
 zip.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-libproc = "0.14.11"
-nix.workspace = true
-
 [target.'cfg(windows)'.dependencies]
 cccc-windows-process = { path = "../cccc-windows-process" }
 
@@ -55,5 +51,3 @@ workspace = true
 
 [lib]
 name = "cccc_core"
-[build-dependencies]
-sha2.workspace = true

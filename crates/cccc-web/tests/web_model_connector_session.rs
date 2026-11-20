@@ -1103,3 +1103,5 @@ async fn hark_claims_without_metadata_sends_replies_and_never_replays() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body.to_string().contains("hark_connector_revoked"));
 }
+
+cccc_daemon::session_owner_test_entry!();

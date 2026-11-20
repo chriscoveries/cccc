@@ -15,3 +15,5 @@ export * from "./groupSpace";
 export * from "./diagnostics";
 export * from "./codexVoice";
 export * from "./workspace";
+export * from "./backlog";
+export * from "./update";

@@ -46,16 +46,14 @@
 - **CCCC Connect** 跨机器、跨团队连接工作组，各实例保留自己的状态。
 - **本地优先**：运行时状态保存在 `CCCC_HOME`（默认 `~/.cccc/`）中，不在你的代码仓库里。
 
-## 0.4.53 更新内容
+## 0.4.58 更新内容
 
-- **消息参数写错会立刻报错**：消息调用里带了 CCCC 不认识的参数（比如把 mode 写成 `mdoe`，或者把选择题的选项放错了位置），以前会报成功，这个参数要么被存下来、要么被忽略。现在调用会失败，返回 `unknown_arguments` 并列出参数名，不做任何改动。通过 CCCC Connect 发出的新消息和文件暂时不在检查范围内。
-- **消息来源只由桥接写入**：普通的 Web 和 MCP 消息调用不能再自己填写记录平台和发送者的 IM 来源字段；以前调用方可以借此让收件人看到伪造的来源。在 Web 里转发消息时，必须有权访问消息所在的工作组。
-- **原生会话能直接调用的启动示例**：`cccc_bootstrap` 给已连接的原生会话建议的调用，现在都带上它所在的工作组，这是这类会话的工具必需的参数。
-- **双 agent 起步路径和 AGENTS.md 模板**：指南里有一条从注册两个 agent 到整合成果的 builder + reviewer 起步路径，附一份可以复制到项目说明里的短模板；还说明了由 CCCC 启动的 Claude Code agent 在哪里改文件，以及改变这一点的 Claude Code 设置。
+- **在页面里读文档。** Markdown 附件可以在渲染效果和原文之间切换，不用重新下载。HTML 附件、工作组里的 HTML 文件，以及 GitHub raw 和 gist 上的 HTML，以静态预览打开：脚本不执行，表单禁用，不加载外部资源。20 MiB 以内的 HTML 连同内嵌图片可以完整预览。
+- **手机输入区收成一行。** 输入区空着、没点进去时，附件、模板按钮、输入框和语音排在同一行，模板按钮不再掉到第二行。正在发送时，进度和“停止等待上传”按钮保持可见。
 
-**升级须知**：升级前，请等正在进行的发送和录音结束，先恢复或丢弃待恢复的发送，再把所有没发出的草稿发出或另存，并保存 **文件** 里未保存的编辑：这些都只保存在当前打开的页面里。重新发送前，先确认消息是否已经送达。然后重启 daemon 和 Web，并刷新已打开的页面。升级前启动的 agent 会话仍在用它启动时的 MCP 服务：可以照常工作，但 MCP 一侧的来源检查和新的启动示例，要等这个会话的 MCP 服务重新启动（比如重启这个 agent）以后才生效。
+**升级须知。** 升级前，等发送和录音结束，恢复或丢弃待发送的消息，再把所有未发送的草稿发出或复制下来，并保存 **文件** 里未保存的编辑：这些都只存在于打开的页面里。然后重启 daemon 和 Web，刷新打开的页面。重启 daemon 仍会停掉由 CCCC 启动的智能体。
 
-详见 [0.4.53 发布说明](https://chesterra.github.io/cccc/release/v0.4.53_release_notes)。
+详见 [0.4.58 发布说明](https://chesterra.github.io/cccc/release/v0.4.58_release_notes)。
 
 ## 快速上手
 
@@ -185,7 +183,7 @@ Chet 是整个 CCCC 实例共用的一个助手，不在任何工作组的成员
 - **消息**：用 `@` 提及智能体，用 `#` 提及工作组。鼠标指向消息时会出现**回复**、**转发**和复制；消息的**更多**菜单还提供快速回复、**固定**和**复制链接**。在触屏上，所有操作都在**更多**里。
 - **标签页**：**待你答复**（可以就地答复的请求）、**全部**、**已固定**和**用户相关**。在筛选视图中，**定位到聊天位置**会在完整对话中打开该消息。
 - 工作组页头的**消息**和**终端**用于切换视图。终端视图每页最多显示四个智能体，并接受键盘输入。
-- **文件**、**展示区**（四个固定槽位）和**项目上下文**（**任务**、**AGENTS.md**、**协作记录**、**智能体状态**、**技能**）。
+- **文件**、**展示区**（四个固定槽位）和**项目上下文**（**任务**、**AGENTS.md**、**智能体状态**、**技能**）。
 - 在**设置与更多**中点**全部设置**：**当前工作组**包括引导、自动化、消息投递、消息路由和 IM 桥接；**整个实例**包括账户、Web 访问、通知和语音。
 - **外观**：**主题**可选浅色、深色或自动（跟随系统的浅色或深色设置）；界面语言可选英语、中文或日语。**更多外观设置**中有**正文字体**、**消息区宽度**（标准、宽或全宽，屏幕宽度 768px 及以上时可用）、**动效**、**待你答复提示**和**文字大小**（70%、90%、100% 或 125%）。
 - **通知**：在每个浏览器中分别打开**设置 → 整个实例 → 通知 → 开启通知**，需通过 HTTPS 或 localhost 访问。在 iPhone 或 iPad（iOS 或 iPadOS 16.4 及以上）上，要先把 CCCC 添加到主屏幕。
@@ -198,8 +196,8 @@ Chet 是整个 CCCC 实例共用的一个助手，不在任何工作组的成员
 
 | CCCC 的运行方式 | 运行时（`--runtime` id） |
 |---|---|
-| 原生终端 + CCCC 管理的会话 | Claude Code（`claude`）、Codex CLI（`codex`）、Grok Build（`grok`）、OpenCode V2 2.1.4+（`opencode`）、Kilo Code（`kilo`） |
-| 原生终端或官方 ACP | GitHub Copilot（`copilot`）、Cursor（`cursor`）、Devin（`devin`）、Kiro（`kiro`）、Antigravity（`antigravity`）、Droid（`droid`）、Auggie（`auggie`）、Hermes（`hermes`）、Kimi Code（`kimi`） |
+| 原生终端 + CCCC 管理的会话 | Claude Code（`claude`）、Codex CLI（`codex`）、Grok Build（`grok`）、OpenCode V2 2.1.4+（`opencode`）、Kilo Code（`kilo`）、Hermes（`hermes`，也可只用 ACP） |
+| 原生终端或官方 ACP | GitHub Copilot（`copilot`）、Cursor（`cursor`）、Devin（`devin`）、Kiro（`kiro`）、Antigravity（`antigravity`）、Droid（`droid`）、Auggie（`auggie`）、Kimi Code（`kimi`） |
 | 原生终端 | Cline（`cline`）、Amp（`amp`） |
 | 结构化协议，无终端 | Pi 1.1.0+（`pi`）、DeepSeek Harness（`deepseek`，开发者预览） |
 | Web 模型 | ChatGPT Web（`web_model`）、ChatGPT Dots（`chatgpt_dots`）、Grok Bot Web Model（`grok_web_model`） |

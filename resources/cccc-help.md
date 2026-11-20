@@ -11,7 +11,7 @@ CCCC routes and shared-state reference, including the peer collaboration contrac
 - Promote/retry with `cccc_message_deliver`; a new claim wakes a paused/stopped Group; confirm `ambiguous` retries.
 - `cccc_inbox_read` consumes Mail; `cccc_message_history` inspects messages without changing Mail state.
 - Read shared truth with `cccc_context_get(detail="overview")` and open tasks with `cccc_task()`; reserve `cccc_agent_state` for cross-turn recovery.
-- Invoke known hidden tools with `cccc_capability_use`; search only when unknown.
+- When a capability could fill a gap or improve quality or efficiency, browse the recommended entries you might use with `cccc_capability_search(recommended=true)`; bootstrap's `recommended` lists them too, with when each fits and any setup it needs. Check its requirements and limitations, then use it with `cccc_capability_use`. Keep your existing tools when the added option does not help.
 
 If the client blocks a tool call, report the actual tool name and error. A host refusal is not evidence that CCCC executed the operation. Await user guidance before retrying that operation, including through a different tool.
 
@@ -72,14 +72,15 @@ an uncertain send, rather than creating another message.
 
 ### Durable Coordination
 
-- `cccc_coordination` holds shared objectives, constraints, decisions, and handoffs.
-- Use `cccc_task` only for durable work; `cccc_tracked_send` adds owner, scope, done criteria, and evidence. Otherwise reply/send.
+- `cccc_coordination` holds shared objectives and constraints.
+- Use `cccc_task` for user requests and commitments that need multiple steps, coordination or follow-up; `cccc_tracked_send` adds owner, scope, done criteria, and evidence. Use `cccc_backlog` for an observed issue or a user's idea deferred and worth keeping: reuse a matching entry, record why it waits and when to revisit; recording it does not approve the work. If the Group has no backlog file yet, propose one to the user instead of creating it. Otherwise reply/send.
 - Task lifecycle uses `move`; use `update` only when changing other task fields too.
+- Record what a task waits on in `waiting_on`: `user` when its next step needs the user (hand over the action in a message; the mark notifies no one), `external` when it waits outside the Group; set it back, usually to `none`, when the wait ends.
 - A coordination interrupt is not automatically a task switch; resume the recorded task unless priority actually changed; do not replace active state with the interrupt itself.
 
 ### Recovery
 
-- `cccc_bootstrap` returns recovery state, tasks, recent decisions, and a Mail preview.
+- `cccc_bootstrap` returns recovery state, tasks, and a Mail preview.
 - It is a snapshot, not proof of current external state; verify at the execution boundary.
 
 ### Inbox
@@ -97,8 +98,8 @@ an uncertain send, rather than creating another message.
 
 - `cccc_capability_use(tool_name="...", tool_arguments={...})` invokes hidden tools without exposing the full pack.
 - Hidden tools include `cccc_tracked_send`; pass their arguments in `tool_arguments`.
-- `cccc_capability_use(capability_id="skill:...")` returns that skill's rules in `capsule_text`, ready to follow.
-- Use `cccc_capability_search` only when the capability or tool name is unknown.
+- `cccc_capability_use(capability_id="skill:...")` returns that skill's rules in `capsule_text`, ready to follow; recommended entries also return CCCC's `gotchas` and `avoid_when`.
+- Browse recommended entries with `cccc_capability_search(recommended=true)`, or search by a name or one short word (for example `paper` or `xlsx`); each space-separated term must appear in an entry (case-insensitive), so every added term narrows the results. When you know the exact capability_id or an unambiguous tool name, call `cccc_capability_use` directly.
 - When a capability that adds tools reports `activation_pending` or `refresh_required=true`, relist or reconnect. On failure, inspect `diagnostics` and `resolution_plan`.
 - State, enablement, installation, cleanup, and governance are on demand; expose them only when needed.
 

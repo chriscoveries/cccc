@@ -76,7 +76,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect::<BTreeSet<_>>();
 
-        assert_eq!(catalog.len(), 50);
+        assert_eq!(catalog.len(), 51);
         assert!(names.contains("cccc_voice_secretary_task"));
         for retired in [
             "cccc_voice_secretary_document",
@@ -124,6 +124,14 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "cccc_capability_search")
             .expect("capability search tool");
+        assert_eq!(
+            search["inputSchema"]["properties"]["recommended"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            search["inputSchema"]["properties"]["recommended"]["default"],
+            false
+        );
         for name in [
             "kind",
             "source_id",

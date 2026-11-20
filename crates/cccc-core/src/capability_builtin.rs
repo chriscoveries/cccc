@@ -25,6 +25,7 @@ pub const CORE_TOOL_NAMES: &[&str] = &[
     "cccc_context_get",
     "cccc_coordination",
     "cccc_task",
+    "cccc_backlog",
     "cccc_agent_state",
 ];
 
@@ -220,6 +221,8 @@ fn skill(id: &str, name: &str, description: &str, capsule_text: &str, tags: &[&s
         sync_state: String::new(),
         qualification_status: "qualified".into(),
         enable_supported: true,
+        metadata: Default::default(),
+        release_owned: false,
     }
 }
 
@@ -237,6 +240,8 @@ fn pack(id: &str, title: &str, tools: &[&str], tags: &[&str]) -> Capability {
         sync_state: String::new(),
         qualification_status: "qualified".into(),
         enable_supported: true,
+        metadata: Default::default(),
+        release_owned: false,
     }
 }
 

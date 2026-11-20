@@ -6,6 +6,374 @@ The format follows [Keep a Changelog](https://keepachangelog.com/), and versions
 
 ## [Unreleased]
 
+## [0.4.58]
+
+### Added
+
+- Markdown attachments, and Markdown links opened in the page, switch between the rendered
+  view and the unchanged source without downloading again, with the **View source** /
+  **Preview** control that workspace files already have. The control sits in the title bar
+  of the resource panel, of each side of a split view and of the preview dialog, so a
+  document gets no extra toolbar row.
+- HTML attachments, Group HTML files and HTML from `raw.githubusercontent.com` or
+  `gist.githubusercontent.com` open as a static document preview. Scripts do not run, form
+  controls are disabled and external resources are not loaded; inline styles and embedded
+  images are supported, and the page follows only web, mail and in-page links. An
+  attachment has no directory, so its relative images, stylesheets and sibling files are
+  not resolved. HTML up to 20 MiB previews in full, embedded images included, and
+  **Files** previews HTML over its 1 MiB editing limit the same way, read-only.
+  **View source** shows the first 1 MiB. Larger HTML shows only that source, with a
+  notice, instead of a broken page. Wide slides stacked in a centered column start at the
+  left and scroll sideways; pages keep their own size and are not scaled to fit. Panel tabs restored
+  after a reload keep the HTML kind.
+
+### Fixed
+
+- The keys in an attachment's title bar share one size with the **Files** toolbar, and the
+  download key no longer sticks out of the bar.
+- On a phone, the empty composer at rest keeps attach, the template button, the input and
+  voice on one row; the template button no longer drops to a second line. **Send** returns
+  with the full layout when the input is focused. A send in flight keeps the full layout,
+  so its progress and **Stop waiting for upload** stay visible if focus leaves the
+  composer during an upload.
+
+## [0.4.57]
+
+### Added
+
+- Quick replies of your own, in one list. Settings › Quick Replies keeps up to 24 replies in
+  your order, the four default ones included, each with a name and a text sent exactly as
+  written; add, reword, reorder or delete any of them. A default reply's unchanged name or
+  text follows the interface language, a changed one stays as written, **Restore default**
+  puts it back, and a deleted default can be brought back at the end of the list. A
+  message's quick reply menu sends one at once; the composer's template button opens the
+  list above the input, near where you are typing, and inserts one at the cursor to edit
+  before sending. The daemon keeps one list per signed-in user, so other browsers and phones
+  signed in as that user see the same replies; a browser on this computer that is not
+  signed in has its own.
+- The operations guide lists what a daemon restart keeps and what it does not, with a
+  FAQ entry pointing to it.
+- `cccc_bootstrap` recovery includes the Group brief's last update time
+  (`coordination_brief.updated_at`), so an agent resuming work can see that a brief is
+  old. It is omitted when the brief has no recorded update time.
+
+### Changed
+
+- Reading a parent task through MCP keeps the parent's full details and returns its
+  subtasks as summary rows. Read a subtask by its own ID for its notes and checklist.
+
+### Fixed
+
+- Enabling a capability or calling an external tool no longer holds up other operations
+  while it waits for the external service. Superseded preparation cannot reverse a later
+  disable, and an old call cannot restore a changed binding or installation. Already
+  admitted external calls are never automatically replayed.
+- A cron automation rule that already owes a run, for example one enabled again after
+  missing its time, reports that run as its next fire time instead of the following
+  occurrence, as interval and one-time rules already did. The Web labels that time as
+  pending. The missed run still fires once.
+- The capability page's Enabled count covers all matches of the current search, like the
+  Skills, MCP and Packs counts, instead of only the page on screen. `capability_overview`
+  returns `enabled_count`; the standard now also documents `kind_counts`.
+- MCP recipes that declare `command` as a string or argv array, or a fallback command
+  without a package identifier, install as the published contract describes. A string
+  names one executable and is never split by a shell; arguments need an argv array.
+  Malformed command fields are rejected before the catalog changes.
+- ChatGPT Web members treat `local-chatgpt:` conversation URLs as provisional, like
+  `WEB:` ones, and a conversation moved into a Project keeps its binding and delivery
+  receipts (#226, #227).
+- On Windows, background process constructors now share a no-console-window
+  default, covering the Codex app-server and delivery helper reported in #228,
+  managed Claude launchers, Reach helpers and process checks, Git scope detection,
+  and runtime preparation. Standard streams, timeouts and ownership are unchanged;
+  interactive terminals, foreground maintenance and detached daemon startup retain
+  their policies. Production Clippy and entry-point checks catch bypasses, with
+  explicit reasons for exceptions. The runtime library and its Windows tests
+  were checked for a Windows target on Linux; Windows-only daemon and CLI
+  branches will first be compiled in Windows CI. This release has not been run
+  locally on Windows; the reporter's Codex/Windows Terminal check remains needed.
+- Chet on OpenCode: a message or member result sent while Chet is busy waits for the
+  current turn and goes to Chet's own session as its own turn, instead of being typed
+  into Chet's terminal, where after `/new` it reached another session and held up later
+  Group messages to Chet (#229). Voice delegations during a call are unchanged.
+- The documentation home page's getting-started button links to the page's own address,
+  so opening the link directly no longer returns 404.
+- Web slash commands for capability tools pass their arguments to the tool. They were sent
+  under a field the daemon does not read, so the tool ran without them.
+- The chat composer keeps the highlight of a later @mention when Undo restores a
+  replaced or deleted selection. Who receives the message was not affected.
+
+## [0.4.56]
+
+### Added
+
+- CCCC ships a short recommendation list: 10 skills and MCP servers in four work
+  groups, each listed only where we produced a representative result with it. Each
+  has its reason (what that result showed and its limits), notes on when not to use
+  it, verification records (level, outcome, date, build and path, failed checks
+  included) and, for MCP servers, where it runs, how it signs in and what it needs.
+  Release-owned entries are read-only, change with CCCC versions and are never
+  installed or enabled automatically. An entry is a primary only where a trial
+  showed a gain; this release has one, Exa.
+- The capability page has a Recommended view by work group. Each entry shows a status
+  for the Group's members, and its details show the reason, each member's status and
+  why, verification, where it runs, sign-in and requirements. Enable for Group is
+  offered when some member can use the entry, or might; the MCP and Skills lists show
+  the same status and action for recommended entries.
+- `capability_overview` and `capability_state` project each member's availability
+  (`compatible`, `needs_setup`, `unsupported`, `unknown`), enabled scopes, blocks and
+  pending preparation, with localized names and reasons; `capability_search` adds a
+  `for_you` summary for the calling member.
+- Managed members can use remote MCP servers that need a Bearer token from their own
+  private settings or linked Profile. Recipes reference the environment key, never
+  the value; enabling for a Group records intent only and uses no member's token.
+  Native sessions and Web model members have no member-token route.
+- An administrator can update an installed MCP server's recipe for all Groups from
+  CCCC Web, after previewing it and confirming the scope. A failed update keeps the
+  previous installation; agents cannot update recipes.
+- Recommended entries carry CCCC's notes (`avoid_when`, `gotchas`,
+  `requirements_summary`) alongside skill text, MCP preparation results and
+  structured external tool results, including results with `isError: true`; a
+  transport error carries none.
+- `cccc_bootstrap` lists the recommended entries an agent might use, one line each
+  with its role, exact ID and first use case, marked when applicable `enabled`,
+  `discovery pending`, `check requirements` or `setup required` (with the
+  requirements summary); blocked and `unsupported` entries are left out. The section
+  stays within 24 entries and 3,072 bytes of compact JSON and counts the entries it
+  leaves out.
+- When a client connects, CCCC's MCP server returns a short fixed note: CCCC offers optional skills
+  and MCP servers for named kinds of work, and an agent can browse the recommended ones or search
+  with `cccc_capability_search` and should read an entry's limits before enabling it. The MCP
+  `initialize` result and the Web model connector's `server/discover` result carry it; Voice
+  secretary task sessions, which cannot see those tools, do not. Clients decide whether to show it
+  to the model.
+- `cccc_capability_search(recommended=true)` lists the recommended entries for the calling agent, at
+  most ten, without guessing a word: blocked entries and entries it cannot use are left out, entries
+  that need setup stay with their requirements, and a query narrows them. Without the argument,
+  search is unchanged.
+
+### Changed
+
+- `capability_search` returns summaries without skill text or full tool schemas;
+  `cccc_capability_use` returns a skill's full text. `capability_overview` returns
+  skill text only for the self-proposed skill editor.
+- Help points agents to browsing the recommended entries with
+  `cccc_capability_search(recommended=true)`, or to `recommended` in bootstrap, when a capability
+  could fill a gap or improve quality or efficiency, and to keep their own tools when the added
+  option does not help. Help and the `cccc_capability_search` description say to search by a name or
+  one short word, since every space-separated term must appear in an entry; the description also
+  names the kinds of work the recommended entries serve. The `cccc_capability_use` description says
+  what a capability is and that it takes an exact ID or an unambiguous tool name.
+- Remote and local MCP servers use the official Rust MCP SDK 3.9.0. HTTP servers may
+  answer with JSON or SSE; an expired session is not reinitialized and a call is not
+  replayed. A local server's handshake and call share one deadline, and errors keep
+  up to the last 8 KiB of its stderr with known credentials and declared
+  environment values redacted.
+- A tool result with `isError: true` no longer marks a binding verified.
+- HTTP(S) source links are projected without user information, query or fragment.
+- Claude Code sessions that CCCC starts turn off CCCC's own Claude Code plugin in
+  their session settings; user and project plugin settings are unchanged.
+- **Open Capability Center**, in Settings → **Capability Governance** and on a Group's
+  **Skills** tab in **Project Context**, opens the Capability Center over the current page
+  instead of in a new browser tab. Closing it, with its close button or Esc, returns to that
+  page, which then reloads its list. The `/ui/capabilities` address opens the main page.
+
+### Fixed
+
+- CCCC closed a local MCP server's input right after sending its requests, so a call
+  could end before the server answered; input now stays open until the answer or the
+  time limit. Errors also left out the server's error output.
+- Remote MCP servers that answer with SSE, or require clients to accept it, could not
+  be used.
+- Importing a skill kept only the first 2,400 characters of its text; imported skills
+  now keep their full text up to 2 MiB.
+- The capability page filtered the daemon's search results again with a narrower
+  rule, treating the whole query as one string over fewer fields, so some matched
+  entries disappeared, such as those matching several words in different fields; it
+  now keeps the daemon's matches for the same query.
+
+## [0.4.55]
+
+### Added
+
+- A workspace can use a Markdown file in its project as its Backlog. Tasks now has
+  a Tasks | Backlog switch for reading, adding, editing, moving and closing entries,
+  and for starting work from an entry. The file remains the source of truth;
+  existing-entry writes check its file hash and reject stale edits. Linked tasks
+  retain their source without writing CCCC task numbers into the Markdown file.
+  A task's result can be written back to its entry, and finishing a task asks for
+  a source update without automatically closing the topic. Creating BACKLOG.md
+  in a Git project excludes it locally by default, without changing .gitignore.
+  Tasks still works without a Backlog file. The read-only exhibit does not expose
+  the Backlog.
+- The `cccc_backlog` MCP tool and daemon Backlog operations expose the same
+  workspace-file workflow. Task create and update accept an optional Backlog
+  `source`; the daemon owns permissions, file-hash checks and partial-write
+  reporting.
+- `cccc ledger search` exposes the daemon's existing sender, recipient, time,
+  kind, text and cursor filters. `cccc actor new-session` exposes the existing
+  action that restarts a member with a new session instead of resuming its saved
+  conversation. Both commands return the daemon's result and report its errors.
+
+### Changed
+
+- A native member's own exact message-history read no longer repeats the full
+  Group rules immediately after they have been given. They are included on first
+  use in a conversation, after a reported context compaction, when the rules
+  change or after a UTC hour boundary, unless an accepted delivery already
+  carried them. Further self exact reads use the receiving-context header.
+  Reading on a member's behalf still returns the full rules without marking
+  them as given. The record is kept in daemon memory, so restarting the daemon
+  can repeat the rules. Claude's pointer notices now mention instructions only
+  when due.
+  This changes neither message delivery nor read acknowledgments.
+- The member protocol, task tool descriptions and help now explain when to track
+  requests and commitments as tasks, and when to keep deferred issues or ideas
+  in the configured Backlog. A task's completion follow-up distinguishes its
+  outcome from whether its source topic is finished. Tool descriptions also
+  clarify caller identity and the retry keys accepted for local sends.
+- In the Web Tasks section, the former Working summary block is now Coordination
+  brief, and its text field is Project background. The English, Chinese and
+  Japanese labels, refresh hints and save controls follow those names. Editing
+  hides the repeated saved goal, focus and refresh note above the form while
+  preserving the draft. On narrow screens, the time and save controls wrap as
+  groups instead of breaking within a word.
+- Markdown pinned to Presentation renders Mermaid diagrams, as the Files preview
+  of the same file already does. The existing enlargement and Escape behavior
+  applies; the Voice Secretary's live draft is unchanged.
+
+### Fixed
+
+- A change to launch PATH alone no longer necessarily discards a saved managed
+  conversation. Claude, Pi and the Copilot, Devin, Cursor, Kimi Code, Auggie,
+  Kiro, Hermes and Droid ACP adapters can recognize that case when both receipts
+  contain the complete launch-fingerprint split introduced in 0.4.54. Other
+  identity changes and older receipts retain the existing rules. Pi and ACP
+  start with the new PATH. Claude resumes the saved session only when its lookup
+  finds no live job; a live job keeps its old PATH, so CCCC leaves it alone and
+  starts a new conversation. A failed resume still reports failure rather than
+  silently starting fresh. This restores conversation selection, not a running
+  turn across a daemon restart.
+- Task dependencies stop blocking once all their referenced tasks are done, or
+  archived after completion. Missing or unfinished dependencies still block,
+  and reopening one blocks again. The read-only `open_blocked_by` projection is
+  used consistently by the board, task summaries, attention filters, bootstrap
+  and TUI; stored `blocked_by` relationships remain intact. A task that has
+  already entered execution cannot be deleted by first moving it back to planned.
+  The assignee picker now includes Group members even if they have not reported
+  a working state or been assigned another task.
+- A running headless process without an authoritative turn observation reports
+  unknown rather than an invented idle state and duration. Managed-session and
+  Dots observations still take precedence, and a paused Group remains paused.
+- Failed managed deliveries that exhaust their retry budget retain an explicit
+  `retryable: false` result. Automatic recovery no longer resets those deliveries
+  and claims them again; an explicit delivery request can still retry them.
+  Older failed receipts without the flag keep their existing behavior.
+- The MCP message-send retry key now selects the daemon's existing replay for
+  local and same-instance cross-Group sends too. Reuse a key with the same
+  arguments; it does not turn a changed message body into a new send. Connect
+  message and file sends reject unknown top-level arguments before acceptance
+  or file handling, matching the validation on other message writes.
+- Configuring an already active ChatGPT or Grok Web connector no longer replaces
+  its credential. Creation returns the existing connector without its secret;
+  replacing the credential requires explicit rotation. Rotation preserves the
+  conversation pairings and Dots state and returns the new secret once.
+- Retrying ChatGPT pairing can clear CCCC's own unsent setup message after an
+  interrupted attempt. It does so only when the focused composer still contains
+  exactly that setup message, one valid pairing code and no attachment. Other
+  drafts and attachments remain untouched, and a failed read-back stops the
+  attempt. Browser command replies also preserve non-string command IDs.
+- A repeated Dots wake that already completed is reported as idle instead of
+  incorrectly claiming a turn is still in progress. Checks for unfinished work
+  and the completion cleanup window still take precedence.
+- Interrupting a managed Claude turn sends the required nullable `terminal` and
+  `mux` attach capabilities before Escape. Claude Code 2.1.317 rejected the
+  earlier incomplete capability object, so the turn continued instead of being
+  interrupted. A refused attach does not send Escape.
+- The project-context view, including Tasks, refreshes after changes from another
+  tab or member.
+  A timer callback previously invoked `clearTimeout` without its Window receiver
+  and could leave later updates unseen until the panel was reopened. Backlog
+  entries use task-style rows, with linked tasks opening independently. Group
+  creation quick picks are translated and stack on phones. A Group without a
+  project folder explains why AGENTS.md is unavailable instead of offering a
+  Create action that cannot work. Segmented controls size their options to the
+  labels so touch-screen minimum widths do not clip an option. English labels
+  are consistent: Edit agent, Documents in the Voice Secretary, and New session
+  in the agent menu, page and failed-resume hint.
+- Build fingerprints are generated at the CLI, Web and MCP entry packages
+  instead of invalidating core and all its dependents whenever a workspace Rust
+  source changes. Each executable registers its compiled identity; a library
+  without a registered identity reports none rather than reading the current
+  checkout as if it were the running build. Web and MCP libraries can still
+  rebuild when their package fingerprint changes.
+
+### Removed
+
+- Coordination notes: the Web Coordination log tab, `cccc_coordination`'s
+  `add_decision` and `add_handoff` actions, the `coordination.note.add` context
+  operation and the two note lists in context/bootstrap recovery. Removed
+  actions fail as unsupported and the operation fails as unknown. Existing
+  stored notes stay in the context file, including through task/brief writes
+  and migration, but are no longer projected to clients. The coordination brief
+  remains available. SDK callers must remove the retired note helpers and
+  result-field dependencies when upgrading the SDK with this release.
+- The unreachable capability-source-instance view and its unused result/request
+  fields, along with two unused message fields. A browser tab opened before the
+  upgrade can still send the removed cross-Group reply field and receive
+  `unknown_arguments`; reload the tab before retrying.
+
+## [0.4.54]
+
+### Added
+
+- A managed agent that starts a new conversation although one was saved now leaves a record. Until
+  now the saved conversation was replaced without a trace when the agent's runtime, command, model,
+  workspace, launch settings or launch environment no longer matched it. The agent's page shows a
+  small information mark after its status; hovering over it or selecting it gives the time of the
+  record and the compared settings that had changed. For managed Claude and Pi agents and for ACP
+  agents other than Antigravity, a changed launch `PATH` and a changed CCCC program location are
+  named separately from the other launch settings when both the saved record and the new one contain
+  that detail; a record saved by an earlier version does not. CCCC also attempts to write one
+  system notice addressed to the user, which an enabled IM bridge can forward, and the Actor
+  listing reports `runtime_session_replaced_at` and `runtime_session_replaced_reasons`. Which
+  conversation a start selects is unchanged.
+
+### Changed
+
+- CCCC Web ignores file-open notifications when it watches Group ledgers. On Linux, read-only
+  opens of a ledger could queue redundant ledger checks. Writes, rotations, Group removal and the
+  periodic recovery scan are handled as before.
+
+### Fixed
+
+- History and the Inbox read a Group's rotated ledger segments in the order they were rotated,
+  even when the system clock went backwards between two rotations. Segments were read in
+  file-name order, and a name starts with the time of its rotation, so a later segment stamped
+  with an earlier time was read first: history showed its messages out of order and an Inbox
+  read could skip Mail. Nothing was removed from the ledger. A ledger is rotated only by an
+  explicit compaction such as `cccc ledger compact`. In a Group that was already read in the
+  wrong order, new Mail arrives normally after the update, but Mail that an Inbox read had
+  already passed over may not return to the Inbox; it remains in the Group's history.
+- On a phone-sized screen, the Edit button under a stopped agent's page no longer breaks its label
+  over two lines and grows taller than the buttons beside it. It shows its icon alone there, as it
+  already does while the agent is running.
+- The Group menu, opened from the run button in the header or from a Group in the sidebar, no
+  longer reserves extra width as if neighbouring items stood side by side. The labels filled only
+  part of it.
+- **Agent State** no longer shows an agent that was removed from the Group. Removal cleared the
+  agent's state but left an empty entry in the stored context, so Project Context kept a card
+  for it and context reads returned it. Context reads now return states only for agents still in
+  the Group, including for entries left by earlier removals. States of agents still in the Group
+  are kept even if they are disabled or stopped. This filtering does not rewrite the stored
+  context.
+- Three smaller layout defects in CCCC Web. In the add-agent dialog, Cancel no longer grows
+  taller than the create button beside it when that button has a hint line under it. A settings
+  choice whose options wrap onto a second row, such as the default recipient in Japanese and
+  English, now forms one block of aligned rows. The card that opens from a recipient in the
+  composer gives the recipient's kind more room on wider screens; it was cut off in Japanese and
+  English.
+
 ## [0.4.53]
 
 ### Added

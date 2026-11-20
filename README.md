@@ -47,16 +47,14 @@ When several coding agents share work, you need to know who owns a task, whether
 - **CCCC Connect** links Groups across machines and teams; each instance keeps its own state.
 - **Local-first.** Runtime state stays in `CCCC_HOME` (default `~/.cccc/`), outside your repository.
 
-## What's new in 0.4.53
+## What's new in 0.4.58
 
-- **Mistyped message arguments fail at once.** A message call with an argument CCCC does not recognize, such as `mdoe` for the mode or a question's options in the wrong place, used to report success while the argument was stored or ignored. It now fails with `unknown_arguments`, names the argument and changes nothing. New messages and files sent through CCCC Connect are not covered yet.
-- **Message origin stays with the bridge.** Ordinary Web and MCP message calls can no longer supply the IM origin fields that record a platform and sender, which a caller could use to show a recipient a false origin. Forwarding a message in the Web requires access to the Group it comes from.
-- **Start-up examples a native session can call.** The calls `cccc_bootstrap` suggests to a connected native session now name its Group, which that session's tools require.
-- **A starter pair and an AGENTS.md template.** The guide walks through a builder and reviewer pair from registering the two agents to integration, with a short template to copy into your project's instructions. It also explains where a Claude Code agent that CCCC starts edits files, and the Claude Code setting that changes it.
+- **Read documents in the page.** Markdown attachments switch between the rendered view and their unchanged source without downloading again. HTML attachments, Group HTML files and HTML from the raw GitHub and gist hosts open as a static preview: scripts do not run, forms are disabled and external resources are not loaded. HTML up to 20 MiB previews in full, embedded images included.
+- **One row for the phone composer.** At rest, the empty composer keeps attach, the template button, the input and voice on one row, so the template button no longer drops to a second line. A send in flight keeps its progress and **Stop waiting for upload** in view.
 
-**Upgrade notes.** Before upgrading, let sends and recordings finish, restore or discard waiting sends, then send or copy every unsent draft and save unsaved edits in Files: all of these live only in the open page. Check whether a message already arrived before sending it again. Then restart the daemon and Web and reload open pages. Agent sessions started before the upgrade keep the MCP server they started with: they keep working, but the MCP-side origin check and the new start-up examples reach a session only when its MCP server is started again, for example by restarting the agent.
+**Upgrade notes.** Before upgrading, let sends and recordings finish, restore or discard waiting sends, then send or copy every unsent draft and save unsaved edits in Files: all of these live only in the open page. Then restart the daemon and Web and reload open pages. A daemon restart still stops the agents that CCCC started.
 
-Details: [0.4.53 release notes](https://chesterra.github.io/cccc/release/v0.4.53_release_notes).
+Details: [0.4.58 release notes](https://chesterra.github.io/cccc/release/v0.4.58_release_notes).
 
 ## Quick start
 
@@ -186,7 +184,7 @@ Use Mail for updates that can wait, Send when the recipient should know now, and
 - **Messages.** `@` mentions agents and `#` mentions Groups. Point at a message for **Reply**, **Forward** and copy; its **More** menu adds quick replies, **Pin message** and **Copy link**. On touch screens, **More** holds every action.
 - **Tabs.** **Waiting for you** (requests you can answer in place), **All**, **Pinned** and **User-related**. In a filtered view, **Show in chat** opens a message in the whole conversation.
 - **Messages** and **Terminals** in the Group header switch views. The terminal view shows up to four agents per page and takes keyboard input.
-- **Files**, **Presentation** (four pinned slots) and **Project Context** (**Tasks**, **AGENTS.md**, **Coordination log**, **Agent State**, **Skills**).
+- **Files**, **Presentation** (four pinned slots) and **Project Context** (**Tasks**, **AGENTS.md**, **Agent State**, **Skills**).
 - **Settings and more**, then **All settings**: **This group** includes Guidance, Automation, Delivery, Messaging and IM Bridge; **This instance** includes Account, Web Access, Notifications and Voice.
 - **Appearance.** **Theme** is Light, Dark or Auto (follows the light or dark setting of your system), and the language is English, Chinese or Japanese. **More appearance settings** has **Body font**, **Message area width** (Medium, Wide or Full, on screens 768px and wider), **Motion**, **‘Waiting for you’ indicators** and **Text Size** (70%, 90%, 100% or 125%).
 - **Notifications.** **Settings → This instance → Notifications → Enable notifications**, in each browser, over HTTPS or on localhost. On iPhone or iPad (iOS or iPadOS 16.4 or later), add CCCC to the Home Screen first.
@@ -199,8 +197,8 @@ Each agent can use a different runtime:
 
 | How CCCC runs it | Runtimes (`--runtime` id) |
 |---|---|
-| Native terminal plus a CCCC-managed session | Claude Code (`claude`), Codex CLI (`codex`), Grok Build (`grok`), OpenCode V2 2.1.4+ (`opencode`), Kilo Code (`kilo`) |
-| Native terminal or official ACP | GitHub Copilot (`copilot`), Cursor (`cursor`), Devin (`devin`), Kiro (`kiro`), Antigravity (`antigravity`), Droid (`droid`), Auggie (`auggie`), Hermes (`hermes`), Kimi Code (`kimi`) |
+| Native terminal plus a CCCC-managed session | Claude Code (`claude`), Codex CLI (`codex`), Grok Build (`grok`), OpenCode V2 2.1.4+ (`opencode`), Kilo Code (`kilo`), Hermes (`hermes`, or ACP only) |
+| Native terminal or official ACP | GitHub Copilot (`copilot`), Cursor (`cursor`), Devin (`devin`), Kiro (`kiro`), Antigravity (`antigravity`), Droid (`droid`), Auggie (`auggie`), Kimi Code (`kimi`) |
 | Native terminal | Cline (`cline`), Amp (`amp`) |
 | Structured, no terminal | Pi 1.1.0+ (`pi`), DeepSeek Harness (`deepseek`, developer preview) |
 | Web models | ChatGPT Web (`web_model`), ChatGPT Dots (`chatgpt_dots`), Grok Bot Web Model (`grok_web_model`) |
