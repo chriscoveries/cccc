@@ -213,20 +213,37 @@ async fn start_connection(
         .pairing_page(&key)
         .await
         .map_err(|e| pairing_error(&e.to_string()))?;
-    // cwf#855: when the actor's bound conversation is not the tab's current
-    // conversation the saved chat is unreachable for this attempt, so the
-    // connect becomes an explicit-style replace instead of `already_paired`.
-    // The old binding still stands until the new pairing confirms.
-    if !replace {
-        let bound_url = web_model_connectors::binding_for_actor(
+    // cwf#855: a normal connect stays idempotent and never silently gains
+    // replace authority. On the automatic path (enabled Actor) the daemon
+    // answers already_paired; when the bound chat is conclusively
+    // unavailable we answer a discoverable binding_unavailable hint instead,
+    // and only an explicit replace:true re-pairs. The old binding still
+    // stands until the new pairing confirms either way.
+    if !replace && automatic {
+        let bound = web_model_connectors::binding_for_actor(
             &connector,
             group,
             actor,
             &cccc_core::actors::generation_identity(config),
-        )
-        .and_then(|b| b["url"].as_str().map(str::to_owned));
-        if bound_chat_unavailable(bound_url.as_deref(), target.conversation()) {
-            args.insert("replace".into(), json!(true));
+        );
+        if let Some(bound) = bound {
+            let delivery_target = super::web_model_delivery_state::target(state, group, actor)
+                .unwrap_or_else(|_| json!({}));
+            if let Some(reason) = unavailable_reason(
+                bound["url"].as_str(),
+                target.conversation(),
+                &delivery_target,
+            ) {
+                return Err(ApiError::bad_code(
+                    "binding_unavailable",
+                    "The bound conversation is unavailable; pass replace:true to pair a different chat",
+                    json!({
+                        "reason":reason,
+                        "binding_revision":bound["revision"].clone(),
+                        "action":"connect replace:true",
+                    }),
+                ));
+            }
         }
     }
     let pair = call(state, "web_model_pairing_begin", args.clone()).await?;
@@ -357,7 +374,16 @@ async fn connect(
             confirm.insert("url".into(), json!(url));
             call(state, "web_model_pairing_confirm", confirm)
                 .await
-                .map_err(|_| "pairing_failed")?;
+                .map_err(|error| {
+                    // cwf#855: a stale candidate must report the revision
+                    // conflict, not a generic failure, so the caller can
+                    // retry begin against the newer binding.
+                    if error.to_string().contains("binding_revision_changed") {
+                        "binding_revision_changed"
+                    } else {
+                        "pairing_failed"
+                    }
+                })?;
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -413,13 +439,35 @@ fn candidate(state: &AppState, args: &Map<String, Value>) -> Result<Value, &'sta
     Ok(pair)
 }
 
-/// cwf#855: the bound chat counts as unavailable when its saved URL
-/// normalizes to a conversation the pairing tab is not on. An
-/// unparseable saved URL stays conservative — no auto-replace.
-fn bound_chat_unavailable(bound_url: Option<&str>, current: Option<&str>) -> bool {
-    bound_url
-        .and_then(|u| web_model_connectors::conversation_url(u).ok())
-        .is_some_and(|saved| current != Some(saved.as_str()))
+/// cwf#855: a typed unavailability reason for the bound chat, or `None`
+/// when the evidence does not conclusively show it cannot be used.
+/// `target_changed` (the pairing tab simply sits on another conversation)
+/// is deliberately not unavailable: the saved chat may still load fine, so
+/// plain `already_paired` stands. Only states the delivery/reopen paths
+/// already recorded count — a full conversation, a persistent 404, or an
+/// exhausted bounded reload budget. Transient 429/login/load failures
+/// never qualify.
+fn unavailable_reason(
+    bound_url: Option<&str>,
+    tab: Option<&str>,
+    target: &Value,
+) -> Option<&'static str> {
+    let saved = bound_url.and_then(|u| web_model_connectors::conversation_url(u).ok())?;
+    if tab == Some(saved.as_str()) {
+        return None;
+    }
+    if target["last_delivery_status"] == "conversation_length_exceeded" {
+        return Some("conversation_full");
+    }
+    let recovery = &target["load_recovery"];
+    if recovery.is_object() && recovery["reload_attempts"].as_u64().unwrap_or(0) >= 3 {
+        return Some(if recovery["last_http_status"] == 404 {
+            "conversation_closed"
+        } else {
+            "reopen_exhausted"
+        });
+    }
+    None
 }
 
 fn pairing_error(code: &str) -> ApiError {

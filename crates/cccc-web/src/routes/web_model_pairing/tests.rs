@@ -972,20 +972,71 @@ fn composer_occupied_has_one_blocking_envelope_across_routes() {
 }
 
 #[test]
-fn bound_chat_unavailable_only_when_the_tab_left_the_bound_conversation() {
+fn unavailable_reason_needs_conclusive_evidence_not_just_a_moved_tab() {
     let bound = "https://chatgpt.com/c/abc-123-def?utm=1";
-    // Same conversation after URL normalization: already_paired stands.
-    assert!(!bound_chat_unavailable(
-        Some(bound),
-        Some("https://chatgpt.com/c/abc-123-def")
-    ));
-    // A different conversation or a fresh-chat page: unavailable.
-    assert!(bound_chat_unavailable(
-        Some(bound),
-        Some("https://chatgpt.com/c/other-9")
-    ));
-    assert!(bound_chat_unavailable(Some(bound), None));
+    let saved_tab = Some("https://chatgpt.com/c/abc-123-def");
+    let other_tab = Some("https://chatgpt.com/c/other-9");
+    // Tab on the bound conversation: never unavailable.
+    assert_eq!(unavailable_reason(Some(bound), saved_tab, &json!({})), None);
+    // Tab moved but no recorded failure: target_changed, already_paired stands.
+    for tab in [other_tab, None] {
+        assert_eq!(unavailable_reason(Some(bound), tab, &json!({})), None);
+        // Transient states never qualify.
+        assert_eq!(
+            unavailable_reason(
+                Some(bound),
+                tab,
+                &json!({"last_delivery_status":"rate_limited",
+                    "load_recovery":{"state":"rate_limited","reload_attempts":1}})
+            ),
+            None
+        );
+        // A bounded reload still in progress is not exhaustion.
+        assert_eq!(
+            unavailable_reason(
+                Some(bound),
+                tab,
+                &json!({"load_recovery":{"state":"conversation_load_failed",
+                    "reload_attempts":2,"last_http_status":500}})
+            ),
+            None
+        );
+    }
+    // Recorded full conversation: typed reason.
+    for tab in [other_tab, None] {
+        assert_eq!(
+            unavailable_reason(
+                Some(bound),
+                tab,
+                &json!({"last_delivery_status":"conversation_length_exceeded"})
+            ),
+            Some("conversation_full")
+        );
+    }
+    // Exhausted bounded reloads: closed on a persistent 404, otherwise
+    // reopen_exhausted.
+    assert_eq!(
+        unavailable_reason(
+            Some(bound),
+            other_tab,
+            &json!({"load_recovery":{"state":"conversation_load_failed",
+                "reload_attempts":3,"last_http_status":404}})
+        ),
+        Some("conversation_closed")
+    );
+    assert_eq!(
+        unavailable_reason(
+            Some(bound),
+            None,
+            &json!({"load_recovery":{"state":"conversation_load_failed",
+                "reload_attempts":3,"last_http_status":500}})
+        ),
+        Some("reopen_exhausted")
+    );
     // No binding or an unparseable saved URL stays conservative.
-    assert!(!bound_chat_unavailable(None, None));
-    assert!(!bound_chat_unavailable(Some("not a url"), None));
+    assert_eq!(unavailable_reason(None, None, &json!({})), None);
+    assert_eq!(
+        unavailable_reason(Some("not a url"), None, &json!({})),
+        None
+    );
 }

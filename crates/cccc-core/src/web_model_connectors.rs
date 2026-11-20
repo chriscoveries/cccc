@@ -600,7 +600,12 @@ pub fn begin_pairing(
         if c["bindings"][route_key(group, actor)]["transport"] == "mcp_events" {
             return Err(error("dots_requires_event_binding"));
         }
-        let (record, result) = pairing_candidate(group, actor, generation, automatic);
+        // cwf#855: the candidate pins the binding revision it was started
+        // against, so a stale attempt cannot overwrite a newer binding at
+        // confirm. Absent for candidates written before this field existed.
+        let expected_revision = c["bindings"][route_key(group, actor)]["revision"].clone();
+        let (record, result) =
+            pairing_candidate(group, actor, generation, automatic, expected_revision);
         // One record per Actor. Expired/failed attempts are retained until an
         // explicit retry or lifecycle removal, so a supervisor cannot resend.
         c["pairings"][route_key(group, actor)] = record;
@@ -613,6 +618,7 @@ fn pairing_candidate(
     actor: &str,
     generation: &str,
     automatic: bool,
+    expected_binding_revision: Value,
 ) -> (Value, Value) {
     let code = format!(
         "wm_pair_{}{}",
@@ -623,7 +629,8 @@ fn pairing_candidate(
     let expiry = now_ms() + PAIRING_TTL_MS;
     (
         json!({"pairing_id":operation,"group_id":group,"actor_id":actor,"generation":generation,
-            "automatic":automatic,"code_hash":hash(&code),"expires_at_ms":expiry,"state":"waiting","session_key":null}),
+            "automatic":automatic,"code_hash":hash(&code),"expires_at_ms":expiry,"state":"waiting","session_key":null,
+            "expected_binding_revision":expected_binding_revision}),
         json!({"pairing_id":operation,"code":code,"expires_at_ms":expiry,"state":"waiting"}),
     )
 }
@@ -808,6 +815,17 @@ pub fn confirm_pairing(
                 return Err(error("pairing_target_changed"));
             }
             return Ok(bound.clone());
+        }
+        // cwf#855: CAS the binding revision the candidate was started
+        // against. A binding that changed since begin (another confirmed
+        // pairing, a remove+rebind) must not be overwritten by this stale
+        // attempt. Candidates predating the field skip the check.
+        if pair
+            .as_object()
+            .is_some_and(|p| p.contains_key("expected_binding_revision"))
+            && c["bindings"][&key]["revision"] != pair["expected_binding_revision"]
+        {
+            return Err(error("binding_revision_changed"));
         }
         let bound = json!({"group_id":group,"actor_id":actor,"generation":generation,"pairing_id":pairing_id,"revision":Uuid::new_v4().to_string(),"session_key":session,"url":url,"state":"bound","updated_at":cccc_contracts::utc_now()});
         c["bindings"][&key] = bound.clone();

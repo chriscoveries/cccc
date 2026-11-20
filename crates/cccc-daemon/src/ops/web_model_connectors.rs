@@ -209,6 +209,7 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 | "pairing_submission_uncertain"
                 | "pairing_composer_occupied"
                 | "pairing_failed"
+                | "binding_revision_changed"
         ) {
             return Err(OpError::new("invalid_argument", "Invalid pairing failure"));
         }
