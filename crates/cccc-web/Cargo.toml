@@ -14,6 +14,10 @@ include = [
   "src/**",
 ]
 
+[features]
+# CI proof candidates must serve the bundled UI outside the build checkout.
+embedded-debug = ["rust-embed/debug-embed"]
+
 [dependencies]
 anyhow.workspace = true
 aes.workspace = true

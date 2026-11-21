@@ -26,6 +26,8 @@ pub(crate) use events::{
     contains_dedupe as contains_event_dedupe,
 };
 pub(crate) use supervisor::submit_prepared;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub(crate) use supervisor::observed_process;
 pub(crate) use supervisor::{
     cancel_turn, respond_interaction, respond_permission, structured_state,
 };
