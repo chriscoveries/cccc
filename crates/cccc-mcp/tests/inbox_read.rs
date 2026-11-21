@@ -566,7 +566,7 @@ async fn actor_scope_roots_and_file_reads_follow_the_authenticated_actor() {
                 .call(
                     actor,
                     "cccc_file",
-                    json!({"path":"same.txt","actor_id":"fixed-b","by":"user"}),
+                    json!({"path":"same.txt","actor_id":"fixed-b"}),
                 )
                 .await;
             assert_ne!(root["result"]["isError"], true, "{root}");
@@ -643,7 +643,7 @@ async fn actor_scope_file_send_stores_bytes_from_the_effective_workspace() {
                 .call(
                     Some(actor),
                     "cccc_file_send",
-                    json!({"path":"same.txt","to":["user"],"mode":"send","by":"user"}),
+                    json!({"path":"same.txt","to":["user"],"mode":"send","by":actor}),
                 )
                 .await;
             assert_ne!(sent["result"]["isError"], true, "{sent}");
@@ -1021,7 +1021,7 @@ async fn scope_bootstrap_stdio_cannot_select_another_actor() {
         .stdio_tool(
             "follow",
             "cccc_bootstrap",
-            json!({"actor_id":"fixed-b","by":"user"}),
+            json!({"actor_id":"fixed-b","by":"follow"}),
         )
         .await;
     println!(
