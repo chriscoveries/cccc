@@ -856,13 +856,16 @@ fn process_managed_batch(
     };
     if !running {
         // While the user answers a confirmation nothing is started, so nothing
-        // is spent: the wait can outlast every start this batch has.
-        if !actor_runtime::confirmation_required(&group.group_id, &actor.id) {
-            match wakes.spend(&group.group_id, &actor.id) {
-                Ok(true) => {}
-                Ok(false) => return BatchOutcome::Retry,
-                Err(reason) => return BatchOutcome::Terminal(reason),
-            }
+        // is spent: the wait can outlast every start this batch has. The paced
+        // relaunch waits with it — apply would only no-op, and its sleep would
+        // stall the retry until the confirmation itself has expired.
+        if actor_runtime::confirmation_required(&group.group_id, &actor.id) {
+            return BatchOutcome::Retry;
+        }
+        match wakes.spend(&group.group_id, &actor.id) {
+            Ok(true) => {}
+            Ok(false) => return BatchOutcome::Retry,
+            Err(reason) => return BatchOutcome::Terminal(reason),
         }
         let Some(attempt) = respawn_backoff(group, actor, cancelled) else {
             return BatchOutcome::Retry;
@@ -873,44 +876,47 @@ fn process_managed_batch(
             Err(_) => return BatchOutcome::Retry,
         };
         if !running {
-        let started = launch_runtime(home, group, actor, attempt);
-        match started {
-            Ok(None)
-                if matches!(
-                    push_owner_running(&group.group_id, &actor.id, false),
-                    Ok(true)
-                ) => {}
-            Ok(_) => return BatchOutcome::Retry,
-            Err(error) => {
-                if let Some(reason) = terminal_reason(&error) {
-                    return BatchOutcome::Terminal(reason);
-                }
-                if error.code == actor_runtime::RUNTIME_CONFIRMATION_PAUSED {
-                    // No native submission occurred. Keep the durable messages
-                    // retryable while freeing the worker for an explicit start.
-                    for job in jobs {
-                        finish_job(job, CompletedDelivery::Unsubmitted(error.message.clone()));
+            let started = launch_runtime(home, group, actor, attempt);
+            match started {
+                Ok(None)
+                    if matches!(
+                        push_owner_running(&group.group_id, &actor.id, false),
+                        Ok(true)
+                    ) => {}
+                Ok(_) => return BatchOutcome::Retry,
+                Err(error) => {
+                    if let Some(reason) = terminal_reason(&error) {
+                        return BatchOutcome::Terminal(reason);
                     }
-                    return BatchOutcome::Delivered;
+                    if error.code == actor_runtime::RUNTIME_CONFIRMATION_PAUSED {
+                        // No native submission occurred. Keep the durable messages
+                        // retryable while freeing the worker for an explicit start.
+                        for job in jobs {
+                            finish_job(
+                                job,
+                                CompletedDelivery::Unsubmitted(error.message.clone()),
+                            );
+                        }
+                        return BatchOutcome::Delivered;
+                    }
+                    if matches!(
+                        error.code.as_str(),
+                        actor_runtime::CLAUDE_RESUME_FAILED | actor_runtime::RUNTIME_RESUME_FAILED
+                    ) {
+                        // Release this worker's claims but leave inbox/ledger messages pending.
+                        // Explicit recovery redispatches them; automatic startup must stop.
+                        super::actor_delivery::fail_jobs(jobs, &error.message);
+                        return BatchOutcome::Delivered;
+                    }
+                    tracing::warn!(
+                        group_id = %group.group_id,
+                        actor_id = %actor.id,
+                        message = %error.message,
+                        "failed to auto-wake managed actor for message delivery"
+                    );
+                    return BatchOutcome::Retry;
                 }
-                if matches!(
-                    error.code.as_str(),
-                    actor_runtime::CLAUDE_RESUME_FAILED | actor_runtime::RUNTIME_RESUME_FAILED
-                ) {
-                    // Release this worker's claims but leave inbox/ledger messages pending.
-                    // Explicit recovery redispatches them; automatic startup must stop.
-                    super::actor_delivery::fail_jobs(jobs, &error.message);
-                    return BatchOutcome::Delivered;
-                }
-                tracing::warn!(
-                    group_id = %group.group_id,
-                    actor_id = %actor.id,
-                    message = %error.message,
-                    "failed to auto-wake managed actor for message delivery"
-                );
-                return BatchOutcome::Retry;
             }
-        }
         }
     }
     let events = jobs.iter().map(|job| job.event.clone()).collect::<Vec<_>>();
