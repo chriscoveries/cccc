@@ -566,7 +566,7 @@ async fn actor_scope_roots_and_file_reads_follow_the_authenticated_actor() {
                 .call(
                     actor,
                     "cccc_file",
-                    json!({"path":"same.txt","actor_id":"fixed-b"}),
+                    json!({"path":"same.txt"}),
                 )
                 .await;
             assert_ne!(root["result"]["isError"], true, "{root}");
