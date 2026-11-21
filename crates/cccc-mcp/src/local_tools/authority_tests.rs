@@ -153,9 +153,16 @@ async fn reply_gate(fixture: &Fixture, expected_op: &'static str) -> ReplyGate {
     }
 }
 
+/// Local tools a Dots actor may still call: the authority fences below
+/// apply to these.
 fn local_calls() -> Vec<(&'static str, Value)> {
-    #[allow(unused_mut)]
-    let mut calls = vec![
+    vec![("cccc_file", json!({"path":"private.txt"}))]
+}
+
+/// Host tools no Web Model class actor may reach: the router refuses them
+/// before any daemon read, so they never touch the scope.
+fn host_tool_calls() -> Vec<(&'static str, Value)> {
+    vec![
         (
             "cccc_repo_edit",
             json!({"action":"write","path":"marker.txt","content":"effect"}),
@@ -164,10 +171,6 @@ fn local_calls() -> Vec<(&'static str, Value)> {
             "cccc_apply_patch",
             json!({"patch":"*** Begin Patch\n*** Add File: marker.txt\n+effect\n*** End Patch"}),
         ),
-        ("cccc_file", json!({"path":"private.txt"})),
-    ];
-    #[cfg(unix)]
-    calls.extend([
         (
             "cccc_shell",
             json!({"command":["sh","-c","printf effect > marker.txt"]}),
@@ -176,8 +179,44 @@ fn local_calls() -> Vec<(&'static str, Value)> {
             "cccc_exec_command",
             json!({"command":["sh","-c","printf effect > marker.txt"],"yield_time_ms":100}),
         ),
-    ]);
-    calls
+    ]
+}
+
+#[tokio::test]
+async fn dots_host_tools_are_refused_before_any_daemon_call() {
+    for (name, args) in host_tool_calls() {
+        let fixture = Fixture::new();
+        // No daemon is listening for this home: a call that got past the
+        // router would fail on IPC, not with the Web Model refusal.
+        let client = DaemonClient::new(fixture.home.clone());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::router::call_with_context(
+                &fixture.home,
+                &client,
+                name,
+                args.as_object().expect("args").clone(),
+                Some(crate::RequestContext {
+                    native_binding: None,
+                    binding: Some(&fixture.binding),
+                    group_id: &fixture.group_id,
+                    actor_id: &fixture.actor_id,
+                }),
+                false,
+            ),
+        )
+        .await
+        .expect("refusal needs no daemon round trip");
+        let error = format!("{:?}", result.expect_err("host tool must be refused"));
+        assert!(
+            error.contains("not available to Web Model actors"),
+            "{name} refused for the wrong reason: {error}"
+        );
+        assert!(
+            !fixture.root.join("marker.txt").exists(),
+            "{name} must have no local effect"
+        );
+    }
 }
 
 async fn delayed_scope_call(

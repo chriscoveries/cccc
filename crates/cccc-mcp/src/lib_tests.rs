@@ -476,9 +476,9 @@ async fn daemon_error_details_survive_nested_code_mode_calls() {
         },
     )
     .expect("attach root");
-    let mut web = cccc_contracts::Actor::new("web1");
-    web.runtime = cccc_contracts::ActorRuntime::WebModel;
-    cccc_core::actors::add(&mut group, web).expect("add Web Model");
+    // Code mode is a host tool: Web Model actors are refused it, so the
+    // nested error contract is exercised by an ordinary agent runtime.
+    cccc_core::actors::add(&mut group, cccc_contracts::Actor::new("coder1")).expect("add coder");
     cccc_core::actors::add(&mut group, cccc_contracts::Actor::new("peer1")).expect("add peer");
     store.save(&group).expect("save group");
 
@@ -510,7 +510,7 @@ async fn daemon_error_details_survive_nested_code_mode_calls() {
                 "name":"cccc_code_exec",
                 "arguments":{
                     "group_id":group.group_id,
-                    "by":"web1",
+                    "by":"coder1",
                     "source":"try { await tools.cccc_message_send({to:['peer1'], text:'review this', mode:'send'}); } catch (error) { text(JSON.stringify({code:error.code, delivery_state:error.details?.delivery_state, new_side_effects:error.details?.new_side_effects})); }"
                 }
             }
