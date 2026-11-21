@@ -75,7 +75,7 @@ async fn optional_actions_use_the_published_default_before_routing() {
 }
 
 #[tokio::test]
-async fn workspace_defaults_inspect_and_edit_the_active_scope() {
+async fn workspace_defaults_inspect_and_refuse_host_edits_for_web_model() {
     let temp = tempfile::tempdir().expect("temp");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
     home.initialize().expect("initialize");
@@ -129,21 +129,36 @@ async fn workspace_defaults_inspect_and_edit_the_active_scope() {
     })
     .await
     .expect("daemon ready");
+    let call = |tool: &'static str, args: serde_json::Value| {
+        let home = home.clone();
+        let group_id = group.group_id.clone();
+        async move {
+            cccc_mcp::handle_request_for_actor(&home,
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":args}}),
+                &group_id,"web-peer").await
+        }
+    };
+    // Read-only workspace tools keep their default actions for Web Model.
     let mut results = Vec::new();
+    for args in [json!({}), json!({"action":"read", "path":"note.txt"})] {
+        let response = call("cccc_repo", args).await;
+        assert_ne!(response["result"]["isError"], true, "cccc_repo: {response}");
+        results.push(response["result"]["structuredContent"].clone());
+    }
+    // Host edits and git are refused to Web Model actors and change nothing.
     for (tool, args) in [
-        ("cccc_repo", json!({})),
-        ("cccc_repo", json!({"action":"read", "path":"note.txt"})),
         (
             "cccc_repo_edit",
             json!({"path":"note.txt", "old_text":"before", "new_text":"after"}),
         ),
         ("cccc_git", json!({})),
     ] {
-        let response = cccc_mcp::handle_request_for_actor(&home,
-            &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":args}}),
-            &group.group_id,"web-peer").await;
-        assert_ne!(response["result"]["isError"], true, "{tool}: {response}");
-        results.push(response["result"]["structuredContent"].clone());
+        let response = call(tool, args).await;
+        assert_eq!(response["result"]["isError"], true, "{tool}: {response}");
+        assert!(
+            response.to_string().contains("not available to Web Model actors"),
+            "{tool}: {response}"
+        );
     }
     daemon.abort();
     let _ = daemon.await;
@@ -154,17 +169,7 @@ async fn workspace_defaults_inspect_and_edit_the_active_scope() {
     assert!(results[1].to_string().contains("before"));
     assert_eq!(
         std::fs::read_to_string(root.join("note.txt")).expect("read"),
-        "after"
-    );
-    assert_eq!(
-        results[3]["exit_code"], 0,
-        "default git action must return status"
-    );
-    assert!(
-        results[3]["stdout"]
-            .as_str()
-            .expect("status")
-            .contains("note.txt")
+        "before"
     );
 }
 
