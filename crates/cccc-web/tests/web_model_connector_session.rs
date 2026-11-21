@@ -912,14 +912,17 @@ async fn grok_execution_routes_real_tools_and_nested_management_without_identity
             "{id} must stay enabled"
         );
     }
-    let denied = f
+    // beta was not stopped (nested management is refused), so its token
+    // still answers for beta alone.
+    let still = f
         .call(
             "cccc_connector_status",
             json!({"actor_token":tokens[1]}),
             json!({}),
         )
         .await;
-    assert_eq!(denied["result"]["isError"], true);
+    assert_ne!(still["result"]["isError"], true, "{still}");
+    assert_eq!(still["result"]["structuredContent"]["actor_id"], "beta", "{still}");
     let ledger = std::fs::read_to_string(groups.ledger_path(&f.group).expect("valid test fixture"))
         .expect("valid test fixture");
     for token in tokens {
