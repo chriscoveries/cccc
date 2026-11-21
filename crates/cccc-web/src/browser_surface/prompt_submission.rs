@@ -1718,6 +1718,7 @@ mod readiness_tests {
     #[tokio::test]
     async fn failed_page_inspection_invalidates_earlier_readiness() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -1767,6 +1768,7 @@ mod readiness_tests {
     #[tokio::test]
     async fn current_chatgpt_composer_is_not_an_auth_or_search_input() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -1832,6 +1834,7 @@ mod readiness_tests {
     #[tokio::test]
     async fn current_chatgpt_user_bubble_is_required_for_delivery_receipt() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -1878,6 +1881,7 @@ mod readiness_tests {
     #[tokio::test]
     async fn current_chatgpt_layout_submits_once_and_protects_drafts_and_generation() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -1942,6 +1946,7 @@ mod readiness_tests {
         use base64::Engine as _;
 
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -1994,6 +1999,7 @@ mod readiness_tests {
     #[tokio::test]
     async fn send_activation_rechecks_ownership_and_uses_the_button_handler_once() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -2094,6 +2100,7 @@ mod readiness_tests {
     #[tokio::test]
     async fn submission_receipt_requires_the_current_batch_in_a_user_message() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -2146,6 +2153,7 @@ mod readiness_tests {
     #[tokio::test]
     async fn send_wait_preserves_covered_controls_and_changed_drafts() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -2210,6 +2218,7 @@ mod readiness_tests {
     #[tokio::test]
     async fn owned_draft_recovery_rechecks_composer_and_page_before_replacement() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -2334,6 +2343,7 @@ mod readiness_tests {
     #[tokio::test]
     async fn unverified_submission_and_user_drafts_are_never_overwritten() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -2414,6 +2424,7 @@ mod readiness_tests {
     #[tokio::test]
     async fn chatgpt_auth_and_landing_inputs_are_not_conversation_composers() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;

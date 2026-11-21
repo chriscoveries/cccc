@@ -1557,6 +1557,7 @@ mod login_tests {
     #[tokio::test]
     async fn existing_chat_requires_review_and_empty_composer_before_resuming() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -1696,6 +1697,7 @@ mod login_tests {
     #[tokio::test]
     async fn login_verification_and_generation_do_not_claim_delivery_or_leave_the_page() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;

@@ -225,6 +225,7 @@ mod tests {
         .iter()
         .any(|path| std::path::Path::new(path).is_file())
         {
+            crate::browser_surface::browser_fixture_skip("a Chrome/Chromium binary");
             return;
         }
         let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
