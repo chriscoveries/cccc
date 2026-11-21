@@ -595,7 +595,9 @@ async fn code_mode_is_refused_to_web_model_actors() {
         "no code-mode cell may run: {response}"
     );
     assert!(
-        response.to_string().contains("not available to Web Model actors"),
+        response
+            .to_string()
+            .contains("not available to Web Model actors"),
         "code mode must be refused to Web Model actors: {response}"
     );
     daemon_task.abort();

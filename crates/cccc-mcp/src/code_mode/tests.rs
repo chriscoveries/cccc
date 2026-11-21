@@ -489,7 +489,10 @@ async fn nested_management_is_refused_to_web_model_actors() {
     let _ = daemon.await;
     // A Web Model foreman cannot reach actor management through a nested
     // capability route either: the call is refused and nothing changes.
-    let refused = format!("{:?}", result.expect_err("Web Model foreman may not stop a peer"));
+    let refused = format!(
+        "{:?}",
+        result.expect_err("Web Model foreman may not stop a peer")
+    );
     assert!(
         refused.contains("not available to Web Model actors"),
         "refused for the wrong reason: {refused}"
