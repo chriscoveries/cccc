@@ -451,11 +451,11 @@ async fn automation_run_now_reaches_the_daemon_with_the_bound_actor() {
 }
 
 #[tokio::test]
-async fn daemon_error_details_survive_nested_code_mode_calls() {
+async fn code_mode_is_refused_to_web_model_actors() {
     if crate::lib_tests::isolate_embedded_daemon_test(concat!(
         module_path!(),
         "::",
-        "daemon_error_details_survive_nested_code_mode_calls"
+        "code_mode_is_refused_to_web_model_actors"
     )) {
         return;
     }
@@ -476,9 +476,9 @@ async fn daemon_error_details_survive_nested_code_mode_calls() {
         },
     )
     .expect("attach root");
-    // Code mode is a host tool: Web Model actors are refused it, so the
-    // nested error contract is exercised by an ordinary agent runtime.
-    cccc_core::actors::add(&mut group, cccc_contracts::Actor::new("coder1")).expect("add coder");
+    let mut web = cccc_contracts::Actor::new("web1");
+    web.runtime = cccc_contracts::ActorRuntime::WebModel;
+    cccc_core::actors::add(&mut group, web).expect("add Web Model");
     cccc_core::actors::add(&mut group, cccc_contracts::Actor::new("peer1")).expect("add peer");
     store.save(&group).expect("save group");
 
@@ -510,20 +510,24 @@ async fn daemon_error_details_survive_nested_code_mode_calls() {
                 "name":"cccc_code_exec",
                 "arguments":{
                     "group_id":group.group_id,
-                    "by":"coder1",
+                    "by":"web1",
                     "source":"try { await tools.cccc_message_send({to:['peer1'], text:'review this', mode:'send'}); } catch (error) { text(JSON.stringify({code:error.code, delivery_state:error.details?.delivery_state, new_side_effects:error.details?.new_side_effects})); }"
                 }
             }
         }),
     )
     .await;
-    let output = response["result"]["structuredContent"]["output"]
-        .as_str()
-        .expect("code mode output");
-    let error: serde_json::Value = serde_json::from_str(output).expect("structured nested error");
-    assert_eq!(error["code"], "peer_insight_required");
-    assert_eq!(error["delivery_state"], "not_sent");
-    assert_eq!(error["new_side_effects"], false);
+    // Code mode is only ever offered to Web Model actors, and Web Model
+    // actors are now refused every host tool: the call never starts a cell,
+    // so no nested call (and no message) can run.
+    assert!(
+        response["result"]["structuredContent"]["output"].is_null(),
+        "no code-mode cell may run: {response}"
+    );
+    assert!(
+        response.to_string().contains("not available to Web Model actors"),
+        "code mode must be refused to Web Model actors: {response}"
+    );
     daemon_task.abort();
 }
 
