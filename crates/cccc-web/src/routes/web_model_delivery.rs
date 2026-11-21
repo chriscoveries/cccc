@@ -34,8 +34,8 @@ const COMPATIBILITY_IMAGE_NOTE: &str = "[CCCC] Compatibility attachment: the bla
 const WEB_TRANSPORT_NOTE: &str = "[CCCC] Web transport:\n\
 - This browser conversation is the web surface for the actor above.\n\
 - Browser-injected messages are already delivered in chat; do not call cccc_runtime_wait_next_turn for them.\n\
-- Use CCCC MCP tools for visible replies, handoffs, local workspace work, validation, and evidence.\n\
-- For non-trivial local development work, default to cccc_code_exec so repo reads, patches, tests, diffs, and reports stay in one focused Codex-style loop; use direct tools only for simple one-step actions.\n\
+- Use CCCC MCP tools for visible replies, handoffs, reading the workspace, and evidence.\n\
+- Web Model actors have no shell, git, patch, edit or code execution on the host; hand changes that need them to a local actor.\n\
 - If CCCC MCP tools are not visible in the selected web model, you do not have CCCC local access in this chat; tell the user to switch to a supported session that can see the CCCC connector.\n\
 - Text typed only in this web chat is not delivered to CCCC users or peers.";
 

@@ -675,7 +675,7 @@ async fn host_javascript_forwards_current_claim_arguments_without_business_code_
         assert_eq!(report["mode"], mode);
         assert_eq!(report["claim_count"], 1);
         for field in [
-            "code_completed",
+            "code_refused",
             "reply_completed",
             "turn_completed",
             "temporary_context_discarded",
