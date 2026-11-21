@@ -179,3 +179,75 @@ fn raw_pages_preserve_non_utf8_bytes_and_exact_cursors() {
     assert_eq!(first.data, [0xff, b'b', 0xfe]);
     assert_eq!(first.end_cursor, 44);
 }
+
+const CAPTURED_TERMINAL: &[u8] = include_bytes!("fixtures/captured_terminal.pty");
+
+#[test]
+fn captured_reads_coalesce_without_changing_raw_pages_or_absolute_cursors() {
+    let capacity = 5001;
+    for stride in [1, 3, 7, 4095, 4096, 4097, CAPTURED_TERMINAL.len()] {
+        let mut output = OutputBuffer::with_capacity_at(capacity, 37);
+        let mut consumed = 0;
+        for chunk in CAPTURED_TERMINAL.chunks(stride) {
+            output.push(chunk);
+            consumed += chunk.len();
+            let begin = consumed.saturating_sub(capacity);
+            let expected = &CAPTURED_TERMINAL[begin..consumed];
+            let raw = output.raw_retained_since(None);
+            assert_eq!(raw.data, expected);
+            assert_eq!(
+                (raw.start_cursor, raw.end_cursor),
+                (37 + begin as u64, 37 + consumed as u64)
+            );
+            assert!(output.chunks.len() <= capacity.div_ceil(4096) + 1);
+            if consumed == CAPTURED_TERMINAL.len() || consumed % 4096 == 0 {
+                let mut reference = OutputBuffer::with_capacity_at(capacity, 37);
+                reference.push(&CAPTURED_TERMINAL[..consumed]);
+                for limit in [1, 7, 129, capacity] {
+                    assert_eq!(
+                        output.raw_page_since(37, limit),
+                        reference.raw_page_since(37, limit)
+                    );
+                    assert_eq!(
+                        serde_json::to_value(output.page(None, limit)).expect("page"),
+                        serde_json::to_value(reference.page(None, limit)).expect("reference")
+                    );
+                    assert_eq!(
+                        serde_json::to_value(output.page_since(37, limit)).expect("forward"),
+                        serde_json::to_value(reference.page_since(37, limit)).expect("reference")
+                    );
+                }
+                assert_eq!(
+                    output.bracketed_paste_enabled(),
+                    reference.bracketed_paste_enabled()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn captured_oversized_input_clear_and_trim_keep_only_bounded_allocations() {
+    let mut output = OutputBuffer::with_capacity_at(41, 19);
+    output.push(CAPTURED_TERMINAL);
+    assert_eq!(
+        output.raw_retained_since(None).data,
+        CAPTURED_TERMINAL[CAPTURED_TERMINAL.len() - 41..]
+    );
+    assert!(output.chunks.iter().map(Vec::capacity).sum::<usize>() <= 82);
+    assert!(output.mode_probe.capacity() <= 32);
+    output.trim_to(17);
+    assert_eq!(
+        output.raw_retained_since(None).data,
+        CAPTURED_TERMINAL[CAPTURED_TERMINAL.len() - 17..]
+    );
+    let end = output.end_cursor();
+    output.clear();
+    assert_eq!(output.chunks.capacity(), 0);
+    output.push(&CAPTURED_TERMINAL[..13]);
+    assert_eq!(
+        output.raw_retained_since(None).data,
+        CAPTURED_TERMINAL[..13]
+    );
+    assert_eq!(output.raw_retained_since(None).start_cursor, end);
+}
