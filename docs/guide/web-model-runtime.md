@@ -332,6 +332,21 @@ metadata does not guarantee acceptance by ChatGPT's safety checks. If a call is
 blocked, report the actual tool error and seek the user's next instruction;
 do not automatically retry through a different tool or claim it succeeded.
 
+### Public file directory
+
+The host can confine a Web Model caller's file tools to one directory by setting
+`CCCC_WEB_MODEL_FILE_ROOT` on the CCCC process. While it is set,
+`cccc_file` (`read`, `info`, `blob_path`) and every path in a `cccc_file_send`
+resolve inside that directory: relative paths join it, absolute paths must
+already name a location inside it, and `..` components or symlinked spellings
+that land outside it are refused. Reads of `state/blobs/...` are exempt from the
+directory only for blobs carried by an attachment on a message the actor sent
+or that was delivered to it; every other blob is refused. `cccc_file_send`
+never accepts `state/blobs/` sources. An unset variable keeps the
+effective-workspace behavior; a set but unusable value refuses every confined
+path. For sends, place the directory inside the caller's effective workspace:
+the daemon applies its own scope check to the resolved files.
+
 Use `cccc_file` with `action="read"` and an active-workspace relative path, or the
 `state/blobs/...` path of an attachment delivered to this Group:
 
