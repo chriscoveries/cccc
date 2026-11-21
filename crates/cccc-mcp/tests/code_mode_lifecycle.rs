@@ -80,23 +80,6 @@ async fn code_mode_and_nested_commands_are_refused_to_web_model() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!root.join("calls").exists(), "no nested command may run");
     cccc_mcp::shutdown(&home).await;
-        } else {
-            let stopped = call(
-                &home,
-                &group.group_id,
-                "cccc_code_wait",
-                json!({"cell_id":id,"terminate":true}),
-            )
-            .await;
-            assert_eq!(stopped["status"], "terminated");
-        }
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-        assert!(
-            !root.join(format!("{prefix}.leaked")).exists(),
-            "owned nested process must stop"
-        );
-    }
-    cccc_mcp::shutdown(&home).await;
     daemon.abort();
     let _ = daemon.await;
 }
