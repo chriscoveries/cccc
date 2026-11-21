@@ -17,6 +17,7 @@ cccc-core = { package = "cccc-pair-core", version = "=0.4.58", path = "../cccc-c
 cccc-runtime = { package = "cccc-pair-runtime", version = "=0.4.58", path = "../cccc-runtime" }
 chrono.workspace = true
 globset.workspace = true
+libc.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
