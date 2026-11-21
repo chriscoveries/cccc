@@ -11,17 +11,69 @@ pub(crate) const PPTX_MIME: &str =
 
 /// Called only after active-scope or group-blob path resolution.
 pub(crate) fn read(path: &Path, args: &Map<String, Value>) -> Result<Value, String> {
+    reject_unsupported_args(args)?;
+    let metadata = path.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("read expects a regular file".into());
+    }
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    read_open(file, path, args)
+}
+
+/// Variant for Web Model callers: `O_NOFOLLOW` keeps a symlink swapped in
+/// after path resolution from redirecting the read outside the allowed
+/// directory, and the opened file must be a regular file.
+pub(crate) fn read_no_follow(path: &Path, args: &Map<String, Value>) -> Result<Value, String> {
+    reject_unsupported_args(args)?;
+    let file = open_no_follow(path)?;
+    read_open(file, path, args)
+}
+
+fn reject_unsupported_args(args: &Map<String, Value>) -> Result<(), String> {
     if ["region", "page", "view"]
         .iter()
         .any(|key| args.contains_key(*key))
     {
         return Err("region/page/view are not supported: read returns original files or UTF-8 text without local conversion. Refresh the connector's tool definitions".into());
     }
-    let metadata = path.metadata().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    if !file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err("read expects a regular file".into());
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_no_follow(path: &Path) -> Result<std::fs::File, String> {
+    // No O_NOFOLLOW off Unix: refuse a final-component link by name, then
+    // open. The resolve-then-open window remains on those platforms.
+    let metadata = path.symlink_metadata().map_err(|error| error.to_string())?;
     if !metadata.is_file() {
         return Err("read expects a regular file".into());
     }
-    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    std::fs::File::open(path).map_err(|error| error.to_string())
+}
+
+fn read_open(
+    mut file: std::fs::File,
+    path: &Path,
+    args: &Map<String, Value>,
+) -> Result<Value, String> {
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
     let mut prefix = Vec::new();
     (&mut file)
         .take(12)
@@ -396,5 +448,19 @@ mod tests {
                     .contains("PNG, JPEG or WebP")
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_reads_refuse_a_final_component_symlink() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let target = temp.path().join("target.txt");
+        std::fs::write(&target, "inside").expect("target");
+        let link = temp.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        // The ordinary read follows the link; the Web Model variant refuses.
+        assert!(read(&link, &Map::new()).is_ok());
+        assert!(read_no_follow(&link, &Map::new()).is_err());
+        assert!(read_no_follow(&target, &Map::new()).is_ok());
     }
 }
