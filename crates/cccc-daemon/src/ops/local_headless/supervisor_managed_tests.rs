@@ -179,10 +179,13 @@ mod structured_admission {
             .expect("attach scope");
             let opencode = runtime == ActorRuntime::Opencode;
             let kilo = runtime == ActorRuntime::Kilo;
+            let codex = runtime == ActorRuntime::Codex;
             let executable = temp.path().join(if opencode {
                 "opencode"
             } else if kilo {
                 "kilo-acp-fixture"
+            } else if codex {
+                "codex"
             } else {
                 "kiro-cli"
             });
@@ -192,6 +195,8 @@ mod structured_admission {
                     include_str!("../codex_voice_analyst/tests/opencode_v2_fixture.py")
                 } else if kilo {
                     include_str!("../codex_voice_analyst/tests/kilo_acp_fixture.py")
+                } else if codex {
+                    include_str!("../codex_voice_analyst/tests/codex_app_server_fixture.py")
                 } else {
                     include_str!("../codex_voice_analyst/native_acp/v3_fixture.py")
                 },
@@ -201,7 +206,7 @@ mod structured_admission {
                 .expect("fixture permissions");
             let mut actor = Actor::new("worker");
             actor.runtime = runtime;
-            actor.runtime_mode = if opencode || kilo {
+            actor.runtime_mode = if opencode || kilo || codex {
                 RuntimeMode::Default
             } else {
                 RuntimeMode::Acp
@@ -223,6 +228,13 @@ mod structured_admission {
                     "OPENCODE_FIXTURE_DIR".into(),
                     temp.path()
                         .join("opencode-events")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                (
+                    "CODEX_FIXTURE_DIR".into(),
+                    temp.path()
+                        .join("codex-events")
                         .to_string_lossy()
                         .into_owned(),
                 ),
@@ -438,6 +450,44 @@ mod structured_admission {
         fixture.wait(|| probe(&fixture).is_some_and(|sample| !sample.working));
         let idle_end = sampled(&fixture);
         assert_same_identity(&idle_start, &idle_end);
+    }
+
+    #[test]
+    fn f615_codex_labelled_busy_idle_busy_keeps_one_generation_and_thread() {
+        let fixture = Fixture::with_runtime(ActorRuntime::Codex);
+        fixture.wait(|| {
+            probe(&fixture).is_some_and(|sample| !sample.provider_thread_id.is_empty())
+        });
+        let idle_start = sampled(&fixture);
+        assert!(idle_start.running);
+        assert!(!idle_start.working, "fresh managed session must start idle");
+        assert_eq!(idle_start.provider_thread_id, "thread-1");
+        assert!(
+            !idle_start.headless_status.is_empty(),
+            "HeadlessStatus must be reported for a running session"
+        );
+
+        fixture.send("F615-CODEX-HOLD labelled busy turn");
+        fixture.wait(|| probe(&fixture).is_some_and(|sample| sample.working));
+        let busy = sampled(&fixture);
+        assert!(busy.working, "held app-server turn must report working");
+        assert_same_identity(&idle_start, &busy);
+
+        std::fs::create_dir_all(fixture.temp.path().join("codex-events"))
+            .expect("fixture dir");
+        std::fs::write(fixture.temp.path().join("codex-events/release-turn"), "release")
+            .expect("release held turn");
+        fixture.wait(|| probe(&fixture).is_some_and(|sample| !sample.working));
+        let idle_middle = sampled(&fixture);
+        assert!(!idle_middle.working, "released turn must return to idle");
+        assert_same_identity(&idle_start, &idle_middle);
+
+        let second = fixture.send("F615-CODEX labelled second turn");
+        fixture.wait(|| fixture.outcome(&second).as_deref() == Some("accepted"));
+        fixture.wait(|| probe(&fixture).is_some_and(|sample| !sample.working));
+        let idle_end = sampled(&fixture);
+        assert_same_identity(&idle_start, &idle_end);
+        assert_eq!(idle_end.provider_thread_id, "thread-1");
     }
 
     #[test]
