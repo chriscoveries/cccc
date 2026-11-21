@@ -52,6 +52,7 @@ mod tests {
             .flat_map(|p| p.tool_names);
         let reachable = ordinary
             .chain(cccc_core::web_model_tool_names())
+            .chain(cccc_core::UNPROFILED_TOOL_NAMES.iter().copied())
             .chain(cccc_core::USER_CONTROL_TOOL_NAMES.iter().copied())
             .chain(cccc_core::LOCAL_SESSION_TOOL_NAMES.iter().copied())
             .chain(cccc_core::VOICE_SECRETARY_TASK_TOOL_NAMES.iter().copied())

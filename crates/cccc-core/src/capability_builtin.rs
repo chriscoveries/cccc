@@ -31,13 +31,17 @@ pub const CORE_TOOL_NAMES: &[&str] = &[
 
 const WEB_MODEL_EXTRA_TOOL_NAMES: &[&str] = &[
     "cccc_capability_state",
-    "cccc_capability_enable",
-    "cccc_capability_install",
     "cccc_tracked_send",
     "cccc_repo",
     "cccc_presentation",
     "cccc_runtime_wait_next_turn",
     "cccc_runtime_complete_turn",
+];
+
+/// Published contract tools that no base actor profile advertises. They stay
+/// in the catalog for callers that name them directly; Web Model actors are
+/// refused them at authorization.
+pub const UNPROFILED_TOOL_NAMES: &[&str] = &[
     "cccc_code_exec",
     "cccc_code_wait",
     "cccc_repo_edit",

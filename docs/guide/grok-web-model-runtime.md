@@ -16,7 +16,7 @@ Global connection settings require administrator access. Users without it see an
 
 ## Task order and completion
 
-Webhook events carry a temporary **claim-only** credential and event ID, not the business message. Only the first successful claimant receives the task and a different execution credential. The daemon preserves ledger order, permits one active turn per agent, and makes the next wake eligible after exact completion. A completed task's credential can only retry its original completion; it cannot acknowledge a newer task. Duplicate or out-of-order Routine runs cannot claim the same inputs twice. Nested `cccc_code_exec` tools inherit the validated execution context.
+Webhook events carry a temporary **claim-only** credential and event ID, not the business message. Only the first successful claimant receives the task and a different execution credential. The daemon preserves ledger order, permits one active turn per agent, and makes the next wake eligible after exact completion. A completed task's credential can only retry its original completion; it cannot acknowledge a newer task. Duplicate or out-of-order Routine runs cannot claim the same inputs twice.
 
 HTTP 200 means Grok accepted a wake, not that it claimed or completed the task. Transient network/429/5xx failures retry the **same wake** at most three times with 2s/4s backoff. An acknowledged wake is not automatically resent. After two minutes without a claim, **Retry wake** becomes available; first check the saved Routine, connector permissions and provider limits. Duplicate cloud runs remain possible after uncertain network delivery, but CCCC still admits only one task.
 
@@ -39,7 +39,8 @@ Grok's tested MCP path supplies no stable host Bot identity. Each top-level busi
 Keep the successful claim result together as temporary context for that run.
 Host JavaScript orchestration may pass its credential as the CCCC tool's
 `actor_token` argument, including a literal argument value if needed; this does
-not permit putting it in `cccc_code_exec` `source`/`code`, business code or logs.
+not permit putting it in business code, files, commands, logs, saved
+instructions or user-facing messages.
 If a variable reference is lost, the same execution may use its original claim
 tool result to populate arguments. Do not claim again or use a previous run,
 conversation history or saved memory to recover credentials. Discard temporary
