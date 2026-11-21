@@ -82,8 +82,26 @@ async fn grok_actors_reject_browser_apis_without_launching_a_browser() {
     .expect("json");
     assert_eq!(body["ok"], false);
 }
+/// Web Model file tools reach only `CCCC_WEB_MODEL_FILE_ROOT`, a host-wide
+/// setting. Every fixture in this binary shares one staging directory holding
+/// the same sample file, set once before the first fixture is built.
+fn shared_web_file_root() -> &'static std::path::Path {
+    static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("web file root");
+        std::fs::write(dir.path().join("sample.txt"), "local fixture content")
+            .expect("web file root sample");
+        // SAFETY: set exactly once, to the same value for every test, before
+        // any fixture's daemon or MCP call reads it.
+        unsafe { std::env::set_var("CCCC_WEB_MODEL_FILE_ROOT", dir.path()) };
+        dir
+    })
+    .path()
+}
+
 impl Fixture {
     fn new() -> Self {
+        shared_web_file_root();
         let temp = tempfile::tempdir().expect("valid test fixture");
         let home = HomeLayout::from_path(temp.path().join("home")).expect("valid test fixture");
         home.initialize().expect("valid test fixture");
