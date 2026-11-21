@@ -178,13 +178,20 @@ mod structured_admission {
             )
             .expect("attach scope");
             let opencode = runtime == ActorRuntime::Opencode;
-            let executable = temp
-                .path()
-                .join(if opencode { "opencode" } else { "kiro-cli" });
+            let kilo = runtime == ActorRuntime::Kilo;
+            let executable = temp.path().join(if opencode {
+                "opencode"
+            } else if kilo {
+                "kilo-acp-fixture"
+            } else {
+                "kiro-cli"
+            });
             std::fs::write(
                 &executable,
                 if opencode {
                     include_str!("../codex_voice_analyst/tests/opencode_v2_fixture.py")
+                } else if kilo {
+                    include_str!("../codex_voice_analyst/tests/kilo_acp_fixture.py")
                 } else {
                     include_str!("../codex_voice_analyst/native_acp/v3_fixture.py")
                 },
@@ -194,7 +201,7 @@ mod structured_admission {
                 .expect("fixture permissions");
             let mut actor = Actor::new("worker");
             actor.runtime = runtime;
-            actor.runtime_mode = if opencode {
+            actor.runtime_mode = if opencode || kilo {
                 RuntimeMode::Default
             } else {
                 RuntimeMode::Acp
@@ -279,6 +286,158 @@ mod structured_admission {
             actor_delivery::shutdown_actor(&self.group.group_id, "worker");
             let _ = local_headless::stop(&self.group.group_id, "worker");
         }
+    }
+
+    /// One labelled idle-proof sample: everything the CWF #615 fence needs
+    /// to decide whether a managed session may be resumed or restarted.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct IdleProbe {
+        generation: String,
+        running: bool,
+        working: bool,
+        headless_status: String,
+        provider_session_id: String,
+        provider_thread_id: String,
+    }
+
+    fn runtime_record(fixture: &Fixture) -> Value {
+        let path = GroupStore::new(fixture.home.clone())
+            .expect("store")
+            .state_dir(&fixture.group.group_id)
+            .expect("state")
+            .join("runtime_sessions/worker.json");
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or(Value::Null)
+    }
+
+    fn probe(fixture: &Fixture) -> Option<IdleProbe> {
+        let state = local_headless::structured_state(&fixture.group.group_id, "worker")?;
+        let record = runtime_record(fixture);
+        Some(IdleProbe {
+            generation: state["generation"].as_str()?.to_owned(),
+            running: state["running"].as_bool()?,
+            working: state["working"].as_bool()?,
+            headless_status: local_headless::status(&fixture.group.group_id, "worker")
+                .map(|status| status.status)
+                .unwrap_or_default(),
+            provider_session_id: record["provider_session_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            provider_thread_id: record["provider_thread_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        })
+    }
+
+    fn sampled(fixture: &Fixture) -> IdleProbe {
+        probe(fixture).expect("managed session must be sampleable")
+    }
+
+    fn assert_same_identity(a: &IdleProbe, b: &IdleProbe) {
+        assert_eq!(a.generation, b.generation, "actor generation changed");
+        assert_eq!(
+            a.provider_session_id, b.provider_session_id,
+            "provider session id changed"
+        );
+        assert_eq!(
+            a.provider_thread_id, b.provider_thread_id,
+            "provider thread id changed"
+        );
+    }
+
+    #[test]
+    fn f615_opencode_labelled_busy_idle_busy_keeps_one_generation_and_session() {
+        let fixture = Fixture::with_runtime(ActorRuntime::Opencode);
+        fixture.wait(|| {
+            probe(&fixture).is_some_and(|sample| !sample.provider_session_id.is_empty())
+        });
+        let idle_start = sampled(&fixture);
+        assert!(idle_start.running);
+        assert!(!idle_start.working, "fresh managed session must start idle");
+        assert_eq!(idle_start.provider_session_id, "ses_chet_fixture");
+        assert!(
+            !idle_start.headless_status.is_empty(),
+            "HeadlessStatus must be reported for a running session"
+        );
+
+        let held = fixture.send("F615-OC HOLD_FIRST labelled busy turn");
+        fixture.wait(|| probe(&fixture).is_some_and(|sample| sample.working));
+        let busy = sampled(&fixture);
+        assert!(busy.working, "HOLD_FIRST turn must report working");
+        assert_same_identity(&idle_start, &busy);
+
+        std::fs::write(
+            fixture.temp.path().join("opencode-events/release-completion"),
+            "release",
+        )
+        .expect("release held turn");
+        fixture.wait(|| fixture.outcome(&held).as_deref() == Some("accepted"));
+        fixture.wait(|| probe(&fixture).is_some_and(|sample| !sample.working));
+        let idle_middle = sampled(&fixture);
+        assert!(!idle_middle.working, "released turn must return to idle");
+        assert_same_identity(&idle_start, &idle_middle);
+
+        let second = fixture.send("F615-OC labelled second turn");
+        fixture.wait(|| fixture.outcome(&second).as_deref() == Some("accepted"));
+        fixture.wait(|| probe(&fixture).is_some_and(|sample| !sample.working));
+        let idle_end = sampled(&fixture);
+        assert_same_identity(&idle_start, &idle_end);
+        assert_eq!(idle_end.provider_session_id, "ses_chet_fixture");
+
+        let types: Vec<&str> = fixture
+            .journal()
+            .iter()
+            .filter_map(|event| event["type"].as_str())
+            .collect();
+        for expected in ["headless.turn.started", "headless.turn.completed"] {
+            assert!(
+                types.contains(&expected),
+                "journal must record {expected}: {types:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn f615_kilo_labelled_busy_idle_busy_keeps_one_generation_and_session() {
+        let fixture = Fixture::with_runtime(ActorRuntime::Kilo);
+        fixture.wait(|| {
+            probe(&fixture).is_some_and(|sample| !sample.provider_session_id.is_empty())
+        });
+        let idle_start = sampled(&fixture);
+        assert!(idle_start.running);
+        assert!(!idle_start.working, "fresh managed session must start idle");
+        assert!(!idle_start.provider_session_id.is_empty());
+        assert!(
+            !idle_start.headless_status.is_empty(),
+            "HeadlessStatus must be reported for a running session"
+        );
+
+        fixture.send("F615-KILO HOLD labelled busy turn");
+        fixture.wait(|| probe(&fixture).is_some_and(|sample| sample.working));
+        let busy = sampled(&fixture);
+        assert!(busy.working, "HOLD prompt must report working");
+        assert_same_identity(&idle_start, &busy);
+
+        let generation = busy.generation.clone();
+        assert!(
+            local_headless::cancel_turn(&fixture.group.group_id, "worker", &generation)
+                .expect("cancel held turn"),
+            "an active turn must be cancellable"
+        );
+        fixture.wait(|| probe(&fixture).is_some_and(|sample| !sample.working));
+        let idle_middle = sampled(&fixture);
+        assert!(!idle_middle.working, "cancelled turn must return to idle");
+        assert_same_identity(&idle_start, &idle_middle);
+
+        let second = fixture.send("F615-KILO labelled second turn");
+        fixture.wait(|| fixture.outcome(&second).as_deref() == Some("accepted"));
+        fixture.wait(|| probe(&fixture).is_some_and(|sample| !sample.working));
+        let idle_end = sampled(&fixture);
+        assert_same_identity(&idle_start, &idle_end);
     }
 
     #[test]
