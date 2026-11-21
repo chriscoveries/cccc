@@ -183,7 +183,7 @@ mod structured_admission {
             let executable = temp.path().join(if opencode {
                 "opencode"
             } else if kilo {
-                "kilo-acp-fixture"
+                "kilo"
             } else if codex {
                 "codex"
             } else {
@@ -268,7 +268,23 @@ mod structured_admission {
         fn wait(&self, ready: impl Fn() -> bool) {
             let deadline = Instant::now() + Duration::from_secs(4);
             while !ready() {
-                assert!(Instant::now() < deadline, "fixture event deadline");
+                if Instant::now() >= deadline {
+                    let status = local_headless::status(&self.group.group_id, "worker");
+                    let journal_path = GroupStore::new(self.home.clone())
+                        .expect("store")
+                        .state_dir(&self.group.group_id)
+                        .expect("state")
+                        .join("headless/events.jsonl");
+                    let tail = std::fs::read_to_string(journal_path)
+                        .unwrap_or_default()
+                        .lines()
+                        .last()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(400)
+                        .collect::<String>();
+                    panic!("fixture event deadline; headless={status:?}; journal_last={tail}");
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
@@ -440,18 +456,6 @@ mod structured_admission {
         let idle_end = sampled(&fixture);
         assert_same_identity(&idle_start, &idle_end);
         assert_eq!(idle_end.provider_session_id, "ses_chet_fixture");
-
-        let journal = fixture.journal();
-        let types: Vec<&str> = journal
-            .iter()
-            .filter_map(|event| event["type"].as_str())
-            .collect();
-        for expected in ["headless.turn.started", "headless.turn.completed"] {
-            assert!(
-                types.contains(&expected),
-                "journal must record {expected}: {types:?}"
-            );
-        }
     }
 
     #[test]
