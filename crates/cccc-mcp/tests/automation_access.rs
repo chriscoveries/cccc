@@ -140,31 +140,18 @@ async fn automation_permissions_follow_the_authenticated_actor() {
     let before_web = automation(&home, group_id, "lead", json!({"action":"state"})).await;
     assert_eq!(before_web["structuredContent"]["version"], version);
 
-    // A Web Model peer cannot name the tool directly, but through capability use
-    // it sets a reminder for itself, as any peer can.
+    // A Web Model peer reaches automation neither directly nor through
+    // capability use: its capability route is a read-only allow list, so
+    // even a reminder for itself is refused, and nothing is written.
     let direct = automation(&home, group_id, "web1", json!({"action":"state"})).await;
     assert_eq!(direct["isError"], true, "{direct}");
-    let web_own = automation_via_capability_use(
-        &home,
-        group_id,
-        "web1",
-        json!({"action":"manage","actions":[{"type":"create_rule","rule":{
-            "id":"web1-hourly","trigger":{"kind":"interval","every_seconds":3600},
-            "action":{"kind":"notify","message":"hourly check"}
-        }}]}),
-    )
-    .await;
-    assert_ne!(web_own["isError"], true, "{web_own}");
-    // Capability use returns the tool's own result under `tool_result`.
-    let web_result = json!({"structuredContent": web_own["structuredContent"]["tool_result"]});
-    let web_reminder = rule(&web_result, "web1-hourly").expect("saved Web Model reminder");
-    assert_eq!(web_reminder["scope"], "personal");
-    assert_eq!(web_reminder["to"], json!(["web1"]));
-    let web_version = web_result["structuredContent"]["version"].clone();
-
-    // The route grants no more than a peer holds: a reminder for another Actor,
-    // or one claimed as the user, is refused and nothing is written.
     for (id, arguments) in [
+        (
+            "web1-hourly",
+            json!({"action":"manage","actions":[{"type":"create_rule","rule":{
+            "id":"web1-hourly","trigger":{"kind":"interval","every_seconds":3600},
+            "action":{"kind":"notify","message":"hourly check"}}}]}),
+        ),
         (
             "web1-nudge",
             json!({"action":"manage","actions":[{"type":"create_rule","rule":{
@@ -183,7 +170,9 @@ async fn automation_permissions_follow_the_authenticated_actor() {
         let refused = automation_via_capability_use(&home, group_id, "web1", arguments).await;
         assert_eq!(refused["isError"], true, "{id}: {refused}");
         assert!(
-            refused.to_string().contains("permission_denied"),
+            refused
+                .to_string()
+                .contains("not available to Web Model actors"),
             "{id}: {refused}"
         );
         let after = automation(&home, group_id, "lead", json!({"action":"state"})).await;
@@ -193,7 +182,7 @@ async fn automation_permissions_follow_the_authenticated_actor() {
     let state = automation(&home, group_id, "lead", json!({"action":"state"})).await;
     daemon.abort();
     let _ = daemon.await;
-    assert_eq!(state["structuredContent"]["version"], web_version);
+    assert_eq!(state["structuredContent"]["version"], version);
     assert_eq!(
         rule(&state, "nightly-pause").expect("kept")["enabled"],
         true
