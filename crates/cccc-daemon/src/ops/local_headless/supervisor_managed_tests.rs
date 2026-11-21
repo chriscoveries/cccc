@@ -361,8 +361,47 @@ mod structured_admission {
         );
     }
 
+    /// Managed provider launches resolve a CCCC executable for MCP binding.
+    /// Re-run the labelled case in a child process with an offline launcher
+    /// stub, the same isolation `opencode_actor_delivery_still_uses_its_owned_http_queue` uses.
+    /// Returns true inside the child; the parent spawns it and returns false.
+    fn f615_fixture_child_or_spawn(test_name: &str) -> bool {
+        if std::env::var_os("F615_FIXTURE_CHILD").is_some() {
+            return true;
+        }
+        let temp = tempfile::tempdir().expect("isolated launcher");
+        let launcher = temp.path().join("cccc");
+        std::fs::write(&launcher, "#!/bin/sh\nexit 1\n").expect("offline MCP launcher");
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700))
+            .expect("launcher executable");
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", test_name, "--nocapture"])
+            .env("F615_FIXTURE_CHILD", "1")
+            .env("CCCC_LAUNCHER_PATH", launcher)
+            .env("HOME", temp.path().join("home"))
+            .env("CCCC_HOME", temp.path().join("cccc-home"))
+            .env("CODEX_HOME", temp.path().join("codex"))
+            .output()
+            .expect("fixture child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && stdout
+                    .lines()
+                    .any(|line| line.starts_with("test result: ok. 1 passed;")),
+            "fixture child failed or did not run:\n{stdout}\n{stderr}"
+        );
+        false
+    }
+
     #[test]
     fn f615_opencode_labelled_busy_idle_busy_keeps_one_generation_and_session() {
+        if !f615_fixture_child_or_spawn(
+            "ops::local_headless::supervisor_managed_tests::structured_admission::f615_opencode_labelled_busy_idle_busy_keeps_one_generation_and_session",
+        ) {
+            return;
+        }
         let fixture = Fixture::with_runtime(ActorRuntime::Opencode);
         fixture
             .wait(|| probe(&fixture).is_some_and(|sample| !sample.provider_session_id.is_empty()));
@@ -417,6 +456,11 @@ mod structured_admission {
 
     #[test]
     fn f615_kilo_labelled_busy_idle_busy_keeps_one_generation_and_session() {
+        if !f615_fixture_child_or_spawn(
+            "ops::local_headless::supervisor_managed_tests::structured_admission::f615_kilo_labelled_busy_idle_busy_keeps_one_generation_and_session",
+        ) {
+            return;
+        }
         let fixture = Fixture::with_runtime(ActorRuntime::Kilo);
         fixture
             .wait(|| probe(&fixture).is_some_and(|sample| !sample.provider_session_id.is_empty()));
@@ -455,6 +499,11 @@ mod structured_admission {
 
     #[test]
     fn f615_codex_labelled_busy_idle_busy_keeps_one_generation_and_thread() {
+        if !f615_fixture_child_or_spawn(
+            "ops::local_headless::supervisor_managed_tests::structured_admission::f615_codex_labelled_busy_idle_busy_keeps_one_generation_and_thread",
+        ) {
+            return;
+        }
         let fixture = Fixture::with_runtime(ActorRuntime::Codex);
         fixture
             .wait(|| probe(&fixture).is_some_and(|sample| !sample.provider_thread_id.is_empty()));
