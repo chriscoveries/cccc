@@ -482,7 +482,7 @@ async fn automation_run_now_reaches_the_daemon_with_the_bound_actor() {
             "jsonrpc":"2.0","id":1,"method":"tools/call",
             "params":{"name":"cccc_capability_use","arguments":{
                 "tool_name":"cccc_automation",
-                "tool_arguments":{"action":action,"rule_id":"team","expected_version":7,"by":"user"}
+                "tool_arguments":{"action":action,"rule_id":"team","expected_version":7,"by":"lead"}
             }}
         })
     };
