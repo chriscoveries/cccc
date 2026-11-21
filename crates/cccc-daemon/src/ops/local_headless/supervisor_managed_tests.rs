@@ -400,8 +400,8 @@ mod structured_admission {
         assert_same_identity(&idle_start, &idle_end);
         assert_eq!(idle_end.provider_session_id, "ses_chet_fixture");
 
-        let types: Vec<&str> = fixture
-            .journal()
+        let journal = fixture.journal();
+        let types: Vec<&str> = journal
             .iter()
             .filter_map(|event| event["type"].as_str())
             .collect();
