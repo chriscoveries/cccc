@@ -1,9 +1,11 @@
+#![cfg_attr(not(test), deny(clippy::disallowed_methods))]
 pub mod access_tokens;
 pub mod active;
 pub mod actors;
 #[cfg(test)]
 mod actors_tests;
 pub mod assistant_state;
+pub mod attended_update;
 pub mod automation;
 mod automation_render;
 mod automation_schedule;
@@ -17,6 +19,7 @@ mod capability_builtin;
 pub mod capability_legacy;
 #[cfg(test)]
 mod capability_legacy_tests;
+pub mod capability_recommendations;
 pub mod chet_history;
 pub mod cloudflared;
 pub mod codex_voice_settings;
@@ -51,6 +54,7 @@ pub mod mail_pending;
 pub mod membership;
 pub mod monitor_records;
 pub mod nomcp;
+pub mod owned_mcp;
 pub mod path_input;
 pub mod peer_insight;
 pub mod permissions;
@@ -63,6 +67,10 @@ pub mod scope;
 pub mod settings;
 pub mod space_credentials;
 pub mod system_prompt;
+#[cfg(unix)]
+pub mod unix_socket_path;
+pub mod update_capabilities;
+pub mod update_image;
 pub mod user_requests;
 pub mod voice_notifications;
 pub mod voice_recording_lease;
@@ -77,10 +85,12 @@ pub mod workspace_changes;
 pub mod workspace_git;
 
 pub use capability_builtin::{
-    CORE_TOOL_NAMES, LOCAL_SESSION_TOOL_NAMES, SELF_EVOLUTION_CAPABILITY_ID,
+    CORE_TOOL_NAMES, HARK_TOOL_NAMES, LOCAL_SESSION_TOOL_NAMES, SELF_EVOLUTION_CAPABILITY_ID,
     USER_CONTROL_TOOL_NAMES, VOICE_SECRETARY_TASK_TOOL_NAMES, actor_base_tool_names,
-    is_builtin_capability_pack_tool, web_model_tool_names,
+    hark_tool_allowed, is_builtin_capability_pack_tool, web_model_tool_names,
 };
 pub use group::{GroupDoc, GroupStore, Scope};
 pub use home::{HomeError, HomeLayout};
 pub use registry::{GroupMeta, Registry};
+#[cfg(test)]
+cccc_runtime::process_watchdog_test_entry!();

@@ -287,10 +287,13 @@ fn headless_status(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 fn headless_set_status(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let actor = actor(&group, &actor_id)?;
-    if actor.runtime == cccc_contracts::ActorRuntime::ChatgptDots {
+    if matches!(
+        actor.runtime,
+        cccc_contracts::ActorRuntime::ChatgptDots | cccc_contracts::ActorRuntime::Hark
+    ) {
         return Err(OpError::new(
             "provider_managed_headless",
-            "Dots task status is owned by the daemon",
+            "Native pull task status is owned by the daemon",
         ));
     }
     if super::local_headless::supports(actor) {
@@ -333,6 +336,12 @@ pub(super) fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpRe
         ));
     }
     let actor = actor(&group, &actor_id)?;
+    if actor.runtime == cccc_contracts::ActorRuntime::Hark && request.op != "hark_work_claim" {
+        return Err(OpError::new(
+            "hark_connector_required",
+            "Hark work requires its agent-bound pull connector",
+        ));
+    }
     if actor.runtime == cccc_contracts::ActorRuntime::ChatgptDots && request.op != "dots_work_claim"
     {
         return Err(OpError::new(
@@ -481,7 +490,14 @@ pub(super) fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpRe
         }
     }
     if messages.is_empty() {
-        set_runtime_status(home, &group, &actor_id, "waiting", "", "", &[])?;
+        // An idle browser asks again every few seconds; rewriting the same
+        // waiting state would rewrite group.yaml each time. The state read
+        // above is still current: this request holds the Group's write permit
+        // and claiming changes only delivery records.
+        let unchanged = transport == "web_model_browser" && idle_state_recorded(&active_state);
+        if !unchanged {
+            set_runtime_status(home, &group, &actor_id, "waiting", "", "", &[])?;
+        }
         return object(json!({"status":"idle","turn":null,"suggested_retry_after_ms":5000}));
     }
     let event_ids: Vec<_> = messages.iter().map(|event| event.id.clone()).collect();
@@ -555,6 +571,12 @@ pub(super) fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpRe
 fn recover_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let actor = require_web_model_actor(&group, &actor_id)?;
+    if actor.runtime == cccc_contracts::ActorRuntime::Hark {
+        return Err(OpError::new(
+            "hark_explicit_resolution_required",
+            "Hark unfinished work requires explicit user resolution; it is not replayed",
+        ));
+    }
     if actor.runtime == cccc_contracts::ActorRuntime::GrokWebModel {
         return Err(OpError::new(
             "grok_event_required",
@@ -750,6 +772,7 @@ fn complete_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         .is_some_and(|binding| match binding["transport"].as_str() {
             Some("grok_webhook") => binding["grok_turn_id"].as_str() != Some(turn_id.as_str()),
             Some("mcp_events") => binding["dots_turn_id"].as_str() != Some(turn_id.as_str()),
+            Some("hark_pull") => binding["hark_turn_id"].as_str() != Some(turn_id.as_str()),
             _ => false,
         })
     {
@@ -829,6 +852,7 @@ pub(super) fn finish_completion(
         )?;
     }
     super::grok_webhook::completed(home, group, actor_id, completion)?;
+    super::hark_pull::completed(home, group, actor_id, completion)?;
     let runtime = actor_state(home, &group.group_id, actor_id)?;
     let owns_active_projection =
         runtime["active_turn_id"].as_str() == Some(completion.turn_id.as_str());
@@ -849,6 +873,12 @@ pub(super) fn finish_completion(
 fn record_browser_delivery(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let actor = require_web_model_actor(&group, &actor_id)?;
+    if actor.runtime == cccc_contracts::ActorRuntime::Hark {
+        return Err(OpError::new(
+            "hark_pull_required",
+            "Hark has no browser delivery",
+        ));
+    }
     if actor.runtime == cccc_contracts::ActorRuntime::GrokWebModel {
         return Err(OpError::new(
             "grok_event_required",
@@ -1155,6 +1185,19 @@ fn set_runtime_status(
         state["updated_at"] = json!(utc_now());
         Ok(())
     })
+}
+
+/// Whether the stored state already holds what an idle poll would write.
+fn idle_state_recorded(state: &Value) -> bool {
+    state["status"] == "waiting"
+        && state["active_turn_id"] == ""
+        && state["latest_event_id"] == ""
+        && state["active_event_ids"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        && state["updated_at"]
+            .as_str()
+            .is_some_and(|at| !at.is_empty())
 }
 
 /// The batch a browser left staged, as it was claimed: the limit of this request

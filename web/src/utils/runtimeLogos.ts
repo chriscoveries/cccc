@@ -16,6 +16,7 @@ export const RUNTIME_LOGO_FILE_BY_RUNTIME: Partial<Record<RuntimeLogoRuntime, st
   antigravity: "logos/antigravity.svg",
   droid: "logos/droid.png",
   grok: "logos/grok.svg",
+  hark: "logos/hark.svg",
   hermes: "logos/hermes.svg",
   kimi: "logos/kimi.png",
   opencode: "logos/opencode.svg",

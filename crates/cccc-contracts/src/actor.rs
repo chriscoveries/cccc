@@ -87,6 +87,7 @@ pub enum ActorRuntime {
     WebModel,
     ChatgptDots,
     GrokWebModel,
+    Hark,
     Custom,
 }
 
@@ -116,6 +117,7 @@ impl ActorRuntime {
             Self::WebModel => "web_model",
             Self::ChatgptDots => "chatgpt_dots",
             Self::GrokWebModel => "grok_web_model",
+            Self::Hark => "hark",
             Self::Custom => "custom",
         }
     }
@@ -164,6 +166,7 @@ impl ActorRuntime {
         match self {
             Self::WebModel | Self::ChatgptDots => Some("chatgpt_web"),
             Self::GrokWebModel => Some("grok_web"),
+            Self::Hark => Some("hark"),
             _ => None,
         }
     }
@@ -184,21 +187,29 @@ impl ActorRuntime {
     #[must_use]
     pub const fn runner(self) -> RunnerKind {
         match self {
-            Self::Deepseek | Self::Pi | Self::WebModel | Self::ChatgptDots | Self::GrokWebModel => {
-                RunnerKind::Headless
-            }
+            Self::Deepseek
+            | Self::Pi
+            | Self::WebModel
+            | Self::ChatgptDots
+            | Self::GrokWebModel
+            | Self::Hark => RunnerKind::Headless,
             _ => RunnerKind::Pty,
         }
     }
 
     /// Runtime state authority is derived from the Runtime adapter. It is not
-    /// a user-selectable execution mode.
+    /// a user-selectable execution mode. Hermes's terminal is a viewer of the
+    /// member's ACP session, which CCCC drives.
     #[must_use]
     pub const fn state_source(self) -> RuntimeStateSource {
         match self {
-            Self::Claude | Self::Codex | Self::Grok | Self::Opencode | Self::Kilo | Self::Pi => {
-                RuntimeStateSource::ManagedSession
-            }
+            Self::Claude
+            | Self::Codex
+            | Self::Grok
+            | Self::Opencode
+            | Self::Kilo
+            | Self::Pi
+            | Self::Hermes => RuntimeStateSource::ManagedSession,
             _ => RuntimeStateSource::Terminal,
         }
     }
@@ -358,7 +369,21 @@ mod tests {
         assert!(ActorRuntime::WebModel.is_browser_web_model());
     }
 
-    const ALL_RUNTIMES: [ActorRuntime; 22] = [
+    #[test]
+    fn hark_is_pull_only_without_a_local_process_or_browser() {
+        let mut actor = Actor::new("hark");
+        actor.runtime = serde_json::from_str(r#""hark""#).expect("Hark runtime");
+        actor.command = vec!["must-not-launch".into()];
+        actor.normalize_runtime_constraints();
+        assert_eq!(actor.runtime, ActorRuntime::Hark);
+        assert_eq!(actor.runtime.web_model_provider(), Some("hark"));
+        assert_eq!(actor.runner, RunnerKind::Headless);
+        assert!(actor.command.is_empty());
+        assert!(!actor.runtime.is_browser_web_model());
+        assert!(RuntimeMode::Acp.validate(actor.runtime).is_err());
+    }
+
+    const ALL_RUNTIMES: [ActorRuntime; 23] = [
         ActorRuntime::Amp,
         ActorRuntime::Antigravity,
         ActorRuntime::Auggie,
@@ -380,6 +405,7 @@ mod tests {
         ActorRuntime::WebModel,
         ActorRuntime::ChatgptDots,
         ActorRuntime::GrokWebModel,
+        ActorRuntime::Hark,
         ActorRuntime::Custom,
     ];
 
@@ -498,7 +524,12 @@ mod tests {
             assert_eq!(runtime.runner_for(RuntimeMode::Default), RunnerKind::Pty);
             assert_eq!(
                 runtime.state_source_for(RuntimeMode::Default),
-                RuntimeStateSource::Terminal
+                if runtime == ActorRuntime::Hermes {
+                    // The terminal views the member's ACP session.
+                    RuntimeStateSource::ManagedSession
+                } else {
+                    RuntimeStateSource::Terminal
+                }
             );
             assert!(RuntimeMode::Acp.validate(runtime).is_ok());
             assert_eq!(runtime.runner_for(RuntimeMode::Acp), RunnerKind::Headless);

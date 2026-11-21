@@ -13,6 +13,7 @@ import {
   restoreCoordinationTask,
   uninstallCapability,
   updateGroupCapabilityVisibility,
+  useGroupCapability,
   updateCoordinationTask,
   replyMessage,
   sendCrossGroupMessage,
@@ -387,6 +388,24 @@ describe("capability state API helpers", () => {
     vi.unstubAllGlobals();
   });
 
+  it("sends a slash command's tool arguments under the name the daemon reads", async () => {
+    vi.stubGlobal("window", { location: { search: "" } });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true, result: {} })));
+
+    await useGroupCapability("g1", {
+      capabilityId: "mcp:fixture",
+      toolName: "search",
+      toolArguments: { query: "release notes" },
+    });
+
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(String(request.body));
+    expect(body).toMatchObject({ tool_name: "search", arguments: { query: "release notes" } });
+    expect(body).not.toHaveProperty("tool_arguments");
+  });
+
   it("requests the compact slash-command capability view", async () => {
     vi.stubGlobal("window", { location: { search: "" } });
     const fetchMock = vi
@@ -688,7 +707,7 @@ describe("cross-group attachment API helper", () => {
       ["lead"],
       "send",
       [file],
-      { replyTo: "local-parent", clientId: "client-1", remoteReplyToEventId: "remote-parent" },
+      { replyTo: "local-parent", clientId: "client-1" },
     );
 
     expect(response.ok).toBe(true);
@@ -699,7 +718,7 @@ describe("cross-group attachment API helper", () => {
     expect(form.get("to_json")).toBe(JSON.stringify(["lead"]));
     expect(form.get("reply_to")).toBe("local-parent");
     expect(form.get("client_id")).toBe("client-1");
-    expect(form.get("remote_reply_to_event_id")).toBe("remote-parent");
+    expect(form.has("remote_reply_to_event_id")).toBe(false);
     expect((form.get("files") as File).name).toBe("chart.png");
   });
 

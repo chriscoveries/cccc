@@ -74,6 +74,17 @@ function clearAllReadRequestCaches(): void {
   recentReadGenerations.clear();
 }
 
+const authChangeListeners = new Set<() => void>();
+
+/** Run `listener` whenever this browser's credentials change: a sign-in, a sign-out, or a
+ *  session the server stopped accepting. What belonged to the previous person is dropped there. */
+export function onAuthChange(listener: () => void): () => void {
+  authChangeListeners.add(listener);
+  return () => {
+    authChangeListeners.delete(listener);
+  };
+}
+
 export function setAuthToken(token: string): void {
   clearAllReadRequestCaches();
   cachedToken = token;
@@ -82,6 +93,7 @@ export function setAuthToken(token: string): void {
   } catch {
     void 0;
   }
+  authChangeListeners.forEach((listener) => listener());
 }
 
 export function clearAuthToken(): void {
@@ -92,6 +104,7 @@ export function clearAuthToken(): void {
   } catch {
     void 0;
   }
+  authChangeListeners.forEach((listener) => listener());
 }
 
 export function setForceTokenLogin(): void {
@@ -622,28 +635,6 @@ export function normalizeContext(raw: unknown): GroupContext {
           }
         : null,
       tasks,
-      recent_decisions: Array.isArray(coordination.recent_decisions)
-        ? coordination.recent_decisions
-            .map((item) => asRecord(item))
-            .filter((item): item is UnknownRecord => !!item)
-            .map((item) => ({
-              at: asOptionalString(item.at),
-              by: asOptionalString(item.by),
-              summary: asString(item.summary),
-              task_id: asOptionalString(item.task_id),
-            }))
-        : [],
-      recent_handoffs: Array.isArray(coordination.recent_handoffs)
-        ? coordination.recent_handoffs
-            .map((item) => asRecord(item))
-            .filter((item): item is UnknownRecord => !!item)
-            .map((item) => ({
-              at: asOptionalString(item.at),
-              by: asOptionalString(item.by),
-              summary: asString(item.summary),
-              task_id: asOptionalString(item.task_id),
-            }))
-        : [],
     },
     agent_states: agentStates,
     actors_runtime: actorsRuntime,

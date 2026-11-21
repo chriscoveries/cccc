@@ -44,12 +44,15 @@ scope key and a `cccc_message_history({"group_id":"…","event_id":"…"})`
 instruction. A plain message from another agent in the Group arrives in the
 notification when it fits. Anything else asks for that exact read before acting:
 a message from you, Mail, a message with attachments, references or its own
-project path, a long message, one containing `<`, `>` or `&`, and the first
-message in a conversation, after a reported compaction, after the Group's
-instructions change or in a new hour. A
+project path, a long message, one containing `<`, `>` or `&`, and a message
+that needs to refresh the Group's instructions when this session joins a Group,
+starts a new conversation, reports compaction, sees changed rules or enters a new hour. A
 notification that ends in `...(truncated)` needs the read too. The read's
-`delivery_text` contains the complete message, reply/attachment guidance and
-Group instructions. Long messages stay intact in the ledger; notification
+`delivery_text` contains the complete message and reply/attachment guidance.
+When a refresh is due, a native agent's own exact read includes the full Group
+instructions; subsequent reads use a short receiving context. An accepted native
+delivery containing the full instructions also satisfies that refresh. A short
+Claude notification alone does not. Long messages stay intact in the ledger; notification
 previews are not the full task. The read does not mark Mail as read, acknowledge
 execution or replay delivery.
 
@@ -57,7 +60,11 @@ The native runtime still owns tool permissions. In its default mode, a CCCC tool
 
 ### Upgrade an existing integration
 
-Updating CCCC and loading the update into an existing native session are separate steps:
+Updating CCCC and loading new tool definitions into an existing native session
+are separate steps. A compatible retained MCP can continue its current work
+with its original tool definitions. A different version or source fingerprint
+alone does not require interrupting it. When the user needs updated tools,
+follow these steps after active work finishes:
 
 1. Run `/setup` in the terminal interface and pick the runtimes you use, or run `cccc sessions enable --runtime codex`, `cccc sessions enable --runtime claude`, `cccc sessions enable --runtime pi` or `cccc sessions enable --runtime opencode`, with the new binary to regenerate the integration commands. Keep the same OS user, `CCCC_HOME` and provider configuration. Resolve any reported installation ownership conflict before retrying.
 2. Restart this CCCC instance through its normal service controls when adopting the new daemon. This does not reload MCP servers already running inside Codex, Claude, Pi or OpenCode.
@@ -68,9 +75,9 @@ Updating CCCC and loading the update into an existing native session are separat
    - **OpenCode:** it watches the owned plugin directory; reload or reopen the same native session if its plugin or MCP declaration remains old.
 4. Check the newly loaded tools: `cccc_message_history` must offer `event_id`, and `cccc_session send` must offer `mode`. `cccc sessions list` confirms receive readiness, not which tool declarations a native application has cached. If the tool fields are missing, finish reconnecting MCP before processing notifications that use them.
 
-After each tool call, the `cccc` MCP server checks its version against the daemon address file. If the versions differ, a tool result names both and says which service to restart. It can also notice different source fingerprints when the version numbers match and both sides report a fingerprint. The same difference is reported at most once every six hours; a new difference is reported sooner. A native `cccc_bootstrap` result identifies the MCP process that supplied it.
+After each tool call, the `cccc` MCP server checks its version against the daemon address file. If the versions differ, a tool result names both and explains that tool definitions still come from the MCP build. It can also notice different source fingerprints when the version numbers match and both sides report a fingerprint. These notices do not establish incompatibility or require interrupting current work; the user can reload the integration when updated tools are needed. The same difference is reported at most once every six hours; a new difference is reported sooner. A native `cccc_bootstrap` result identifies the MCP process that supplied it.
 
-Earlier MCP servers cannot perform the source check. A native agent reading a message by exact ID may instead see a notice that its client did not report an identity, with a link to the upgrade steps. This alone does not prove its MCP server is old. Reconnect existing MCP servers after upgrading even if no warning appeared: a matching version or fingerprint does not prove that the host reloaded the tool declarations.
+Earlier MCP servers cannot perform the source check. A native agent reading a message by exact ID may instead see a notice that its client did not report an identity, with a link to the upgrade steps. This alone does not prove its MCP server is old. When updated tool declarations are needed, verify them after reloading: a matching version or fingerprint does not prove that the host reloaded them.
 
 If the native application cannot reload those processes, resume its original
 conversation after restarting it. Native history is retained. When Claude or Pi

@@ -16,6 +16,7 @@ mod grok;
 pub use grok::{bind_grok, grok_bot_url};
 mod dots;
 pub mod grok_webhook;
+pub mod hark;
 pub use dots::{
     DOTS_URL, begin_dots_pairing, bind_dots, confirm_dots_pairing, dots_binding_for_token,
     dots_claim_binding, dots_invalidate, dots_subscription_binding, dots_subscription_token,
@@ -105,15 +106,20 @@ fn update<T>(home: &HomeLayout, change: impl FnOnce(&mut Value) -> io::Result<T>
 }
 
 pub fn load(home: &HomeLayout) -> io::Result<Vec<Value>> {
-    fs::with_exclusive_lock(&lock_path(home), || {
-        let root = read(home)?;
-        Ok(root["connectors"]
-            .as_object()
-            .expect("validated store")
-            .values()
-            .cloned()
-            .collect())
-    })
+    fs::with_exclusive_lock(&lock_path(home), || snapshot(home))
+}
+
+/// Read one published connector document without creating or waiting for its
+/// write lock. Writers publish atomically; this is an observation, not a fence
+/// for a later mutation or an authorization decision.
+pub fn snapshot(home: &HomeLayout) -> io::Result<Vec<Value>> {
+    let root = read(home)?;
+    Ok(root["connectors"]
+        .as_object()
+        .expect("validated store")
+        .values()
+        .cloned()
+        .collect())
 }
 
 pub fn requires_reconfiguration(home: &HomeLayout) -> io::Result<bool> {
@@ -363,13 +369,18 @@ pub fn validate_binding(home: &HomeLayout, expected: &Value) -> io::Result<()> {
     {
         return Err(error("paired_actor_runtime_changed"));
     }
-    if !actor.enabled {
+    if !(actor.enabled
+        || connector["kind"] == "hark_connector" && expected["hark_stage"] == "claim")
+    {
         return Err(error("paired_actor_stopped"));
     }
     let current = binding_for_actor(&connector, group_id, actor_id, generation)
         .ok_or_else(|| error("conversation_not_paired"))?;
     if current["revision"] != expected["revision"] {
         return Err(error("conversation_pairing_changed"));
+    }
+    if connector["kind"] == "hark_connector" {
+        hark::validate(&connector, expected, &group)?;
     }
     if actor.runtime == cccc_contracts::ActorRuntime::GrokWebModel {
         grok_webhook::validate(&connector, expected, &group)?;

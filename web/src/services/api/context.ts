@@ -3,9 +3,9 @@ import type {
   BacklogSource,
   AutomationRunResult,
   CapabilityBlockEntry,
+  CapabilityDomain,
   CapabilityImportRecord,
   CapabilityOverviewItem,
-  CapabilitySourceInstance,
   CapabilitySourceState,
   CapabilityStateResult,
   ContextDetailLevel,
@@ -159,21 +159,6 @@ export async function updateCoordinationBrief(groupId: string, brief: Coordinati
     op.constraints = Array.isArray(brief.constraints) ? brief.constraints : [];
   if (brief.project_brief !== undefined) op.project_brief = String(brief.project_brief || "");
   if (brief.project_brief_stale !== undefined) op.project_brief_stale = !!brief.project_brief_stale;
-  return contextSync(groupId, [op]);
-}
-
-export async function addCoordinationNote(
-  groupId: string,
-  kind: "decision" | "handoff",
-  summary: string,
-  taskId?: string | null,
-) {
-  const op: Record<string, unknown> = {
-    op: "coordination.note.add",
-    kind,
-    summary: String(summary || ""),
-  };
-  if (taskId) op.task_id = String(taskId || "");
   return contextSync(groupId, [op]);
 }
 
@@ -355,9 +340,11 @@ export async function fetchCapabilityOverview(opts?: {
   policy?: "all" | "actionable" | "blocked" | "indexed";
   sourceId?: string;
   groupId?: string;
-  includeSourceInstances?: boolean;
+  /** The language the daemon localizes release recommendations into. */
+  locale?: string;
 }) {
   const params = new URLSearchParams();
+  if (String(opts?.locale || "").trim()) params.set("locale", String(opts?.locale || "").trim());
   if (String(opts?.query || "").trim()) params.set("query", String(opts?.query || "").trim());
   if (typeof opts?.limit === "number" && Number.isFinite(opts.limit)) {
     params.set("limit", String(Math.max(1, Math.trunc(opts.limit))));
@@ -367,9 +354,6 @@ export async function fetchCapabilityOverview(opts?: {
   }
   if (typeof opts?.includeIndexed === "boolean") {
     params.set("include_indexed", opts.includeIndexed ? "true" : "false");
-  }
-  if (typeof opts?.includeSourceInstances === "boolean") {
-    params.set("include_source_instances", opts.includeSourceInstances ? "true" : "false");
   }
   if (String(opts?.kind || "").trim() && String(opts?.kind || "").trim() !== "all") {
     params.set("kind", String(opts?.kind || "").trim());
@@ -393,10 +377,13 @@ export async function fetchCapabilityOverview(opts?: {
     has_more: boolean;
     query?: string;
     kind_counts?: { skill?: number; mcp?: number; pack?: number };
+    /** Matches of the query enabled for the user in the Group, across every page. */
+    enabled_count?: number;
     sources?: Record<string, CapabilitySourceState>;
-    source_instances?: CapabilitySourceInstance[];
     blocked_capabilities?: CapabilityBlockEntry[];
     allowlist_revision?: string;
+    /** The release's recommendation areas, in its order and in the requested language. */
+    domains?: CapabilityDomain[];
   }>(`/api/v1/capabilities/overview${suffix}`);
 }
 
@@ -415,11 +402,13 @@ export async function fetchCapabilityAllowlist() {
   }>(`/api/v1/capabilities/allowlist?by=user`);
 }
 
-export async function blockCapabilityGlobal(
+/** Blocks everywhere by default; a block an agent set for one Group is lifted with scope "group". */
+export async function setCapabilityBlocked(
   capabilityId: string,
   blocked: boolean,
   reason: string = "",
   groupId?: string,
+  scope: "global" | "group" = "global",
 ) {
   const body: Record<string, unknown> = {
     by: "user",
@@ -427,7 +416,7 @@ export async function blockCapabilityGlobal(
     capability_id: capabilityId,
     blocked,
     reason,
-    scope: "global",
+    scope,
   };
   if (String(groupId || "").trim()) body.group_id = String(groupId || "").trim();
   clearCapabilityStateRequests(groupId);
@@ -435,6 +424,33 @@ export async function blockCapabilityGlobal(
     return await apiJson<Record<string, unknown>>(`/api/v1/capabilities/block`, {
       method: "POST",
       body: JSON.stringify(body),
+    });
+  } finally {
+    clearCapabilityStateRequests(groupId);
+  }
+}
+
+/** Replaces the one global installation of an MCP; the fingerprint is the one the user reviewed. */
+export async function updateCapabilityInstallation(
+  capabilityId: string,
+  expectedRecipeFingerprint: string,
+  groupId?: string,
+) {
+  clearCapabilityStateRequests(groupId);
+  try {
+    return await apiJson<{
+      capability_id: string;
+      updated: boolean;
+      state: string;
+      enabled_group_count?: number;
+      refresh_required?: boolean;
+    }>(`/api/v1/capabilities/update`, {
+      method: "POST",
+      body: JSON.stringify({
+        by: "user",
+        capability_id: capabilityId,
+        expected_recipe_fingerprint: expectedRecipeFingerprint,
+      }),
     });
   } finally {
     clearCapabilityStateRequests(groupId);
@@ -557,7 +573,7 @@ export async function useGroupCapability(
     reason: args.reason || "",
   };
   if (String(args.toolName || "").trim()) body.tool_name = String(args.toolName || "").trim();
-  if (args.toolArguments) body.tool_arguments = args.toolArguments;
+  if (args.toolArguments) body.arguments = args.toolArguments;
   clearCapabilityStateRequests(groupId);
   try {
     return await apiJson<Record<string, unknown>>(
@@ -659,7 +675,7 @@ export async function uninstallCapability(
 export async function deleteCapabilitySource(
   groupId: string,
   sourceId: string,
-  opts?: { actorId?: string; reason?: string; sourceInstanceKey?: string },
+  opts?: { actorId?: string; reason?: string },
 ) {
   return apiJson<Record<string, unknown>>(
     `/api/v1/groups/${encodeURIComponent(groupId)}/capabilities/sources/delete`,
@@ -667,7 +683,6 @@ export async function deleteCapabilitySource(
       method: "POST",
       body: JSON.stringify({
         source_id: sourceId,
-        source_instance_key: opts?.sourceInstanceKey || "",
         actor_id: opts?.actorId || "user",
         reason: opts?.reason || "",
       }),
@@ -961,21 +976,12 @@ export async function sendCrossGroupMessage(
   to: string[],
   messageMode: MessageMode = "send",
   files?: File[],
-  options?: {
-    replyTo?: string;
-    quoteText?: string;
-    clientId?: string;
-    remoteReplyToEventId?: string;
-    signal?: AbortSignal;
-  },
+  options?: { replyTo?: string; quoteText?: string; clientId?: string; signal?: AbortSignal },
 ) {
   const replyMetadata = {
     ...(options?.replyTo ? { reply_to: options.replyTo } : {}),
     ...(options?.quoteText ? { quote_text: options.quoteText } : {}),
     ...(options?.clientId ? { client_id: options.clientId } : {}),
-    ...(options?.remoteReplyToEventId
-      ? { remote_reply_to_event_id: options.remoteReplyToEventId }
-      : {}),
   };
   if (files && files.length > 0) {
     const tooLarge = attachmentLimitError(files);
