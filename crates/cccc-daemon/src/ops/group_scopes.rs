@@ -155,6 +155,12 @@ fn require_scope_authority(
     request: &DaemonRequest,
     group_id: &str,
 ) -> Result<(), OpError> {
+    if request.args.contains_key("_cccc_web_binding") {
+        return Err(OpError::new(
+            "permission_denied",
+            "Group management is unavailable to cloud connectors",
+        ));
+    }
     let group = store(home)?.load(group_id).map_err(OpError::not_found)?;
     permissions::require_group(
         &group,

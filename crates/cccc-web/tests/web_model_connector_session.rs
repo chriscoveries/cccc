@@ -257,9 +257,12 @@ async fn one_catalog_before_pairing_and_strict_authentication() {
         "cccc_connector_status",
         "cccc_file",
         "cccc_file_send",
-        "cccc_code_exec",
     ] {
         assert!(tools.iter().any(|t| t["name"] == name));
+    }
+    // Host tools are never offered to Web Model connectors.
+    for &name in cccc_core::UNPROFILED_TOOL_NAMES {
+        assert!(!tools.iter().any(|t| t["name"] == name), "{name} offered");
     }
     for (name, read_only) in [
         ("cccc_file", true),
@@ -368,19 +371,17 @@ async fn file_read_and_send_keep_distinct_effects_and_bound_identity() {
     let blobs = groups.state_dir(&f.group).expect("state").join("blobs");
     assert!(!blobs.exists() || std::fs::read_dir(&blobs).expect("blobs").next().is_none());
 
+    // Code mode is refused to Web Model actors, so no nested send can run.
     let nested = f.call("cccc_code_exec", json!({
         "source":"await tools.cccc_file({action:'send', path:'sample.txt', to:'user', mode:'send'});",
         "yield_time_ms":10000
     }), meta("chat-a")).await;
-    assert_eq!(
-        nested["result"]["structuredContent"]["status"], "failed",
-        "{nested}"
-    );
+    assert_eq!(nested["result"]["isError"], true, "{nested}");
     assert!(
-        nested["result"]["structuredContent"]["error_text"]
-            .as_str()
-            .expect("nested error")
-            .contains("use cccc_file_send")
+        nested
+            .to_string()
+            .contains("not available to Web Model actors"),
+        "{nested}"
     );
     assert_eq!(std::fs::read(&ledger).expect("ledger bytes"), before);
 
@@ -418,11 +419,13 @@ async fn file_read_and_send_keep_distinct_effects_and_bound_identity() {
         "source":"const sent = await tools.cccc_file_send({path:'sample.txt', to:'user', mode:'send', by:'user', actor_id:'beta'}); text(sent.result.event.by);",
         "yield_time_ms":10000
     }), meta("chat-a")).await;
-    assert_eq!(
-        nested["result"]["structuredContent"]["status"], "completed",
+    assert_eq!(nested["result"]["isError"], true, "{nested}");
+    assert!(
+        nested
+            .to_string()
+            .contains("not available to Web Model actors"),
         "{nested}"
     );
-    assert_eq!(nested["result"]["structuredContent"]["output"], "alpha");
     cccc_mcp::shutdown(&f.home).await;
 }
 #[tokio::test]
@@ -683,7 +686,10 @@ async fn pairing_tool_receipt_requires_host_metadata_and_grants_no_business_tool
         .await;
     assert_eq!(code["result"]["isError"], true, "{code}");
     assert!(
-        code.to_string().contains("conversation_not_paired"),
+        code.to_string().contains("conversation_not_paired")
+            || code
+                .to_string()
+                .contains("not available to Web Model actors"),
         "{code}"
     );
 }
@@ -881,41 +887,53 @@ async fn grok_execution_routes_real_tools_and_nested_management_without_identity
         read["result"]["structuredContent"]["content"], "local fixture content",
         "{read}"
     );
-    let nested = f.call("cccc_code_exec",json!({"actor_token":tokens[0],"source":"const r=await tools.cccc_file({rel_path:'sample.txt'});text(r);","yield_time_ms":10000}),json!({})).await;
-    assert_eq!(
-        nested["result"]["structuredContent"]["status"], "completed",
-        "{nested}"
-    );
-    assert!(!nested.to_string().contains(&tokens[0]));
-    let stopped = f.call("cccc_code_exec",json!({"actor_token":tokens[0],"source":"text(await tools.cccc_capability_use({tool_name:'cccc_actor',tool_arguments:{action:'stop',actor_id:'beta'}}));","yield_time_ms":10000}),json!({})).await;
-    assert_eq!(
-        stopped["result"]["structuredContent"]["status"], "completed",
-        "{stopped}"
-    );
+    // Code mode, and nested management through it, is refused to Web Model
+    // actors: neither call runs, and beta stays enabled.
+    for source in [
+        "const r=await tools.cccc_file({rel_path:'sample.txt'});text(r);",
+        "text(await tools.cccc_capability_use({tool_name:'cccc_actor',tool_arguments:{action:'stop',actor_id:'beta'}}));",
+    ] {
+        let nested = f
+            .call(
+                "cccc_code_exec",
+                json!({"actor_token":tokens[0],"source":source,"yield_time_ms":10000}),
+                json!({}),
+            )
+            .await;
+        assert_eq!(nested["result"]["isError"], true, "{nested}");
+        assert!(
+            nested
+                .to_string()
+                .contains("not available to Web Model actors"),
+            "{nested}"
+        );
+        assert!(!nested.to_string().contains(&tokens[0]));
+    }
     let doc = groups.load(&f.group).expect("valid test fixture");
-    assert!(
-        doc.actors
-            .iter()
-            .find(|a| a.id == "alpha")
-            .expect("valid test fixture")
-            .enabled
-    );
-    assert!(
-        !doc.actors
-            .iter()
-            .find(|a| a.id == "beta")
-            .expect("valid test fixture")
-            .enabled,
-        "{stopped}"
-    );
-    let denied = f
+    for id in ["alpha", "beta"] {
+        assert!(
+            doc.actors
+                .iter()
+                .find(|a| a.id == id)
+                .expect("valid test fixture")
+                .enabled,
+            "{id} must stay enabled"
+        );
+    }
+    // beta was not stopped (nested management is refused), so its token
+    // still answers for beta alone.
+    let still = f
         .call(
             "cccc_connector_status",
             json!({"actor_token":tokens[1]}),
             json!({}),
         )
         .await;
-    assert_eq!(denied["result"]["isError"], true);
+    assert_ne!(still["result"]["isError"], true, "{still}");
+    assert_eq!(
+        still["result"]["structuredContent"]["actor_id"], "beta",
+        "{still}"
+    );
     let ledger = std::fs::read_to_string(groups.ledger_path(&f.group).expect("valid test fixture"))
         .expect("valid test fixture");
     for token in tokens {

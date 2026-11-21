@@ -107,7 +107,7 @@ When {EVENT_NAME} wakes this task, call cccc_runtime_wait_next_turn once:
 ChatGPT metadata identifies the explicitly paired Dot. Do not supply Actor or Group selectors or retrieve credentials from subscription configuration, event data, chat history or memory.
 If work_available:
 {handoff}
-Follow that turn's system_prompt and instructions. Use the actor_token returned in that tool result for all CCCC calls in this turn, including cccc_code_exec. Reply through CCCC, then call cccc_runtime_complete_turn with the exact turn_id, event_ids and execution actor_token.
+Follow that turn's system_prompt and instructions. Use the actor_token returned in that tool result for all CCCC calls in this turn. Reply through CCCC, then call cccc_runtime_complete_turn with the exact turn_id, event_ids and execution actor_token.
 If idle, stopped or turn_in_progress, exit. If paired_actor_stopped or dots_actor_stopped is returned, report that CCCC access is paused and exit; this does not mean pairing was lost. Do not enable access yourself. If another call is rejected, report it and stop; do not poll, recover another turn, reconnect or infer another identity.
 {credential_usage}
 END CCCC DOTS HANDLER
@@ -535,7 +535,7 @@ mod tests {
         assert!(handler.contains("paired_actor_stopped"));
         assert!(handler.contains("Host JavaScript orchestration"));
         assert!(handler.contains("this same run's original claim tool result"));
-        assert!(handler.contains("cccc_code_exec source/code"));
+        assert!(handler.contains("Never put credentials in business code"));
         assert!(!handler.contains("commands, JavaScript source"));
         let paired_setup = setup_instruction("synthetic-subscription-credential", None);
         assert!(!paired_setup.contains("synthetic-setup-code"));
@@ -562,7 +562,7 @@ mod tests {
         let usage = response["result"]["tools"][0]["inputSchema"]["properties"]["actor_token"]["description"]
             .as_str().expect("execution argument guidance");
         assert!(usage.contains("Host JavaScript orchestration"));
-        assert!(usage.contains("cccc_code_exec source/code"));
+        assert!(usage.contains("Never put credentials in business code"));
         assert!(!usage.contains("commands, JavaScript source"));
     }
 }

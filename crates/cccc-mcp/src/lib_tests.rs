@@ -521,11 +521,11 @@ async fn automation_run_now_reaches_the_daemon_with_the_bound_actor() {
 }
 
 #[tokio::test]
-async fn daemon_error_details_survive_nested_code_mode_calls() {
+async fn code_mode_is_refused_to_web_model_actors() {
     if crate::lib_tests::isolate_embedded_daemon_test(concat!(
         module_path!(),
         "::",
-        "daemon_error_details_survive_nested_code_mode_calls"
+        "code_mode_is_refused_to_web_model_actors"
     )) {
         return;
     }
@@ -587,13 +587,19 @@ async fn daemon_error_details_survive_nested_code_mode_calls() {
         }),
     )
     .await;
-    let output = response["result"]["structuredContent"]["output"]
-        .as_str()
-        .expect("code mode output");
-    let error: serde_json::Value = serde_json::from_str(output).expect("structured nested error");
-    assert_eq!(error["code"], "peer_insight_required");
-    assert_eq!(error["delivery_state"], "not_sent");
-    assert_eq!(error["new_side_effects"], false);
+    // Code mode is only ever offered to Web Model actors, and Web Model
+    // actors are now refused every host tool: the call never starts a cell,
+    // so no nested call (and no message) can run.
+    assert!(
+        response["result"]["structuredContent"]["output"].is_null(),
+        "no code-mode cell may run: {response}"
+    );
+    assert!(
+        response
+            .to_string()
+            .contains("not available to Web Model actors"),
+        "code mode must be refused to Web Model actors: {response}"
+    );
     daemon_task.abort();
 }
 

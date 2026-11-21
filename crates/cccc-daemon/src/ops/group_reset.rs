@@ -14,6 +14,12 @@ pub(super) fn reset(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     }
     let store = GroupStore::new(home.clone()).map_err(OpError::io)?;
     let old = store.load(&group_id).map_err(OpError::not_found)?;
+    if request.args.contains_key("_cccc_web_binding") {
+        return Err(OpError::new(
+            "permission_denied",
+            "Group management is unavailable to cloud connectors",
+        ));
+    }
     permissions::require_group(
         &old,
         &string_arg(request, "by").unwrap_or_else(|| "user".into()),

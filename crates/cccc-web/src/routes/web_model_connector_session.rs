@@ -5,8 +5,8 @@ use cccc_core::web_model_connectors as store;
 use serde_json::{Value, json};
 
 // Native hosts may wrap MCP calls in JavaScript. Passing an argument there is
-// distinct from embedding authority in the business code CCCC will execute.
-pub(super) const CREDENTIAL_ARGUMENT_USAGE: &str = "Use credentials only to populate actor_token arguments to tools on this CCCC connector. Host JavaScript orchestration may pass a current value in that argument, including a literal when needed. Never put credentials in cccc_code_exec source/code, business code, files, commands, logs, saved instructions or user-facing messages.";
+// distinct from embedding authority in the business inputs CCCC will process.
+pub(super) const CREDENTIAL_ARGUMENT_USAGE: &str = "Use credentials only to populate actor_token arguments to tools on this CCCC connector. Host JavaScript orchestration may pass a current value in that argument, including a literal when needed. Never put credentials in business code, files, commands, logs, saved instructions or user-facing messages.";
 pub(super) const NATIVE_EXECUTION_HANDOFF: &str = "Use only this run's successful claim result: actor_token, turn.turn_id and turn.event_ids. Prefer retaining these together in temporary host context and passing references. If a temporary reference is lost, use this same run's original claim tool result to fill tool arguments; do not claim again or recover credentials from prior runs, chat history or saved memory. Discard temporary context after confirmed completion.";
 
 pub(super) fn extend_catalog(response: &mut Value) {
@@ -14,13 +14,13 @@ pub(super) fn extend_catalog(response: &mut Value) {
         tools.extend([
             json!({
                 "name":"cccc_connector_status",
-                "description":"Use to check this conversation's connection to a CCCC Actor. Reads pairing status and the linked Group/Actor without changing the connection, reading workspace files or running tasks. Available through the CCCC connector before pairing; it is not a tool inside CCCC's cccc_code_exec.",
+                "description":"Use to check this conversation's connection to a CCCC Actor. Reads pairing status and the linked Group/Actor without changing the connection, reading workspace files or running tasks. Available through the CCCC connector before pairing; it is not a CCCC business tool.",
                 "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
                 "annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
             }),
             json!({
                 "name":"cccc_pair",
-                "description":"Use when the user explicitly connects this conversation to an Actor selected in CCCC. Send its temporary setup code to the same CCCC connector. For a browser Actor, this records a pending link: reply with the receipt exactly as plain text for CCCC to verify in its window. For Dots, this pairs the fixed event Actor immediately; the result states routing_mode=mcp_events. Dot pairing only permits cccc_runtime_wait_next_turn; business tools need the execution credential returned by that claim. Does not read files or execute tasks. Available before pairing through the connector, not inside cccc_code_exec. Follow ChatGPT's normal approval flow; report blocked or failed calls.",
+                "description":"Use when the user explicitly connects this conversation to an Actor selected in CCCC. Send its temporary setup code to the same CCCC connector. For a browser Actor, this records a pending link: reply with the receipt exactly as plain text for CCCC to verify in its window. For Dots, this pairs the fixed event Actor immediately; the result states routing_mode=mcp_events. Dot pairing only permits cccc_runtime_wait_next_turn; business tools need the execution credential returned by that claim. Does not read files or execute tasks. Available before pairing through the connector only. Follow ChatGPT's normal approval flow; report blocked or failed calls.",
                 "inputSchema":{"type":"object","properties":{"code":{"type":"string","description":"Temporary CCCC pairing code generated for the selected Actor and supplied in this conversation's setup message. Expires after 10 minutes; send it only to the same CCCC instance's cccc_pair tool."}},"required":["code"],"additionalProperties":false},
                 "annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
             }),

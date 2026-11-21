@@ -833,9 +833,8 @@ completion. Waiting never triggers browser delivery.
 Keep each successful claim's execution credential, turn ID and event IDs together
 in temporary host state for that run. Direct tool calls and host-side JavaScript
 may pass the credential in the CCCC tool's `actor_token` argument, including a
-literal argument value when necessary. It must not enter `cccc_code_exec`
-`source`/`code`, business code, files, commands, logs, saved instructions or
-user-facing messages. No particular host storage API is required.
+literal argument value when necessary. It must not enter business code, files,
+commands, logs, saved instructions or user-facing messages. No particular host storage API is required.
 
 Losing a JavaScript variable does not expire the credential. The same execution
 may use its original claim tool result to fill tool arguments without claiming
