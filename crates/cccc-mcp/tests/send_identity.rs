@@ -63,7 +63,7 @@ async fn send_as(home: &HomeLayout, group_id: &str, id: u64, by: Option<&str>) -
         "to": ["peer2"],
         "text": format!("t806 send {id}"),
         "insight": "Refusal and acceptance are measured on the same path, so the control proves the daemon still accepts an honest sender.",
-        "message_mode": "send",
+        "mode": "send",
     });
     if let Some(by) = by {
         arguments["by"] = json!(by);
