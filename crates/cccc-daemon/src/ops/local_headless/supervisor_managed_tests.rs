@@ -364,9 +364,8 @@ mod structured_admission {
     #[test]
     fn f615_opencode_labelled_busy_idle_busy_keeps_one_generation_and_session() {
         let fixture = Fixture::with_runtime(ActorRuntime::Opencode);
-        fixture.wait(|| {
-            probe(&fixture).is_some_and(|sample| !sample.provider_session_id.is_empty())
-        });
+        fixture
+            .wait(|| probe(&fixture).is_some_and(|sample| !sample.provider_session_id.is_empty()));
         let idle_start = sampled(&fixture);
         assert!(idle_start.running);
         assert!(!idle_start.working, "fresh managed session must start idle");
@@ -383,7 +382,10 @@ mod structured_admission {
         assert_same_identity(&idle_start, &busy);
 
         std::fs::write(
-            fixture.temp.path().join("opencode-events/release-completion"),
+            fixture
+                .temp
+                .path()
+                .join("opencode-events/release-completion"),
             "release",
         )
         .expect("release held turn");
@@ -416,9 +418,8 @@ mod structured_admission {
     #[test]
     fn f615_kilo_labelled_busy_idle_busy_keeps_one_generation_and_session() {
         let fixture = Fixture::with_runtime(ActorRuntime::Kilo);
-        fixture.wait(|| {
-            probe(&fixture).is_some_and(|sample| !sample.provider_session_id.is_empty())
-        });
+        fixture
+            .wait(|| probe(&fixture).is_some_and(|sample| !sample.provider_session_id.is_empty()));
         let idle_start = sampled(&fixture);
         assert!(idle_start.running);
         assert!(!idle_start.working, "fresh managed session must start idle");
@@ -455,9 +456,8 @@ mod structured_admission {
     #[test]
     fn f615_codex_labelled_busy_idle_busy_keeps_one_generation_and_thread() {
         let fixture = Fixture::with_runtime(ActorRuntime::Codex);
-        fixture.wait(|| {
-            probe(&fixture).is_some_and(|sample| !sample.provider_thread_id.is_empty())
-        });
+        fixture
+            .wait(|| probe(&fixture).is_some_and(|sample| !sample.provider_thread_id.is_empty()));
         let idle_start = sampled(&fixture);
         assert!(idle_start.running);
         assert!(!idle_start.working, "fresh managed session must start idle");
@@ -473,10 +473,12 @@ mod structured_admission {
         assert!(busy.working, "held app-server turn must report working");
         assert_same_identity(&idle_start, &busy);
 
-        std::fs::create_dir_all(fixture.temp.path().join("codex-events"))
-            .expect("fixture dir");
-        std::fs::write(fixture.temp.path().join("codex-events/release-turn"), "release")
-            .expect("release held turn");
+        std::fs::create_dir_all(fixture.temp.path().join("codex-events")).expect("fixture dir");
+        std::fs::write(
+            fixture.temp.path().join("codex-events/release-turn"),
+            "release",
+        )
+        .expect("release held turn");
         fixture.wait(|| probe(&fixture).is_some_and(|sample| !sample.working));
         let idle_middle = sampled(&fixture);
         assert!(!idle_middle.working, "released turn must return to idle");
