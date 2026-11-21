@@ -61,7 +61,13 @@ fn a_real_failed_worker_launch_does_not_earn_an_additional_restart_delay() {
     actor.command = vec![temp.path().join("input.py").to_string_lossy().into_owned()];
     group.actors[0] = actor.clone();
     assert!(
-        ensure_running(&home, &group, &actor, &AtomicBool::new(false))
+        ensure_running(
+            &home,
+            &group,
+            &actor,
+            &mut WakeBudget::default(),
+            &AtomicBool::new(false),
+        )
             .expect("retryable missing executable")
             .is_none()
     );
@@ -78,7 +84,14 @@ fn a_real_failed_worker_launch_does_not_earn_an_additional_restart_delay() {
 fn an_immediate_exit_counts_but_a_failed_launch_after_the_wait_preserves_history() {
     let (temp, home, mut group, mut actor, _cleanup) = restart_fixture(vec!["/bin/false".into()]);
     let cancelled = AtomicBool::new(false);
-    let _ = ensure_running(&home, &group, &actor, &cancelled).expect("actual launch");
+    let _ = ensure_running(
+        &home,
+        &group,
+        &actor,
+        &mut WakeBudget::default(),
+        &cancelled,
+    )
+    .expect("actual launch");
     wait_for_restart_fixture_exit(&group.group_id, &actor.id);
     let before = super::super::actor_respawn_backoff::observed(&group.group_id, &actor.id);
     assert_eq!(
@@ -90,7 +103,13 @@ fn an_immediate_exit_counts_but_a_failed_launch_after_the_wait_preserves_history
     actor.command = vec![temp.path().join("input.py").to_string_lossy().into_owned()];
     group.actors[0] = actor.clone();
     assert!(
-        ensure_running(&home, &group, &actor, &AtomicBool::new(true))
+        ensure_running(
+            &home,
+            &group,
+            &actor,
+            &mut WakeBudget::default(),
+            &AtomicBool::new(true),
+        )
             .expect("cancelled retry")
             .is_none()
     );
@@ -99,7 +118,7 @@ fn an_immediate_exit_counts_but_a_failed_launch_after_the_wait_preserves_history
         before
     );
     assert!(
-        ensure_running(&home, &group, &actor, &cancelled)
+        ensure_running(&home, &group, &actor, &mut WakeBudget::default(), &cancelled)
             .expect("failed retry")
             .is_none()
     );
@@ -114,13 +133,28 @@ fn an_immediate_exit_counts_but_a_failed_launch_after_the_wait_preserves_history
 fn a_runtime_brought_up_during_the_wait_does_not_commit_an_automatic_restart() {
     let (_temp, home, mut group, mut actor, _cleanup) = restart_fixture(vec!["/bin/false".into()]);
     let cancelled = AtomicBool::new(false);
-    let _ = ensure_running(&home, &group, &actor, &cancelled).expect("actual launch");
+    let _ = ensure_running(
+        &home,
+        &group,
+        &actor,
+        &mut WakeBudget::default(),
+        &cancelled,
+    )
+    .expect("actual launch");
     wait_for_restart_fixture_exit(&group.group_id, &actor.id);
     let before = super::super::actor_respawn_backoff::observed(&group.group_id, &actor.id);
     actor.command = vec!["/bin/sh".into(), "-c".into(), "exec sleep 60".into()];
     group.actors[0] = actor.clone();
     std::thread::scope(|scope| {
-        let worker = scope.spawn(|| ensure_running(&home, &group, &actor, &cancelled));
+        let worker = scope.spawn(|| {
+            ensure_running(
+                &home,
+                &group,
+                &actor,
+                &mut WakeBudget::default(),
+                &cancelled,
+            )
+        });
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !super::super::actor_respawn_backoff::pending(&group.group_id, &actor.id) {
             assert!(
