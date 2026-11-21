@@ -114,8 +114,16 @@ impl Fixture {
         home.initialize().expect("valid test fixture");
         let groups = GroupStore::new(home.clone()).expect("valid test fixture");
         let group = groups.create("fixture", "").expect("valid test fixture");
-        let root = temp.path().join("repo");
-        std::fs::create_dir(&root).expect("valid test fixture");
+        // A child rerun (rerun_with_web_file_root) makes the web file root
+        // the scope root, so Web Model reads and sends resolve in one place.
+        let root = match std::env::var_os("CCCC_WEB_MODEL_FILE_ROOT") {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => {
+                let root = temp.path().join("repo");
+                std::fs::create_dir(&root).expect("valid test fixture");
+                root
+            }
+        };
         std::fs::write(root.join("sample.txt"), "local fixture content")
             .expect("valid test fixture");
         let mut group = cccc_core::group_scope::attach(
