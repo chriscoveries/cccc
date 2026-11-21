@@ -270,9 +270,7 @@ pub(super) mod linux {
         use super::*;
         use std::io::{BufRead, Write};
 
-        fn live_interval() -> std::sync::MutexGuard<'static, ()> {
-            static GUARD: Mutex<()> = Mutex::new(());
-            let guard = GUARD.lock().unwrap_or_else(|error| error.into_inner());
+        fn clear_live_interval() {
             let root = std::process::id();
             if let Some(started) = std::fs::read_to_string(format!("/proc/{root}/stat"))
                 .ok()
@@ -282,6 +280,12 @@ pub(super) mod linux {
             {
                 cache.remove(&(root, started));
             }
+        }
+
+        fn live_interval() -> std::sync::MutexGuard<'static, ()> {
+            static GUARD: Mutex<()> = Mutex::new(());
+            let guard = GUARD.lock().unwrap_or_else(|error| error.into_inner());
+            clear_live_interval();
             guard
         }
 
@@ -359,51 +363,63 @@ pub(super) mod linux {
             // burns CPU and is reaped entirely between the endpoints.
             let _guard = live_interval();
             let root = std::process::id();
-            let first = Snapshot::capture().expect("first real capture");
-            let (rss, initial) = first.actor(root).expect("own tree");
-            assert!(rss > 0);
-            assert!(initial.is_none(), "the first observation has no interval");
+            // Other tests in this binary spawn and reap children of the same
+            // process; a member that departs between the endpoints
+            // legitimately withholds attribution, so retry until an interval
+            // with a stable member set completes.
+            for _attempt in 0..8 {
+                clear_live_interval();
+                let first = Snapshot::capture().expect("first real capture");
+                let (rss, initial) = first.actor(root).expect("own tree");
+                assert!(rss > 0);
+                assert!(initial.is_none(), "the first observation has no interval");
 
-            let mut child = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg("while :; do :; done")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .expect("burning child");
-            let child_pid = child.id();
-            let mut observed = 0u64;
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while observed < 3 && Instant::now() < deadline {
-                observed = std::fs::read_to_string(format!("/proc/{child_pid}/stat"))
-                    .ok()
-                    .and_then(|text| parse_process_stat(&text))
-                    .map(|stat| stat.user_ticks + stat.system_ticks)
-                    .unwrap_or(0);
-                if observed == 0 {
-                    std::thread::sleep(Duration::from_millis(10));
+                let mut child = std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg("while :; do :; done")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("burning child");
+                let child_pid = child.id();
+                let mut observed = 0u64;
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while observed < 3 && Instant::now() < deadline {
+                    observed = std::fs::read_to_string(format!("/proc/{child_pid}/stat"))
+                        .ok()
+                        .and_then(|text| parse_process_stat(&text))
+                        .map(|stat| stat.user_ticks + stat.system_ticks)
+                        .unwrap_or(0);
+                    if observed == 0 {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                 }
+                assert!(observed >= 3, "the child consumed observed CPU");
+                child.kill().expect("stop the child");
+                child.wait().expect("reap the child");
+                // The reap moves the child's lifetime ticks into this process's
+                // waited-for accounting, visible in its own /proc record.
+                let own =
+                    std::fs::read_to_string(format!("/proc/{root}/stat")).expect("own record");
+                let own = parse_process_stat(&own).expect("own parse");
+                assert!(own.child_user_ticks + own.child_system_ticks >= observed);
+                // Keep the interval above the one-second floor after the reap.
+                let remaining = Duration::from_millis(1_300).saturating_sub(first.at.elapsed());
+                std::thread::sleep(remaining);
+                let second = Snapshot::capture().expect("second real capture");
+                let (_, cpu) = second.actor(root).expect("own tree");
+                let Some(percent) = cpu else {
+                    continue;
+                };
+                let elapsed = second.at.saturating_duration_since(first.at).as_secs_f64();
+                let accounted = percent / 100.0 * second.ticks_per_second as f64 * elapsed;
+                assert!(
+                    accounted + 5.0 >= observed as f64,
+                    "the interval accounted {accounted} ticks for an observed child of {observed}"
+                );
+                return;
             }
-            assert!(observed >= 3, "the child consumed observed CPU");
-            child.kill().expect("stop the child");
-            child.wait().expect("reap the child");
-            // The reap moves the child's lifetime ticks into this process's
-            // waited-for accounting, visible in its own /proc record.
-            let own = std::fs::read_to_string(format!("/proc/{root}/stat")).expect("own record");
-            let own = parse_process_stat(&own).expect("own parse");
-            assert!(own.child_user_ticks + own.child_system_ticks >= observed);
-            // Keep the interval above the one-second floor after the reap.
-            let remaining = Duration::from_millis(1_300).saturating_sub(first.at.elapsed());
-            std::thread::sleep(remaining);
-            let second = Snapshot::capture().expect("second real capture");
-            let (_, cpu) = second.actor(root).expect("own tree");
-            let percent = cpu.expect("stable identity with covered attribution");
-            let elapsed = second.at.saturating_duration_since(first.at).as_secs_f64();
-            let accounted = percent / 100.0 * second.ticks_per_second as f64 * elapsed;
-            assert!(
-                accounted + 5.0 >= observed as f64,
-                "the interval accounted {accounted} ticks for an observed child of {observed}"
-            );
+            panic!("no stable attribution interval completed in 8 attempts");
         }
 
         #[test]
