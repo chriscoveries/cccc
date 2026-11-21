@@ -87,6 +87,12 @@ fn resolve(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 }
 
 fn create(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    if request.args.contains_key("_cccc_web_binding") {
+        return Err(OpError::new(
+            "permission_denied",
+            "Group management is unavailable to cloud connectors",
+        ));
+    }
     let title = string_arg(request, "title").unwrap_or_else(|| "working-group".into());
     let topic = string_arg(request, "topic").unwrap_or_default();
     let group_store = store(home)?;
@@ -715,6 +721,15 @@ fn load(home: &HomeLayout, request: &DaemonRequest) -> Result<GroupDoc, OpError>
 }
 
 fn authorize(group: &GroupDoc, request: &DaemonRequest) -> Result<(), OpError> {
+    // Cloud connectors act for a Web Model actor, whose tool surface never
+    // includes group management; refuse here too so a routed or direct call
+    // cannot mutate the Group (rename, state, scopes, preamble, lifecycle).
+    if request.args.contains_key("_cccc_web_binding") {
+        return Err(OpError::new(
+            "permission_denied",
+            "Group management is unavailable to cloud connectors",
+        ));
+    }
     permissions::require_group(
         group,
         &string_arg(request, "by").unwrap_or_else(|| "user".into()),
