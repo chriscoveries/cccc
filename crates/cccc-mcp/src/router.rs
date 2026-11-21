@@ -1067,9 +1067,10 @@ fn apply_mcp_identity(name: &str, arguments: &mut Map<String, Value>, native: bo
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_actor_context, apply_request_context, help_markdown, is_message_operation,
-        is_task_mail_boundary, postprocess_task_result, prepare_task_arguments,
-        remove_untrusted_authority, runtime_group_id, with_post_message_context,
+        WEB_MODEL_CAPABILITY_USE_ALLOW_TOOLS, apply_actor_context, apply_request_context,
+        help_markdown, is_message_operation, is_task_mail_boundary, postprocess_task_result,
+        prepare_task_arguments, remove_untrusted_authority, runtime_group_id,
+        with_post_message_context,
     };
     use crate::RequestContext;
     use serde_json::{Map, Value, json};
