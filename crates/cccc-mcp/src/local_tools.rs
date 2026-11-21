@@ -348,10 +348,21 @@ async fn file(
     let web_root = web_file_root();
     if action == "blob_path" || action == "info" {
         let path = file_path(home, args, root, raw, &web_root)?;
+        // The resolved path is canonical; a link here is a swap raced in
+        // after resolution, so Web Model callers refuse it outright.
+        if args.contains_key("_cccc_web_binding")
+            && path
+                .symlink_metadata()
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false)
+        {
+            return Err("permission_denied: path must remain inside the allowed directory".into());
+        }
         return Ok(tool_result(
             json!({"path":path,"bytes":path.metadata().map(|meta|meta.len()).unwrap_or(0)}),
         ));
     }
+    let web_bound = args.contains_key("_cccc_web_binding");
     let args = args.clone();
     let home = home.clone();
     let root = root.to_path_buf();
@@ -359,7 +370,11 @@ async fn file(
     tokio::task::spawn_blocking(move || {
         revalidate(&home, &args)?;
         let path = file_path(&home, &args, &root, &raw, &web_root)?;
-        crate::file_read::read(&path, &args)
+        if web_bound {
+            crate::file_read::read_no_follow(&path, &args)
+        } else {
+            crate::file_read::read(&path, &args)
+        }
     })
     .await
     .map_err(|error| format!("file read task failed: {error}"))?
@@ -367,7 +382,7 @@ async fn file(
 }
 
 /// Resolve one `cccc_file` path. A caller carrying `_cccc_web_binding` is
-/// confined to the host-configured public directory when one is set; a
+/// confined to the host-configured public directory, which must be set; a
 /// `state/blobs/` name resolves only when the blob is carried by that
 /// actor's own conversation. Every other caller keeps the effective-scope
 /// resolution.
@@ -388,10 +403,8 @@ fn file_path(
         }
         return cccc_core::blobs::resolve(home, group_id, raw).map_err(|error| error.to_string());
     }
-    if args.contains_key("_cccc_web_binding")
-        && let Some(root) = web_file_root_dir(web_root)?
-    {
-        return web_file_path(root, raw, false);
+    if args.contains_key("_cccc_web_binding") {
+        return web_file_path(web_file_root_dir(web_root)?, raw, false);
     }
     crate::repo::resolve(root, &scope_relative(root, raw), false)
 }
@@ -461,8 +474,10 @@ fn web_blob_attached(
 const WEB_FILE_ROOT_ENV: &str = "CCCC_WEB_MODEL_FILE_ROOT";
 
 /// The resolved `CCCC_WEB_MODEL_FILE_ROOT` setting for one call.
+#[derive(Debug)]
 enum WebFileRoot {
-    /// Not configured: Web Model callers keep effective-scope resolution.
+    /// Not configured: Web Model file tools are denied; the setting is
+    /// required on any host that exposes them to a Web Model actor.
     Unset,
     /// Configured but not a usable directory: every confined path is denied.
     Invalid,
@@ -471,8 +486,8 @@ enum WebFileRoot {
 }
 
 /// Read the setting at the point of enforcement so each call sees live
-/// configuration. Unset keeps the effective-scope behavior; a set but
-/// unusable value denies rather than silently widening access.
+/// configuration. Unset and unusable values both deny rather than silently
+/// widening access.
 fn web_file_root() -> WebFileRoot {
     let Some(raw) = std::env::var_os(WEB_FILE_ROOT_ENV) else {
         return WebFileRoot::Unset;
@@ -486,21 +501,24 @@ fn web_file_root() -> WebFileRoot {
     }
 }
 
-/// The directory a Web Model caller is confined to, or the refusal a
-/// misconfigured setting produces. `Unset` keeps effective-scope behavior.
-fn web_file_root_dir(web_root: &WebFileRoot) -> Result<Option<&Path>, String> {
+/// The directory a Web Model caller is confined to. Only reached for
+/// `_cccc_web_binding` callers; an absent or unusable setting denies rather
+/// than falling back to effective-scope resolution.
+fn web_file_root_dir(web_root: &WebFileRoot) -> Result<&Path, String> {
     match web_root {
-        WebFileRoot::Root(root) => Ok(Some(root)),
+        WebFileRoot::Root(root) => Ok(root),
         WebFileRoot::Invalid => Err(format!(
             "permission_denied: {WEB_FILE_ROOT_ENV} is not a usable directory"
         )),
-        WebFileRoot::Unset => Ok(None),
+        WebFileRoot::Unset => Err(format!(
+            "permission_denied: {WEB_FILE_ROOT_ENV} is not configured"
+        )),
     }
 }
 
 /// Resolve `raw` inside `root`, the only directory a Web Model caller's file
-/// tools may reach when the host configures one. Relative paths join the
-/// root; absolute paths must already name a location inside it.
+/// tools may reach. Relative paths join the root; absolute paths must already
+/// name a location inside it.
 /// Canonicalization refuses `..` components and symlinked spellings that land
 /// outside the root. `allow_missing` admits a not-yet-existing path by lexical
 /// containment so a send retry still reaches the daemon's idempotent lookup.
@@ -612,8 +630,8 @@ fn send_path(root: &Path, raw: &str) -> Result<String, String> {
 }
 
 /// Resolve every `cccc_file_send` source for a Web Model caller inside the
-/// configured public directory, or `None` for other callers and for an
-/// unconfigured setting, which keep the effective-scope resolution.
+/// configured public directory. An absent or unusable setting denies; other
+/// callers keep the effective-scope resolution.
 fn web_send_paths(
     args: &Map<String, Value>,
     raws: &[&str],
@@ -622,9 +640,7 @@ fn web_send_paths(
     if !args.contains_key("_cccc_web_binding") {
         return Ok(None);
     }
-    let Some(root) = web_file_root_dir(web_root)? else {
-        return Ok(None);
-    };
+    let root = web_file_root_dir(web_root)?;
     raws.iter()
         .map(|raw| {
             if raw.starts_with("state/blobs/") {

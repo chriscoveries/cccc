@@ -109,31 +109,44 @@ fn web_reads_stay_inside_the_configured_public_directory() {
 }
 
 #[test]
-fn unconfigured_keeps_scope_resolution_and_invalid_denies() {
+fn unconfigured_and_invalid_settings_both_deny_web_file_tools() {
     let fixture = Fixture::new();
     let args = fixture.args(json!({}));
-    // Unset: the Web Model caller keeps the effective-scope behavior.
-    let path = file_path(
-        &fixture.home,
-        &args,
-        &fixture.root,
-        "private.txt",
-        &WebFileRoot::Unset,
-    )
-    .expect("scope file still resolves when unconfigured");
-    assert!(path.ends_with("private.txt"));
-    // A set but unusable directory denies every confined path.
-    assert!(
-        file_path(
+    // Unset: a Web Model caller is denied even a scope file — the setting is
+    // required, never an effective-scope fallback.
+    for web_root in [WebFileRoot::Unset, WebFileRoot::Invalid] {
+        let error = file_path(
             &fixture.home,
             &args,
             &fixture.root,
             "private.txt",
-            &WebFileRoot::Invalid
+            &web_root,
         )
-        .expect_err("invalid setting denies")
-        .starts_with("permission_denied:")
-    );
+        .expect_err("unconfigured or invalid setting denies");
+        assert!(
+            error.starts_with("permission_denied:"),
+            "{web_root:?}: {error}"
+        );
+        let raws = ["private.txt"];
+        assert!(
+            web_send_paths(&args, &raws, &web_root).is_err(),
+            "{web_root:?}: sends deny too"
+        );
+    }
+    // Own-conversation blobs stay readable with no root configured: the
+    // blob branch never consults the file root.
+    let blob = store_blob(&fixture, b"own bytes");
+    attach(&fixture, "dots", json!([]), &blob.path);
+    let name = blob.path.strip_prefix("state/blobs/").expect("blob name");
+    let path = file_path(
+        &fixture.home,
+        &args,
+        &fixture.root,
+        &format!("state/blobs/{name}"),
+        &WebFileRoot::Unset,
+    )
+    .expect("own blob resolves without a file root");
+    assert!(path.ends_with(name));
 }
 
 #[test]
