@@ -156,6 +156,7 @@ async fn connect_actor(state: &AppState, group: &str, actor: &str) -> Value {
 #[tokio::test]
 async fn automatic_pairing_verifies_owned_receipts_and_preserves_drafts_routes_and_cancellation() {
     if crate::system_browser_path().is_none() {
+        crate::browser_surface::browser_fixture_skip("a system browser");
         return;
     }
     let _chrome = crate::browser_surface::chrome_test_guard().await;

@@ -295,6 +295,7 @@ async fn closed_actor_windows_retire_with_their_generation() {
 async fn legacy_actor_pairing_does_not_replace_or_reap_its_window() {
     require_chrome!();
     if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::browser_fixture_skip("Xvfb");
         return;
     }
     let (url, server) = local_page("<textarea id=prompt-textarea></textarea>").await;

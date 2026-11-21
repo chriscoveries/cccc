@@ -15,7 +15,7 @@ mod system_browser;
 #[cfg(test)]
 mod chrome_test_guard;
 #[cfg(test)]
-pub(crate) use chrome_test_guard::chrome_test_guard;
+pub(crate) use chrome_test_guard::{browser_fixture_skip, chrome_test_guard};
 
 pub use interaction::{serve_socket, serve_vnc_socket};
 pub(crate) use prompt_submission::{

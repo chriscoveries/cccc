@@ -72,6 +72,7 @@ fn rejected_session_guards_do_not_release_the_active_owner() {
 #[tokio::test]
 async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() {
     if crate::system_browser_path().is_none() {
+        crate::browser_surface::browser_fixture_skip("a system browser");
         return;
     }
     let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -378,6 +379,7 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
 #[tokio::test]
 async fn verified_legacy_draft_recovers_through_rebuilt_prompt_once() {
     if crate::system_browser_path().is_none() {
+        crate::browser_surface::browser_fixture_skip("a system browser");
         return;
     }
     let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -555,6 +557,7 @@ async fn contended_worker_recovers_manual_send_and_only_delivers_later_work() {
     use futures_util::StreamExt;
 
     if crate::system_browser_path().is_none() {
+        crate::browser_surface::browser_fixture_skip("a system browser");
         return;
     }
     let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -972,6 +975,7 @@ async fn preserved_browser_keeps_the_same_conversation_across_restarts() {
         || !cccc_daemon::session_owner::platform_supported()
         || (cfg!(target_os = "linux") && !std::path::Path::new("/usr/bin/Xvfb").is_file())
     {
+        crate::browser_surface::browser_fixture_skip("a supported system-browser session");
         return;
     }
     let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
@@ -1432,6 +1436,7 @@ async fn a_stopping_web_records_claimed_work_and_claims_no_more() {
         || !cccc_daemon::session_owner::platform_supported()
         || (cfg!(target_os = "linux") && !std::path::Path::new("/usr/bin/Xvfb").is_file())
     {
+        crate::browser_surface::browser_fixture_skip("a supported system-browser session");
         return;
     }
     let _chrome_guard = crate::browser_surface::chrome_test_guard().await;

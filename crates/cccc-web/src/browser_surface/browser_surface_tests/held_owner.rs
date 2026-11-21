@@ -127,6 +127,7 @@ async fn lose_connection(surfaces: &BrowserSurfaces) {
 async fn kept_browser_returns_to_the_next_web_and_reopens_after_it_ends() {
     require_chrome!();
     if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::browser_fixture_skip("Xvfb");
         return;
     }
     let temp = tempfile::tempdir().expect("temp");
@@ -346,6 +347,7 @@ fn owner_pid(home: &cccc_core::HomeLayout) -> u64 {
 async fn next_owner_stops_the_browser_a_killed_owner_left() {
     require_chrome!();
     if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::browser_fixture_skip("Xvfb");
         return;
     }
     let temp = tempfile::tempdir().expect("temp");

@@ -140,6 +140,7 @@ mod tests {
         if crate::system_browser_path().is_none()
             || !std::path::Path::new("/usr/bin/Xvfb").is_file()
         {
+            crate::browser_surface::browser_fixture_skip("a system browser and Xvfb");
             return;
         }
         let _chrome = crate::browser_surface::chrome_test_guard().await;

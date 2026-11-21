@@ -260,6 +260,7 @@ mod tests {
     #[tokio::test]
     async fn current_chatgpt_pairing_receipt_keeps_exact_user_and_assistant_boundaries() {
         if crate::system_browser_path().is_none() {
+            crate::browser_surface::browser_fixture_skip("a system browser");
             return;
         }
         let _chrome_guard = super::super::chrome_test_guard().await;

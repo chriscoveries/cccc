@@ -18,6 +18,7 @@ async fn owned_page(manager: &BrowserSurfaces, key: &str) -> Page {
 async fn actor_window_remains_visible_and_closable_during_slow_navigation() {
     require_chrome!();
     if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::browser_fixture_skip("Xvfb");
         return;
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -100,6 +101,7 @@ async fn actor_window_remains_visible_and_closable_during_slow_navigation() {
 async fn shared_login_window_is_available_before_document_readiness() {
     require_chrome!();
     if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::browser_fixture_skip("Xvfb");
         return;
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -249,6 +251,7 @@ async fn shared_login_window_is_available_before_document_readiness() {
 async fn shared_windows_submit_independent_batches_while_viewers_capture() {
     require_chrome!();
     if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::browser_fixture_skip("Xvfb");
         return;
     }
     let (url, server) = local_page(r#"<main><form style="position:fixed;bottom:10px;left:20px;right:20px" onsubmit="event.preventDefault();const t=document.querySelector('textarea');const a=document.createElement('article');a.dataset.messageAuthorRole='user';a.textContent=t.value;document.querySelector('main').prepend(a);t.value='';window.sends++"><textarea id="prompt-textarea" style="width:90%;height:40px;transition:height .2s" oninput="this.style.height=this.value.length>200?'200px':'40px'"></textarea><button id="composer-submit-button" type="submit">Send</button></form></main><script>window.sends=0</script>"#).await;
@@ -317,6 +320,7 @@ async fn shared_windows_submit_independent_batches_while_viewers_capture() {
 async fn shared_windows_keep_login_and_close_only_their_own_surface() {
     require_chrome!();
     if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::browser_fixture_skip("Xvfb");
         return;
     }
     let (url, server) = local_page("<textarea id='prompt-textarea'></textarea>").await;
@@ -534,6 +538,7 @@ async fn shared_windows_keep_login_and_close_only_their_own_surface() {
 async fn shared_page_commands_do_not_adopt_popups_or_block_other_surfaces() {
     require_chrome!();
     if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::browser_fixture_skip("Xvfb");
         return;
     }
     let (url, server) = local_page("<button style='position:absolute;left:0;top:0;width:200px;height:100px' onclick=\"window.open('about:blank')\">Popup</button><textarea></textarea>").await;
@@ -665,6 +670,7 @@ async fn shared_page_commands_do_not_adopt_popups_or_block_other_surfaces() {
 async fn shared_login_open_recovers_blank_without_replacing_actor_pages() {
     require_chrome!();
     if !std::path::Path::new("/usr/bin/Xvfb").is_file() {
+        crate::browser_surface::browser_fixture_skip("Xvfb");
         return;
     }
     let (url, server) = local_page("<h1>Shared login fixture</h1><textarea></textarea>").await;
