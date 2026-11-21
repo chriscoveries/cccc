@@ -278,18 +278,22 @@ async fn dots_local_tools_preserve_valid_authority_and_forward_scope_identity() 
     for (name, args) in local_calls() {
         let fixture = Fixture::new();
         let (result, request) = delayed_scope_call(&fixture, name, args, false).await;
-        assert!(
-            result.is_ok(),
-            "current authority must still execute {name}"
-        );
         if name == "cccc_file" {
+            // A Web Model file read needs a configured staging root; with
+            // none set it is denied even under valid authority, and the
+            // private file is never returned. Reads inside a configured root
+            // are covered in web_file_tests.
+            let denied = format!("{:?}", result.expect_err("no file root: read denied"));
             assert!(
-                result
-                    .expect("read")
-                    .to_string()
-                    .contains("retired-task-content")
+                denied.contains("is not configured"),
+                "unset file root must deny, got {denied}"
             );
+            assert!(!denied.contains("retired-task-content"));
         } else {
+            assert!(
+                result.is_ok(),
+                "current authority must still execute {name}"
+            );
             assert!(
                 fixture.root.join("marker.txt").exists(),
                 "valid {name} must perform its local effect"
