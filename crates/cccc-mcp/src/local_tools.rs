@@ -673,7 +673,7 @@ async fn send_files_scoped(
     // A Web Model caller may only send files from the configured public
     // directory. Every source is resolved before either send branch runs, so
     // one bad path sends nothing.
-    let web_paths = web_send_paths(args, raws, web_root)?;
+    let web_paths = web_send_paths(args, &raws, web_root)?;
     let mut request = args.clone();
     let default = crate::argument_normalization::default_new_message_mode(args, false);
     let message_mode = crate::argument_normalization::message_mode(&mut request, default)?;
