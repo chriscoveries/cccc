@@ -31,6 +31,7 @@ pub(crate) use supervisor::{
 };
 pub(crate) use supervisor::{
     pauses_after_confirmation, registered_generation, registered_running, registered_workspace,
+    session_generation,
 };
 
 use cccc_core::HomeLayout;
