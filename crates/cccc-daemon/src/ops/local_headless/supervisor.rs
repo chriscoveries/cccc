@@ -542,6 +542,27 @@ pub(crate) fn registered_workspace(
     Some((item.running(), item.workspace.clone()))
 }
 
+/// The registered session's generation alone, for launch-admission checks.
+pub(crate) fn session_generation(group_id: &str, actor_id: &str) -> Option<String> {
+    #[cfg(unix)]
+    match crate::session_owner::snapshot(group_id, actor_id) {
+        Ok(Some(snapshot)) => {
+            if let Some(generation) = snapshot.owner.and_then(|owner| match owner.identity {
+                super::super::actor_runtime::OwnerIdentity::Managed {
+                    generation: Some(generation),
+                } => Some(generation),
+                _ => None,
+            }) {
+                return Some(generation);
+            }
+        }
+        Err(_) => return None,
+        Ok(None) => {}
+    }
+    lookup(&(group_id.to_owned(), actor_id.to_owned()))
+        .map(|item| item.managed.generation().to_owned())
+}
+
 #[must_use]
 pub fn status(group_id: &str, actor_id: &str) -> Option<HeadlessStatus> {
     #[cfg(unix)]

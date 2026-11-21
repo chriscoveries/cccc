@@ -48,6 +48,38 @@ fn terminal_reason(error: &crate::dispatch::OpError) -> Option<String> {
     .then(|| error.message.clone())
 }
 
+fn respawn_backoff(
+    group: &cccc_core::GroupDoc,
+    actor: &Actor,
+    cancelled: &AtomicBool,
+) -> Option<super::actor_respawn_backoff::Attempt> {
+    let attempt = super::actor_respawn_backoff::begin(&group.group_id, &actor.id)?;
+    (interruptible_sleep(attempt.delay, cancelled) && !cancelled.load(Ordering::Acquire))
+        .then_some(attempt)
+}
+
+fn launch_runtime(
+    home: &cccc_core::HomeLayout,
+    group: &cccc_core::GroupDoc,
+    actor: &Actor,
+    attempt: super::actor_respawn_backoff::Attempt,
+) -> Result<Option<cccc_runtime::SessionStatus>, crate::dispatch::OpError> {
+    let before_managed = super::local_headless::session_generation(&group.group_id, &actor.id);
+    let before_deepseek = super::deepseek_runtime::session_generation(&group.group_id, &actor.id);
+    let started = actor_runtime::apply(home, group, &actor.id, "actor.start");
+    let managed = super::local_headless::session_generation(&group.group_id, &actor.id);
+    let deepseek = super::deepseek_runtime::session_generation(&group.group_id, &actor.id);
+    // Admission, not a later liveness sample, also covers immediate exit and
+    // saved Profile changes that select a different backend for this launch.
+    attempt.complete(
+        started.is_ok()
+            && (matches!(&started, Ok(Some(_)))
+                || (managed.is_some() && managed != before_managed)
+                || (deepseek.is_some() && deepseek != before_deepseek)),
+    );
+    started
+}
+
 /// Deliver `jobs`. Jobs settled here for good (stale Mail notices) are removed
 /// from `jobs`, so a caller that retries the batch never offers them again.
 #[cfg(test)]
@@ -199,7 +231,7 @@ pub(super) fn process_batch_tracked(
             wakes,
         );
     }
-    let status = match ensure_running(&job.home, &current_group, &current_actor, wakes) {
+    let status = match ensure_running(&job.home, &current_group, &current_actor, wakes, cancelled) {
         Ok(Some(status)) => status,
         Ok(None) => return BatchOutcome::Retry,
         Err(reason) => return BatchOutcome::Terminal(reason),
@@ -768,18 +800,24 @@ fn process_deepseek_batch(
             Ok(false) => return BatchOutcome::Retry,
             Err(reason) => return BatchOutcome::Terminal(reason),
         }
-        match actor_runtime::apply(home, group, &actor.id, "actor.start") {
-            Ok(_)
-                if matches!(
-                    push_owner_running(&group.group_id, &actor.id, true),
-                    Ok(true)
-                ) => {}
-            Ok(_) => return BatchOutcome::Retry,
-            Err(error) => {
-                return match terminal_reason(&error) {
-                    Some(reason) => BatchOutcome::Terminal(reason),
-                    None => BatchOutcome::Retry,
-                };
+        let Some(attempt) = respawn_backoff(group, actor, cancelled) else {
+            return BatchOutcome::Retry;
+        };
+        if !crate::ops::deepseek_runtime::running(&group.group_id, &actor.id) {
+            let started = launch_runtime(home, group, actor, attempt);
+            match started {
+                Ok(_)
+                    if matches!(
+                        push_owner_running(&group.group_id, &actor.id, true),
+                        Ok(true)
+                    ) => {}
+                Ok(_) => return BatchOutcome::Retry,
+                Err(error) => {
+                    return match terminal_reason(&error) {
+                        Some(reason) => BatchOutcome::Terminal(reason),
+                        None => BatchOutcome::Retry,
+                    };
+                }
             }
         }
     }
@@ -826,7 +864,17 @@ fn process_managed_batch(
                 Err(reason) => return BatchOutcome::Terminal(reason),
             }
         }
-        match actor_runtime::apply(home, group, &actor.id, "actor.start") {
+        let Some(attempt) = respawn_backoff(group, actor, cancelled) else {
+            return BatchOutcome::Retry;
+        };
+        // another worker may have started the session during the backoff sleep
+        let running = match push_owner_running(&group.group_id, &actor.id, false) {
+            Ok(running) => running,
+            Err(_) => return BatchOutcome::Retry,
+        };
+        if !running {
+        let started = launch_runtime(home, group, actor, attempt);
+        match started {
             Ok(None)
                 if matches!(
                     push_owner_running(&group.group_id, &actor.id, false),
@@ -862,6 +910,7 @@ fn process_managed_batch(
                 );
                 return BatchOutcome::Retry;
             }
+        }
         }
     }
     let events = jobs.iter().map(|job| job.event.clone()).collect::<Vec<_>>();
@@ -1012,6 +1061,7 @@ fn ensure_running(
     group: &cccc_core::GroupDoc,
     actor: &Actor,
     wakes: &mut WakeBudget,
+    cancelled: &AtomicBool,
 ) -> Result<Option<cccc_runtime::SessionStatus>, String> {
     if actor_runtime::confirmation_pause_applies(home, &group.group_id, actor).unwrap_or(true) {
         return Ok(None);
@@ -1024,7 +1074,16 @@ fn ensure_running(
     if !wakes.spend(&group.group_id, &actor.id)? {
         return Ok(None);
     }
-    let status = match actor_runtime::apply(home, group, &actor.id, "actor.start") {
+    let Some(attempt) = respawn_backoff(group, actor, cancelled) else {
+        return Ok(None);
+    };
+    if let Ok(status) = cccc_runtime::status(&group.group_id, &actor.id)
+        && status.running
+    {
+        return Ok(Some(status));
+    }
+    let started = launch_runtime(home, group, actor, attempt);
+    let status = match started {
         Ok(Some(status)) if status.running => status,
         Ok(_) => return Ok(None),
         Err(error) => {

@@ -5,6 +5,145 @@ use cccc_contracts::{DaemonRequest, Event, RunnerKind};
 use cccc_core::{GroupStore, HomeLayout};
 use std::collections::BTreeMap;
 
+// Reuse the existing failed-start recovery scenario and native process fixture.
+// No provider transcript or timing observation is synthesized.
+struct RestartCleanup(String, String);
+
+impl Drop for RestartCleanup {
+    fn drop(&mut self) {
+        let _ = cccc_runtime::stop(&self.0, &self.1);
+        super::super::actor_respawn_backoff::forget(&self.0, &self.1);
+    }
+}
+
+fn restart_fixture(
+    command: Vec<String>,
+) -> (
+    tempfile::TempDir,
+    HomeLayout,
+    cccc_core::GroupDoc,
+    Actor,
+    RestartCleanup,
+) {
+    let temp = tempfile::tempdir().expect("startup fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let group = store.create("startup recovery", "").expect("group");
+    let mut group = cccc_core::group_scope::attach(
+        &store,
+        &group.group_id,
+        cccc_core::scope::detect(temp.path()).expect("scope"),
+    )
+    .expect("attach");
+    let mut actor = Actor::new("peer");
+    actor.runtime = ActorRuntime::Custom;
+    actor.command = command;
+    group.actors.push(actor.clone());
+    store.save(&group).expect("actor");
+    let cleanup = RestartCleanup(group.group_id.clone(), actor.id.clone());
+    (temp, home, group, actor, cleanup)
+}
+
+fn wait_for_restart_fixture_exit(group: &str, actor: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while cccc_runtime::status(group, actor).is_ok_and(|status| status.running) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "native fixture exited"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_real_failed_worker_launch_does_not_earn_an_additional_restart_delay() {
+    let (temp, home, mut group, mut actor, _cleanup) = restart_fixture(Vec::new());
+    actor.command = vec![temp.path().join("input.py").to_string_lossy().into_owned()];
+    group.actors[0] = actor.clone();
+    assert!(
+        ensure_running(&home, &group, &actor, &AtomicBool::new(false))
+            .expect("retryable missing executable")
+            .is_none()
+    );
+    let (delay, state) = super::super::actor_respawn_backoff::observed(&group.group_id, &actor.id);
+    assert_eq!(
+        delay,
+        Duration::ZERO,
+        "failed startup must not earn restart backoff"
+    );
+    assert_eq!(state, None, "no session was launched");
+}
+
+#[test]
+fn an_immediate_exit_counts_but_a_failed_launch_after_the_wait_preserves_history() {
+    let (temp, home, mut group, mut actor, _cleanup) = restart_fixture(vec!["/bin/false".into()]);
+    let cancelled = AtomicBool::new(false);
+    let _ = ensure_running(&home, &group, &actor, &cancelled).expect("actual launch");
+    wait_for_restart_fixture_exit(&group.group_id, &actor.id);
+    let before = super::super::actor_respawn_backoff::observed(&group.group_id, &actor.id);
+    assert_eq!(
+        before.0,
+        Duration::from_secs(10),
+        "a successful rapid exit still counts"
+    );
+    assert_eq!(before.1.map(|state| state.0), Some(1));
+    actor.command = vec![temp.path().join("input.py").to_string_lossy().into_owned()];
+    group.actors[0] = actor.clone();
+    assert!(
+        ensure_running(&home, &group, &actor, &AtomicBool::new(true))
+            .expect("cancelled retry")
+            .is_none()
+    );
+    assert_eq!(
+        super::super::actor_respawn_backoff::observed(&group.group_id, &actor.id),
+        before
+    );
+    assert!(
+        ensure_running(&home, &group, &actor, &cancelled)
+            .expect("failed retry")
+            .is_none()
+    );
+    assert_eq!(
+        super::super::actor_respawn_backoff::observed(&group.group_id, &actor.id),
+        before,
+        "a failed launch after the completed wait changes neither count nor timestamp"
+    );
+}
+
+#[test]
+fn a_runtime_brought_up_during_the_wait_does_not_commit_an_automatic_restart() {
+    let (_temp, home, mut group, mut actor, _cleanup) = restart_fixture(vec!["/bin/false".into()]);
+    let cancelled = AtomicBool::new(false);
+    let _ = ensure_running(&home, &group, &actor, &cancelled).expect("actual launch");
+    wait_for_restart_fixture_exit(&group.group_id, &actor.id);
+    let before = super::super::actor_respawn_backoff::observed(&group.group_id, &actor.id);
+    actor.command = vec!["/bin/sh".into(), "-c".into(), "exec sleep 60".into()];
+    group.actors[0] = actor.clone();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| ensure_running(&home, &group, &actor, &cancelled));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !super::super::actor_respawn_backoff::pending(&group.group_id, &actor.id) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker entered pending wait"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        actor_runtime::apply(&home, &group, &actor.id, "actor.start").expect("independent start");
+        assert!(
+            worker
+                .join()
+                .expect("worker")
+                .expect("running fixture")
+                .is_some()
+        );
+    });
+    assert_eq!(
+        super::super::actor_respawn_backoff::observed(&group.group_id, &actor.id),
+        before
+    );
+}
+
 #[test]
 fn actor_start_preserves_a_healthy_acp_owner_despite_a_failed_native_receipt() {
     use std::os::unix::fs::PermissionsExt;
