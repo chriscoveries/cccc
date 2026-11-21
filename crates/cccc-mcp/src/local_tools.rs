@@ -3,6 +3,7 @@ use cccc_core::HomeLayout;
 use cccc_core::group_scope::EffectiveScope;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::ToolCallError;
@@ -10,6 +11,8 @@ use crate::router::{daemon, tool_result};
 
 #[cfg(test)]
 pub(crate) mod authority_tests;
+#[cfg(test)]
+mod web_file_tests;
 
 pub async fn call(
     home: &HomeLayout,
@@ -342,29 +345,218 @@ async fn file(
                 .into(),
         );
     }
-    let path = if raw.starts_with("state/blobs/") {
-        let group_id = args
-            .get("group_id")
-            .and_then(Value::as_str)
-            .ok_or("group_id is required")?;
-        cccc_core::blobs::resolve(home, group_id, raw).map_err(|error| error.to_string())?
-    } else {
-        crate::repo::resolve(root, &scope_relative(root, raw), false)?
-    };
+    let web_root = web_file_root();
     if action == "blob_path" || action == "info" {
+        let path = file_path(home, args, root, raw, &web_root)?;
         return Ok(tool_result(
             json!({"path":path,"bytes":path.metadata().map(|meta|meta.len()).unwrap_or(0)}),
         ));
     }
     let args = args.clone();
     let home = home.clone();
+    let root = root.to_path_buf();
+    let raw = raw.to_owned();
     tokio::task::spawn_blocking(move || {
         revalidate(&home, &args)?;
+        let path = file_path(&home, &args, &root, &raw, &web_root)?;
         crate::file_read::read(&path, &args)
     })
     .await
     .map_err(|error| format!("file read task failed: {error}"))?
     .map_err(Into::into)
+}
+
+/// Resolve one `cccc_file` path. A caller carrying `_cccc_web_binding` is
+/// confined to the host-configured public directory when one is set; a
+/// `state/blobs/` name resolves only when the blob is carried by that
+/// actor's own conversation. Every other caller keeps the effective-scope
+/// resolution.
+fn file_path(
+    home: &HomeLayout,
+    args: &Map<String, Value>,
+    root: &Path,
+    raw: &str,
+    web_root: &WebFileRoot,
+) -> Result<PathBuf, String> {
+    if raw.starts_with("state/blobs/") {
+        let group_id = args
+            .get("group_id")
+            .and_then(Value::as_str)
+            .ok_or("group_id is required")?;
+        if args.contains_key("_cccc_web_binding") {
+            web_blob_path(home, group_id, args, raw)?;
+        }
+        return cccc_core::blobs::resolve(home, group_id, raw).map_err(|error| error.to_string());
+    }
+    if args.contains_key("_cccc_web_binding")
+        && let Some(root) = web_file_root_dir(web_root)?
+    {
+        return web_file_path(root, raw, false);
+    }
+    crate::repo::resolve(root, &scope_relative(root, raw), false)
+}
+
+/// Admit a `state/blobs/` read for a Web Model caller only when the blob is
+/// carried by a message it sent or that was delivered to it.
+fn web_blob_path(
+    home: &HomeLayout,
+    group_id: &str,
+    args: &Map<String, Value>,
+    raw: &str,
+) -> Result<(), String> {
+    let actor_id = args.get("by").and_then(Value::as_str).unwrap_or_default();
+    let name = raw.strip_prefix("state/blobs/").unwrap_or(raw);
+    if web_blob_attached(home, group_id, actor_id, name)? {
+        Ok(())
+    } else {
+        Err("permission_denied: blob is not part of this conversation".into())
+    }
+}
+
+/// Whether the blob `name` (the part after `state/blobs/`) is carried by an
+/// attachment on a message the actor sent or that was delivered to it. The
+/// ledger is the only record of which conversation owns a stored blob.
+fn web_blob_attached(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    name: &str,
+) -> Result<bool, String> {
+    if actor_id.is_empty() {
+        return Ok(false);
+    }
+    let store = cccc_core::GroupStore::new(home.clone()).map_err(|error| error.to_string())?;
+    let group = store.load(group_id).map_err(|error| error.to_string())?;
+    let ledger = store
+        .ledger_path(group_id)
+        .map_err(|error| error.to_string())?;
+    let mut attached = false;
+    cccc_core::ledger::visit_newest_first(&ledger, |event| {
+        let involved =
+            event.by == actor_id || cccc_core::inbox::is_for_actor(&group, &event, actor_id);
+        let carried = involved
+            && event
+                .data
+                .get("attachments")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.get("path"))
+                        .filter_map(Value::as_str)
+                        .any(|path| path.strip_prefix("state/blobs/").unwrap_or(path) == name)
+                });
+        if carried {
+            attached = true;
+            return std::ops::ControlFlow::Break(());
+        }
+        std::ops::ControlFlow::Continue(())
+    })
+    .map_err(|error| error.to_string())?;
+    Ok(attached)
+}
+
+/// The host environment variable naming the one directory Web Model file
+/// tools may reach.
+const WEB_FILE_ROOT_ENV: &str = "CCCC_WEB_MODEL_FILE_ROOT";
+
+/// The resolved `CCCC_WEB_MODEL_FILE_ROOT` setting for one call.
+enum WebFileRoot {
+    /// Not configured: Web Model callers keep effective-scope resolution.
+    Unset,
+    /// Configured but not a usable directory: every confined path is denied.
+    Invalid,
+    /// The canonical allowed directory.
+    Root(PathBuf),
+}
+
+/// Read the setting at the point of enforcement so each call sees live
+/// configuration. Unset keeps the effective-scope behavior; a set but
+/// unusable value denies rather than silently widening access.
+fn web_file_root() -> WebFileRoot {
+    let Some(raw) = std::env::var_os(WEB_FILE_ROOT_ENV) else {
+        return WebFileRoot::Unset;
+    };
+    if raw.is_empty() {
+        return WebFileRoot::Unset;
+    }
+    match PathBuf::from(raw).canonicalize() {
+        Ok(root) if root.is_dir() => WebFileRoot::Root(root),
+        _ => WebFileRoot::Invalid,
+    }
+}
+
+/// The directory a Web Model caller is confined to, or the refusal a
+/// misconfigured setting produces. `Unset` keeps effective-scope behavior.
+fn web_file_root_dir(web_root: &WebFileRoot) -> Result<Option<&Path>, String> {
+    match web_root {
+        WebFileRoot::Root(root) => Ok(Some(root)),
+        WebFileRoot::Invalid => Err(format!(
+            "permission_denied: {WEB_FILE_ROOT_ENV} is not a usable directory"
+        )),
+        WebFileRoot::Unset => Ok(None),
+    }
+}
+
+/// Resolve `raw` inside `root`, the only directory a Web Model caller's file
+/// tools may reach when the host configures one. Relative paths join the
+/// root; absolute paths must already name a location inside it.
+/// Canonicalization refuses `..` components and symlinked spellings that land
+/// outside the root. `allow_missing` admits a not-yet-existing path by lexical
+/// containment so a send retry still reaches the daemon's idempotent lookup.
+fn web_file_path(root: &Path, raw: &str, allow_missing: bool) -> Result<PathBuf, String> {
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let candidate = Path::new(raw);
+    if candidate
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err("permission_denied: path must remain inside the allowed directory".into());
+    }
+    let candidate = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    let checked = match candidate.canonicalize() {
+        Ok(path) => path,
+        Err(error) if !allow_missing => {
+            return Err(match error.kind() {
+                std::io::ErrorKind::NotFound => format!("path not found: {raw}"),
+                _ => error.to_string(),
+            });
+        }
+        Err(_) => {
+            // A send retry may name a source removed since the first
+            // attempt. Resolve the deepest existing ancestor so a symlinked
+            // directory cannot smuggle an outside spelling through the
+            // lexical containment check below.
+            let mut missing: Vec<&OsStr> = Vec::new();
+            let mut ancestor = candidate.as_path();
+            loop {
+                match ancestor.canonicalize() {
+                    Ok(dir) => {
+                        let mut resolved = dir;
+                        for part in missing.iter().rev() {
+                            resolved.push(*part);
+                        }
+                        break resolved;
+                    }
+                    Err(_) => match (ancestor.file_name(), ancestor.parent()) {
+                        (Some(name), Some(parent)) => {
+                            missing.push(name);
+                            ancestor = parent;
+                        }
+                        _ => break candidate.clone(),
+                    },
+                }
+            }
+        }
+    };
+    if !checked.starts_with(&root) {
+        return Err("permission_denied: path escapes the allowed directory".into());
+    }
+    Ok(checked)
 }
 
 /// Files one message may carry; IM bridges split larger sets on their own.
@@ -419,12 +611,53 @@ fn send_path(root: &Path, raw: &str) -> Result<String, String> {
     Ok(root.join(relative).to_string_lossy().into_owned())
 }
 
+/// Resolve every `cccc_file_send` source for a Web Model caller inside the
+/// configured public directory, or `None` for other callers and for an
+/// unconfigured setting, which keep the effective-scope resolution.
+fn web_send_paths(
+    args: &Map<String, Value>,
+    raws: &[&str],
+    web_root: &WebFileRoot,
+) -> Result<Option<Vec<PathBuf>>, String> {
+    if !args.contains_key("_cccc_web_binding") {
+        return Ok(None);
+    }
+    let Some(root) = web_file_root_dir(web_root)? else {
+        return Ok(None);
+    };
+    raws.iter()
+        .map(|raw| {
+            if raw.starts_with("state/blobs/") {
+                return Err("send expects a file under the effective tool scope".into());
+            }
+            web_file_path(root, raw, true)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 async fn send_files(
     client: &DaemonClient,
     root: &Path,
     args: &Map<String, Value>,
 ) -> Result<Value, ToolCallError> {
+    let web_root = web_file_root();
+    send_files_scoped(client, root, args, &web_root).await
+}
+
+/// `cccc_file_send` body. `web_root` is the host-configured public directory
+/// resolved once per call.
+async fn send_files_scoped(
+    client: &DaemonClient,
+    root: &Path,
+    args: &Map<String, Value>,
+    web_root: &WebFileRoot,
+) -> Result<Value, ToolCallError> {
     let (raws, listed) = send_paths(args)?;
+    // A Web Model caller may only send files from the configured public
+    // directory. Every source is resolved before either send branch runs, so
+    // one bad path sends nothing.
+    let web_paths = web_send_paths(args, raws, web_root)?;
     let mut request = args.clone();
     let default = crate::argument_normalization::default_new_message_mode(args, false);
     let message_mode = crate::argument_normalization::message_mode(&mut request, default)?;
@@ -435,7 +668,13 @@ async fn send_files(
     crate::argument_normalization::normalize_message_author(&mut request);
     crate::argument_normalization::normalize_recipients(&mut request);
     if args.contains_key("dst_instance_id") {
-        let scoped: Vec<String> = raws.iter().map(|raw| scope_relative(root, raw)).collect();
+        let scoped: Vec<String> = match &web_paths {
+            Some(paths) => paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            None => raws.iter().map(|raw| scope_relative(root, raw)).collect(),
+        };
         request.insert("paths".into(), json!(scoped));
         crate::mapping::connect_destination(&mut request)?;
         let result = daemon(client, "connect_send_files", request).await?;
@@ -446,10 +685,16 @@ async fn send_files(
     // The retry key names the logical send, as it does for Connect.
     crate::argument_normalization::alias(&mut request, "idempotency_key", "client_id");
     // Check every path before sending any: one bad path sends nothing.
-    let paths = raws
-        .iter()
-        .map(|raw| send_path(root, raw))
-        .collect::<Result<Vec<_>, _>>()?;
+    let paths: Vec<String> = match &web_paths {
+        Some(paths) => paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        None => raws
+            .iter()
+            .map(|raw| send_path(root, raw))
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     request.insert("paths".into(), json!(paths));
     let result = daemon(client, "send_files", request).await?;
     let attachments = result["event"]["data"]["attachments"]
