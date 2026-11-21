@@ -82,6 +82,31 @@ async fn grok_actors_reject_browser_apis_without_launching_a_browser() {
     .expect("json");
     assert_eq!(body["ok"], false);
 }
+/// Web Model file tools reach only `CCCC_WEB_MODEL_FILE_ROOT`, a host-wide
+/// setting read at each call. A test that needs it re-runs itself as a child
+/// process with the setting pointing at a staging directory holding the
+/// sample file; the child runs only that test. Returns true in the parent.
+fn rerun_with_web_file_root(test: &str) -> bool {
+    if std::env::var_os("CCCC_WEB_MODEL_FILE_ROOT").is_some() {
+        return false;
+    }
+    let dir = tempfile::tempdir().expect("web file root");
+    std::fs::write(dir.path().join("sample.txt"), "local fixture content")
+        .expect("web file root sample");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", test, "--test-threads=1", "--nocapture"])
+        .env("CCCC_WEB_MODEL_FILE_ROOT", dir.path())
+        .output()
+        .expect("child test run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{test} with a web file root:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().expect("valid test fixture");
@@ -89,8 +114,16 @@ impl Fixture {
         home.initialize().expect("valid test fixture");
         let groups = GroupStore::new(home.clone()).expect("valid test fixture");
         let group = groups.create("fixture", "").expect("valid test fixture");
-        let root = temp.path().join("repo");
-        std::fs::create_dir(&root).expect("valid test fixture");
+        // A child rerun (rerun_with_web_file_root) makes the web file root
+        // the scope root, so Web Model reads and sends resolve in one place.
+        let root = match std::env::var_os("CCCC_WEB_MODEL_FILE_ROOT") {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => {
+                let root = temp.path().join("repo");
+                std::fs::create_dir(&root).expect("valid test fixture");
+                root
+            }
+        };
         std::fs::write(root.join("sample.txt"), "local fixture content")
             .expect("valid test fixture");
         let mut group = cccc_core::group_scope::attach(
@@ -305,6 +338,9 @@ async fn one_catalog_before_pairing_and_strict_authentication() {
 
 #[tokio::test]
 async fn file_read_and_send_keep_distinct_effects_and_bound_identity() {
+    if rerun_with_web_file_root("file_read_and_send_keep_distinct_effects_and_bound_identity") {
+        return;
+    }
     let f = Fixture::new();
     let _daemon = start_daemon(&f.home).await;
     f.bind("alpha", "chat-a");
@@ -426,6 +462,11 @@ async fn file_read_and_send_keep_distinct_effects_and_bound_identity() {
 }
 #[tokio::test]
 async fn routes_two_conversations_across_refresh_without_exposing_raw_metadata() {
+    if rerun_with_web_file_root(
+        "routes_two_conversations_across_refresh_without_exposing_raw_metadata",
+    ) {
+        return;
+    }
     let f = Fixture::new();
     let _daemon = start_daemon(&f.home).await;
     f.bind("alpha", "chat-a");
@@ -466,6 +507,11 @@ async fn routes_two_conversations_across_refresh_without_exposing_raw_metadata()
 
 #[tokio::test]
 async fn legacy_actor_binding_authorizes_its_conversation_without_changing_identity() {
+    if rerun_with_web_file_root(
+        "legacy_actor_binding_authorizes_its_conversation_without_changing_identity",
+    ) {
+        return;
+    }
     let f = Fixture::new();
     let groups = GroupStore::new(f.home.clone()).expect("groups");
     groups
@@ -750,6 +796,11 @@ async fn closing_login_does_not_depend_on_actor_lifecycle_or_group_parsing() {
 
 #[tokio::test]
 async fn grok_execution_routes_real_tools_and_nested_management_without_identity_metadata() {
+    if rerun_with_web_file_root(
+        "grok_execution_routes_real_tools_and_nested_management_without_identity_metadata",
+    ) {
+        return;
+    }
     let mut f = Fixture::new();
     let groups = GroupStore::new(f.home.clone()).expect("valid test fixture");
     let group = groups
