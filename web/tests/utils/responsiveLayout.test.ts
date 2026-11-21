@@ -12,7 +12,7 @@ describe("responsiveLayout", () => {
     expect(MOBILE_VIEWPORT_MEDIA_QUERY).toBe("(max-width: 767px)");
   });
 
-  it("reserves the absolute mobile app header once", () => {
-    expect(MOBILE_APP_HEADER_HEIGHT_PX).toBe(48);
+  it("reserves the mobile app header and resource row once", () => {
+    expect(MOBILE_APP_HEADER_HEIGHT_PX).toBe(48 + 20);
   });
 });

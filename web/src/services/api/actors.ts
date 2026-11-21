@@ -71,6 +71,11 @@ type ProfileLookupOptions = { scope?: ProfileScope; ownerId?: string };
 
 type ProfileDeleteOptions = ProfileLookupOptions & { forceDetach?: boolean };
 
+type ActorListResult = {
+  actors: Actor[];
+  host_memory?: { total_bytes: number; available_bytes: number };
+};
+
 function buildProfileQuery(opts?: ProfileLookupOptions): string {
   const params = new URLSearchParams();
   if (opts?.scope) params.set("scope", String(opts.scope));
@@ -105,13 +110,14 @@ export async function fetchActors(
   groupId: string,
   includeUnread = false,
   init?: RequestInit & { noCache?: boolean },
-  options?: { includeInternal?: boolean },
+  options?: { includeInternal?: boolean; includeResources?: boolean },
 ) {
   const gid = String(groupId || "").trim();
   const includeInternal = Boolean(options?.includeInternal);
   const params = new URLSearchParams();
   if (includeUnread) params.set("include_unread", "true");
   if (includeInternal) params.set("include_internal", "true");
+  if (options?.includeResources) params.set("include_resources", "true");
   const query = params.toString();
   const url = includeUnread
     ? `/api/v1/groups/${encodeURIComponent(gid)}/actors?${query}`
@@ -127,7 +133,10 @@ export async function fetchActors(
       },
     };
   };
-  if (init?.noCache || init?.signal || includeUnread) return read();
+  // Live resource readings must not be served from the shared read cache.
+  if (init?.noCache || init?.signal || includeUnread || options?.includeResources) {
+    return read();
+  }
   return reuseSharedReadRequest(actorsReadOnlyRequestKey(gid, includeInternal), read);
 }
 

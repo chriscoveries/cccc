@@ -1,3 +1,4 @@
+import { MOBILE_APP_HEADER_HEIGHT_PX } from "../../utils/responsiveLayout";
 import { CodexVoiceDock } from "../../components/layout/CodexVoiceDock";
 import { CodexVoiceAnalystModal } from "../../components/modals/CodexVoiceAnalystModal";
 import { useModalStore } from "../../stores";
@@ -24,7 +25,7 @@ export function CodexVoiceMobileDock(props: SharedProps) {
   // The phone bar shows while a call or Chet's work runs, and folds away after.
   if (!voice.controller.isEngaged && !voice.chet.working) return null;
   return (
-    <div className="mt-[48px] flex-none md:hidden">
+    <div className="flex-none md:hidden" style={{ marginTop: MOBILE_APP_HEADER_HEIGHT_PX }}>
       <CodexVoiceDock
         variant="mobile"
         controller={voice.controller}

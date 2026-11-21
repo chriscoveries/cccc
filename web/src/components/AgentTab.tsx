@@ -1,3 +1,4 @@
+import { ActorResourcesBadge } from "../features/resources/ResourceProvider";
 import { NativeSessionPanel } from "../features/localSessions/NativeSessionPanel";
 import { RuntimeSwitchPendingNotice } from "../features/runtimeSwitch/RuntimeSwitchPendingNotice";
 import { ActorRuntimeConfirmationNotice } from "./agentTerminal/ActorRuntimeConfirmationNotice";
@@ -847,6 +848,7 @@ export function AgentTab({
             >
               {actor.title || actor.id}
             </span>
+            <ActorResourcesBadge actorId={actor.id} running={isRunning} />
             {compactStatusText ? (
               <span
                 className="max-w-[40%] shrink-0 truncate text-[var(--color-text-secondary)]"
@@ -922,6 +924,7 @@ export function AgentTab({
                   >
                     {actor.title || actor.id}
                   </span>
+                  <ActorResourcesBadge actorId={actor.id} running={isRunning} />
                   <span className={actorGroupRoleBadgeClass(actorGroupRole)} data-role-badge>
                     {actorGroupRole === "foreman"
                       ? t("groupRoleForeman", { defaultValue: "Foreman" })
