@@ -414,7 +414,9 @@ async fn file_read_and_send_keep_distinct_effects_and_bound_identity() {
     }), meta("chat-a")).await;
     assert_eq!(nested["result"]["isError"], true, "{nested}");
     assert!(
-        nested.to_string().contains("not available to Web Model actors"),
+        nested
+            .to_string()
+            .contains("not available to Web Model actors"),
         "{nested}"
     );
     assert_eq!(std::fs::read(&ledger).expect("ledger bytes"), before);
@@ -455,7 +457,9 @@ async fn file_read_and_send_keep_distinct_effects_and_bound_identity() {
     }), meta("chat-a")).await;
     assert_eq!(nested["result"]["isError"], true, "{nested}");
     assert!(
-        nested.to_string().contains("not available to Web Model actors"),
+        nested
+            .to_string()
+            .contains("not available to Web Model actors"),
         "{nested}"
     );
     cccc_mcp::shutdown(&f.home).await;
@@ -729,7 +733,9 @@ async fn pairing_tool_receipt_requires_host_metadata_and_grants_no_business_tool
     assert_eq!(code["result"]["isError"], true, "{code}");
     assert!(
         code.to_string().contains("conversation_not_paired")
-            || code.to_string().contains("not available to Web Model actors"),
+            || code
+                .to_string()
+                .contains("not available to Web Model actors"),
         "{code}"
     );
 }
@@ -947,7 +953,9 @@ async fn grok_execution_routes_real_tools_and_nested_management_without_identity
             .await;
         assert_eq!(nested["result"]["isError"], true, "{nested}");
         assert!(
-            nested.to_string().contains("not available to Web Model actors"),
+            nested
+                .to_string()
+                .contains("not available to Web Model actors"),
             "{nested}"
         );
         assert!(!nested.to_string().contains(&tokens[0]));
@@ -973,7 +981,10 @@ async fn grok_execution_routes_real_tools_and_nested_management_without_identity
         )
         .await;
     assert_ne!(still["result"]["isError"], true, "{still}");
-    assert_eq!(still["result"]["structuredContent"]["actor_id"], "beta", "{still}");
+    assert_eq!(
+        still["result"]["structuredContent"]["actor_id"], "beta",
+        "{still}"
+    );
     let ledger = std::fs::read_to_string(groups.ledger_path(&f.group).expect("valid test fixture"))
         .expect("valid test fixture");
     for token in tokens {

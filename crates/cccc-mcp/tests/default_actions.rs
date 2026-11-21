@@ -156,7 +156,9 @@ async fn workspace_defaults_inspect_and_refuse_host_edits_for_web_model() {
         let response = call(tool, args).await;
         assert_eq!(response["result"]["isError"], true, "{tool}: {response}");
         assert!(
-            response.to_string().contains("not available to Web Model actors"),
+            response
+                .to_string()
+                .contains("not available to Web Model actors"),
             "{tool}: {response}"
         );
     }
