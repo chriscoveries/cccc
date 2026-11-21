@@ -26,6 +26,58 @@ const RUNTIME_STATES_KEY: &str = "runtime_states";
 #[path = "actors_confirmation_tests.rs"]
 mod confirmation_tests;
 
+#[cfg(test)]
+mod web_binding_tests {
+    use super::*;
+
+    #[test]
+    fn cloud_connector_calls_cannot_manage_actors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        home.initialize().expect("initialize");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let group = store.create("web bound", "").expect("group");
+        for action in [
+            ActorAction::List,
+            ActorAction::Add,
+            ActorAction::Update,
+            ActorAction::Remove,
+            ActorAction::Start,
+            ActorAction::Stop,
+            ActorAction::Restart,
+        ] {
+            let request = DaemonRequest {
+                v: 1,
+                op: "actor_add".into(),
+                args: json!({
+                    "group_id":group.group_id,
+                    "by":"web-actor",
+                    "_cccc_web_binding":{}
+                })
+                .as_object()
+                .expect("args")
+                .clone(),
+            };
+            let error = authorize(&group, &request, action, "target")
+                .expect_err("cloud connector actor management must fail");
+            assert_eq!(error.code, "permission_denied");
+        }
+        // The same call without the connector binding still reaches the
+        // ordinary role check: an unknown actor is refused, not the binding.
+        let request = DaemonRequest {
+            v: 1,
+            op: "actor_add".into(),
+            args: json!({"group_id":group.group_id,"by":"web-actor"})
+                .as_object()
+                .expect("args")
+                .clone(),
+        };
+        let error = authorize(&group, &request, ActorAction::Add, "target")
+            .expect_err("unknown actor must still fail");
+        assert_ne!(error.code, "permission_denied");
+    }
+}
+
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     Some(match request.op.as_str() {
         "actor_list" => Operation::new(Read, list),
@@ -1379,6 +1431,15 @@ fn authorize(
     action: ActorAction,
     target: &str,
 ) -> Result<(), OpError> {
+    // Cloud connectors act for a Web Model actor, whose tool surface never
+    // includes actor management; refuse here too so a routed or direct call
+    // cannot add, update or lifecycle an actor (and its command line).
+    if request.args.contains_key("_cccc_web_binding") {
+        return Err(OpError::new(
+            "permission_denied",
+            "Actor management is unavailable to cloud connectors",
+        ));
+    }
     permissions::require_actor(
         group,
         &string_arg(request, "by").unwrap_or_else(|| "user".into()),

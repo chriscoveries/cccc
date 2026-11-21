@@ -256,15 +256,16 @@ async fn call_scoped(
     })
 }
 
-/// Capability-state mutators a Web Model actor may not reach even through a
-/// foreman's `cccc_capability_use` route: their base profile no longer lists
-/// them, and pack routing must not reopen the same surface.
-const WEB_MODEL_CAPABILITY_MUTATION_TOOLS: &[&str] = &[
-    "cccc_capability_enable",
-    "cccc_capability_install",
-    "cccc_capability_import",
-    "cccc_capability_block",
-    "cccc_capability_uninstall",
+/// The only capability-pack tools a Web Model actor may reach through
+/// `cccc_capability_use`: read-only state and workspace reads. Every other
+/// pack tool — actor/group lifecycle, headless, terminal, automation,
+/// capability mutators — stays refused for Web Model actors, peer or foreman,
+/// so pack routing cannot reopen host or roster control.
+const WEB_MODEL_CAPABILITY_USE_ALLOW_TOOLS: &[&str] = &[
+    "cccc_capability_state",
+    "cccc_repo",
+    "cccc_presentation",
+    "cccc_tracked_send",
 ];
 
 fn authorize_tool(
@@ -308,24 +309,12 @@ fn authorize_tool(
             .find(|actor| actor.id == actor_id)
             .is_some_and(|actor| actor.runtime.is_web_model())
     {
-        let role = cccc_core::actors::effective_role(group, actor_id)
-            .unwrap_or(cccc_contracts::ActorRole::Peer);
-        // The daemon authorizes each automation change by the caller's role, so a peer
-        // manages only reminders to itself; a Web Model peer may reach it like any peer.
-        let open_to_peers = name == "cccc_automation";
         if cccc_core::web_model_tool_names().any(|tool| tool == name)
-            || (via_capability_use
-                && (role == cccc_contracts::ActorRole::Foreman || open_to_peers)
-                && cccc_core::is_builtin_capability_pack_tool(name)
-                && !WEB_MODEL_CAPABILITY_MUTATION_TOOLS.contains(&name))
+            || (via_capability_use && WEB_MODEL_CAPABILITY_USE_ALLOW_TOOLS.contains(&name))
         {
             return Ok(());
         }
-        return if role == cccc_contracts::ActorRole::Peer {
-            Err(format!("{name} requires a Web Model foreman actor"))
-        } else {
-            Err(format!("{name} is not available to Web Model actors"))
-        };
+        return Err(format!("{name} is not available to Web Model actors"));
     }
     if !matches!(
         name,
@@ -1243,7 +1232,11 @@ mod tests {
                 .expect_err("direct management call must fail"),
             "cccc_actor is not available to Web Model actors"
         );
-        assert!(super::authorize_tool(&home, "cccc_actor", &foreman_args, true).is_ok());
+        assert_eq!(
+            super::authorize_tool(&home, "cccc_actor", &foreman_args, true)
+                .expect_err("capability-routed management call must fail"),
+            "cccc_actor is not available to Web Model actors"
+        );
 
         let mut peer_group = store.create("web model peer", "").expect("group");
         cccc_core::actors::add(
@@ -1264,11 +1257,11 @@ mod tests {
         assert_eq!(
             super::authorize_tool(&home, "cccc_actor", &peer_args, true)
                 .expect_err("peer management call must fail"),
-            "cccc_actor requires a Web Model foreman actor"
+            "cccc_actor is not available to Web Model actors"
         );
-        // Automation is decided per change by the daemon, so a Web Model peer may reach
-        // it through capability use, though not by naming it directly.
-        assert!(super::authorize_tool(&home, "cccc_automation", &peer_args, true).is_ok());
+        // Pack routing is an explicit read-only allow list for Web Model
+        // actors: automation and every other pack tool stay refused.
+        assert!(super::authorize_tool(&home, "cccc_automation", &peer_args, true).is_err());
         assert!(super::authorize_tool(&home, "cccc_automation", &peer_args, false).is_err());
         let native_peer_args = json!({
             "group_id":peer_group.group_id,
@@ -1344,7 +1337,22 @@ mod tests {
                 "{name} must stay refused through capability use"
             );
         }
+        // Pack tools outside the read-only allow list: a Web Model foreman
+        // cannot reach actor/group lifecycle, headless, terminal, automation
+        // or capability mutators through capability use either.
         for name in [
+            "cccc_actor",
+            "cccc_group",
+            "cccc_runtime_list",
+            "cccc_actor_notes",
+            "cccc_im_bind",
+            "cccc_space",
+            "cccc_automation",
+            "cccc_context_sync",
+            "cccc_headless",
+            "cccc_notify",
+            "cccc_terminal",
+            "cccc_debug",
             "cccc_capability_enable",
             "cccc_capability_install",
             "cccc_capability_import",
@@ -1356,9 +1364,14 @@ mod tests {
                 "{name} must stay refused through capability use"
             );
         }
-        // Read-only capability state and non-mutating pack tools still route.
-        assert!(super::authorize_tool(&home, "cccc_capability_state", &foreman_args, true).is_ok());
-        assert!(super::authorize_tool(&home, "cccc_actor", &foreman_args, true).is_ok());
+        // The allow list routes: read-only capability state and the workspace
+        // reads already on the Web Model surface.
+        for &name in WEB_MODEL_CAPABILITY_USE_ALLOW_TOOLS {
+            assert!(
+                super::authorize_tool(&home, name, &foreman_args, true).is_ok(),
+                "{name} must route through capability use"
+            );
+        }
         assert!(super::authorize_tool(&home, "cccc_repo", &foreman_args, false).is_ok());
         assert!(super::authorize_tool(&home, "cccc_tracked_send", &foreman_args, false).is_ok());
     }

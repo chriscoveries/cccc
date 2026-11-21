@@ -12,6 +12,12 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
 }
 
 fn create(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    if request.args.contains_key("_cccc_web_binding") {
+        return Err(OpError::new(
+            "permission_denied",
+            "Group management is unavailable to cloud connectors",
+        ));
+    }
     create_using(home, request, &RealCreationSteps)
 }
 
