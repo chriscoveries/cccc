@@ -151,7 +151,7 @@ async fn connect_tools_use_local_actor_context_and_canonical_queue_through_ipc()
             false,
         )
     };
-    // A caller may repeat its own identity but not claim another sender (T806).
+    // A caller may repeat its own identity but not claim another sender.
     let refused = call("cccc_connect", json!({"by":"user"}))
         .await
         .expect_err("forged sender");

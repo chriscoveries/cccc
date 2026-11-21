@@ -967,7 +967,7 @@ fn remove_untrusted_authority(args: &mut Map<String, Value>) {
 /// An explicit sender may repeat the connected identity; it may not name
 /// somebody else. Normalising a mismatch to the caller would silently rewrite
 /// who the model asked to send as, so the call is refused with
-/// `permission_denied` (seat ruling, T806) and nothing is appended.
+/// `permission_denied` and nothing is appended.
 fn refuse_mismatched_identity(
     args: &Map<String, Value>,
     key: &str,
@@ -997,20 +997,23 @@ fn apply_request_context(
     // A remote connector is bound to exactly one actor and group. Its request
     // arguments are model-controlled, so the request-scoped binding is authoritative.
     let actor = context.actor_id.trim();
+    // The bound actor may be repeated but not contradicted: a caller that names
+    // another sender is refused before any field is rewritten, so a refused
+    // call leaves the request untouched.
+    refuse_mismatched_identity(args, "by", actor)?;
+    // Actor management addresses a target; `by` remains the authenticated caller.
+    // Identity-bearing tools must still use the bound Actor, including nested calls.
+    if name != "cccc_actor" {
+        refuse_mismatched_identity(args, "actor_id", actor)?;
+    }
     args.insert(
         "group_id".into(),
         Value::String(context.group_id.to_owned()),
     );
-    // The bound actor may be repeated but not contradicted: a caller that names
-    // another sender is refused (seat ruling, T806), not quietly normalised.
-    refuse_mismatched_identity(args, "by", actor)?;
-    // Actor management addresses a target; `by` remains the authenticated caller.
-    // Identity-bearing tools must still use the bound Actor, including nested calls.
     if name == "cccc_actor" {
         args.entry("actor_id")
             .or_insert_with(|| Value::String(actor.to_owned()));
     } else {
-        refuse_mismatched_identity(args, "actor_id", actor)?;
         args.insert("actor_id".into(), Value::String(actor.to_owned()));
     }
     args.insert("by".into(), Value::String(actor.to_owned()));
@@ -2143,6 +2146,7 @@ mod tests {
                 .cloned()
                 .expect("args");
             args.insert(key.into(), value.into());
+            let before = args.clone();
 
             let error = apply_request_context(
                 "cccc_message_send",
@@ -2161,7 +2165,7 @@ mod tests {
                 "permission_denied",
                 "{key} must be refused, not normalised"
             );
-            assert_eq!(args[key], value, "a refused call rewrites nothing");
+            assert_eq!(args, before, "a refused call rewrites nothing");
         }
     }
 

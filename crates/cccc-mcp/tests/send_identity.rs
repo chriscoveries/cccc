@@ -1,4 +1,4 @@
-//! T806 (seat ruling): an explicit sender that is not the connected actor is
+//! An explicit sender that is not the connected actor is
 //! refused with `permission_denied`, never normalised to the caller, and
 //! nothing is appended. These drive the real MCP dispatch path
 //! (`handle_request_for_actor`) against a live daemon, not the router helpers
@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 
 #[tokio::test]
 async fn a_mismatched_sender_is_refused_and_appends_nothing() {
-    let (_temp, home, group_id) = fixture("t806-refuse");
+    let (_temp, home, group_id) = fixture("refuse-identity");
     let daemon = start_daemon(&home).await;
 
     let refused = send_as(&home, &group_id, 1, Some("peer2")).await;
@@ -61,7 +61,7 @@ async fn send_as(home: &HomeLayout, group_id: &str, id: u64, by: Option<&str>) -
     let mut arguments = json!({
         "group_id": group_id,
         "to": ["peer2"],
-        "text": format!("t806 send {id}"),
+        "text": format!("identity send {id}"),
         "insight": "Refusal and acceptance are measured on the same path, so the control proves the daemon still accepts an honest sender.",
         "mode": "send",
     });
