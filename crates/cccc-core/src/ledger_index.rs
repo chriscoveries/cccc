@@ -1,72 +1,46 @@
 use cccc_contracts::Event;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::ops::ControlFlow;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use crate::ledger::{SourceRevision, read_all_uncached, revisions};
+use crate::ledger::snapshot::{Location, Snapshot, Source};
 
 mod cache;
 mod queries;
-pub(crate) use queries::{find_event, find_idempotent, find_relay, inspect, inspect_status};
+pub(crate) use queries::{
+    events_after, find_event, find_idempotent, find_relay, inspect, inspect_status, read_all,
+};
 
 type ClientKey = (String, String, String);
 
-#[derive(Default)]
+// No parsed Event or JSON body survives a query. These are source locations
+// and the small identity fields needed to preserve generated legacy defaults.
+#[derive(Clone)]
+struct Record {
+    location: Location,
+    id: String,
+    ts: String,
+}
+
+#[derive(Clone, Default)]
 struct LedgerIndex {
-    revisions: Vec<SourceRevision>,
-    events: Vec<Event>,
+    sources: Vec<Source>,
+    offsets: Vec<u64>,
+    records: Vec<Record>,
     positions: HashMap<String, usize>,
     client_ids: HashMap<ClientKey, usize>,
     relays: HashMap<String, usize>,
     actor_generations: HashMap<String, usize>,
-    estimated_bytes: u64,
+    active_prefix: Option<[u8; 32]>,
+    line_aligned: bool,
 }
 
 impl LedgerIndex {
-    fn rebuild(path: &Path, revisions: Vec<SourceRevision>) -> io::Result<Self> {
-        let events = read_all_uncached(path)?;
-        let mut index = Self {
-            revisions,
-            events,
-            ..Self::default()
-        };
-        index.reindex();
-        index.estimated_bytes = estimate_events_bytes(&index.events);
-        Ok(index)
-    }
-
-    fn reindex(&mut self) {
-        self.positions.clear();
-        self.client_ids.clear();
-        self.relays.clear();
-        self.actor_generations.clear();
-        for (position, event) in self.events.iter().enumerate() {
-            self.positions.insert(event.id.clone(), position);
-            if let Some(client_id) = event
-                .data
-                .get("client_id")
-                .and_then(serde_json::Value::as_str)
-            {
-                self.client_ids.insert(
-                    (event.kind.clone(), event.by.clone(), client_id.to_owned()),
-                    position,
-                );
-            }
-            if event.kind == "chat.message"
-                && let Some(source_id) = event
-                    .data
-                    .get("src_event_id")
-                    .and_then(serde_json::Value::as_str)
-            {
-                self.relays.insert(source_id.to_owned(), position);
-            }
-            index_actor_generation(event, position, &mut self.actor_generations);
-        }
-    }
-
-    fn push(&mut self, event: Event, next_revisions: Vec<SourceRevision>) {
-        let position = self.events.len();
+    fn push(&mut self, event: Event, location: Location) {
+        let position = self.records.len();
         self.positions.insert(event.id.clone(), position);
         if let Some(client_id) = event
             .data
@@ -87,167 +61,178 @@ impl LedgerIndex {
             self.relays.insert(source_id.to_owned(), position);
         }
         index_actor_generation(&event, position, &mut self.actor_generations);
-        self.estimated_bytes = self
-            .estimated_bytes
-            .saturating_add(estimate_event_bytes(&event));
-        self.events.push(event);
-        self.revisions = next_revisions;
+        self.records.push(Record {
+            location,
+            id: event.id,
+            ts: event.ts,
+        });
+        // event.data, including oversized actor.activity bodies, drops here.
+    }
+
+    fn events(
+        &self,
+        snapshot: &Snapshot,
+        positions: impl IntoIterator<Item = usize>,
+    ) -> io::Result<Vec<Event>> {
+        let records = positions
+            .into_iter()
+            .map(|p| &self.records[p])
+            .collect::<Vec<_>>();
+        let locations = records.iter().map(|r| r.location).collect::<Vec<_>>();
+        let mut events = snapshot.events(&locations)?;
+        for (event, record) in events.iter_mut().zip(records) {
+            // Event permits absent id/ts in legacy records. Reuse the defaults
+            // generated at indexing, rather than generating new ones on a read.
+            event.id.clone_from(&record.id);
+            event.ts.clone_from(&record.ts);
+        }
+        Ok(events)
+    }
+
+    fn weight(&self) -> u64 {
+        // Account owned capacities conservatively, including lookup tables.
+        // This bounds accounted retained metadata, not allocator RSS or the
+        // temporary Vec<Event> explicitly requested by the bulk inspect API.
+        let strings = self
+            .records
+            .iter()
+            .map(|r| r.id.capacity() + r.ts.capacity())
+            .sum::<usize>()
+            + self.positions.keys().map(String::capacity).sum::<usize>()
+            + self.relays.keys().map(String::capacity).sum::<usize>()
+            + self
+                .actor_generations
+                .keys()
+                .map(String::capacity)
+                .sum::<usize>()
+            + self
+                .client_ids
+                .keys()
+                .map(|(a, b, c)| a.capacity() + b.capacity() + c.capacity())
+                .sum::<usize>();
+        let tables = (self.positions.capacity()
+            + self.relays.capacity()
+            + self.actor_generations.capacity())
+            * std::mem::size_of::<(String, usize)>()
+            + self.client_ids.capacity() * std::mem::size_of::<(ClientKey, usize)>();
+        let sources = self
+            .sources
+            .iter()
+            .map(|s| s.path.as_os_str().len())
+            .sum::<usize>()
+            + self.sources.capacity() * std::mem::size_of::<Source>();
+        ((std::mem::size_of::<Self>()
+            + strings
+            + tables
+            + sources
+            + self.offsets.capacity() * std::mem::size_of::<u64>()
+            + self.records.capacity() * std::mem::size_of::<Record>()) as u64)
+            .saturating_mul(2)
     }
 }
 
 fn index_actor_generation(
     event: &Event,
     position: usize,
-    actor_generations: &mut HashMap<String, usize>,
+    generations: &mut HashMap<String, usize>,
 ) {
-    if event.kind != "actor.add" {
-        return;
-    }
-    if let Some(actor_id) = event
-        .data
-        .get("actor")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|actor| actor.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|actor_id| !actor_id.is_empty())
+    if event.kind == "actor.add"
+        && let Some(id) = event
+            .data
+            .get("actor")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|actor| actor.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
     {
-        actor_generations.insert(actor_id.to_owned(), position);
+        generations.insert(id.to_owned(), position);
     }
 }
 
-fn estimate_events_bytes(events: &[Event]) -> u64 {
-    events.iter().map(estimate_event_bytes).sum()
+struct IndexedSnapshot {
+    entry: Arc<cache::CachedIndex>,
+    snapshot: Snapshot,
 }
 
-fn estimate_event_bytes(event: &Event) -> u64 {
-    let strings = [
-        &event.id,
-        &event.ts,
-        &event.kind,
-        &event.group_id,
-        &event.scope_key,
-        &event.by,
-    ]
-    .into_iter()
-    .map(|value| value.capacity() as u64)
-    .sum::<u64>();
-    // IDs and relation keys are duplicated by the lookup maps. A factor of
-    // two keeps the cache budget conservative without a second allocation.
-    (std::mem::size_of::<Event>() as u64)
-        .saturating_add(strings)
-        .saturating_add(estimate_map_bytes(&event.data))
-        .saturating_mul(2)
-}
-
-fn estimate_map_bytes(map: &serde_json::Map<String, serde_json::Value>) -> u64 {
-    map.iter()
-        .map(|(key, value)| key.capacity() as u64 + estimate_value_bytes(value))
-        .sum::<u64>()
-        .saturating_add((map.len() * std::mem::size_of::<(String, serde_json::Value)>()) as u64)
-}
-
-fn estimate_value_bytes(value: &serde_json::Value) -> u64 {
-    match value {
-        serde_json::Value::String(value) => value.capacity() as u64,
-        serde_json::Value::Array(values) => values
-            .iter()
-            .map(estimate_value_bytes)
-            .sum::<u64>()
-            .saturating_add((values.capacity() * std::mem::size_of::<serde_json::Value>()) as u64),
-        serde_json::Value::Object(map) => estimate_map_bytes(map),
-        _ => std::mem::size_of::<serde_json::Value>() as u64,
-    }
-}
-
-fn current(path: &Path) -> io::Result<Arc<RwLock<LedgerIndex>>> {
-    // Observe the sources under the stable ledger lock, then release it before
-    // taking the index lock below so the lock order stays index -> ledger.
-    // Compaction renames the active file and adds segments; outside the lock a
-    // look can miss a source, and a partial list can even match a cached one
-    // (path, length and mtime are not a file generation), returning stale events.
-    let observed = {
-        let _source_lock = crate::ledger::acquire_reader_lock(path)?;
-        revisions(path)?
-    };
-    let weight = observed.iter().map(|revision| revision.len).sum();
-    let entry = cache::entry(path, weight);
-    if entry
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .revisions
-        == observed
+fn current(path: &Path) -> io::Result<IndexedSnapshot> {
+    // The stable lock spans capture, continuity proof and metadata catch-up.
+    // No cache lock is held during source I/O or decoding.
+    let _lock = crate::ledger::acquire_reader_lock(path)?;
+    let snapshot = Snapshot::open(path)?;
+    let previous = cache::get(path);
+    if let Some(entry) = previous.as_ref()
+        && entry.index.sources == snapshot.sources
     {
-        return Ok(entry);
+        return Ok(IndexedSnapshot {
+            entry: Arc::clone(entry),
+            snapshot,
+        });
     }
-    let mut index = entry
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Metadata and events must describe the same committed history. Refresh
-    // after both locks: another reader or append may have updated the index
-    // while this reader waited. Appenders release the writer lock before
-    // note_append takes the index lock, so this order cannot form a lock cycle.
-    let source_lock = crate::ledger::acquire_reader_lock(path)?;
-    let next_revisions = revisions(path)?;
-    if index.revisions != next_revisions {
-        *index = LedgerIndex::rebuild(path, next_revisions)?;
-    }
-    let weight = index
-        .revisions
-        .iter()
-        .map(|revision| revision.len)
-        .sum::<u64>()
-        .max(index.estimated_bytes);
-    drop(source_lock);
-    drop(index);
-    cache::update_weight(path, weight, &entry);
-    Ok(entry)
-}
-
-pub(crate) fn note_append(path: &Path, event: &Event, encoded_len: usize) {
-    let cached = cache::get(path);
-    let Some(cached) = cached else { return };
-    let Ok(next_revisions) = revisions(path) else {
-        return;
-    };
-    let source_bytes: u64 = next_revisions.iter().map(|revision| revision.len).sum();
-    let mut index = cached
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if index.revisions == next_revisions {
-        // A rebuild already included this committed append.
-        return;
-    }
-    let previous_len = index
-        .revisions
-        .iter()
-        .find(|revision| revision.path == path)
-        .map(|revision| revision.len);
-    let next_len = next_revisions
-        .iter()
-        .find(|revision| revision.path == path)
-        .map(|revision| revision.len);
-    let other_sources_unchanged = index
-        .revisions
-        .iter()
-        .filter(|revision| revision.path != path)
-        .eq(next_revisions
-            .iter()
-            .filter(|revision| revision.path != path));
-    let exact_append = previous_len
-        .zip(next_len)
-        .is_some_and(|(before, after)| after == before.saturating_add(encoded_len as u64));
-    // A delayed callback may describe an event already loaded by a rebuild,
-    // while the file has grown by a different event of the same encoded size.
-    if exact_append && other_sources_unchanged && !index.positions.contains_key(&event.id) {
-        index.push(event.clone(), next_revisions);
-        let weight = source_bytes.max(index.estimated_bytes);
-        drop(index);
-        cache::update_weight(path, weight, &cached);
+    let resumes = if let Some(entry) = previous.as_ref() {
+        let old = &entry.index;
+        old.line_aligned
+            && snapshot.extends(&old.sources)
+            && match snapshot.active_index() {
+                Some(active) => {
+                    old.active_prefix
+                        == Some(prefix_hash(&snapshot, active, old.sources[active].len)?)
+                }
+                None => false,
+            }
     } else {
-        index.revisions.clear();
-    }
+        false
+    };
+    let mut index = if resumes {
+        previous.as_ref().expect("previous").index.clone()
+    } else {
+        LedgerIndex::default()
+    };
+    #[cfg(test)]
+    BUILD_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+    let previous_offsets = index.offsets.clone();
+    let offsets = snapshot.visit(&previous_offsets, |event, location| {
+        index.push(event, location);
+        ControlFlow::Continue(())
+    })?;
+    index.offsets = offsets;
+    index.active_prefix = snapshot
+        .active_index()
+        .map(|active| prefix_hash(&snapshot, active, snapshot.sources[active].len))
+        .transpose()?;
+    index.line_aligned = snapshot.ends_with_newline()?;
+    index.sources.clone_from(&snapshot.sources);
+    drop(previous);
+    let entry = cache::admit(path, index);
+    Ok(IndexedSnapshot { entry, snapshot })
 }
+
+fn prefix_hash(snapshot: &Snapshot, source: usize, len: u64) -> io::Result<[u8; 32]> {
+    let mut file = snapshot.source_file(source)?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = file.take(len);
+    let mut hash = Sha256::new();
+    let mut bytes = [0_u8; 64 * 1024];
+    loop {
+        let count = reader.read(&mut bytes)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&bytes[..count]);
+    }
+    if reader.limit() != 0 {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(hash.finalize().into())
+}
+
+// Queries reconcile canonical committed bytes, independently of notification
+// timing. A delayed/duplicate notification cannot replay an Event into the index.
+pub(crate) fn note_append(_path: &Path, _event: &Event, _encoded_len: usize) {}
 
 pub(crate) fn invalidate_path(path: &Path) {
     cache::invalidate(path);
@@ -259,54 +244,71 @@ pub(crate) fn is_cached(path: &Path) -> bool {
 }
 
 #[cfg(test)]
+thread_local! {
+    static BUILD_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use fs2::FileExt;
-    #[cfg(unix)]
-    use std::fs::File;
-    #[cfg(unix)]
-    use std::thread;
-    #[cfg(unix)]
-    use std::time::{Duration, Instant};
+    use std::io::Write;
+    use std::time::Duration;
+
+    fn captured(kind: &str) -> Event {
+        include_str!("../tests/fixtures/ledger-index-memory/sample.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str::<Event>(line).expect("captured event"))
+            .find(|event| event.kind == kind)
+            .expect("captured kind")
+    }
+    fn pair() -> (Event, Event) {
+        (captured("chat.message"), captured("actor.activity"))
+    }
+    fn commit_without_notification(path: &Path, event: &Event) {
+        let _lock = crate::ledger::acquire_writer_lock(path).expect("writer lock");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("source");
+        serde_json::to_writer(&mut file, event).expect("encode");
+        file.write_all(b"\n").expect("newline");
+        file.sync_data().expect("commit");
+    }
+    fn all(view: &IndexedSnapshot) -> Vec<Event> {
+        view.entry
+            .index
+            .events(&view.snapshot, 0..view.entry.index.records.len())
+            .expect("hydrate")
+    }
 
     #[test]
     fn delayed_notification_cannot_apply_an_already_indexed_event_for_a_new_append() {
-        use std::io::Write;
-
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("ledger.jsonl");
-        let first = Event::new("chat.message", "g_fixture");
-        let mut second = first.clone();
-        second.id = "x".repeat(first.id.len());
-        crate::ledger::append(&path, &first).expect("first event");
+        let (first, second) = pair();
+        crate::ledger::append(&path, &first).expect("first");
         assert_eq!(
-            crate::ledger::read_all(&path).expect("cold index"),
+            crate::ledger::read_all(&path).expect("cold"),
             vec![first.clone()]
         );
-
-        // Model the interval after a second writer commits and before its
-        // callback. The first writer's callback may arrive during this interval.
-        let mut encoded = serde_json::to_vec(&second).expect("encode");
-        encoded.push(b'\n');
-        let source_lock = crate::ledger::acquire_writer_lock(&path).expect("writer lock");
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .expect("source");
-        file.write_all(&encoded).expect("second event");
-        file.sync_data().expect("commit");
-        drop(source_lock);
-        note_append(&path, &first, encoded.len());
+        commit_without_notification(&path, &second);
+        note_append(
+            &path,
+            &first,
+            serde_json::to_vec(&first).expect("encode").len() + 1,
+        );
         assert_eq!(
-            crate::ledger::read_all(&path).expect("current index"),
+            crate::ledger::read_all(&path).expect("current"),
             vec![first, second.clone()]
         );
-        note_append(&path, &second, encoded.len());
-        let entry = cache::get(&path).expect("cache");
+        note_append(
+            &path,
+            &second,
+            serde_json::to_vec(&second).expect("encode").len() + 1,
+        );
         assert_eq!(
-            entry.read().expect("index").revisions,
-            revisions(&path).expect("revisions")
+            cache::get(&path).expect("cache").index.sources,
+            Snapshot::open(&path).expect("snapshot").sources
         );
     }
 
@@ -314,23 +316,14 @@ mod tests {
     fn a_warm_query_waits_for_a_rotation_in_progress() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("ledger.jsonl");
-        let first = Event::new("chat.message", "g_fixture");
-        crate::ledger::append(&path, &first).expect("first event");
-        assert_eq!(
-            crate::ledger::read_all(&path).expect("warm"),
-            vec![first.clone()]
-        );
-
-        // Compaction holds the writer lock while it moves sources. Even a warm
-        // index must not compare against a source list taken mid-rotation.
+        let first = captured("chat.message");
+        crate::ledger::append(&path, &first).expect("first");
+        crate::ledger::read_all(&path).expect("warm");
         let rotation = crate::ledger::acquire_writer_lock(&path).expect("writer lock");
         let reader_path = path.clone();
         let reader = std::thread::spawn(move || crate::ledger::read_all(&reader_path));
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(
-            !reader.is_finished(),
-            "a warm query must not observe sources while a rotation holds the ledger"
-        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!reader.is_finished(), "reader must wait for rotation");
         drop(rotation);
         assert_eq!(reader.join().expect("reader").expect("read"), vec![first]);
     }
@@ -339,73 +332,264 @@ mod tests {
     fn a_stale_warm_index_catches_up_with_an_unnotified_commit() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("ledger.jsonl");
-        let first = Event::new("chat.message", "g_fixture");
-        let second = Event::new("chat.message", "g_fixture");
-        crate::ledger::append(&path, &first).expect("first event");
-        let entry = current(&path).expect("warm index");
-
-        // Commit without the append notification so the cache really is stale.
-        let mut encoded = serde_json::to_vec(&second).expect("encode");
-        encoded.push(b'\n');
-        let writer = crate::ledger::acquire_writer_lock(&path).expect("writer lock");
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .expect("source");
-        std::io::Write::write_all(&mut file, &encoded).expect("second event");
-        file.sync_data().expect("commit");
-        drop(writer);
-        assert_eq!(entry.read().expect("index").events.len(), 1);
-
-        let index = current(&path).expect("caught up");
-        let index = index.read().expect("index");
-        assert_eq!(index.events, vec![first, second]);
-        assert_eq!(index.revisions, revisions(&path).expect("revisions"));
+        let (first, second) = pair();
+        crate::ledger::append(&path, &first).expect("first");
+        let previous = current(&path).expect("warm");
+        commit_without_notification(&path, &second);
+        let before = crate::ledger::snapshot::decoded_records();
+        let next = current(&path).expect("caught up");
+        assert_eq!(
+            crate::ledger::snapshot::decoded_records() - before,
+            1,
+            "old JSON must not be reparsed"
+        );
+        assert_eq!(
+            all(&previous),
+            vec![first.clone()],
+            "borrowed snapshots stay immutable"
+        );
+        assert_eq!(all(&next), vec![first, second]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn concurrent_cold_read_and_append_do_not_duplicate_the_committed_event() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("ledger.jsonl");
-        let first = Event::new("chat.message", "g_fixture");
-        let second = Event::new("chat.message", "g_fixture");
-        crate::ledger::append(&path, &first).expect("first event");
-
-        // Pause the cold reader after revision capture, before source reading.
-        // Unix source-file locks are advisory; the actual writer uses its own
-        // stable ledger lock, so the old implementation permits an append here.
-        let source = File::open(&path).expect("source");
-        source.lock_exclusive().expect("pause source reads");
+        let (first, second) = pair();
+        crate::ledger::append(&path, &first).expect("first");
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
         let reader_path = path.clone();
-        let reader = thread::spawn(move || crate::ledger::read_all(&reader_path));
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut rebuilding = false;
-        while Instant::now() < deadline {
-            if cache::get(&path).is_some_and(|entry| entry.try_read().is_err()) {
-                rebuilding = true;
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        let original_len = source.metadata().expect("metadata").len();
+        let reader = std::thread::spawn(move || {
+            BUILD_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    entered.send(()).expect("entered");
+                    resume
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("release");
+                }))
+            });
+            crate::ledger::read_all(&reader_path)
+        });
+        waiting
+            .recv_timeout(Duration::from_secs(5))
+            .expect("source-read barrier");
         let writer_path = path.clone();
         let writer_event = second.clone();
-        let writer = thread::spawn(move || crate::ledger::append(&writer_path, &writer_event));
-        let deadline = Instant::now() + Duration::from_millis(200);
-        while Instant::now() < deadline
-            && source.metadata().expect("metadata").len() == original_len
-        {
-            thread::sleep(Duration::from_millis(1));
-        }
-        FileExt::unlock(&source).expect("release reader");
-        reader.join().expect("reader thread").expect("read");
-        writer.join().expect("writer thread").expect("append");
-        assert!(rebuilding, "reader must reach the source-read barrier");
+        let writer = std::thread::spawn(move || crate::ledger::append(&writer_path, &writer_event));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!writer.is_finished(), "stable snapshot lock blocks append");
+        release.send(()).expect("resume");
         assert_eq!(
-            crate::ledger::read_all(&path).expect("cached events"),
-            vec![first, second],
-            "a delayed append notification must not duplicate data read during rebuild"
+            reader.join().expect("reader").expect("read"),
+            vec![first.clone()]
         );
+        writer.join().expect("writer").expect("append");
+        assert_eq!(
+            crate::ledger::read_all(&path).expect("current"),
+            vec![first, second]
+        );
+    }
+
+    #[test]
+    fn rewrite_with_growth_rebuilds_instead_of_using_old_locations() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let (first, second) = pair();
+        crate::ledger::append(&path, &first).expect("first");
+        let old = current(&path).expect("warm");
+        drop(old);
+        // Labeled mutation: replace the indexed id and append a captured row.
+        let mut changed = first.clone();
+        changed.id = "0".repeat(first.id.len());
+        let mut bytes = serde_json::to_vec(&changed).expect("encode");
+        bytes.push(b'\n');
+        bytes.extend(serde_json::to_vec(&second).expect("encode"));
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).expect("rewrite and grow");
+        assert_eq!(
+            all(&current(&path).expect("rebuilt")),
+            vec![changed, second]
+        );
+        assert!(find_event(&path, &first.id).expect("old id").is_none());
+    }
+
+    #[test]
+    fn replacement_truncation_and_partial_lines_reset_safely() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let (first, second) = pair();
+        crate::ledger::append(&path, &first).expect("first");
+        let original = current(&path).expect("warm");
+        let new_path = temp.path().join("replacement");
+        let mut bytes = serde_json::to_vec(&second).expect("encode");
+        bytes.push(b'\n');
+        std::fs::write(&new_path, &bytes).expect("replacement");
+        // Rename the old active file, as compaction does, including on Windows.
+        std::fs::rename(&path, temp.path().join("old")).expect("old active");
+        std::fs::rename(new_path, &path).expect("replace");
+        assert_eq!(
+            all(&current(&path).expect("replacement")),
+            vec![second.clone()]
+        );
+        assert_eq!(all(&original), vec![first.clone()]);
+        std::fs::write(&path, []).expect("truncate");
+        assert!(all(&current(&path).expect("truncated")).is_empty());
+        bytes.truncate(bytes.len() / 2);
+        std::fs::write(&path, bytes).expect("partial captured row");
+        assert!(all(&current(&path).expect("partial")).is_empty());
+        std::fs::write(&path, serde_json::to_vec(&second).expect("encode"))
+            .expect("complete without newline");
+        assert_eq!(all(&current(&path).expect("complete")), vec![second]);
+    }
+
+    #[test]
+    fn cold_activity_body_is_reparsed_only_on_demand_and_gzip_preserves_order() {
+        use flate2::{Compression, write::GzEncoder};
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let (first, activity) = pair();
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        serde_json::to_writer(&mut gzip, &first).expect("gzip row");
+        gzip.write_all(b"\n").expect("newline");
+        let archives = temp.path().join("state/ledger/segments");
+        std::fs::create_dir_all(&archives).expect("archive dir");
+        std::fs::write(
+            archives.join("ledger.000001.jsonl.gz"),
+            gzip.finish().expect("finish"),
+        )
+        .expect("archive");
+        crate::ledger::append(&path, &activity).expect("activity");
+        let view = current(&path).expect("index");
+        assert_eq!(view.entry.index.records.len(), 2);
+        assert_eq!(
+            find_event(&path, &activity.id).expect("activity"),
+            Some(activity.clone())
+        );
+        assert_eq!(all(&view), vec![first, activity]);
+    }
+    #[test]
+    fn parsed_payload_retention_is_zero_and_bounded_pages_load_only_requested_bodies() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let (first, activity) = pair();
+        crate::ledger::append(&path, &first).expect("first");
+        crate::ledger::append(&path, &activity).expect("activity");
+        let before = crate::ledger::snapshot::hydrated_records();
+        let _view = current(&path).expect("metadata only");
+        assert_eq!(crate::ledger::snapshot::hydrated_records(), before);
+        assert_eq!(
+            find_event(&path, &activity.id).expect("body"),
+            Some(activity.clone())
+        );
+        assert_eq!(crate::ledger::snapshot::hydrated_records() - before, 1);
+        assert_eq!(
+            events_after(&path, &first.id, 1).expect("page"),
+            vec![activity.clone()]
+        );
+        assert_eq!(crate::ledger::snapshot::hydrated_records() - before, 2);
+        let location = Location {
+            source: 0,
+            offset: 0,
+            end: 0,
+        };
+        let mut with_body = LedgerIndex::default();
+        with_body.push(activity.clone(), location);
+        let mut without_body = LedgerIndex::default();
+        let mut stripped = activity;
+        stripped.data.clear(); // Labeled mutation: remove the captured body.
+        without_body.push(stripped, location);
+        assert_eq!(
+            with_body.weight(),
+            without_body.weight(),
+            "body bytes are never retained"
+        );
+    }
+
+    #[test]
+    fn legacy_defaults_stay_stable_and_failed_rebuilds_do_not_replace_a_good_index() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ledger.jsonl");
+        let event = captured("chat.message");
+        let mut legacy = serde_json::to_value(event).expect("captured value");
+        // Labeled mutation of a captured record: exercise serde defaults.
+        legacy.as_object_mut().expect("object").remove("id");
+        legacy.as_object_mut().expect("object").remove("ts");
+        std::fs::write(&path, format!("{legacy}\n")).expect("legacy row");
+        let events = read_all(&path).expect("defaults");
+        assert_eq!(
+            find_event(&path, &events[0].id).expect("stable defaults"),
+            Some(events[0].clone())
+        );
+        let before = cache::get(&path).expect("cached");
+        let archives = temp.path().join("state/ledger/segments");
+        std::fs::create_dir_all(&archives).expect("segments");
+        std::fs::write(archives.join("ledger.000001.jsonl.gz"), b"not gzip")
+            .expect("corrupt archive");
+        assert!(current(&path).is_err());
+        assert!(Arc::ptr_eq(
+            &before,
+            &cache::get(&path).expect("unchanged cache")
+        ));
+    }
+    #[test]
+    fn warm_lookup_and_page_wait_for_a_file_locked_partial_append() {
+        use fs2::FileExt;
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        for page in [false, true] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let path = temp.path().join("ledger.jsonl");
+            let (first, second) = pair();
+            crate::ledger::append(&path, &first).expect("captured first row");
+            crate::ledger::read_all(&path).expect("warm index");
+            let encoded = serde_json::to_vec(&second).expect("captured second row");
+            let split = encoded.len() / 2;
+            let mut writer = std::fs::OpenOptions::new()
+                .append(true)
+                .read(true)
+                .open(&path)
+                .expect("active file");
+            writer.lock_exclusive().expect("legacy file lock");
+            writer.write_all(&encoded[..split]).expect("partial row");
+            writer.flush().expect("flush partial row");
+            let (started, start) = mpsc::sync_channel(1);
+            let (send, receive) = mpsc::sync_channel(1);
+            let reader_path = path.clone();
+            let first_id = first.id.clone();
+            let second_id = second.id.clone();
+            let reader = std::thread::spawn(move || {
+                started.send(()).expect("reader started");
+                let result = if page {
+                    crate::ledger::events_after(&reader_path, &first_id, 1)
+                } else {
+                    crate::ledger::find_event(&reader_path, &second_id)
+                        .map(|event| event.into_iter().collect::<Vec<_>>())
+                };
+                send.send(result).expect("send result");
+            });
+            start
+                .recv_timeout(Duration::from_secs(2))
+                .expect("reader started");
+            let early = receive.recv_timeout(Duration::from_millis(50));
+            let blocked = matches!(&early, Err(RecvTimeoutError::Timeout));
+            // Complete/unlock even if the negative control failed, then join.
+            writer.write_all(&encoded[split..]).expect("complete row");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush complete row");
+            FileExt::unlock(&writer).expect("unlock writer");
+            let result = match early {
+                Ok(result) => result,
+                Err(RecvTimeoutError::Timeout) => receive
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("completed read"),
+                Err(error) => panic!("reader disconnected: {error}"),
+            };
+            reader.join().expect("join reader");
+            assert!(
+                blocked,
+                "warm query observed an in-progress file-locked append"
+            );
+            assert_eq!(result.expect("query"), vec![second]);
+        }
     }
 }

@@ -1,171 +1,188 @@
 use super::LedgerIndex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const MAX_ENTRIES: usize = 32;
-const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_RETAINED_BYTES: u64 = 128 * 1024 * 1024;
 
-struct CacheEntry {
-    index: Arc<RwLock<LedgerIndex>>,
-    source_bytes: u64,
-    last_used: u64,
+struct Budget {
+    used: AtomicU64,
+    limit: u64,
 }
 
+impl Budget {
+    fn reserve(self: &Arc<Self>, bytes: u64) -> Option<Permit> {
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes).filter(|next| *next <= self.limit)
+            })
+            .ok()?;
+        Some(Permit {
+            budget: Arc::clone(self),
+            bytes,
+        })
+    }
+}
+
+struct Permit {
+    budget: Arc<Budget>,
+    bytes: u64,
+}
+impl Drop for Permit {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+pub(super) struct CachedIndex {
+    pub index: LedgerIndex,
+    // The permit follows the Arc, including readers of retired entries.
+    _permit: Option<Permit>,
+}
+
+struct Entry {
+    index: Arc<CachedIndex>,
+    last_used: u64,
+}
 struct IndexCache {
-    entries: HashMap<PathBuf, CacheEntry>,
-    source_bytes: u64,
+    entries: HashMap<PathBuf, Entry>,
     clock: u64,
     max_entries: usize,
-    max_source_bytes: u64,
+    budget: Arc<Budget>,
 }
 
 impl IndexCache {
-    fn new(max_entries: usize, max_source_bytes: u64) -> Self {
+    fn new(max_entries: usize, max_bytes: u64) -> Self {
         Self {
             entries: HashMap::new(),
-            source_bytes: 0,
             clock: 0,
             max_entries,
-            max_source_bytes,
+            budget: Arc::new(Budget {
+                used: AtomicU64::new(0),
+                limit: max_bytes,
+            }),
         }
     }
-
-    fn entry(
-        &mut self,
-        path: &Path,
-        source_bytes: u64,
-    ) -> (Arc<RwLock<LedgerIndex>>, Vec<CacheEntry>) {
+    fn get(&mut self, path: &Path) -> Option<Arc<CachedIndex>> {
         self.clock = self.clock.wrapping_add(1);
-        let index = if let Some(cached) = self.entries.get_mut(path) {
-            let source_bytes = source_bytes.max(cached.source_bytes);
-            self.source_bytes = self
-                .source_bytes
-                .saturating_sub(cached.source_bytes)
-                .saturating_add(source_bytes);
-            cached.source_bytes = source_bytes;
-            cached.last_used = self.clock;
-            Arc::clone(&cached.index)
-        } else {
-            let index = Arc::new(RwLock::new(LedgerIndex::default()));
-            self.entries.insert(
-                path.to_path_buf(),
-                CacheEntry {
-                    index: Arc::clone(&index),
-                    source_bytes,
-                    last_used: self.clock,
-                },
-            );
-            self.source_bytes = self.source_bytes.saturating_add(source_bytes);
-            index
-        };
-        let retired = self.evict(path);
-        (index, retired)
+        let entry = self.entries.get_mut(path)?;
+        entry.last_used = self.clock;
+        Some(Arc::clone(&entry.index))
     }
-
-    fn get(&mut self, path: &Path) -> Option<Arc<RwLock<LedgerIndex>>> {
-        self.clock = self.clock.wrapping_add(1);
-        let cached = self.entries.get_mut(path)?;
-        cached.last_used = self.clock;
-        Some(Arc::clone(&cached.index))
-    }
-
-    fn update_weight(
-        &mut self,
-        path: &Path,
-        source_bytes: u64,
-        expected: &Arc<RwLock<LedgerIndex>>,
-    ) -> Vec<CacheEntry> {
-        self.clock = self.clock.wrapping_add(1);
-        let Some(cached) = self.entries.get_mut(path) else {
-            return Vec::new();
-        };
-        if !Arc::ptr_eq(&cached.index, expected) {
+    fn retire_for(&mut self, path: &Path, bytes: u64) -> Vec<Entry> {
+        if bytes > self.budget.limit {
             return Vec::new();
         }
-        self.source_bytes = self
-            .source_bytes
-            .saturating_sub(cached.source_bytes)
-            .saturating_add(source_bytes);
-        cached.source_bytes = source_bytes;
-        cached.last_used = self.clock;
-        self.evict(path)
-    }
-
-    fn remove(&mut self, path: &Path) -> Option<CacheEntry> {
-        let removed = self.entries.remove(path)?;
-        self.source_bytes = self.source_bytes.saturating_sub(removed.source_bytes);
-        Some(removed)
-    }
-
-    fn evict(&mut self, protected: &Path) -> Vec<CacheEntry> {
         let mut retired = Vec::new();
-        while self.entries.len() > self.max_entries
-            || (self.source_bytes > self.weight_limit() && self.entries.len() > 1)
+        let mut reclaimed = 0;
+        if let Some(entry) = self.entries.remove(path) {
+            reclaimed += reclaimable(&entry);
+            retired.push(entry);
+        }
+        // Retirement may not free borrowed entries. Reservation below is the
+        // authority; no oversized allowance or borrowed-entry exemption.
+        while !self.entries.is_empty()
+            && (self.entries.len() >= self.max_entries
+                || self
+                    .budget
+                    .used
+                    .load(Ordering::Acquire)
+                    .saturating_sub(reclaimed)
+                    .saturating_add(bytes)
+                    > self.budget.limit)
         {
-            let candidate = self
+            let oldest = self
                 .entries
                 .iter()
-                .filter(|(path, cached)| {
-                    path.as_path() != protected && Arc::strong_count(&cached.index) == 1
-                })
-                .min_by_key(|(_, cached)| cached.last_used)
-                .map(|(path, _)| path.clone());
-            let Some(candidate) = candidate else { break };
-            if let Some(removed) = self.remove(&candidate) {
-                retired.push(removed);
-            }
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(path, _)| path.clone())
+                .expect("nonempty");
+            let entry = self.entries.remove(&oldest).expect("oldest");
+            reclaimed += reclaimable(&entry);
+            retired.push(entry);
         }
         retired
     }
+}
 
-    fn weight_limit(&self) -> u64 {
-        let oversized_allowance = self
-            .entries
-            .values()
-            .map(|cached| cached.source_bytes)
-            .max()
-            .filter(|largest| *largest > self.max_source_bytes)
-            .unwrap_or_default();
-        self.max_source_bytes.saturating_add(oversized_allowance)
+fn reclaimable(entry: &Entry) -> u64 {
+    if Arc::strong_count(&entry.index) == 1 {
+        entry
+            .index
+            ._permit
+            .as_ref()
+            .map_or(0, |permit| permit.bytes)
+    } else {
+        0
     }
 }
 
 fn cache() -> &'static Mutex<IndexCache> {
     static CACHE: OnceLock<Mutex<IndexCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(IndexCache::new(MAX_ENTRIES, MAX_SOURCE_BYTES)))
+    CACHE.get_or_init(|| Mutex::new(IndexCache::new(MAX_ENTRIES, MAX_RETAINED_BYTES)))
 }
 
-pub(super) fn entry(path: &Path, source_bytes: u64) -> Arc<RwLock<LedgerIndex>> {
-    let (index, retired) = cache()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .entry(path, source_bytes);
-    // Large indexes can contain millions of allocations. Free them after the
-    // cache lock is released so unrelated Groups can keep reading.
-    drop(retired);
-    index
-}
-
-pub(super) fn get(path: &Path) -> Option<Arc<RwLock<LedgerIndex>>> {
+pub(super) fn get(path: &Path) -> Option<Arc<CachedIndex>> {
     cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(path)
 }
 
-pub(super) fn update_weight(path: &Path, source_bytes: u64, expected: &Arc<RwLock<LedgerIndex>>) {
-    let retired = cache()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .update_weight(path, source_bytes, expected);
+pub(super) fn admit(path: &Path, index: LedgerIndex) -> Arc<CachedIndex> {
+    let bytes = index.weight();
+    let (budget, retired) = {
+        let mut cache = cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = cache.entries.get(path)
+            && entry.index.index.sources == index.sources
+        {
+            return Arc::clone(&entry.index);
+        }
+        (Arc::clone(&cache.budget), cache.retire_for(path, bytes))
+    };
+    // Free large tables outside the global lock, before trying to reserve.
     drop(retired);
+    let permit = budget.reserve(bytes);
+    let retained = permit.is_some();
+    let entry = Arc::new(CachedIndex {
+        index,
+        _permit: permit,
+    });
+    if retained {
+        let displaced = {
+            let mut cache = cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A simultaneous admission may have filled the entry-count limit.
+            // The byte permit still accounts for both entries until drop.
+            let retired = cache.retire_for(path, 0);
+            cache.clock = cache.clock.wrapping_add(1);
+            let last_used = cache.clock;
+            cache.entries.insert(
+                path.to_owned(),
+                Entry {
+                    index: Arc::clone(&entry),
+                    last_used,
+                },
+            );
+            retired
+        };
+        drop(displaced);
+    }
+    // No reservation means an uncached query result, never over-budget cache
+    // retention. Its temporary metadata lives only for this request.
+    entry
 }
 
 pub(super) fn invalidate(path: &Path) {
     let retired = cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entries
         .remove(path);
     drop(retired);
 }
@@ -175,79 +192,118 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_oversized_reservation_is_refused() {
+        let budget = Arc::new(Budget {
+            used: AtomicU64::new(0),
+            limit: 10,
+        });
+        assert!(budget.reserve(11).is_none());
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn borrowed_retired_entries_remain_charged_until_the_last_reader_drops() {
+        let budget = Arc::new(Budget {
+            used: AtomicU64::new(0),
+            limit: 10,
+        });
+        let entry = Arc::new(CachedIndex {
+            index: LedgerIndex::default(),
+            _permit: budget.reserve(8),
+        });
+        let reader = Arc::clone(&entry);
+        drop(entry);
+        assert!(budget.reserve(3).is_none());
+        assert!(budget.reserve(2).is_some());
+        drop(reader);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+        assert!(budget.reserve(10).is_some());
+    }
+
+    #[test]
+    fn concurrent_reservations_never_exceed_the_explicit_budget() {
+        let budget = Arc::new(Budget {
+            used: AtomicU64::new(0),
+            limit: 7,
+        });
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let budget = Arc::clone(&budget);
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        let permit = budget.reserve(3);
+                        assert!(budget.used.load(Ordering::Acquire) <= budget.limit);
+                        std::thread::yield_now();
+                        drop(permit);
+                    }
+                });
+            }
+        });
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+    fn insert(cache: &mut IndexCache, name: &str, bytes: u64) {
+        let path = Path::new(name);
+        let retired = cache.retire_for(path, bytes);
+        drop(retired);
+        let permit = cache.budget.reserve(bytes).expect("within budget");
+        cache.clock += 1;
+        cache.entries.insert(
+            path.to_owned(),
+            Entry {
+                index: Arc::new(CachedIndex {
+                    index: LedgerIndex::default(),
+                    _permit: Some(permit),
+                }),
+                last_used: cache.clock,
+            },
+        );
+    }
+
+    #[test]
     fn evicts_least_recently_used_entries_by_count_and_weight() {
+        for (count, bytes) in [(2, 100), (32, 10)] {
+            let mut cache = IndexCache::new(count, bytes);
+            insert(&mut cache, "first", 4);
+            insert(&mut cache, "second", 4);
+            drop(cache.get(Path::new("first")));
+            insert(&mut cache, "third", 4);
+            assert!(cache.entries.contains_key(Path::new("first")));
+            assert!(!cache.entries.contains_key(Path::new("second")));
+            assert!(cache.entries.contains_key(Path::new("third")));
+            assert_eq!(cache.budget.used.load(Ordering::Acquire), 8);
+        }
+    }
+
+    #[test]
+    fn oversized_metadata_does_not_flush_smaller_entries() {
         let mut cache = IndexCache::new(2, 10);
-        let first = Path::new("first");
-        let second = Path::new("second");
-        let third = Path::new("third");
-        cache.entry(first, 4);
-        cache.entry(second, 4);
-        cache.get(first);
-        cache.entry(third, 4);
-        assert!(cache.entries.contains_key(first));
-        assert!(!cache.entries.contains_key(second));
-        assert!(cache.entries.contains_key(third));
-        assert!(cache.source_bytes <= 10);
+        insert(&mut cache, "small", 2);
+        assert!(cache.retire_for(Path::new("oversized"), 20).is_empty());
+        assert!(cache.budget.reserve(20).is_none());
+        assert_eq!(cache.entries.len(), 1);
     }
 
     #[test]
-    fn retains_one_oversized_entry_alongside_budgeted_smaller_entries() {
-        let mut cache = IndexCache::new(2, 10);
-        let path = Path::new("oversized");
-        let active = cache.entry(path, 20).0;
-        cache.update_weight(path, 20, &active);
-        cache.entry(Path::new("small"), 2);
-
-        assert_eq!(cache.entries.len(), 2);
-        assert!(cache.entries.contains_key(path));
-        assert!(cache.entries.contains_key(Path::new("small")));
-        assert_eq!(cache.source_bytes, 22);
-        assert_eq!(Arc::strong_count(&active), 2);
+    fn updating_weight_retires_only_the_idle_lru_entry_needed() {
+        let mut cache = IndexCache::new(3, 10);
+        insert(&mut cache, "first", 4);
+        insert(&mut cache, "second", 4);
+        insert(&mut cache, "first", 9);
+        assert!(cache.entries.contains_key(Path::new("first")));
+        assert!(!cache.entries.contains_key(Path::new("second")));
+        assert_eq!(cache.budget.used.load(Ordering::Acquire), 9);
     }
 
     #[test]
-    fn replaces_the_older_oversized_entry() {
-        let mut cache = IndexCache::new(4, 10);
-        cache.entry(Path::new("old-large"), 20);
-        cache.entry(Path::new("small"), 2);
-        cache.entry(Path::new("new-large"), 30);
-
-        assert!(!cache.entries.contains_key(Path::new("old-large")));
-        assert!(cache.entries.contains_key(Path::new("small")));
-        assert!(cache.entries.contains_key(Path::new("new-large")));
-        assert_eq!(cache.source_bytes, 32);
-    }
-
-    #[test]
-    fn updates_weight_and_evicts_the_idle_lru_entry() {
-        let mut cache = IndexCache::new(2, 10);
-        let first = Path::new("first");
-        let second = Path::new("second");
-        drop(cache.entry(first, 4));
-        drop(cache.entry(second, 4));
-        let first_index = cache.get(first).expect("first entry");
-
-        cache.update_weight(first, 9, &first_index);
-
-        assert!(cache.entries.contains_key(first));
-        assert!(!cache.entries.contains_key(second));
-        assert_eq!(cache.source_bytes, 9);
-    }
-
-    #[test]
-    fn defers_eviction_while_an_entry_is_in_use() {
+    fn retired_borrowed_entries_cannot_expand_the_budget() {
         let mut cache = IndexCache::new(1, 10);
-        let first = Path::new("first");
-        let second = Path::new("second");
-        let active = cache.entry(first, 4).0;
-        let second_index = cache.entry(second, 4).0;
-        assert_eq!(cache.entries.len(), 2);
-
-        drop(active);
-        drop(cache.entry(second, 4));
-
-        assert!(!cache.entries.contains_key(first));
-        assert!(cache.entries.contains_key(second));
-        assert_eq!(Arc::strong_count(&second_index), 2);
+        insert(&mut cache, "first", 8);
+        let reader = cache.get(Path::new("first")).expect("reader");
+        drop(cache.retire_for(Path::new("second"), 4));
+        assert!(cache.entries.is_empty());
+        assert!(cache.budget.reserve(4).is_none());
+        drop(reader);
+        insert(&mut cache, "second", 4);
+        assert_eq!(cache.entries.len(), 1);
     }
 }

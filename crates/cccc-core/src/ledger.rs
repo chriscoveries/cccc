@@ -334,9 +334,10 @@ fn append_locked(file: &mut File, encoded: &[u8]) -> io::Result<()> {
 #[track_caller]
 pub fn read_all(path: &Path) -> io::Result<Vec<Event>> {
     note_index_query("read_all");
-    crate::ledger_index::inspect(path, |events, _| events.to_vec())
+    crate::ledger_index::read_all(path)
 }
 
+#[cfg(test)]
 pub(crate) fn read_all_uncached(path: &Path) -> io::Result<Vec<Event>> {
     let group_id = ledger_group_id(path);
     let mut events = Vec::new();
@@ -632,22 +633,12 @@ pub fn events_after(path: &Path, event_id: &str, limit: usize) -> io::Result<Vec
         return Ok(Vec::new());
     }
     note_index_query("events_after");
-    crate::ledger_index::inspect(path, |events, positions| {
-        let Some(index) = positions.get(event_id).copied() else {
-            return Vec::new();
-        };
-        events
-            .iter()
-            .skip(index.saturating_add(1))
-            .take(limit)
-            .cloned()
-            .collect()
-    })
+    crate::ledger_index::events_after(path, event_id, limit)
 }
 
-/// Compute a projection without cloning the full history. The callback holds
-/// the index read lock: return owned results before appending or calling other
-/// ledger operations for the same path.
+/// Compute a projection over a temporary full-history view. Event bodies are
+/// decoded for this call and released afterward; only lookup metadata is cached.
+/// The callback runs without a cache or ledger lock.
 #[track_caller]
 pub fn inspect<T>(
     path: &Path,
