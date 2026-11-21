@@ -370,7 +370,6 @@ async fn web_send_rejects_the_whole_request_when_any_path_is_outside() {
 fn web_file_path_admits_missing_sources_only_for_sends() {
     let fixture = Fixture::new();
     let public = staging(&fixture);
-    let root = root_of(&public);
     // Reads require an existing file; sends keep the daemon's retry lookup.
     assert!(web_file_path(&public, "new.txt", false).is_err());
     assert_eq!(
