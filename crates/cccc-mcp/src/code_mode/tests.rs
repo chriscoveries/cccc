@@ -423,11 +423,11 @@ async fn node_available() -> bool {
 }
 
 #[tokio::test]
-async fn nested_management_preserves_target_and_authenticated_caller() {
+async fn nested_management_is_refused_to_web_model_actors() {
     if crate::lib_tests::isolate_embedded_daemon_test(concat!(
         module_path!(),
         "::",
-        "nested_management_preserves_target_and_authenticated_caller"
+        "nested_management_is_refused_to_web_model_actors"
     )) {
         return;
     }
@@ -487,12 +487,15 @@ async fn nested_management_preserves_target_and_authenticated_caller() {
     }))).await;
     daemon.abort();
     let _ = daemon.await;
-    result.expect("foreman may stop peer");
-    assert!(saved.actors[0].enabled, "caller alpha must remain enabled");
+    // A Web Model foreman cannot reach actor management through a nested
+    // capability route either: the call is refused and nothing changes.
+    let refused = format!("{:?}", result.expect_err("Web Model foreman may not stop a peer"));
     assert!(
-        !saved.actors[1].enabled,
-        "explicit target beta must be stopped"
+        refused.contains("not available to Web Model actors"),
+        "refused for the wrong reason: {refused}"
     );
+    assert!(saved.actors[0].enabled, "caller alpha must remain enabled");
+    assert!(saved.actors[1].enabled, "target beta must stay enabled");
     assert!(
         denied.is_err(),
         "peer cannot impersonate user in nested calls"
