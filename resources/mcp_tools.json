@@ -593,7 +593,7 @@
   },
   {
     "name": "cccc_file",
-    "description": "Read a file in your effective workspace (running managed launch, otherwise Actor default or Group active) or a delivered attachment. read returns UTF-8 text, native PNG/JPEG/WebP images, or original PDF/PPTX resources for the client file reader. Binary limit: 20 MiB; no local conversion or OCR. info/blob_path return metadata/path only. In cccc_code_exec, native media is emitted automatically and JavaScript receives metadata. This tool never sends files or changes messages; use cccc_file_send for attachments.",
+    "description": "Read a file in your effective workspace (running managed launch, otherwise Actor default or Group active) or a delivered attachment. read returns UTF-8 text, native PNG/JPEG/WebP images, or original PDF/PPTX resources for the client file reader. Binary limit: 20 MiB; no local conversion or OCR. info/blob_path return metadata/path only. In cccc_code_exec, native media is emitted automatically and JavaScript receives metadata. This tool never sends files or changes messages; use cccc_file_send for attachments. When the host configures a public file directory, Web Model callers are confined to it, and state/blobs reads resolve only for attachments in the caller's own conversation.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -639,7 +639,7 @@
   },
   {
     "name": "cccc_file_send",
-    "description": "Attach a file, or up to 10 files as one message, from your effective workspace (running managed launch, otherwise Actor default or Group active) to a CCCC message. Choose the human user alone or agent recipients, never both. Send prompts recipients; Mail stores agent Inbox mail without prompting. For a connected instance, provide both dst_instance_id and dst_group_id from cccc_connect. Returns the message/queue receipt; it does not confirm that a recipient has read the file. Use cccc_file to read files without sending them.",
+    "description": "Attach a file, or up to 10 files as one message, from your effective workspace (running managed launch, otherwise Actor default or Group active) to a CCCC message. Choose the human user alone or agent recipients, never both. Send prompts recipients; Mail stores agent Inbox mail without prompting. For a connected instance, provide both dst_instance_id and dst_group_id from cccc_connect. Returns the message/queue receipt; it does not confirm that a recipient has read the file. Use cccc_file to read files without sending them. When the host configures a public file directory, Web Model callers may send only files inside it.",
     "inputSchema": {
       "type": "object",
       "properties": {
