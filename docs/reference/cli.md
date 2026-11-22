@@ -244,6 +244,7 @@ Options:
 - `--command`: Custom command (for custom runtime)
 - `--title`: Display title
 - `--model-label`: Optional model name the operator declares for people and external tools; CCCC does not check it or use it to launch the runtime
+- `--enabled`: `true` or `false`; `false` creates the agent disabled so it does not start on delivery (default: `true`)
 
 For a ChatGPT Web Model agent, create and start the agent from the target Group in the CCCC Web UI, then finish ChatGPT sign-in, MCP URL and chat binding in **Settings → This instance → Web Models → ChatGPT**.
 

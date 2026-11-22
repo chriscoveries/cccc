@@ -27,6 +27,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             env: raw_env,
             scope,
             submit,
+            enabled,
             group_id,
             by,
         } => {
@@ -38,7 +39,7 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
                 json!({
                     "group_id":group(home,group_id)?,"actor_id":actor_id,"title":title,
                     "model_label":model_label,"runtime":runtime,"runtime_mode":runtime_mode,"command":command,"env":env(raw_env)?,
-                    "default_scope_key":scope,"submit":submit,"by":by
+                    "default_scope_key":scope,"submit":submit,"enabled":enabled.unwrap_or(true),"by":by
                 }),
             )
             .await?
