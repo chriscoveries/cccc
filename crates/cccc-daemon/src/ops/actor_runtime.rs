@@ -196,7 +196,15 @@ fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> R
     let cwd = working_directory(group, &actor)?;
     let mut env = environment::launch_env(home, group, &actor);
     if super::local_headless::uses_managed_provider_cli(&actor) {
-        super::runtime_mcp::prepare(home, actor.runtime, &actor.command, &cwd, &mut env)?;
+        super::runtime_mcp::prepare(
+            home,
+            &group.group_id,
+            &actor.id,
+            actor.runtime,
+            &actor.command,
+            &cwd,
+            &mut env,
+        )?;
     }
     if actor.runtime == ActorRuntime::Hermes {
         // Only this launch's copy names the profile; the saved command stays.
@@ -255,7 +263,15 @@ fn start(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> Result<SessionSt
     };
     let cwd = working_directory(group, &actor)?;
     let mut env = environment::launch_env(home, group, &actor);
-    super::runtime_mcp::prepare(home, actor.runtime, &command, &cwd, &mut env)?;
+    super::runtime_mcp::prepare(
+        home,
+        &group.group_id,
+        &actor.id,
+        actor.runtime,
+        &command,
+        &cwd,
+        &mut env,
+    )?;
     // Only the PTY registry reads these host-owned attribution fields. Managed
     // providers capture their workspace directly; changing their environment
     // would invalidate otherwise compatible persisted conversation receipts.

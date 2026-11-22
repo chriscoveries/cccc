@@ -2,7 +2,7 @@ mod process;
 mod state;
 
 use cccc_contracts::ActorRuntime;
-use cccc_core::HomeLayout;
+use cccc_core::{GroupStore, HomeLayout};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -22,6 +22,8 @@ fn setup_lock() -> &'static Mutex<()> {
 
 pub(super) fn prepare(
     home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
     runtime: ActorRuntime,
     launch_command: &[String],
     cwd: &Path,
@@ -56,6 +58,7 @@ pub(super) fn prepare(
     );
 
     if runtime == ActorRuntime::Antigravity {
+        scoped_antigravity_home(home, group_id, actor_id, env)?;
         return ensure_antigravity(launch_command, cwd, env, &executable);
     }
 
@@ -79,6 +82,35 @@ pub(super) fn prepare(
             ensure_persistent(runtime, cwd, env, &executable)
         }
     }
+}
+
+/// `agy` keeps its MCP registration and its other state under `$HOME/.gemini`
+/// and offers no config-directory override, so each Actor launches with its
+/// own home inside the Group state directory and never rewrites the user's
+/// global configuration. An explicit HOME or USERPROFILE in the Actor
+/// environment remains the override and keeps the shared user home.
+fn scoped_antigravity_home(
+    home: &HomeLayout,
+    group_id: &str,
+    actor_id: &str,
+    env: &mut BTreeMap<String, String>,
+) -> Result<(), OpError> {
+    if ["HOME", "USERPROFILE"]
+        .iter()
+        .any(|key| env.get(*key).is_some_and(|value| !value.is_empty()))
+    {
+        return Ok(());
+    }
+    let actor_id = cccc_core::actors::validate_actor_id(actor_id).map_err(OpError::io)?;
+    let root = GroupStore::new(home.clone())
+        .and_then(|store| store.state_dir(group_id))
+        .map_err(OpError::io)?
+        .join("antigravity")
+        .join(actor_id);
+    let root = root.to_string_lossy().into_owned();
+    env.insert("HOME".into(), root.clone());
+    env.insert("USERPROFILE".into(), root);
+    Ok(())
 }
 
 fn ensure_antigravity(
@@ -364,6 +396,34 @@ path.write_text(json.dumps({'mcpServers':{'cccc':{'command':'cccc','args':['mcp'
         std::fs::remove_file(&script).expect("remove fixture CLI");
         ensure_antigravity(&command, &cwd, &env, Path::new("/fixture/cccc"))
             .expect("ready entry needs no subprocess");
+    }
+
+    #[test]
+    fn antigravity_actor_home_is_scoped_to_the_group_state_unless_the_actor_sets_one() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let mut env = BTreeMap::new();
+        scoped_antigravity_home(&home, "g_test", "peer-1", &mut env).expect("scoped home");
+        let expected = home
+            .root()
+            .join("groups/g_test/state/antigravity/peer-1")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(env.get("HOME"), Some(&expected));
+        assert_eq!(env.get("USERPROFILE"), Some(&expected));
+
+        for key in ["HOME", "USERPROFILE"] {
+            let mut env = BTreeMap::from([(key.into(), "/actor/provider".into())]);
+            scoped_antigravity_home(&home, "g_test", "peer-1", &mut env)
+                .expect("explicit home is kept");
+            assert_eq!(env.get(key).map(String::as_str), Some("/actor/provider"));
+            assert_eq!(env.len(), 1);
+        }
+
+        let mut env = BTreeMap::from([("HOME".into(), String::new())]);
+        scoped_antigravity_home(&home, "g_test", "peer-1", &mut env)
+            .expect("an empty home counts as unset");
+        assert_eq!(env.get("HOME"), Some(&expected));
     }
 
     #[test]

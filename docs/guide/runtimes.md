@@ -866,12 +866,20 @@ The Web UI also exposes runtime detection and agent configuration from the add/e
 
 ### Antigravity MCP and first terminal delivery
 
-Startup preparation also sets `showFeedbackSurvey` to `false` in
-`~/.gemini/antigravity-cli/settings.json`. AGY's periodic rating prompt can consume
-an automated paste without submitting it to the agent. This is a native **user
-preference**, so it also disables the survey in standalone AGY sessions under
-that user. Other preferences are preserved; malformed JSON is reported without
-overwriting it. CCCC does not recognize or dismiss surveys by matching UI text.
+`agy` keeps its configuration under `$HOME/.gemini` and offers no
+config-directory override, so each Actor launches with `HOME` and
+`USERPROFILE` pointing at its own home inside the Group state directory
+(`<groups>/<group>/state/antigravity/<actor>`). Its MCP registration and all
+other AGY state stay there; the user's global `~/.gemini` configuration is
+never written. An explicit `HOME` or `USERPROFILE` in the Actor environment
+keeps the shared user home instead. A scoped home starts empty, so each such
+Actor completes the AGY sign-in once under its own home.
+
+Startup preparation also sets `showFeedbackSurvey` to `false` in the Actor's
+`antigravity-cli/settings.json`. AGY's periodic rating prompt can consume
+an automated paste without submitting it to the agent. Other preferences are
+preserved; malformed JSON is reported without overwriting it. CCCC does not
+recognize or dismiss surveys by matching UI text.
 
 Antigravity uses native `agy mcp add cccc cccc mcp` before agent startup and in
 `cccc setup --runtime antigravity`. It requires an AGY CLI version supporting
@@ -879,7 +887,7 @@ Antigravity uses native `agy mcp add cccc cccc mcp` before agent startup and in
 serializes updates between instances, and preserves unrelated MCP servers.
 A conflicting project `.agents/mcp_config.json` entry or malformed configuration
 fails explicitly; CCCC does not overwrite it or ask the model to repair it.
-The global entry uses `cccc mcp` on the agent's PATH and inherits instance and
+The entry uses `cccc mcp` on the agent's PATH and inherits instance and
 agent identity, so different installations do not pin each other to one launcher.
 
 The complete CCCC bootstrap accompanies the first native task in one submission,
