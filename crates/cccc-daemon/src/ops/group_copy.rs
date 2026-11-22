@@ -55,6 +55,12 @@ fn preview(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 }
 
 fn import(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
+    if request.args.contains_key("_cccc_web_binding") {
+        return Err(OpError::new(
+            "permission_denied",
+            "Group management is unavailable to cloud connectors",
+        ));
+    }
     let bytes = package_bytes(home, request)?;
     let result = group_copy::import(
         &store(home)?,

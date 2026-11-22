@@ -24,7 +24,7 @@ async function invoke(name, args) {
   });
   assert.equal(response.ok, true);
   const envelope = await response.json();
-  assert.equal(Boolean(envelope.error), false);
+  if (envelope.error) return { ok: false, payload: envelope.error };
   const result = envelope.result;
   const payload = result.structuredContent ?? JSON.parse(result.content[0].text);
   return { ok: result.isError !== true, payload };
@@ -57,9 +57,12 @@ async function main() {
   stage = "business-code";
   const businessSource = "const c = await tools.cccc_context_get({}); text({hasContext: Boolean(c)});";
   assert.equal(businessSource.includes(JSON.parse(originalToolOutput).actor_token), false);
+  // Code mode is a host tool: a Web Model actor is refused it, and the
+  // refusal never carries the credential.
   const business = await call("cccc_code_exec", { source: businessSource });
-  assert.equal(business.ok, true);
-  assert.equal(business.payload.status, "completed");
+  assert.equal(business.ok, false);
+  assert.match(JSON.stringify(business.payload), /not available to Web Model actors/i);
+  assert.equal(JSON.stringify(business.payload).includes(config.secret), false);
 
   stage = "reply";
   const turn = JSON.parse(originalToolOutput).turn;
@@ -78,7 +81,7 @@ async function main() {
   context = null;
   originalToolOutput = null;
   process.stdout.write(JSON.stringify({
-    mode: config.mode, claim_count: claimCount, code_completed: true,
+    mode: config.mode, claim_count: claimCount, code_refused: true,
     reply_completed: true, turn_completed: true, temporary_context_discarded: true,
   }));
 }

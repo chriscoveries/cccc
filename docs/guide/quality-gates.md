@@ -124,7 +124,7 @@ Python daemon job, engine matrix, or cross-engine interoperability job.
 
 `rust-dist` runs `scripts/tests/smoke_rust_replacement.sh` against the built
 executable in a fresh `CCCC_HOME`. It verifies daemon lifecycle, a scoped Web
-Model actor, MCP initialization, a real `cccc_code_exec` cell, and clean stop.
+Model actor, MCP initialization, a real `cccc_repo` read, and clean stop.
 
 Release verification repeats installation and same-version replacement against
 the exact Linux, Apple Silicon macOS, and Windows artifacts. Linux artifacts

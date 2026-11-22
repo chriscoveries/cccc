@@ -11,7 +11,7 @@ async fn call(home: &HomeLayout, group: &str, name: &str, args: Value) -> Value 
 }
 
 #[tokio::test]
-async fn native_media_preserves_scope_blobs_and_code_mode_output() {
+async fn native_media_preserves_scope_blobs_and_refuses_code_mode() {
     let temp = tempfile::tempdir().expect("fixture");
     let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
     home.initialize().expect("initialize");
@@ -137,49 +137,22 @@ async fn native_media_preserves_scope_blobs_and_code_mode_output() {
         .await;
         assert_eq!(denied["isError"], true);
     }
-    if std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-    {
-        for (path, expected, is_resource) in [
-            ("fixture.png", png, false),
-            ("fixture.pdf", pdf_base64.as_str(), true),
-            ("fixture.pptx", pptx_base64.as_str(), true),
-        ] {
-            let first = call(&home,&group.group_id,"cccc_code_exec",json!({
-            "source":format!("const file = await tools.cccc_file({{action:'read',path:'{path}'}}); text(file); await yield_control(); text('after media');"),
-            "yield_time_ms":5000,"max_output_tokens":1
-        })).await;
-            assert_eq!(first["structuredContent"]["status"], "running", "{first}");
-            assert_eq!(
-                if is_resource {
-                    &first["content"][1]["resource"]["blob"]
-                } else {
-                    &first["content"][1]["data"]
-                },
-                expected,
-                "native media survives minimal text budget: {first}"
-            );
-            assert!(!first["structuredContent"].to_string().contains(expected));
-            let next = call(
-                &home,
-                &group.group_id,
-                "cccc_code_wait",
-                json!({
-                    "cell_id":first["structuredContent"]["cell_id"],"yield_time_ms":5000
-                }),
-            )
-            .await;
-            assert_eq!(next["structuredContent"]["status"], "completed", "{next}");
-            assert_eq!(
-                next["content"].as_array().expect("content").len(),
-                1,
-                "media must not repeat"
-            );
-            assert_eq!(next["structuredContent"]["output"], "after media");
-        }
-    }
+    // Code mode is a host tool: a Web Model caller is refused before any
+    // cell starts, so no media can reach it through code mode.
+    let refused = call(
+        &home,
+        &group.group_id,
+        "cccc_code_exec",
+        json!({"source":"text('x');","yield_time_ms":1000}),
+    )
+    .await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert!(
+        refused
+            .to_string()
+            .contains("not available to Web Model actors"),
+        "{refused}"
+    );
     cccc_mcp::shutdown(&home).await;
     daemon.abort();
     let _ = daemon.await;

@@ -102,7 +102,7 @@ BEGIN CCCC GROK HANDLER
 When a cccc.grok.ready Webhook event arrives, use only the actor_token in that event to call cccc_runtime_wait_next_turn once. Omit Group/Actor selectors and transport. This event credential authorizes a claim only.
 If the result is work_available:
 {handoff}
-Follow its turn.system_prompt and instructions. Use only the NEW execution actor_token returned by this claim for all CCCC business tools, including cccc_code_exec. Process the messages in the supplied order, reply through CCCC, then call cccc_runtime_complete_turn with the exact turn_id, event_ids and execution actor_token. A rejected or failed completion is not success: report it.
+Follow its turn.system_prompt and instructions. Use only the NEW execution actor_token returned by this claim for all CCCC business tools. Process the messages in the supplied order, reply through CCCC, then call cccc_runtime_complete_turn with the exact turn_id, event_ids and execution actor_token. A rejected or failed completion is not success: report it.
 If idle, stopped or turn_in_progress, exit. On a rejected call, report it and stop. Do not poll, retry business inputs, recover another task, or use credentials from another event or run.
 {credential_usage}
 END CCCC GROK HANDLER
