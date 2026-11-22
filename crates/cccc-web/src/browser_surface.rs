@@ -496,6 +496,7 @@ impl BrowserSurfaces {
             mode: BrowserMode::Headless,
             shared_browser: true,
             actor_identity: Some(generation),
+            actor: None,
         })
         .await
     }

@@ -290,7 +290,19 @@ impl Fixture {
     async fn close(&mut self) {
         let _ = self.state.shutdown.send(());
         if let Some(daemon) = self.daemon.take() {
-            daemon.stop().await;
+            self.state
+                .client
+                .call(&DaemonRequest {
+                    v: 1,
+                    op: "shutdown".into(),
+                    args: Default::default(),
+                })
+                .await
+                .expect("owned shutdown");
+            tokio::time::timeout(Duration::from_secs(5), daemon)
+                .await
+                .expect("shutdown timeout")
+                .expect("daemon task");
         }
     }
 }
