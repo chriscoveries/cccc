@@ -1,7 +1,10 @@
 //! Provider-scoped Web Model entrances with explicit Actor routes.
 //! Old Actor-bound credentials are deliberately not promoted to instance authority.
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
@@ -100,6 +103,7 @@ fn update<T>(home: &HomeLayout, change: impl FnOnce(&mut Value) -> io::Result<T>
         let mut root = read(home)?;
         let result = change(&mut root)?;
         fs::write_secret_yaml(&store_path(home), &root)?;
+        prune_rejections(home, &root);
         Ok(result)
     })
 }
@@ -157,22 +161,6 @@ pub fn create_provider_if_absent(home: &HomeLayout, provider: &str) -> io::Resul
     configure_inner(home, provider, false)
 }
 
-/// Replace only an active connector's credential, preserving its routes and
-/// pairings. A missing or revoked connector must be created explicitly.
-pub fn rotate_provider(home: &HomeLayout, provider: &str) -> io::Result<Value> {
-    if !matches!(provider, "chatgpt_web" | "grok_web") {
-        return Err(error("invalid_web_model_provider"));
-    }
-    update(home, |root| {
-        let connector = root["connectors"]
-            .get_mut(provider)
-            .filter(|item| item.is_object() && item["revoked"] != true)
-            .ok_or_else(|| error("connector_unavailable"))?;
-        let secret = install_secret(connector, &cccc_contracts::utc_now());
-        Ok(json!({"outcome":"rotated","connector":connector,"secret":secret}))
-    })
-}
-
 fn install_secret(connector: &mut Value, now: &str) -> String {
     let secret = format!(
         "wmcs_{}{}",
@@ -207,7 +195,18 @@ fn configure_inner(
             json!({"connector_id":format!("wmc_{}",Uuid::new_v4().simple()),"kind":"web_model_connector","routing_mode":if provider == "grok_web" {"credential"} else {"session"},"provider":provider,"routing_salt":Uuid::new_v4().to_string(),"created_at":now,"bindings":{},"pairings":{}})
         };
         let existed = old.is_object() && old["revoked"] != true;
+        let generation = if existed {
+            credential_generation(old)
+                .checked_add(1)
+                .ok_or_else(|| error("credential_generation_exhausted"))?
+        } else {
+            1
+        };
         let secret = install_secret(&mut connector, &now);
+        connector["credential_generation"] = json!(generation);
+        if existed {
+            record_rotation(&mut connector, "local:core", &now);
+        }
         if provider == "grok_web" && !connector["routing_key"].is_string() {
             connector["routing_key"] = json!(format!(
                 "{}{}",
@@ -222,6 +221,205 @@ fn configure_inner(
         Ok(Some(
             json!({"outcome":if existed {"rotated"} else {"created"},"connector":connector,"secret":secret}),
         ))
+    })
+}
+
+// Creation and explicit rotation use separate store paths.
+const ROTATION_CONFIRMATION_DOMAIN: &str = "cccc-web-model-rotation-confirmation-v1";
+const UNRECORDED_GENERATION: u64 = 0;
+const EVENTS_LOG_RETAINED: usize = 10;
+const REJECTION_WRITE_INTERVAL: Duration = Duration::from_secs(5);
+
+fn credential_generation(c: &Value) -> u64 {
+    c["credential_generation"]
+        .as_u64()
+        .unwrap_or(UNRECORDED_GENERATION)
+}
+fn active_provider<'a>(root: &'a Value, provider: &str) -> Option<&'a Value> {
+    let c = &root["connectors"][provider];
+    (c.is_object() && c["revoked"] != true).then_some(c)
+}
+fn require_provider(provider: &str) -> io::Result<()> {
+    if matches!(provider, "chatgpt_web" | "grok_web") {
+        Ok(())
+    } else {
+        Err(error("invalid_web_model_provider"))
+    }
+}
+fn push_log(c: &mut Value, field: &str, entry: Value) {
+    let mut log = c[field].as_array().cloned().unwrap_or_default();
+    log.push(entry);
+    log.drain(..log.len().saturating_sub(EVENTS_LOG_RETAINED));
+    c[field] = Value::Array(log);
+}
+fn record_rotation(c: &mut Value, by: &str, now: &str) {
+    c["secret_rotated_at"] = json!(now);
+    c["rotated_by"] = json!(by);
+    let preview = rotation_preview(c);
+    // Existing diagnostics expect method/ok; a successful rotation remains success.
+    push_log(
+        c,
+        "events_log",
+        json!({"at":now,"method":"secret_rotated","ok":true,
+        "reason":"secret_rotated","outcome":"ok","rotated_by":by,
+        "credential_generation":preview["credential_generation"],
+        "recorded_binding_count":preview["recorded_binding_count"]}),
+    );
+}
+/// Non-authorizing fence over connector id, generation and sorted binding keys.
+pub fn rotation_preview(connector: &Value) -> Value {
+    let mut keys: Vec<&String> = connector["bindings"]
+        .as_object()
+        .map(|b| b.keys().collect())
+        .unwrap_or_default();
+    keys.sort();
+    let recorded_binding_count = keys.len();
+    let generation = credential_generation(connector);
+    let confirmation = hash(
+        &json!([
+            ROTATION_CONFIRMATION_DOMAIN,
+            connector["connector_id"],
+            generation,
+            keys
+        ])
+        .to_string(),
+    );
+    json!({
+        "connector_id": connector["connector_id"],
+        "credential_generation": generation,
+        "recorded_binding_count": recorded_binding_count,
+        "dots_binding_recorded": connector["dots"]["actor_id"].is_string(),
+        "secret_rotated_at": connector["secret_rotated_at"],
+        "rotated_by": connector["rotated_by"],
+        "confirmation": confirmation
+    })
+}
+
+/// Explicit rotation preserves routes, pairings and Dots state in one locked update.
+pub fn rotate_provider(
+    home: &HomeLayout,
+    provider: &str,
+    confirmation: &str,
+    rotated_by: &str,
+) -> io::Result<Value> {
+    require_provider(provider)?;
+    if rotated_by.trim().is_empty() {
+        return Err(error("rotated_by_required"));
+    }
+    update(home, |root| {
+        let live = active_provider(root, provider).ok_or_else(|| error("connector_unavailable"))?;
+        let preview = rotation_preview(live);
+        if preview["confirmation"] != confirmation {
+            // `update` only writes on Ok, so a stale fence leaves the file untouched.
+            return Err(error("rotation_confirmation_stale"));
+        }
+        let previous_generation = credential_generation(live);
+        let generation = previous_generation
+            .checked_add(1)
+            .ok_or_else(|| error("credential_generation_exhausted"))?;
+        let mut connector = live.clone();
+        let now = cccc_contracts::utc_now();
+        let secret = install_secret(&mut connector, &now);
+        connector["credential_generation"] = json!(generation);
+        record_rotation(&mut connector, rotated_by, &now);
+        root["connectors"][provider] = connector.clone();
+        Ok(
+            json!({"outcome":"rotated","connector":connector,"secret":secret,
+            "previous_generation":previous_generation}),
+        )
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RejectionRecord {
+    Written { count: u64 },
+    Deferred,
+    UnknownConnector,
+}
+
+/// Process-local 5 s coalescing. Pending counts are lost on restart, so stored
+/// counts are lower bounds; "at" is write-time, not last-seen time.
+#[derive(Default)]
+struct RejectionThrottle {
+    entries: HashMap<(PathBuf, String), (Instant, u64)>,
+}
+impl RejectionThrottle {
+    fn retain(&mut self, home: &HomeLayout, root: &Value) {
+        self.entries.retain(|(path, id), _| {
+            path.as_path() != home.root()
+                || root["connectors"].as_object().is_some_and(|cs| {
+                    cs.values()
+                        .any(|c| c["connector_id"] == id.as_str() && c["revoked"] != true)
+                })
+        });
+    }
+    fn admit(&mut self, home: &HomeLayout, id: &str, now: Instant) -> Option<u64> {
+        let key = (home.root().to_path_buf(), id.to_owned());
+        match self.entries.get_mut(&key) {
+            Some((last, pending)) => {
+                *pending = pending.saturating_add(1);
+                if now.saturating_duration_since(*last) < REJECTION_WRITE_INTERVAL {
+                    return None;
+                }
+                *last = now;
+                Some(std::mem::take(pending))
+            }
+            None => {
+                self.entries.insert(key, (now, 0));
+                Some(1)
+            }
+        }
+    }
+}
+static REJECTIONS: OnceLock<Mutex<RejectionThrottle>> = OnceLock::new();
+fn prune_rejections(home: &HomeLayout, root: &Value) {
+    if let Some(m) = REJECTIONS.get() {
+        m.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(home, root);
+    }
+}
+/// Wrong-secret diagnostics never contain request material and never evict
+/// rotation/call records: rejection_log has its own ten-entry bound.
+pub fn record_rejected_secret(
+    home: &HomeLayout,
+    id: &str,
+    transport: &str,
+) -> io::Result<RejectionRecord> {
+    fs::with_exclusive_lock(&lock_path(home), || {
+        let mut root = read(home)?;
+        let count = {
+            let mut throttle = REJECTIONS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            throttle.retain(home, &root);
+            if !root["connectors"].as_object().is_some_and(|cs| {
+                cs.values()
+                    .any(|c| c["connector_id"] == id && c["revoked"] != true)
+            }) {
+                return Ok(RejectionRecord::UnknownConnector);
+            }
+            match throttle.admit(home, id, Instant::now()) {
+                Some(count) => count,
+                None => return Ok(RejectionRecord::Deferred),
+            }
+        };
+        let c = current(&mut root, id)?;
+        let transport = match transport {
+            "get_probe" | "post_header" | "post_path_token" => transport,
+            _ => "other",
+        };
+        let generation = credential_generation(c);
+        push_log(
+            c,
+            "rejection_log",
+            json!({"at":cccc_contracts::utc_now(),
+            "reason":"invalid_secret","outcome":"denied","transport":transport,
+            "count":count,"credential_generation":generation}),
+        );
+        fs::write_secret_yaml(&store_path(home), &root)?;
+        Ok(RejectionRecord::Written { count })
     })
 }
 
@@ -398,6 +596,20 @@ pub fn begin_pairing(
     generation: &str,
     automatic: bool,
 ) -> io::Result<Value> {
+    begin_pairing_with_recovery(home, id, group, actor, generation, automatic, None)
+}
+
+/// The daemon supplies recovery evidence only after validating the settled
+/// delivery and the current binding. It stays private to this candidate.
+pub fn begin_pairing_with_recovery(
+    home: &HomeLayout,
+    id: &str,
+    group: &str,
+    actor: &str,
+    generation: &str,
+    automatic: bool,
+    recovery: Option<Value>,
+) -> io::Result<Value> {
     if generation.is_empty() {
         return Err(error("actor_generation_required"));
     }
@@ -407,7 +619,18 @@ pub fn begin_pairing(
         if c["bindings"][route_key(group, actor)]["transport"] == "mcp_events" {
             return Err(error("dots_requires_event_binding"));
         }
-        let (record, result) = pairing_candidate(group, actor, generation, automatic);
+        let (mut record, result) = pairing_candidate(group, actor, generation, automatic);
+        if let Some(recovery) = recovery {
+            let expected = recovery["binding_revision"]
+                .as_str()
+                .filter(|s| !s.is_empty());
+            if expected.is_none()
+                || c["bindings"][route_key(group, actor)]["revision"].as_str() != expected
+            {
+                return Err(error("pairing_changed"));
+            }
+            record["recovery"] = recovery;
+        }
         // One record per Actor. Expired/failed attempts are retained until an
         // explicit retry or lifecycle removal, so a supervisor cannot resend.
         c["pairings"][route_key(group, actor)] = record;
@@ -604,23 +827,99 @@ pub fn confirm_pairing(
         let bindings = c["bindings"]
             .as_object()
             .ok_or_else(|| error("invalid binding store"))?;
-        if bindings
-            .iter()
-            .any(|(other, b)| other != &key && (b["session_key"] == session || b["url"] == url))
-        {
+        if bindings.iter().any(|(other, b)| {
+            other != &key
+                && (b["session_key"] == session
+                    || b["url"] == url
+                    || b["url"]
+                        .as_str()
+                        .is_some_and(|old| same_conversation(old, &url)))
+        }) {
             return Err(error("binding_conflict"));
         }
         if let Some(bound) = bindings.get(&key).filter(|b| b["pairing_id"] == pairing_id) {
-            if bound["url"] != url {
+            if !bound["url"]
+                .as_str()
+                .is_some_and(|old| same_conversation(old, &url))
+            {
                 return Err(error("pairing_target_changed"));
             }
             return Ok(bound.clone());
         }
-        let bound = json!({"group_id":group,"actor_id":actor,"generation":generation,"pairing_id":pairing_id,"revision":Uuid::new_v4().to_string(),"session_key":session,"url":url,"state":"bound","updated_at":cccc_contracts::utc_now()});
+        let mut bound = json!({"group_id":group,"actor_id":actor,"generation":generation,"pairing_id":pairing_id,"revision":Uuid::new_v4().to_string(),"session_key":session,"url":url,"state":"bound","updated_at":cccc_contracts::utc_now()});
+        if let Some(recovery) = pair.get("recovery") {
+            let old = &c["bindings"][&key];
+            if old["revision"] != recovery["binding_revision"]
+                || old["url"]
+                    .as_str()
+                    .is_none_or(|old| same_conversation(old, &url))
+            {
+                return Err(error("pairing_changed"));
+            }
+            bound["abandoned_delivery"] = recovery.clone();
+        } else if let Some(disposition) = c["bindings"][&key].get("abandoned_delivery") {
+            // Target projection may not have caught up yet. A second pairing
+            // cannot revive the old fence while the raw row still names it.
+            bound["abandoned_delivery"] = disposition.clone();
+        }
         c["bindings"][&key] = bound.clone();
         c["pairings"][&key]["state"] = json!("bound");
         Ok(bound)
     })
+}
+
+/// The saved route retains its Project prefix for navigation. Authority to
+/// compare two routes comes from the stable ID on the same HTTPS origin.
+pub fn conversation_identity(value: &str) -> Option<(String, String)> {
+    let normalized = conversation_url(value).ok()?;
+    let url = url::Url::parse(&normalized).ok()?;
+    let (_, id) = url.path().rsplit_once("/c/")?;
+    Some((url.host_str()?.to_owned(), id.to_owned()))
+}
+
+pub fn same_conversation(left: &str, right: &str) -> bool {
+    conversation_identity(left)
+        .zip(conversation_identity(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+pub fn delivery_fenced(target: &Value) -> bool {
+    matches!(
+        target["last_delivery_status"].as_str(),
+        Some(
+            "submitting"
+                | "deferred"
+                | "pending_new_chat_bind"
+                | "legacy_recovery_submitting"
+                | "submission_ambiguous"
+                | "submission_ambiguous_completion_pending"
+                | "completion_ambiguous"
+                | "ambiguous"
+                | "completion_conflict"
+                | "legacy_submission_unverified"
+        )
+    )
+}
+
+pub fn abandoned_delivery_matches(binding: &Value, target: &Value) -> bool {
+    let recovery = &binding["abandoned_delivery"];
+    recovery.is_object()
+        && ["binding_revision", "delivery_id", "turn_id"]
+            .into_iter()
+            .all(|key| {
+                recovery[key]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty())
+            })
+        && recovery["event_ids"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty())
+        && target["kind"] == "existing_chat"
+        && target["last_delivery_status"] == "submission_ambiguous"
+        && recovery["binding_revision"] == target["binding_revision"]
+        && recovery["delivery_id"] == target["last_delivery_id"]
+        && recovery["turn_id"] == target["last_delivery_turn_id"]
+        && recovery["event_ids"] == target["last_delivery_event_ids"]
 }
 
 pub fn conversation_url(value: &str) -> io::Result<String> {

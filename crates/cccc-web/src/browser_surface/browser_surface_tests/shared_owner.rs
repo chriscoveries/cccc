@@ -13,6 +13,71 @@ async fn owned_page(manager: &BrowserSurfaces, key: &str) -> Page {
         .clone()
 }
 
+#[tokio::test]
+async fn viewer_registered_during_retirement_protects_the_reopened_page() {
+    require_chrome!();
+    let (base, server) = local_page(
+        r#"<textarea id="prompt-textarea" style="width:500px;height:120px"></textarea>
+        <script>document.hasFocus=()=>false;</script>"#,
+    )
+    .await;
+    let url = format!("{base}/");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let profile = temp.path().join("profile");
+    let manager = BrowserSurfaces::default();
+    let key = "actor";
+    for key in [key, "sibling"] {
+        manager
+            .open_shared_actor_fixture(key, &profile, &url, key)
+            .await
+            .expect("open actor page");
+        wait_for_fixture_document(&owned_page(&manager, key).await).await;
+    }
+    let initial = manager.info(key).await;
+    let target = initial["target_id"].as_str().expect("initial target");
+    let idle_for = std::time::Duration::ZERO;
+    assert!(
+        manager
+            .consider_actor_idle_close(key, target, true, idle_for)
+            .await
+            .expect("retire idle page")
+    );
+    assert_eq!(manager.info(key).await["closed_reason"], "idle");
+
+    // Use the socket's registration step before any replacement or frame lookup.
+    let viewer = manager.register_viewer(key).await;
+    manager
+        .open_shared_actor_fixture(key, &profile, &url, key)
+        .await
+        .expect("reopen actor page");
+    wait_for_fixture_document(&owned_page(&manager, key).await).await;
+    let reopened = manager.info(key).await;
+    let target = reopened["target_id"].as_str().expect("reopened target");
+    assert_ne!(reopened["target_id"], initial["target_id"]);
+    assert_eq!(reopened["controller_attached"], true);
+    assert!(
+        !manager
+            .consider_actor_idle_close(key, target, true, idle_for)
+            .await
+            .expect("protect attached replacement")
+    );
+    assert_eq!(
+        manager.frame(key).await.expect("replacement frame")["t"],
+        "frame"
+    );
+
+    drop(viewer);
+    assert_eq!(manager.info(key).await["controller_attached"], false);
+    assert!(
+        manager
+            .consider_actor_idle_close(key, target, true, idle_for)
+            .await
+            .expect("retire after disconnect")
+    );
+    manager.shutdown_all().await.expect("cleanup");
+    server.abort();
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn actor_window_remains_visible_and_closable_during_slow_navigation() {

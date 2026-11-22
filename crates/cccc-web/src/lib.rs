@@ -18,6 +18,8 @@ mod routes;
 mod security_headers;
 mod shutdown;
 mod update_hook;
+#[cfg(test)]
+mod test_daemon;
 mod web_banner;
 mod web_listener;
 mod web_push;

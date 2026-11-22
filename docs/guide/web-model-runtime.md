@@ -70,25 +70,84 @@ same section; verification does not start it for you. These operations are indep
 agent editor's Save button. Disconnecting is a separate maintenance action and is
 not required to replace a conversation.
 
+#### Repair a stale binding from the private API
+
+Moving the same conversation into or out of a Project keeps its conversation
+identity. If its connection still needs repair, send one administrator request
+to `POST /api/v1/web-model/pairing` with `action: "connect"`, `replace: true`,
+and the actor's `group_id` and `actor_id`. Supply `conversation_url` to open
+or prepare that actor's owned browser page, or omit it to use the current
+page. A draft, attachment, running response, sign-in or verification may
+require attention in the browser before retrying.
+
+If the saved chat cannot be reviewed and the last ambiguous delivery already
+has a durable completion, the operator can acknowledge that exact delivery in
+the same request. Take `expected_binding_revision` from the fresh private
+browser-session status's `delivery_target.binding_revision` and
+`abandon_delivery_id` from `delivery.last_delivery_id`. For example:
+
+```sh
+curl --config "$CCCC_ADMIN_CURL_CONFIG" --fail-with-body \
+  --json @replacement.json "$CCCC_URL/api/v1/web-model/pairing"
+```
+
+Supply the following in `replacement.json`, with the actual IDs. Use local
+administrator authentication in the curl config.
+
+```json
+{
+  "group_id": "<group>",
+  "actor_id": "<actor>",
+  "action": "connect",
+  "replace": true,
+  "conversation_url": "https://chatgpt.com/g/<project>/c/<conversation>",
+  "expected_binding_revision": "<current revision>",
+  "abandon_delivery_id": "<completed ambiguous delivery>"
+}
+```
+
+An acknowledgement accepts that the old submission's outcome is unknown.
+The old batch is retained in delivery history and is never replayed by repair.
+An active turn or changed delivery is refused. The `waiting` response means
+verification started. The previous binding remains until the new conversation
+is verified. Check the new revision and verify a fresh PONG before sending more
+work. A failed attempt leaves the prior binding and delivery fence available
+for further review.
+
 **Shared login & connector** opens instance settings while retaining the agent's
 unsaved draft. Creating a connector credential only creates its address: it does
 not prove that ChatGPT has added or used it. Shared settings separately show the
 last recorded connector request and the number of verified agent bindings.
 Credential replacement and revocation are under **Manage connector credential**.
 
-Creating is safe to repeat: an existing connector is returned unchanged, without
-its secret or a token URL. **Rotate** remains an explicit maintenance action with
-the existing confirmation dialog. It replaces the credential while preserving
-conversation pairings and Dots state. The old URL stops working; copy the new URL
-and update every external plugin using it.
+Create is safe to repeat: an existing credential is returned unchanged without
+revealing its secret. **Rotate** remains an explicit maintenance action. Its
+confirmation shows the recorded binding count and warns that the old URL stops
+working; update every external plugin that uses it. That count cannot inventory
+external plugin installations. The confirmation is fenced to the listed
+credential generation and bindings: if either changes, refresh and confirm
+again. Rotation preserves existing conversation pairings and Dots state and
+shows the replacement URL once.
 
-For API/IPC callers, a flagless create no longer rotates. Send the boolean
-`rotate=true` explicitly to replace an active credential. Create returns
-`outcome=created` with the secret once, or `outcome=existing` without it; rotation
-returns `outcome=rotated` with the replacement secret once. Existing
-`create_only` callers must accept the successful `existing` response instead of
-expecting `connector_exists`. Non-boolean flags and conflicting `rotate=true`
-and `create_only=true` are refused without changing the connector.
+The API records credential_generation, secret_rotated_at and rotated_by together
+with rotation. The attribution is the daemon's local authorized caller
+(local:user), not a claimed remote human. Older stores have an unrecorded
+generation (0) and no invented rotation timestamp. Wrong-secret attempts remain
+403 and are recorded separately from rotation/call history. That ten-entry
+rejection log coalesces writes per process/connector over five seconds, with no
+timer flush. Pending hits are lost on restart, so count is a lower bound; at is
+write-time, not last-seen time. Detailed rejection/last-rotation UI is separate
+follow-up work.
+
+#### API migration: create_only callers
+
+Keep sending boolean create_only if needed, but handle success with
+outcome=existing and no secret instead of expecting connector_exists. A flagless
+POST no longer rotates. To intentionally rotate, read the list's
+rotation.confirmation and send rotate=true with that confirmation; do not
+combine rotate=true and create_only=true. Creation/rotation disclose a secret
+once; an existing response has secret_available=false and no token URL.
+
 
 ### Conversation pairing and diagnostics
 

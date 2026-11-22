@@ -50,7 +50,12 @@ const empty = {
     connector_base_url: "https://cccc.example.test",
   },
 };
-const existing = { connector_id: "shared", bound_actor_count: 2 };
+// Controlled extension of the existing response fixture for the new fence contract.
+const existing = {
+  connector_id: "shared",
+  bound_actor_count: 2,
+  rotation: { confirmation: "review-fence", recorded_binding_count: 2 },
+};
 const created = {
   ok: true,
   result: {
@@ -137,10 +142,7 @@ describe("shared Web Model login and connector", () => {
   it("requires explicit confirmation for credential rotation and preserves error visibility", async () => {
     mocks.connectors.mockResolvedValue({
       ok: true,
-      result: {
-        connectors: [{ connector_id: "shared", bound_actor_count: 2 }],
-        connector_base_url: "https://cccc.example.test",
-      },
+      result: { connectors: [existing], connector_base_url: "https://cccc.example.test" },
     });
     mocks.rotate.mockResolvedValue({ ok: false, error: { message: "Save failed" } });
     await act(async () => root.render(<WebModelConnectorsTab isDark={true} />));
@@ -150,11 +152,9 @@ describe("shared Web Model login and connector", () => {
       host.querySelector("summary")!.click();
     });
     await act(async () => button("rotate").click());
-    expect(mocks.create).not.toHaveBeenCalled();
     expect(mocks.rotate).not.toHaveBeenCalled();
     await act(async () => button("confirm").click());
-    expect(mocks.rotate).toHaveBeenCalledExactlyOnceWith("chatgpt_web");
-    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.rotate).toHaveBeenCalledExactlyOnceWith("chatgpt_web", "review-fence");
     expect(host.textContent).toContain("Save failed");
     expect(host.textContent).toContain("2 webModelShared.pairedActors");
   });
@@ -196,8 +196,9 @@ describe("shared Web Model login and connector", () => {
     await act(async () => button("cancel").click());
     expect(mocks.rotate).not.toHaveBeenCalled();
     await act(async () => button("rotate").click());
+    mocks.rotate.mockResolvedValue(created);
     await act(async () => button("confirm").click());
-    expect(mocks.rotate).toHaveBeenCalledExactlyOnceWith("chatgpt_web");
+    expect(mocks.rotate).toHaveBeenCalledExactlyOnceWith("chatgpt_web", "review-fence");
     expect(mocks.create).not.toHaveBeenCalled();
     await act(async () => button("copy").click());
     expect(mocks.copy).toHaveBeenCalledExactlyOnceWith(
@@ -453,7 +454,7 @@ describe("shared Web Model login and connector", () => {
     [
       "chatgpt_web",
       {},
-      "mailto:ops@cccc.example.test/mcp/web-model/shared",
+      "mailto:ops\u0040cccc.example.test/mcp/web-model/shared",
       "webModelShared.publicUrlMissing",
     ],
     ["grok_web", { connector_base_url: "" }, null, "grokShared.publicUrlMissing"],

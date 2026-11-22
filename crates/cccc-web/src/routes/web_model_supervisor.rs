@@ -26,11 +26,11 @@ pub(crate) fn spawn(state: AppState) {
         loop {
             tokio::select! {
                 _ = shutdown.recv() => break,
-                _ = interval.tick() => ensure_running_actor(&state, None, false).await,
+                _ = interval.tick() => ensure_running_actor(&state, None).await,
                 event = events.recv() => match event {
-                    Ok(event) => ensure_running_actor(&state, Some(&event.group_id), true).await,
+                    Ok(event) => ensure_running_actor(&state, Some(&event.group_id)).await,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        ensure_running_actor(&state, None, true).await;
+                        ensure_running_actor(&state, None).await;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -39,55 +39,86 @@ pub(crate) fn spawn(state: AppState) {
     });
 }
 
-pub(super) async fn ensure_running_actor(
-    state: &AppState,
-    preferred_group: Option<&str>,
-    event_trigger: bool,
-) {
+pub(super) async fn ensure_running_actor(state: &AppState, preferred_group: Option<&str>) {
     use futures_util::{StreamExt, stream};
     stream::iter(running_browser_actors(state, preferred_group))
         .for_each_concurrent(4, |(group_id, actor_id)| {
-            ensure_actor(state, group_id, actor_id, event_trigger)
+            ensure_actor(state, group_id, actor_id)
         })
         .await;
 }
 
-async fn ensure_actor(state: &AppState, group_id: String, actor_id: String, event_trigger: bool) {
+async fn ensure_actor(state: &AppState, group_id: String, actor_id: String) {
     let session_key = super::web_model_browser::key(&group_id, &actor_id);
     let surface = state.browser_surfaces.info(&session_key).await;
-    if surface["active"].as_bool().unwrap_or(false) {
-        prepare_delivery(state, group_id, actor_id, event_trigger).await;
-        return;
-    }
-    if surface["state"] == "closed" {
-        return;
-    }
-    if !warmup_due(&session_key) {
-        return;
-    }
-    match super::web_model_browser::ensure_open_for_actor(
-        state,
-        &group_id,
-        &actor_id,
-        DEFAULT_WIDTH,
-        DEFAULT_HEIGHT,
-    )
-    .await
-    {
-        Ok(_) => {
-            clear_warmup_attempt(&session_key);
-            prepare_delivery(state, group_id, actor_id, true).await;
-        }
-        Err(error) => {
-            tracing::warn!(%error, group_id, actor_id, "Web-model browser warmup failed");
-        }
+    if surface["active"] == true || reopen_on_demand(state, &group_id, &actor_id, &surface).await {
+        prepare_delivery(state, group_id, actor_id).await;
     }
 }
 
-async fn prepare_delivery(state: &AppState, group: String, actor: String, event_trigger: bool) {
+/// Shared by the supervisor and the worker that just observed a missing page.
+/// The periodic supervisor retries if a wake contends with close or delivery.
+pub(super) async fn reopen_on_demand(
+    state: &AppState,
+    group: &str,
+    actor: &str,
+    surface: &serde_json::Value,
+) -> bool {
+    use super::{web_model_delivery::try_browser_work, web_model_delivery_state::target};
+    let Ok(Some(_work)) = try_browser_work(state, group, actor) else {
+        return false;
+    };
+    let Some((doc, config)) = load_actor(state, group, actor) else {
+        return false;
+    };
+    if !group_actor_ready_to_start(state, &doc, &config) {
+        return false;
+    }
+    let Ok(target) = target(state, group, actor) else {
+        return false;
+    };
+    if target["kind"] == "existing_chat" {
+        if !super::web_model_reopen::has_demand(state, group, actor, &target)
+            || super::web_model_reopen::load_recovery_blocks_open(&target)
+        {
+            return false;
+        }
+    } else if surface["state"] == "closed" {
+        return false;
+    }
+    let session_key = super::web_model_browser::key(group, actor);
+    // Another opener might have replaced the target before we got the permit.
+    if state.browser_surfaces.info(&session_key).await["active"] == true {
+        return true;
+    }
+    if !warmup_due(&session_key)
+        || super::web_model_reopen::book_recovery_open(state, group, actor, &target).is_err()
+    {
+        return false;
+    }
+    if let Err(error) = super::web_model_browser::open_actor_surface(
+        state,
+        group,
+        actor,
+        DEFAULT_WIDTH,
+        DEFAULT_HEIGHT,
+        None,
+    )
+    .await
+    {
+        tracing::warn!(%error, group, actor, "Managed web-model browser open failed");
+        return false;
+    }
+    clear_warmup_attempt(&session_key);
+    tracing::info!(group, actor, reason = ?surface.get("closed_reason"),
+        "Opened managed web-model browser page");
+    true
+}
+
+async fn prepare_delivery(state: &AppState, group: String, actor: String) {
     if super::web_model_connector_store::for_actor(state, &group, &actor).is_none() {
         super::web_model_pairing::ensure_automatic(state, &group, &actor).await;
-    } else if event_trigger {
+    } else {
         super::web_model_delivery::ensure_worker(state.clone(), group, actor).await;
     }
 }
@@ -104,6 +135,19 @@ pub(super) fn actor_delivery_enabled(state: &AppState, group_id: &str, actor_id:
     };
     group_actor_ready_to_start(state, &group, actor)
         && super::web_model_connector_store::for_actor(state, group_id, actor_id).is_some()
+}
+
+fn load_actor(state: &AppState, group_id: &str, actor_id: &str) -> Option<(GroupDoc, Actor)> {
+    let group = GroupStore::new(state.home.clone())
+        .ok()?
+        .load(group_id)
+        .ok()?;
+    let actor = group
+        .actors
+        .iter()
+        .find(|actor| actor.id == actor_id)?
+        .clone();
+    Some((group, actor))
 }
 
 fn running_browser_actors(

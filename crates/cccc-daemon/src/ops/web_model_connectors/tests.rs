@@ -161,6 +161,247 @@ fn automatic_pairing_requires_running_group_and_never_replaces_existing_binding(
     assert!(execute(&home, &request("web_model_pairing_begin", args)).is_err());
 }
 
+/// cwf#821: re-pairing a running Actor must never unpair it first. With
+/// `replace: true` the old binding stays in force through a failed or
+/// abandoned attempt and is only superseded by the new confirm.
+#[test]
+fn explicit_replace_repairs_without_removing_the_working_binding() {
+    let temp = tempfile::tempdir().expect("temp");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    home.initialize().expect("init");
+    let groups = GroupStore::new(home.clone()).expect("groups");
+    let mut group = groups.create("replace", " ").expect("group");
+    let mut actor = Actor::new("a");
+    actor.runtime = ActorRuntime::WebModel;
+    actor.enabled = true;
+    cccc_core::actors::add(&mut group, actor).expect("actor");
+    group.running = true;
+    group.state = GroupState::Active;
+    groups.save(&group).expect("save");
+    let configured = store::configure(&home).expect("configure");
+    let id = configured["connector"]["connector_id"].clone();
+    let args = json!({"by":"user","connector_id":id,"group_id":group.group_id,"actor_id":"a","automatic":true});
+    let pair_and_confirm = |args: &Value, session: &str, url: &str| {
+        let p = execute(&home, &request("web_model_pairing_begin", args.clone())).expect("begin");
+        execute(
+            &home,
+            &request(
+                "web_model_pairing_accept",
+                json!({"by":"user","connector_id":id,"code":p["code"],"session_key":session}),
+            ),
+        )
+        .expect("accept");
+        let mut confirm = args.clone();
+        confirm["pairing_id"] = p["pairing_id"].clone();
+        confirm["url"] = json!(url);
+        (p, confirm)
+    };
+    let (_, confirm) = pair_and_confirm(&args, "host-1", "https://chatgpt.com/c/first");
+    execute(&home, &request("web_model_pairing_confirm", confirm)).expect("first bind");
+    let bound_url = |home: &HomeLayout| {
+        store::binding_for_actor(
+            &store::load(home).expect("store")[0],
+            &group.group_id,
+            "a",
+            &cccc_core::actors::generation_identity(
+                &groups.load(&group.group_id).expect("group").actors[0],
+            ),
+        )
+        .map(|b| b["url"].clone())
+    };
+    assert_eq!(bound_url(&home), Some(json!("https://chatgpt.com/c/first")));
+
+    // Default behaviour is unchanged: automatic begin cannot replace.
+    let refused = execute(&home, &request("web_model_pairing_begin", args.clone()))
+        .expect_err("automatic begin without replace");
+    assert_eq!(refused.code, "already_paired");
+
+    // An explicit replace begins without touching the binding; a failed
+    // attempt (e.g. the browser hit a 429) leaves it exactly as it was.
+    let mut replace = args.clone();
+    replace["replace"] = json!(true);
+    let attempt = execute(&home, &request("web_model_pairing_begin", replace.clone()))
+        .expect("replace begin");
+    assert_eq!(bound_url(&home), Some(json!("https://chatgpt.com/c/first")));
+    let mut failed = replace.clone();
+    failed["pairing_id"] = attempt["pairing_id"].clone();
+    failed["error_code"] = json!("pairing_interrupted");
+    execute(&home, &request("web_model_pairing_fail", failed)).expect("fail attempt");
+    assert_eq!(
+        bound_url(&home),
+        Some(json!("https://chatgpt.com/c/first")),
+        "a failed re-pair must not unpair the Actor"
+    );
+
+    // A confirm without replace still cannot supersede the binding.
+    let (_, confirm) = pair_and_confirm(&replace, "host-2", "https://chatgpt.com/c/second");
+    let mut plain = confirm.clone();
+    plain.as_object_mut().expect("object").remove("replace");
+    assert_eq!(
+        execute(&home, &request("web_model_pairing_confirm", plain))
+            .expect_err("plain confirm")
+            .code,
+        "already_paired"
+    );
+    assert_eq!(bound_url(&home), Some(json!("https://chatgpt.com/c/first")));
+    // The replace confirm supersedes it in one write.
+    execute(&home, &request("web_model_pairing_confirm", confirm)).expect("replace confirm");
+    assert_eq!(
+        bound_url(&home),
+        Some(json!("https://chatgpt.com/c/second"))
+    );
+
+    // The reported stale-pairing sequence: the saved chat cannot be reviewed,
+    // remove is refused, and an ordinary connect still sees the old binding.
+    let old = store::binding_for_session(&store::load(&home).expect("store")[0], "host-2")
+        .expect("old binding");
+    let unresolved = json!({"a": {
+        "url": old["url"], "binding_revision": old["revision"], "kind": "existing_chat",
+        "last_delivery_status": "submission_ambiguous", "last_delivery_id": "receipt-1",
+        "last_delivery_turn_id": "turn-1", "last_delivery_event_ids": ["event-1"]
+    }});
+    integration_state::group_update(&groups, &group.group_id, "web_model_browser_targets", |v| {
+        *v = unresolved.clone();
+        Ok(())
+    })
+    .expect("store pending delivery");
+    groups
+        .mutate(&group.group_id, |g| {
+            g.actors[0].enabled = false;
+            Ok(())
+        })
+        .expect("stop");
+    assert_eq!(
+        execute(&home, &request("web_model_binding_remove", args.clone()))
+            .expect_err("unresolved delivery blocks removal")
+            .code,
+        "delivery_unresolved"
+    );
+    groups
+        .mutate(&group.group_id, |g| {
+            g.actors[0].enabled = true;
+            Ok(())
+        })
+        .expect("start");
+    assert_eq!(
+        execute(&home, &request("web_model_pairing_begin", args.clone()))
+            .expect_err("connect still sees the binding")
+            .code,
+        "already_paired"
+    );
+    assert_eq!(
+        execute(&home, &request("web_model_pairing_begin", replace.clone()))
+            .expect_err("bare replace cannot abandon a delivery")
+            .code,
+        "delivery_unresolved"
+    );
+
+    let mut repair = replace;
+    repair["expected_binding_revision"] = old["revision"].clone();
+    repair["abandon_delivery_id"] = json!("receipt-1");
+    repair["url"] = json!("https://chatgpt.com/g/g-p-fixture/c/replacement");
+    assert_eq!(
+        execute(&home, &request("web_model_pairing_begin", repair.clone()))
+            .expect_err("a status row is not a durable completion")
+            .code,
+        "delivery_unresolved"
+    );
+    let completion = super::super::runtime_completion::Completion {
+        turn_id: "turn-1".into(),
+        event_ids: vec!["event-1".into()],
+        status: "done".into(),
+        delivery_id: "receipt-1".into(),
+    };
+    let consumed =
+        super::super::runtime_completion::append(&home, &group.group_id, "a", &completion)
+            .expect("completion receipt");
+    super::super::runtime_state::set_runtime_status(
+        &home,
+        &group,
+        "a",
+        "working",
+        "active-turn",
+        "",
+        &[],
+    )
+    .expect("carry a newer active turn");
+    assert!(execute(&home, &request("web_model_pairing_begin", repair.clone())).is_err());
+    super::super::runtime_state::set_runtime_status(&home, &group, "a", "waiting", "", "", &[])
+        .expect("settle newer turn in fixture");
+    let mut stale = repair.clone();
+    stale["expected_binding_revision"] = json!("stale");
+    assert_eq!(
+        execute(
+            &home,
+            &request("web_model_pairing_validate_replacement", stale.clone())
+        )
+        .expect_err("stale acknowledgement rejected before browser preparation")
+        .code,
+        "delivery_unresolved"
+    );
+    assert!(execute(&home, &request("web_model_pairing_begin", stale)).is_err());
+    let pairing =
+        || store::pairing_for_actor(&store::load(&home).expect("store")[0], &group.group_id, "a");
+    let before = pairing();
+    execute(
+        &home,
+        &request("web_model_pairing_validate_replacement", repair.clone()),
+    )
+    .expect("read-only validation");
+    assert_eq!(pairing(), before);
+    let (_, confirm) = pair_and_confirm(
+        &repair,
+        "host-3",
+        "https://chatgpt.com/g/g-p-fixture/c/replacement",
+    );
+    assert_eq!(
+        execute(
+            &home,
+            &request("web_model_pairing_validate_replacement", repair)
+        )
+        .expect_err("a live candidate must be cancelled before another repair")
+        .code,
+        "pairing_in_progress"
+    );
+    assert_eq!(bound_url(&home), Some(old["url"].clone()));
+    integration_state::group_update(&groups, &group.group_id, "web_model_browser_targets", |v| {
+        v["a"]["last_delivery_id"] = json!("changed");
+        Ok(())
+    })
+    .expect("changed delivery");
+    assert!(
+        execute(
+            &home,
+            &request("web_model_pairing_confirm", confirm.clone())
+        )
+        .is_err()
+    );
+    assert_eq!(bound_url(&home), Some(old["url"].clone()));
+    integration_state::group_update(&groups, &group.group_id, "web_model_browser_targets", |v| {
+        *v = unresolved.clone();
+        Ok(())
+    })
+    .expect("restore captured delivery");
+    execute(
+        &home,
+        &request("web_model_pairing_confirm", confirm.clone()),
+    )
+    .expect("repair confirm");
+    execute(&home, &request("web_model_pairing_confirm", confirm)).expect("confirmation retry");
+    let connector = &store::load(&home).expect("reopened store")[0];
+    assert!(store::binding_for_session(connector, "host-2").is_none());
+    let binding = store::binding_for_session(connector, "host-3").expect("replacement binding");
+    assert_ne!(binding["revision"], old["revision"]);
+    assert!(store::abandoned_delivery_matches(
+        &binding,
+        &unresolved["a"]
+    ));
+    let retained = super::super::runtime_completion::find(&home, &group.group_id, "a", &completion)
+        .expect("read exact completion")
+        .expect("completion retained");
+    assert_eq!(retained.id, consumed.id);
+}
+
 #[test]
 fn legacy_actor_pairing_keeps_the_creation_identity() {
     let temp = tempfile::tempdir().expect("temp");
@@ -348,88 +589,89 @@ fn grok_binding_preserves_enabled_state_and_retires_on_runtime_change() {
 }
 
 #[test]
-fn creation_is_idempotent_and_only_an_explicit_boolean_rotates() {
-    for provider in ["chatgpt_web", "grok_web"] {
-        let temp = tempfile::tempdir().expect("home");
-        let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
-        home.initialize().expect("initialize");
-        let configured = execute(
-            &home,
-            &request(
-                "web_model_connector_configure",
-                json!({"by":"user","provider":provider}),
-            ),
-        )
-        .expect("create");
-        assert_eq!(configured["outcome"], "created");
-        let before = store::load(&home).expect("load");
-        for flags in [
-            json!({}),
-            json!({"create_only":true}),
-            json!({"create_only":false}),
-            json!({"rotate":false}),
-            json!({"rotate":false,"create_only":true}),
-        ] {
-            let mut args = json!({"by":"user","provider":provider});
-            args.as_object_mut()
-                .expect("args")
-                .extend(flags.as_object().expect("flags").clone());
-            let existing =
-                execute(&home, &request("web_model_connector_configure", args)).expect("existing");
-            assert_eq!(existing["outcome"], "existing");
-            assert!(existing.get("secret").is_none());
-            assert_eq!(existing["connector"], configured["connector"]);
-            assert_eq!(store::load(&home).expect("load"), before);
-        }
-        for name in ["create_only", "rotate"] {
-            for value in [json!("true"), json!(1), Value::Null] {
-                let mut args = json!({"by":"user","provider":provider});
-                args[name] = value;
-                let error = execute(&home, &request("web_model_connector_configure", args))
-                    .expect_err("strict flag");
-                assert_eq!(error.code, "invalid_argument");
-                assert_eq!(store::load(&home).expect("load"), before);
-            }
-        }
-        let error = execute(
-            &home,
-            &request(
-                "web_model_connector_configure",
-                json!({"by":"user","provider":provider,"rotate":true,"create_only":true}),
-            ),
-        )
-        .expect_err("conflicting intent");
-        assert_eq!(error.code, "invalid_argument");
-        assert_eq!(store::load(&home).expect("load"), before);
-        let rotated = execute(
-            &home,
-            &request(
-                "web_model_connector_configure",
-                json!({"by":"user","provider":provider,"rotate":true}),
-            ),
-        )
-        .expect("rotate");
-        assert_eq!(rotated["outcome"], "rotated");
-        assert_eq!(
-            rotated["connector"]["connector_id"],
-            configured["connector"]["connector_id"]
-        );
-        assert!(!store::secret_matches(
-            &rotated["connector"],
-            configured["secret"].as_str().expect("old secret")
-        ));
-        assert!(store::secret_matches(
-            &rotated["connector"],
-            rotated["secret"].as_str().expect("new secret")
-        ));
-        let denied = execute(
-            &home,
-            &request(
-                "web_model_connector_configure",
-                json!({"by":"peer","provider":provider,"rotate":true}),
-            ),
-        )
-        .expect_err("user only");
-        assert_eq!(denied.code, "permission_denied");
+fn non_rotating_flags_are_idempotent_and_malformed_flags_refuse() {
+    let temp = tempfile::tempdir().expect("valid test fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("valid test fixture");
+    home.initialize().expect("valid test fixture");
+    store::configure(&home).expect("existing connector");
+    let before = store::load(&home).expect("load");
+    for args in [
+        serde_json::json!({"by":"user","provider":"chatgpt_web"}),
+        serde_json::json!({"by":"user","provider":"chatgpt_web","create_only":true}),
+        serde_json::json!({"by":"user","provider":"chatgpt_web","create_only":false}),
+        serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":false}),
+        serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":false,"create_only":true}),
+    ] {
+        let existing = execute(&home, &request("web_model_connector_configure", args))
+            .expect("an existing connector is idempotent");
+        assert_eq!(existing["outcome"], "existing");
+        assert!(existing.get("secret").is_none());
+        assert_eq!(store::load(&home).expect("load"), before, "nothing rotated");
     }
+    for (name, value) in [
+        ("create_only", serde_json::json!("true")),
+        ("create_only", serde_json::json!(1)),
+        ("create_only", Value::Null),
+        ("rotate", serde_json::json!("true")),
+        ("rotate", serde_json::json!(1)),
+        ("rotate", Value::Null),
+    ] {
+        let mut args = serde_json::json!({"by":"user","provider":"chatgpt_web"});
+        args[name] = value;
+        let error = execute(&home, &request("web_model_connector_configure", args))
+            .expect_err("a non-boolean flag is refused");
+        assert_eq!(error.code, "invalid_argument", "{name}");
+    }
+    let error = execute(
+        &home,
+        &request(
+            "web_model_connector_configure",
+            serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":true,"create_only":true}),
+        ),
+    )
+    .expect_err("contradictory flags are refused before mutation");
+    assert_eq!(error.code, "invalid_argument");
+    assert_eq!(store::load(&home).expect("load"), before, "nothing rotated");
+}
+
+#[test]
+fn explicit_rotation_ignores_supplied_attribution_and_records_the_daemon_principal() {
+    let temp = tempfile::tempdir().expect("valid test fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("valid test fixture");
+    home.initialize().expect("valid test fixture");
+    let created = store::configure(&home).expect("existing connector");
+    let old_secret = created["secret"].as_str().expect("secret");
+    let connector = store::load(&home).expect("load").remove(0);
+    let confirmation = store::rotation_preview(&connector)["confirmation"]
+        .as_str()
+        .expect("confirmation")
+        .to_owned();
+    let rotated = execute(
+        &home,
+        &request(
+            "web_model_connector_configure",
+            serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":true,
+                "confirmation":confirmation,"trusted_rotated_by":"spoofed","rotated_by":"spoofed"}),
+        ),
+    )
+    .expect("explicit rotation");
+    assert_eq!(rotated["outcome"], "rotated");
+    assert_eq!(rotated["connector"]["credential_generation"], 2);
+    assert_eq!(rotated["connector"]["rotated_by"], "local:user");
+    assert!(rotated["connector"]["secret_rotated_at"].is_string());
+    let new_secret = rotated["secret"].as_str().expect("secret");
+    assert!(!store::secret_matches(&rotated["connector"], old_secret));
+    assert!(store::secret_matches(&rotated["connector"], new_secret));
+    let after = store::load(&home).expect("load");
+    let stale = execute(
+        &home,
+        &request(
+            "web_model_connector_configure",
+            serde_json::json!({"by":"user","provider":"chatgpt_web","rotate":true,
+                "confirmation":confirmation}),
+        ),
+    )
+    .expect_err("a replayed confirmation is stale");
+    assert_eq!(stale.code, "rotation_confirmation_stale");
+    assert_eq!(store::load(&home).expect("load"), after, "nothing rotated");
 }

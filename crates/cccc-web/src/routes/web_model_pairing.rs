@@ -3,7 +3,7 @@ use super::{web_model_connector_store as store, web_model_delivery_completion::c
 use crate::{
     AppState,
     api::{ApiError, ApiResult, success},
-    browser_surface::{PairingPage, PromptSubmissionOutcome},
+    browser_surface::{PairingPage, PairingRefusal, PromptSubmissionOutcome, pairing_destination},
 };
 use axum::{Json, Router, extract::State, routing::post};
 use cccc_core::web_model_connectors;
@@ -16,6 +16,8 @@ use std::{
 
 static CONNECTING: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const DESTINATION_TIMEOUT: Duration = Duration::from_secs(20);
+const DESTINATION_POLL: Duration = Duration::from_millis(250);
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/v1/web-model/pairing", post(change))
@@ -48,6 +50,27 @@ impl Drop for Connecting {
             .unwrap_or_else(|p| p.into_inner())
             .remove(&self.0);
     }
+}
+
+pub(super) fn actor_pairing(
+    state: &AppState,
+    group: &str,
+    actor: &str,
+) -> Result<Option<Value>, ApiError> {
+    let doc = cccc_core::GroupStore::new(state.home.clone())
+        .and_then(|store| store.load(group))
+        .map_err(store::io_error)?;
+    let Some(actor) = doc.actors.iter().find(|item| item.id == actor) else {
+        return Ok(None);
+    };
+    let Some(provider) = actor.runtime.web_model_provider() else {
+        return Ok(None);
+    };
+    Ok(store::load(state)?
+        .into_iter()
+        .find(|connector| connector["revoked"] != true && connector["provider"] == provider)
+        .and_then(|connector| web_model_connectors::pairing_for_actor(&connector, group, &actor.id))
+        .filter(|pair| pair["generation"] == cccc_core::actors::generation_identity(actor)))
 }
 
 async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult {
@@ -84,12 +107,44 @@ async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
         ));
     }
     if action == "remove" {
-        let _control = super::web_model_delivery::control_guard(&group, &actor)?;
+        // cwf#825: an ambiguous ("delivery busy") lane is reconciled first with
+        // the resume-delivery checks, so remove is not refused with
+        // delivery_unresolved when the tab shows nothing pending. If the tab
+        // is not safe to resume, remove reports the daemon's refusal as before.
+        if let Err(error) =
+            super::web_model_delivery::reconcile_before_remove(&state, &group, &actor).await
+        {
+            if error.code() == "composer_occupied" {
+                return Err(error);
+            }
+            tracing::info!(%group, %actor, %error, "Web Model remove: ambiguous delivery left for review");
+        }
+        let _control = super::web_model_delivery::control_guard_wait(
+            &group,
+            &actor,
+            super::web_model_reconcile::REMOVE_BUSY_WAIT,
+        )
+        .await?;
+        // cwf#821: an opt-in guard for scripted repair (remove then connect).
+        // Refuse the remove while the browser could not pair again, so a
+        // working binding is not traded for an unpaired Actor.
+        if body["require_browser_ready"] == true {
+            let key = super::web_model_browser::key(&group, &actor);
+            state
+                .browser_surfaces
+                .pairing_page(&key)
+                .await
+                .map_err(|e| pairing_error(&e.to_string()))?;
+        }
         return Ok(success(
             call(&state, "web_model_binding_remove", args).await?,
         ));
     }
-    start_connection(&state, &group, &actor, false)
+    // cwf#821: `replace: true` re-pairs an Actor that already has a binding
+    // without removing it first. The old binding stays in force until the new
+    // pairing is confirmed, so a browser that is not ready changes nothing.
+    let replace = body["replace"] == true;
+    start_connection(&state, &group, &actor, false, replace, Some(&body))
         .await
         .map(success)
 }
@@ -97,7 +152,18 @@ async fn change(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
 /// The first attempt follows normal Actor startup. An existing attempt, even
 /// expired/cancelled/interrupted, requires an explicit retry; never replay sends.
 pub(super) async fn ensure_automatic(state: &AppState, group: &str, actor: &str) {
-    let _ = start_connection(state, group, actor, true).await;
+    let _ = start_connection(state, group, actor, true, false, None).await;
+}
+
+/// cwf#853: the delivery worker's fresh-chat self-heal. Same path as an
+/// explicit user `connect` with `replace: true`: the old binding stays in
+/// force until the new conversation is confirmed.
+pub(super) async fn start_replacement(
+    state: &AppState,
+    group: &str,
+    actor: &str,
+) -> Result<Value, ApiError> {
+    start_connection(state, group, actor, false, true, None).await
 }
 
 async fn start_connection(
@@ -105,8 +171,10 @@ async fn start_connection(
     group: &str,
     actor: &str,
     first_attempt: bool,
+    replace: bool,
+    request: Option<&Value>,
 ) -> Result<Value, ApiError> {
-    let control = super::web_model_delivery::control_guard(group, actor)?;
+    let control = super::web_model_delivery::control_work(state, group, actor)?;
     let connector = store::load(state)?
         .into_iter()
         .find(|c| c["revoked"] != true && c["provider"] == "chatgpt_web")
@@ -139,12 +207,70 @@ async fn start_connection(
     .as_object()
     .expect("literal JSON object")
     .clone();
+    if replace {
+        args.insert("replace".into(), json!(true));
+    }
+    let destination = request
+        .and_then(|body| body.get("conversation_url"))
+        .map(|url| {
+            if !replace {
+                return Err(ApiError::bad(
+                    "Selecting a destination requires replace: true",
+                ));
+            }
+            url.as_str()
+                .and_then(|url| pairing_destination(url).ok())
+                .ok_or_else(|| ApiError::bad("Choose a ChatGPT conversation or new-chat URL"))
+        })
+        .transpose()?;
+    let recovery = request.filter(|body| {
+        body.get("abandon_delivery_id").is_some() || body.get("expected_binding_revision").is_some()
+    });
+    if let Some(body) = recovery {
+        if !replace {
+            return Err(ApiError::bad(
+                "Acknowledging an ambiguous delivery requires replace: true",
+            ));
+        }
+        for field in ["abandon_delivery_id", "expected_binding_revision"] {
+            args.insert(
+                field.into(),
+                json!(super::web_model_connectors::required(body, field)?),
+            );
+        }
+    }
+    if destination.is_some() || recovery.is_some() {
+        if let Some(url) = destination.as_deref() {
+            args.insert("url".into(), json!(url));
+        }
+        // Reject stale acknowledgement and lifecycle state before opening or
+        // navigating the browser. Begin checks again with the URL we observed.
+        call(
+            state,
+            "web_model_pairing_validate_replacement",
+            args.clone(),
+        )
+        .await?;
+    }
     let key = super::web_model_browser::key(group, actor);
+    if let Some(url) = destination.as_deref() {
+        prepare_destination(state, group, actor, url).await?;
+    }
     let target = state
         .browser_surfaces
         .pairing_page(&key)
         .await
-        .map_err(|e| pairing_error(&e.to_string()))?;
+        .map_err(|error| surface_pairing_error("pairing_page", error, &Value::Null))?;
+    if let Some(url) = destination.as_deref()
+        && !destination_matches(url, target.initial_url())
+    {
+        return Err(pairing_readiness_error(
+            "pairing_target_changed",
+            "pairing_page",
+            &json!({"tab_url":target.initial_url()}),
+        ));
+    }
+    args.insert("url".into(), json!(target.initial_url()));
     let pair = call(state, "web_model_pairing_begin", args.clone()).await?;
     let id = pair["pairing_id"]
         .as_str()
@@ -153,7 +279,8 @@ async fn start_connection(
     let code = pair["code"]
         .as_str()
         .ok_or_else(|| ApiError::bad("Invalid pairing response"))?;
-    let prompt = crate::browser_surface::pairing_prompt(code);
+    let plugin = super::web_model_instance::plugin_name();
+    let prompt = super::web_model_instance::pairing_prompt(code, plugin.as_deref());
     args.insert("pairing_id".into(), json!(id));
     let connecting = Connecting::new(state, &id);
     let mut shutdown = state.shutdown.subscribe();
@@ -164,18 +291,60 @@ async fn start_connection(
     let group = group.to_owned();
     let actor = actor.to_owned();
     tokio::spawn(async move {
-        let result = tokio::select! {
-            _ = shutdown.recv() => Err("pairing_interrupted"),
-            result = tokio::time::timeout(PAIRING_TIMEOUT, connect(&state, &args, &key, &target, &prompt)) => {
-                result.unwrap_or(Err("pairing_timeout"))
-            }
-        };
-        if let Err(reason) = result {
+        let mut args = args;
+        let mut prompt = prompt;
+        let mut connecting = connecting;
+        let mut retried = false;
+        let result = loop {
+            let result = tokio::select! {
+                _ = shutdown.recv() => Err("pairing_interrupted"),
+                result = tokio::time::timeout(PAIRING_TIMEOUT, connect(&state, &args, &key, &target, &prompt)) => {
+                    result.unwrap_or(Err("pairing_timeout"))
+                }
+            };
+            let Err(reason) = result else { break result };
             let mut failed = args.clone();
             failed.insert("error_code".into(), json!(reason));
             // A cancelled/replaced/removed candidate deliberately rejects this
             // late update. Never change another attempt or an established route.
             let _ = call(&state, "web_model_pairing_fail", failed).await;
+            // cwf#863: a timed-out handshake (usually the wrong instance's
+            // plugin, or an unanswered approval) gets ONE fresh attempt with a
+            // new code, still under this task's control permit.
+            if !super::web_model_instance::retry_after(reason, retried) {
+                break result;
+            }
+            retried = true;
+            let begin = super::web_model_instance::retry_begin_args(&args);
+            let Ok(pair) = call(&state, "web_model_pairing_begin", begin.clone()).await else {
+                break result;
+            };
+            let (Some(id), Some(code)) = (pair["pairing_id"].as_str(), pair["code"].as_str())
+            else {
+                break result;
+            };
+            tracing::info!(%group, %actor, "Web Model pairing timed out; retrying once with a new code");
+            prompt = super::web_model_instance::pairing_prompt(code, plugin.as_deref());
+            args = begin;
+            args.insert("pairing_id".into(), json!(id));
+            connecting = Connecting::new(&state, id);
+        };
+        if result.is_ok() && replace {
+            match super::web_model_delivery_state::target(&state, &group, &actor) {
+                Ok(current) => {
+                    if let Some(delivery) = super::web_model_reconcile::reconcilable(&current)
+                        && let Err(error) = super::web_model_delivery::resume_reviewed_locked(
+                            &state, &group, &actor, &delivery,
+                        )
+                        .await
+                    {
+                        tracing::info!(%group, %actor, %error, "Replacement confirmed; delivery still needs review");
+                    }
+                }
+                Err(error) => {
+                    tracing::info!(%group, %actor, %error, "Replacement confirmed; delivery state unavailable")
+                }
+            }
         }
         drop(control);
         drop(connecting);
@@ -184,6 +353,163 @@ async fn start_connection(
         }
     });
     Ok(json!({"state":"waiting","pairing_id":id,"expires_at_ms":pair["expires_at_ms"]}))
+}
+
+fn destination_matches(expected: &str, observed: &str) -> bool {
+    pairing_destination(observed).is_ok_and(|url| url == expected)
+        || web_model_connectors::same_conversation(expected, observed)
+}
+
+async fn prepare_destination(
+    state: &AppState,
+    group: &str,
+    actor: &str,
+    url: &str,
+) -> Result<(), ApiError> {
+    let surfaces = &state.browser_surfaces;
+    let key = super::web_model_browser::key(group, actor);
+    let mut phase = "open_browser";
+    let mut last_observation = Value::Null;
+    let mut inspection_error = None;
+    let result = tokio::time::timeout(DESTINATION_TIMEOUT, async {
+        let surface =
+            super::web_model_browser::open_actor_surface(state, group, actor, 1366, 900, Some(url))
+                .await
+                .map_err(|error| {
+                    pairing_readiness_error(
+                        "pairing_browser_required",
+                        phase,
+                        &json!({"state":error.code()}),
+                    )
+                })?;
+        let target_id = surface["target_id"].as_str().unwrap_or_default();
+        let mut navigated_from: Option<String> = None;
+        phase = "source_readiness";
+        loop {
+            match surfaces.pairing_prompt_readiness(&key).await {
+                Ok(snapshot) => {
+                    last_observation = snapshot;
+                    inspection_error = None;
+                }
+                Err(error) if navigated_from.is_some() => {
+                    // The old execution context can disappear between any two
+                    // reads after location.assign. Probe only, never navigate again.
+                    inspection_error = Some(error.to_string());
+                    tokio::time::sleep(DESTINATION_POLL).await;
+                    continue;
+                }
+                Err(error) => {
+                    let mut details = readiness_details(phase, &last_observation);
+                    details["inspection_error"] = json!(error.to_string());
+                    return Err(pairing_error("pairing_browser_not_ready").with_details(details));
+                }
+            }
+            let snapshot = &last_observation;
+            let observed = snapshot["tab_url"].as_str().unwrap_or_default();
+            let category = snapshot["state"].as_str().unwrap_or_default();
+            let matches = destination_matches(url, observed);
+            let waiting_for_document = navigated_from.is_some()
+                && !matches!(
+                    snapshot["ready_state"].as_str(),
+                    Some("interactive" | "complete")
+                );
+            if matches
+                && category == "ready"
+                && !waiting_for_document
+                && snapshot["running"] == false
+            {
+                return Ok(());
+            }
+            if super::web_model_reconcile::composer_occupied(snapshot) {
+                return Err(pairing_readiness_error(
+                    "pairing_composer_occupied",
+                    phase,
+                    snapshot,
+                ));
+            }
+            if category == "loading"
+                || matches
+                    && (category == "page_not_ready" || category == "ready" && waiting_for_document)
+                || navigated_from.is_some() && category == "page_changed"
+                || navigated_from.as_deref() == Some(observed)
+            {
+                tokio::time::sleep(DESTINATION_POLL).await;
+                continue;
+            }
+            let empty = snapshot["composer_chars"].as_u64() == Some(0)
+                && snapshot["composer_has_attachments"] == false
+                && snapshot["running"] == false;
+            if !matches
+                && navigated_from.is_none()
+                && empty
+                && matches!(
+                    category,
+                    "ready" | "conversation_load_failed" | "conversation_length_exceeded"
+                )
+            {
+                phase = "navigation_guard";
+                surfaces
+                    .navigate_pairing_destination(
+                        &key,
+                        target_id,
+                        observed,
+                        url,
+                        category != "conversation_load_failed",
+                    )
+                    .await
+                    .map_err(|error| surface_pairing_error(phase, error, snapshot))?;
+                navigated_from = Some(observed.to_owned());
+                phase = "destination_readiness";
+                continue;
+            }
+            return Err(pairing_readiness_error(
+                "pairing_browser_not_ready",
+                phase,
+                snapshot,
+            ));
+        }
+    })
+    .await;
+    match result {
+        Ok(result) => result,
+        Err(_) => {
+            let mut details = readiness_details(phase, &last_observation);
+            details["timed_out"] = json!(true);
+            details["expected_url"] = json!(url);
+            details["inspection_error"] = json!(inspection_error);
+            Err(pairing_error("pairing_browser_not_ready").with_details(details))
+        }
+    }
+}
+
+fn readiness_details(phase: &str, snapshot: &Value) -> Value {
+    json!({
+        "phase":phase,
+        "browser_state":snapshot["state"],
+        "observed_url":snapshot["tab_url"].as_str().and_then(|url| pairing_destination(url).ok()),
+        "ready_state":snapshot["ready_state"],
+        "composer_present":snapshot["composer_present"],
+        "composer_chars":snapshot["composer_chars"],
+        "composer_has_attachments":snapshot["composer_has_attachments"],
+        "running":snapshot["running"],
+        "login_required":snapshot["login_required"],
+        "verification_required":snapshot["verification_required"],
+    })
+}
+
+fn pairing_readiness_error(code: &str, phase: &str, snapshot: &Value) -> ApiError {
+    let mut details = readiness_details(phase, snapshot);
+    if code == "pairing_composer_occupied" {
+        details["reason"] = json!("composer_occupied");
+    }
+    pairing_error(code).with_details(details)
+}
+
+fn surface_pairing_error(phase: &str, error: anyhow::Error, fallback: &Value) -> ApiError {
+    match error.downcast_ref::<PairingRefusal>() {
+        Some(refusal) => pairing_readiness_error(&refusal.code, phase, &refusal.observation),
+        None => pairing_readiness_error(&error.to_string(), phase, fallback),
+    }
 }
 
 async fn connect(
@@ -307,10 +633,16 @@ fn pairing_error(code: &str) -> ApiError {
     let code = match code {
         "pairing_browser_required" => "pairing_browser_required",
         "pairing_browser_not_ready" => "pairing_browser_not_ready",
+        "pairing_browser_rate_limited" => "pairing_browser_rate_limited",
+        "pairing_browser_load_failed" => "pairing_browser_load_failed",
+        "pairing_browser_conversation_full" => "pairing_browser_conversation_full",
         "pairing_composer_occupied" => "pairing_composer_occupied",
         "pairing_target_changed" => "pairing_target_changed",
         _ => "pairing_failed",
     };
+    if code == "pairing_composer_occupied" {
+        return ApiError::bad_code(code, code, json!({"reason":"composer_occupied"}));
+    }
     ApiError::bad_code(code, code, json!({}))
 }
 

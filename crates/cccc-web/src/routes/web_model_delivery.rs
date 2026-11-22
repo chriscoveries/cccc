@@ -3,20 +3,20 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use base64::Engine;
+use cccc_core::web_model_connectors;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
 use crate::api::ApiError;
-use crate::browser_surface::{
-    BOUND_CONVERSATION_ERROR_MARKER, PromptSubmissionOutcome, is_chatgpt_url,
-};
+use crate::browser_surface::{BoundPromptNotReady, PromptSubmissionOutcome, is_chatgpt_url};
 
 use super::web_model_browser::key;
 use super::web_model_delivery_completion::{
     args, call as daemon_call, complete_args, reconcile, record_delivery, try_record_delivery,
 };
 use super::web_model_delivery_state::{record_connector, target as load_target, update_target};
+use super::{web_model_reconcile as reconcile_draft, web_model_reopen as recovery};
 
 static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static WORKERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -80,7 +80,12 @@ fn spawn_worker(state: AppState, group_id: String, actor_id: String) {
             let mut shutdown = state.shutdown.subscribe();
             loop {
                 let surface = state.browser_surfaces.info(&session_key).await;
-                if !surface["active"].as_bool().unwrap_or(false) {
+                if surface["active"] != true
+                    && !super::web_model_supervisor::reopen_on_demand(
+                        &state, &group_id, &actor_id, &surface,
+                    )
+                    .await
+                {
                     break;
                 }
                 let delay = match deliver_pending(&state, &group_id, &actor_id).await {
@@ -141,11 +146,13 @@ fn spawn_worker(state: AppState, group_id: String, actor_id: String) {
         {
             // Closing this batch is browser work like any attempt. Refused, the
             // batch stays deferred and the next worker takes it back.
-            let Ok(Some(_work)) = browser_work(&state, &group_id, &actor_id) else {
+            let Ok(Some(_work)) = try_browser_work(&state, &group_id, &actor_id) else {
                 return;
             };
             // The composer may still hold this batch, so it is never offered again.
             if let Ok(target) = load_target(&state, &group_id, &actor_id)
+                && target["last_delivery_status"] == "deferred"
+                && target["last_delivery_turn_id"] == exhausted_turn_id
                 && let Some(delivery_id) = target["last_delivery_id"].as_str()
             {
                 let message = "browser model remained unavailable after the bounded automatic retry budget; this message may still be staged in the conversation";
@@ -157,6 +164,7 @@ fn spawn_worker(state: AppState, group_id: String, actor_id: String) {
                 let evidence = json!({
                     "submitted":false,
                     "submission_evidence":"deferred_retry_budget_exhausted",
+                    "send_not_dispatched":true,
                     "error":message
                 });
                 if let Err(error) = complete_ambiguous_attempt(
@@ -200,7 +208,7 @@ pub(super) async fn deliver_pending(
     actor_id: &str,
 ) -> Result<DeliveryOutcome, ApiError> {
     let session_key = key(group_id, actor_id);
-    let Some(_work) = browser_work(state, group_id, actor_id)? else {
+    let Some(_work) = try_browser_work(state, group_id, actor_id)? else {
         return Ok(DeliveryOutcome::Idle);
     };
     deliver_once(state, group_id, actor_id, &session_key).await
@@ -214,7 +222,7 @@ pub(super) struct BrowserWork {
     _lock: std::fs::File,
 }
 
-fn browser_work(
+pub(super) fn try_browser_work(
     state: &AppState,
     group_id: &str,
     actor_id: &str,
@@ -256,7 +264,7 @@ pub(super) fn control_work(
     group: &str,
     actor: &str,
 ) -> Result<BrowserWork, ApiError> {
-    browser_work(state, group, actor)?
+    try_browser_work(state, group, actor)?
         .ok_or_else(|| ApiError::bad("Actor browser delivery is busy; retry after it completes"))
 }
 
@@ -280,6 +288,15 @@ impl Drop for SessionGuard {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&self.key);
     }
+}
+
+fn ready_to_claim(target: &Value, readiness: &Value) -> bool {
+    readiness["ready"] == true
+        && readiness["running"] == false
+        && (target["kind"] != "existing_chat"
+            || !is_chatgpt_url(target["url"].as_str().unwrap_or_default())
+            || (readiness["thread_loaded"] == true
+                && recovery::saved_page_matches(target, readiness)))
 }
 
 async fn deliver_once(
@@ -358,14 +375,80 @@ async fn deliver_once(
     if target_url.is_empty() && target["kind"] != "new_chat" {
         return Ok(DeliveryOutcome::Idle);
     }
+    let probe = tokio::time::timeout(
+        crate::browser_surface::PAGE_PROBE_TIMEOUT,
+        state.browser_surfaces.prompt_readiness(session_key),
+    )
+    .await;
+    let mut readiness = match probe {
+        Ok(Ok(readiness)) => readiness,
+        Ok(Err(error))
+            if !matches!(
+                error.downcast_ref::<chromiumoxide::error::CdpError>(),
+                Some(chromiumoxide::error::CdpError::Timeout)
+            ) =>
+        {
+            return Err(ApiError::bad(error.to_string()));
+        }
+        _ => {
+            let target_id = surface["target_id"].as_str().unwrap_or_default();
+            let can_replace =
+                recovery::may_replace_timed_out_page(state, group_id, actor_id, &target);
+            state
+                .browser_surfaces
+                .actor_probe_timed_out(session_key, target_id, can_replace)
+                .await
+                .map_err(|error| ApiError::bad(error.to_string()))?;
+            return Ok(DeliveryOutcome::Idle);
+        }
+    };
+    if readiness["state"] == "page_changed"
+        || recovery::handle_load_error(state, group_id, actor_id, &target, &readiness).await?
+    {
+        return Ok(DeliveryOutcome::Idle);
+    }
     if target["last_delivery_status"] == "submission_ambiguous" {
         if recover_verified_ambiguous_submission(state, group_id, actor_id, &target).await? {
             return Ok(DeliveryOutcome::Submitted);
         }
         // Terminalizing the attempted turn prevents replay; it does not prove
         // that the browser composer is free for another delivery.
+        if target["last_submission_evidence"]["send_not_dispatched"] == true
+            && reconcile_draft::clear_owned_draft(state, group_id, actor_id, &target, &readiness)
+                .await?
+        {
+            resume_reviewed_locked(
+                state,
+                group_id,
+                actor_id,
+                required(&target, "last_delivery_id")?,
+            )
+            .await?;
+            return Ok(DeliveryOutcome::Idle);
+        }
+
         if target["kind"] == "new_chat" {
             return resolve_pending_new_chat(state, group_id, actor_id, session_key, &target).await;
+        }
+        // cwf#825 (opt-in): after CCCC_WEB_MODEL_AUTO_RESUME_AMBIGUOUS_MIN
+        // minutes, resume it with the manual route's checks. Never replays.
+        let after = super::web_model_reconcile::auto_resume_after(
+            std::env::var(super::web_model_reconcile::ENV_AUTO_RESUME_MIN)
+                .ok()
+                .as_deref(),
+        );
+        if super::web_model_reconcile::auto_resume_due(&target, after, chrono::Utc::now())
+            && let Some(delivery_id) = super::web_model_reconcile::reconcilable(&target)
+        {
+            match resume_reviewed_locked(state, group_id, actor_id, &delivery_id).await {
+                Ok(()) => {
+                    tracing::info!(group_id, actor_id, %delivery_id, "Web-model ambiguous delivery resumed automatically");
+                    return Ok(DeliveryOutcome::Idle);
+                }
+                Err(error) => {
+                    tracing::debug!(group_id, actor_id, %error, "Web-model automatic resume not safe yet");
+                }
+            }
         }
         return Ok(DeliveryOutcome::Ambiguous);
     }
@@ -431,22 +514,110 @@ async fn deliver_once(
     {
         return resolve_pending_new_chat(state, group_id, actor_id, session_key, &target).await;
     }
-    // Do not navigate away from sign-in or a security challenge. This check must
-    // precede target alignment and claiming new work from the daemon.
-    let readiness = state
-        .browser_surfaces
-        .prompt_readiness(session_key)
-        .await
-        .map_err(|error| ApiError::bad(error.to_string()))?;
+    let delivery_status = target["last_delivery_status"].as_str();
+    let staged = delivery_status == Some("deferred");
+    let preflight_deferred = delivery_status == Some("preflight_deferred");
+    let resume_claim = staged || preflight_deferred;
+    let rate_limit = target.get("load_recovery");
+    // cwf#825/#821: the tab left its bound conversation (Saved chat
+    // unavailable / could not load on another URL). Reopen the bound URL at
+    // most once per 10 minutes, never inside the Retry-After backoff.
+    let bound_chat_mismatch = target["kind"] == "existing_chat"
+        && is_chatgpt_url(target_url)
+        && !crate::browser_surface::conversation_target_matches(
+            target_url,
+            readiness["tab_url"].as_str().unwrap_or(""),
+        )
+        && super::web_model_reopen::state_allows_reopen(readiness["state"].as_str().unwrap_or(""));
+    if bound_chat_mismatch {
+        if reconcile_draft::composer_occupied(&readiness)
+            || !super::web_model_reopen::try_book(session_key, rate_limit)
+        {
+            return Ok(DeliveryOutcome::Idle);
+        }
+        if readiness["ready"] != true {
+            tracing::info!(
+                group_id,
+                actor_id,
+                "Web-model tab is off its bound conversation; reopening it"
+            );
+            if let Err(error) = state
+                .browser_surfaces
+                .align_chatgpt_conversation_target(
+                    session_key,
+                    target_url,
+                    std::time::Duration::from_secs(10),
+                )
+                .await
+            {
+                tracing::warn!(group_id, actor_id, %error, "Web-model bound conversation reopen failed; next try in 10 minutes");
+            }
+            return Ok(DeliveryOutcome::Idle);
+        }
+        // A ready tab on another chat: the alignment below navigates once.
+    }
+    // cwf#853: the bound chat hit ChatGPT's maximum length. Nothing is
+    // claimed, so queued messages stay unread until the Actor is re-paired to
+    // a fresh chat. Record it once so status/health stop looking healthy.
+    if readiness["state"] == crate::browser_surface::CONVERSATION_LENGTH_EXCEEDED_STATE {
+        // The browser health already reports the full chat. Keep the exact
+        // turn available for resumption or settlement by a lifecycle change.
+        if resume_claim {
+            return Ok(DeliveryOutcome::Idle);
+        }
+        if target["last_delivery_status"] != "conversation_length_exceeded" {
+            update_target(
+                state,
+                group_id,
+                actor_id,
+                json!({
+                    "last_delivery_status":"conversation_length_exceeded",
+                    "conversation_limit":readiness["conversation_limit"].clone(),
+                    "last_error":readiness["message"].as_str().unwrap_or(
+                        "ChatGPT says this conversation has reached its maximum length."
+                    )
+                }),
+            )?;
+            tracing::warn!(
+                group_id,
+                actor_id,
+                "Web-model conversation reached ChatGPT's maximum length; delivery paused, queue left unclaimed"
+            );
+        }
+        // Self-heal: fresh chat in the same tab, then re-pair (replace).
+        // Nothing was claimed for this conversation, so nothing is replayed.
+        super::web_model_rotation::maybe_rotate(state, group_id, actor_id, &readiness, &target);
+        return Ok(DeliveryOutcome::Idle);
+    }
+    if target["last_delivery_status"] == "conversation_length_exceeded"
+        && readiness["ready"] == true
+    {
+        // The tab no longer shows the banner (re-paired or rotated).
+        update_target(
+            state,
+            group_id,
+            actor_id,
+            json!({"last_delivery_status":"resolved","last_error":"","conversation_limit":Value::Null}),
+        )?;
+    }
     if readiness["ready"] != true || readiness["running"] == true {
         // Leave queued work unclaimed while the provider is still responding.
         return Ok(DeliveryOutcome::Idle);
     }
-    if (readiness["composer_chars"].as_u64().unwrap_or(0) > 0
-        || readiness["composer_has_attachments"] == true)
-        && target["last_delivery_status"] != "deferred"
+    if reconcile_draft::composer_occupied(&readiness)
+        && !staged
+        && reconcile_draft::clear_owned_draft(state, group_id, actor_id, &target, &readiness)
+            .await?
     {
-        if target["last_delivery_status"] != "draft_blocked" {
+        readiness = state
+            .browser_surfaces
+            .prompt_readiness(session_key)
+            .await
+            .map_err(|error| ApiError::bad(error.to_string()))?;
+    }
+    if reconcile_draft::composer_occupied(&readiness) && !staged {
+        // An unsent claim still needs its resume ID after the draft clears.
+        if !preflight_deferred && delivery_status != Some("draft_blocked") {
             update_target(
                 state,
                 group_id,
@@ -467,7 +638,10 @@ async fn deliver_once(
             json!({"last_delivery_status":"resolved","last_error":""}),
         )?;
     }
-    if target["kind"] == "existing_chat" && is_chatgpt_url(target_url) {
+    if target["kind"] == "existing_chat"
+        && is_chatgpt_url(target_url)
+        && !recovery::saved_page_matches(&target, &readiness)
+    {
         if let Err(error) = state
             .browser_surfaces
             .align_chatgpt_conversation_target(
@@ -478,31 +652,46 @@ async fn deliver_once(
             .await
         {
             let message = error.to_string();
-            update_target(
-                state,
-                group_id,
-                actor_id,
-                json!({
-                    "last_delivery_status":"failed",
-                    "last_submission_evidence":{
-                        "submitted":false,
-                        "submission_evidence":"bound_conversation_unavailable",
-                        "error":message.as_str()
-                    },
-                    "last_error":message.as_str()
-                }),
-            )?;
-            record_connector(state, group_id, actor_id, "failed", "", &message)?;
-            return Ok(DeliveryOutcome::Stopped);
+            if resume_claim {
+                update_target(state, group_id, actor_id, json!({"last_error":message}))?;
+            } else {
+                update_target(
+                    state,
+                    group_id,
+                    actor_id,
+                    json!({
+                        "last_delivery_status":"failed",
+                        "last_submission_evidence":{
+                            "submitted":false,
+                            "submission_evidence":"bound_conversation_unavailable",
+                            "error":message.as_str()
+                        },
+                        "last_error":message.as_str()
+                    }),
+                )?;
+                record_connector(state, group_id, actor_id, "failed", "", &message)?;
+            }
+            // cwf#825: keep the worker alive; the reopen gate above retries
+            // the bound URL once per 10 minutes instead of a dead lane.
+            super::web_model_reopen::try_book(session_key, rate_limit);
+            return Ok(DeliveryOutcome::Idle);
         }
+        readiness = state
+            .browser_surfaces
+            .prompt_readiness(session_key)
+            .await
+            .map_err(|error| ApiError::bad(error.to_string()))?;
+    }
+    if !ready_to_claim(&target, &readiness) {
+        return Ok(DeliveryOutcome::Idle);
     }
     // A stopping Web claims nothing more; what it holds finishes first.
     if state.browser_surfaces.stopping() {
         return Ok(DeliveryOutcome::Idle);
     }
     let mut wait_args = browser_wait_args(group_id, actor_id);
-    if target["last_delivery_status"] == "deferred" {
-        // The batch is staged in this composer; only the same batch matches it.
+    if resume_claim {
+        // Resume the saved claim without taking another batch.
         wait_args.insert(
             "resume_turn_id".into(),
             target["last_delivery_turn_id"].clone(),
@@ -534,7 +723,13 @@ async fn deliver_once(
         )
         .await;
     }
-    if wait["status"] != "work_available" {
+    let work_available = wait["status"] == "work_available";
+    let idle = !work_available
+        && wait["status"] == "idle"
+        && readiness["composer_chars"].as_u64() == Some(0)
+        && readiness["composer_has_attachments"] == false;
+    recovery::consider_idle_close(state, group_id, actor_id, &surface, &target, idle).await?;
+    if !work_available {
         return Ok(DeliveryOutcome::Idle);
     }
     let turn = &wait["turn"];
@@ -555,10 +750,41 @@ async fn deliver_once(
         &delivery_id,
         &event_label,
     )?;
-    // Keep the existing binding check after the awaited claim; only Grok's
-    // browser credential injection has been removed.
-    if super::web_model_connector_store::for_actor(state, group_id, actor_id).is_none() {
+    // Never reuse the health of a page that changed while the daemon claimed.
+    // Before the fence a claim can be resumed without any browser side effects.
+    let after_claim = tokio::time::timeout(
+        crate::browser_surface::PAGE_PROBE_TIMEOUT,
+        state.browser_surfaces.prompt_readiness(session_key),
+    )
+    .await;
+    let latest_target = load_target(state, group_id, actor_id)?;
+    if latest_target["kind"] != target["kind"]
+        || latest_target["binding_revision"] != target["binding_revision"]
+        || latest_target["url"] != target["url"]
+    {
         return Err(ApiError::bad("Actor binding changed before delivery"));
+    }
+    let resuming_attempt = resume_claim
+        && target["last_delivery_turn_id"].as_str() == Some(turn_id)
+        && target["last_delivery_event_ids"] == turn["event_ids"];
+    let ready = matches!(after_claim, Ok(Ok(ref after)) if ready_to_claim(&target, after)
+        && (staged && resuming_attempt || !reconcile_draft::composer_occupied(after)))
+        && state.browser_surfaces.info(session_key).await["target_id"] == surface["target_id"];
+    if !ready || !super::web_model_supervisor::actor_delivery_enabled(state, group_id, actor_id) {
+        if !resuming_attempt {
+            update_target(
+                state,
+                group_id,
+                actor_id,
+                json!({
+                    "last_delivery_id":delivery_id,"last_delivery_turn_id":turn_id,
+                    "last_delivery_event_ids":turn["event_ids"],"last_delivery_status":"preflight_deferred",
+                    "last_submission_evidence":{"submitted":false,"submission_evidence":"send_not_started"},
+                    "last_error":"The browser lost readiness before submission began."
+                }),
+            )?;
+        }
+        return Ok(DeliveryOutcome::Idle);
     }
     let attachment = compatibility_attachment(state, turn, &delivery_id)?;
     update_target(
@@ -594,17 +820,32 @@ async fn deliver_once(
         Ok(PromptSubmissionOutcome::Verified(browser)) => browser,
         Ok(PromptSubmissionOutcome::Deferred(browser)) => {
             let message = "browser model is not ready for a safe prompt submission";
+            let staged_draft =
+                reconcile_draft::staged_draft_proof(&target, &surface, &browser, &delivery_id);
             update_target(
                 state,
                 group_id,
                 actor_id,
-                json!({"last_delivery_status":"deferred","last_submission_evidence":browser,"last_error":message}),
+                json!({"last_delivery_status":"deferred","last_submission_evidence":browser,"last_error":message,
+                    "staged_draft":staged_draft}),
             )?;
             record_connector(state, group_id, actor_id, "deferred", turn_id, message)?;
             return Ok(DeliveryOutcome::Deferred(turn_id.to_owned()));
         }
         Ok(PromptSubmissionOutcome::Ambiguous(browser)) => {
-            let message = if browser["submission_evidence"] == "composer_occupied" {
+            let staged_draft =
+                reconcile_draft::staged_draft_proof(&target, &surface, &browser, &delivery_id);
+            update_target(
+                state,
+                group_id,
+                actor_id,
+                json!({"staged_draft":staged_draft}),
+            )?;
+            let message = if browser["submission_evidence"]
+                == crate::browser_surface::CONVERSATION_LENGTH_EXCEEDED_STATE
+            {
+                "ChatGPT refused this batch: the conversation has reached its maximum length. It was not accepted by the model. Re-pair the Actor to a fresh chat; this batch will not be replayed automatically (see last_event_ids)."
+            } else if browser["submission_evidence"] == "composer_occupied" {
                 "The conversation has a different unsent draft; CCCC preserved it without sending this batch. Check the browser and resume delivery explicitly; this batch will not be replayed automatically."
             } else {
                 "browser submission was attempted but could not be verified; delivery is paused until you check the conversation and resume explicitly. This message will not be redelivered automatically"
@@ -623,36 +864,19 @@ async fn deliver_once(
             )
             .await;
         }
-        Err(error) if error.to_string().contains(BOUND_CONVERSATION_ERROR_MARKER) => {
+        Err(error) if error.is::<BoundPromptNotReady>() => {
             let message = error.to_string();
-            update_target(
-                state,
-                group_id,
-                actor_id,
+            let patch = if staged && resuming_attempt {
+                json!({"last_delivery_status":"deferred","last_error":message})
+            } else {
                 json!({
-                    "last_delivery_status":"failed",
-                    "last_submission_evidence":{
-                        "submitted":false,
-                        "submission_evidence":"bound_conversation_unavailable",
-                        "error":message.as_str()
-                    },
-                    "last_error":message.as_str()
-                }),
-            )?;
-            record_connector(state, group_id, actor_id, "failed", turn_id, &message)?;
-            record_delivery(
-                state,
-                group_id,
-                actor_id,
-                turn_id,
-                turn["event_ids"].clone(),
-                &delivery_id,
-                "failed",
-                &message,
-                json!({"target_url":target_url}),
-            )
-            .await;
-            return Ok(DeliveryOutcome::Stopped);
+                    "last_delivery_status":"preflight_deferred",
+                    "last_submission_evidence":{"submitted":false,"submission_evidence":"send_not_started"},
+                    "last_error":message
+                })
+            };
+            update_target(state, group_id, actor_id, patch)?;
+            return Ok(DeliveryOutcome::Idle);
         }
         Err(error) => {
             let message = format!(
@@ -772,6 +996,7 @@ async fn deliver_once(
     };
     let now = cccc_contracts::utc_now();
     let mut final_patch = json!({
+        "staged_draft":null,
         "last_delivery_status":final_status,
         "last_delivery_at":now.clone(),
         "last_error":final_error,
@@ -929,9 +1154,52 @@ pub(super) async fn resume_after_review(
     actor_id: &str,
     delivery_id: &str,
 ) -> Result<(), ApiError> {
-    let session_key = key(group_id, actor_id);
-    let _work = browser_work(state, group_id, actor_id)?
+    let _work = try_browser_work(state, group_id, actor_id)?
         .ok_or_else(|| ApiError::bad("Delivery is busy; try again after it settles."))?;
+    resume_reviewed_locked(state, group_id, actor_id, delivery_id).await
+}
+
+/// cwf#825: resume an ambiguous delivery before `pairing remove`, with the
+/// same checks as the manual route. Returns whether it resumed.
+pub(super) async fn reconcile_before_remove(
+    state: &AppState,
+    group_id: &str,
+    actor_id: &str,
+) -> Result<bool, ApiError> {
+    let target = load_target(state, group_id, actor_id)?;
+    let Some(delivery_id) = super::web_model_reconcile::reconcilable(&target) else {
+        return Ok(false);
+    };
+    resume_after_review(state, group_id, actor_id, &delivery_id).await?;
+    tracing::info!(group_id, actor_id, %delivery_id, "Web-model ambiguous delivery resumed before remove");
+    Ok(true)
+}
+
+/// Wait (bounded) for the worker's poll to release the Actor's control
+/// permit instead of refusing a control at the first busy moment.
+pub(super) async fn control_guard_wait(
+    group: &str,
+    actor: &str,
+    wait: std::time::Duration,
+) -> Result<SessionGuard, ApiError> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match control_guard(group, actor) {
+            Ok(guard) => return Ok(guard),
+            Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        }
+    }
+}
+
+/// The body of resume-delivery; the caller holds the Actor's browser work.
+pub(super) async fn resume_reviewed_locked(
+    state: &AppState,
+    group_id: &str,
+    actor_id: &str,
+    delivery_id: &str,
+) -> Result<(), ApiError> {
+    let session_key = key(group_id, actor_id);
     let target = load_target(state, group_id, actor_id)?;
     if target["kind"] != "existing_chat" || target["last_delivery_status"] != "submission_ambiguous"
     {
@@ -944,7 +1212,7 @@ pub(super) async fn resume_after_review(
             "The pending delivery changed. Refresh and check the conversation again before resuming.",
         ));
     }
-    let readiness = state
+    let mut readiness = state
         .browser_surfaces
         .prompt_readiness(&session_key)
         .await
@@ -961,10 +1229,22 @@ pub(super) async fn resume_after_review(
             "Open the saved conversation and finish signing in before resuming.",
         ));
     }
-    if readiness["composer_chars"].as_u64().unwrap_or(0) > 0
-        || readiness["composer_has_attachments"] == true
-        || readiness["running"] == true
-    {
+    if reconcile_draft::composer_occupied(&readiness) {
+        if !reconcile_draft::clear_owned_draft(state, group_id, actor_id, &target, &readiness)
+            .await?
+        {
+            return Err(reconcile_draft::occupied_error());
+        }
+        readiness = state
+            .browser_surfaces
+            .prompt_readiness(&session_key)
+            .await
+            .map_err(|error| ApiError::bad(error.to_string()))?;
+    }
+    if !super::web_model_reconcile::tab_safe_to_resume(
+        &readiness,
+        recovery::saved_page_matches(&target, &readiness),
+    ) {
         return Err(ApiError::bad(
             "Check the conversation, send or clear its unsent draft, and wait for its response to finish before resuming.",
         ));
@@ -981,7 +1261,7 @@ pub(super) async fn resume_after_review(
         group_id,
         actor_id,
         json!({
-            "last_delivery_status":"resolved", "last_error":"",
+            "last_delivery_status":"resolved", "last_error":"", "staged_draft":null,
             "last_delivery_reviewed_at":cccc_contracts::utc_now()
         }),
     )?;
@@ -1082,6 +1362,7 @@ async fn recover_verified_ambiguous_submission(
             "last_delivery_status":"submitted",
             "last_delivery_at":cccc_contracts::utc_now(),
             "last_submission_evidence":recovered_submission,
+            "staged_draft":null,
             "last_error":""
         }),
     )?;
@@ -1323,12 +1604,17 @@ fn build_browser_prompt(
         "[CCCC] Session bootstrap for this browser chat:\n\n{system_prompt}\n\n{WEB_TRANSPORT_NOTE}"
     );
     let digest = bootstrap_seed_digest(&seed_text);
+    let same_seed_chat = target["bootstrap_seed_conversation_url"]
+        .as_str()
+        .is_some_and(|url| {
+            url == target_url || web_model_connectors::same_conversation(url, target_url)
+        });
     let seed_required = target["bootstrap_seed_delivered_at"]
         .as_str()
         .is_none_or(str::is_empty)
         || target["bootstrap_seed_version"].as_str() != Some(BOOTSTRAP_SEED_VERSION)
         || target["bootstrap_seed_digest"].as_str() != Some(digest.as_str())
-        || target["bootstrap_seed_conversation_url"].as_str() != Some(target_url);
+        || !same_seed_chat;
     let seed = seed_required.then_some(BootstrapSeed {
         text: seed_text,
         digest,
