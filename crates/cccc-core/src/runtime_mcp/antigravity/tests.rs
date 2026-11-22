@@ -120,6 +120,39 @@ fn empty_configuration_from_the_native_first_run_is_set_up_natively() {
 }
 
 #[test]
+fn empty_native_preferences_from_the_first_run_are_filled_in() {
+    for bytes in ["", "\n"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let settings = temp.path().join(".gemini/antigravity-cli/settings.json");
+        std::fs::create_dir_all(settings.parent().expect("parent")).expect("dir");
+        std::fs::write(&settings, bytes).expect("empty settings");
+        disable_feedback_survey(&settings).expect("empty settings are preferences-free");
+        let actual = read_settings(&settings).expect("settings");
+        assert_eq!(actual["showFeedbackSurvey"], false);
+    }
+}
+
+#[test]
+fn actor_startup_succeeds_with_empty_first_run_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join(".gemini/config/mcp_config.json");
+    let settings = temp.path().join(".gemini/antigravity-cli/settings.json");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+    std::fs::create_dir_all(settings.parent().expect("parent")).expect("dir");
+    std::fs::write(&path, "").expect("empty config");
+    std::fs::write(&settings, "").expect("empty settings");
+    ensure(
+        &temp.path().join("project"),
+        &environment(temp.path()),
+        || {
+            write(&path, &json!({"mcpServers":{"cccc":ready()}}));
+            Ok(())
+        },
+    )
+    .expect("startup fills both empty first-run files");
+}
+
+#[test]
 fn setup_failure_or_unverified_success_cannot_report_ready() {
     let temp = tempfile::tempdir().expect("tempdir");
     let env = environment(temp.path());

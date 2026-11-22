@@ -102,6 +102,12 @@ fn read_settings(path: &Path) -> io::Result<serde_json::Map<String, Value>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
         Err(error) => return Err(error),
     };
+    // The native first run can leave an empty settings file, which reads as
+    // having no preferences — the same rule `read_entry` applies to an empty
+    // mcp_config.json. Only a non-empty file must be valid JSON.
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Default::default());
+    }
     serde_json::from_slice::<Value>(&bytes)
         .ok()
         .and_then(|value| value.as_object().cloned())
