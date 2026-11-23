@@ -4,7 +4,7 @@ use cccc_core::settings;
 use serde_json::{Value, json};
 
 use crate::AppState;
-use crate::api::{ApiError, ApiResult, success};
+use crate::api::{ApiError, ApiResult, call, success};
 
 use super::web_model_connector_store as store;
 
@@ -35,34 +35,45 @@ pub(super) async fn create(State(state): State<AppState>, Json(body): Json<Value
             Some(_) => Err(ApiError::bad(format!("{name} must be a boolean"))),
         }
     };
-    let create_only = flag("create_only")?;
     let rotate = flag("rotate")?;
-    let result = super::web_model_delivery_completion::call(
+    // Older clients may still send create_only. It keeps its create-when-absent
+    // meaning and can never select rotation.
+    let create_only = flag("create_only")?;
+    let mut args = json!({"by":"user","provider":provider});
+    if create_only {
+        args["create_only"] = json!(true);
+    }
+    if rotate {
+        args["rotate"] = json!(true);
+        let confirmation = body["confirmation"]
+            .as_str()
+            .ok_or_else(|| ApiError::bad("confirmation is required to rotate"))?;
+        args["confirmation"] = json!(confirmation);
+    }
+    let response = call(
         &state,
         "web_model_connector_configure",
-        json!({"by":"user","provider":provider,"create_only":create_only,"rotate":rotate})
-            .as_object()
-            .expect("literal JSON object")
-            .clone(),
+        args.as_object().expect("literal JSON object").clone(),
     )
     .await?;
+    let result = &response.0["result"];
+    let outcome = result["outcome"].as_str().unwrap_or("existing");
     let base_url = connector_base_url(&state)?;
     let mut connector = public(&result["connector"], &base_url);
-    if let Some(secret) = result["secret"].as_str() {
-        let url = connector["connector_url"].as_str().unwrap_or_default();
-        connector["connector_url_path_token"] = json!(format!("{url}/token/{secret}"));
-        connector["secret_available"] = json!(true);
-        Ok(success(
-            json!({"outcome":result["outcome"],"connector":connector,"secret":secret}),
-        ))
-    } else {
-        Ok(success(
-            json!({"outcome":result["outcome"],"connector":connector}),
-        ))
+    match result["secret"].as_str() {
+        Some(secret) => {
+            let url = connector["connector_url"].as_str().unwrap_or_default();
+            connector["connector_url_path_token"] = json!(format!("{url}/token/{secret}"));
+            connector["secret_available"] = json!(true);
+            Ok(success(
+                json!({"outcome":outcome,"connector":connector,"secret":secret}),
+            ))
+        }
+        None => Ok(success(json!({"outcome":outcome,"connector":connector}))),
     }
 }
 
-fn connector_base_url(state: &AppState) -> Result<String, ApiError> {
+pub(super) fn connector_base_url(state: &AppState) -> Result<String, ApiError> {
     let settings = settings::load(&state.home).map_err(store::io_error)?;
     let mut base = settings
         .remote_access
@@ -78,9 +89,9 @@ fn connector_base_url(state: &AppState) -> Result<String, ApiError> {
     Ok(base)
 }
 
-fn public(item: &Value, base_url: &str) -> Value {
+pub(super) fn public(item: &Value, base_url: &str) -> Value {
     let id = item["connector_id"].as_str().unwrap_or_default();
-    let mut result = json!({"connector_id":id,"kind":"web_model_connector","routing_mode":item["routing_mode"],"provider":item["provider"],
+    let mut result = json!({"connector_id":id,"kind":item["kind"],"routing_mode":item["routing_mode"],"provider":item["provider"],
         "connector_url":format!("{base_url}/mcp/web-model/{id}"),"secret_available":false,
         "bound_actor_count":item["bindings"].as_object().map_or(0, |b| b.len())});
     for field in [
@@ -88,15 +99,24 @@ fn public(item: &Value, base_url: &str) -> Value {
         "updated_at",
         "revoked",
         "secret_preview",
+        "credential_generation",
+        "secret_rotated_at",
+        "rotated_by",
         "last_activity_at",
         "last_method",
         "last_tool_name",
         "last_call_status",
         "last_error",
         "events_log",
+        "rejection_log",
     ] {
         result[field] = item[field].clone();
     }
+    result["group_id"] = item["group_id"].clone();
+    result["actor_id"] = item["actor_id"].clone();
+    // The fence and binding count are non-secret; the UI can preview a
+    // rotation from the normal list read without another endpoint.
+    result["rotation"] = cccc_core::web_model_connectors::rotation_preview(item);
     // Which Actor the Dot is bound to; its credentials and callback stay private.
     let dots = &item["dots"];
     result["dots_actor"] = if dots["actor_id"].is_string() {

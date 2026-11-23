@@ -15,6 +15,11 @@ export type WebModelConnector = {
   revoked?: boolean;
   created_at?: string;
   updated_at?: string;
+  credential_generation?: number | null;
+  secret_rotated_at?: string | null;
+  rotated_by?: string | null;
+  /** Non-secret preview used by the explicit rotation flow. */
+  rotation?: WebModelConnectorRotation;
   last_activity_at?: string;
   last_method?: string;
   last_tool_name?: string;
@@ -31,6 +36,8 @@ export type WebModelConnector = {
   connector_url_path_token?: string;
   secret_available?: boolean;
 };
+
+export type WebModelConnectorRotation = { recorded_binding_count: number; confirmation: string };
 
 export type WebModelConnectorCreateResult = {
   outcome: "created" | "existing" | "rotated";
@@ -339,8 +346,9 @@ export type WebModelProvider = "chatgpt_web" | "grok_web";
 export type WebModelView = WebModelProvider | "dots";
 
 /**
- * Create only when absent; otherwise return the unchanged connector without
- * its secret. Creating never rotates a credential.
+ * Create the provider's shared connector when absent. An existing connector is
+ * returned unchanged as `outcome:"existing"` with no secret; this call never
+ * rotates a credential.
  */
 export async function createWebModelConnector(
   provider: WebModelProvider = "chatgpt_web",
@@ -352,11 +360,11 @@ export async function createWebModelConnector(
   });
 }
 
-/** Explicit credential replacement; the settings view confirms it first. */
-export async function rotateWebModelConnector(provider: WebModelProvider) {
+/** Explicit, fenced rotation. The server derives its own attribution. */
+export async function rotateWebModelConnector(provider: WebModelProvider, confirmation: string) {
   return apiJson<WebModelConnectorCreateResult>("/api/v1/web-model/connectors", {
     method: "POST",
-    body: JSON.stringify({ provider, rotate: true }),
+    body: JSON.stringify({ provider, rotate: true, confirmation }),
   });
 }
 
@@ -673,4 +681,45 @@ export function getWebModelBrowserSurfaceWebSocketUrl(groupId: string, actorId: 
 
 export async function bindGrokBot(groupId: string, actorId: string, url: string) {
   return changeGrokWebhook(groupId, actorId, { action: "bind", url });
+}
+
+export type HarkActorState = {
+  group_id: string;
+  actor_id: string;
+  enabled: boolean;
+  configured: boolean;
+  phase: string;
+  pending_count: number;
+  active_turn_id?: string | null;
+  active_event_ids?: string[];
+  last_poll_at?: string | null;
+  last_poll_status?: string | null;
+  reason_code?: string | null;
+  last_claim_at?: string | null;
+  error_code?: string | null;
+  connector?: WebModelConnector;
+  secret?: string;
+};
+
+export function fetchHarkActorState(groupId: string, actorId: string) {
+  const params = new URLSearchParams({ group_id: groupId, actor_id: actorId });
+  return apiJson<HarkActorState>(`/api/v1/web-model/hark?${params.toString()}`);
+}
+
+export function updateHarkActorConnection(
+  groupId: string,
+  actorId: string,
+  action: "create" | "rotate" | "revoke" | "resolve",
+  turnId?: string,
+  eventIds?: string[],
+) {
+  return apiJson<HarkActorState>("/api/v1/web-model/hark", {
+    method: "POST",
+    body: JSON.stringify({
+      group_id: groupId,
+      actor_id: actorId,
+      action,
+      ...(turnId ? { turn_id: turnId, event_ids: eventIds } : {}),
+    }),
+  });
 }

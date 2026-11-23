@@ -4,13 +4,14 @@ use super::operation::{Operation, Policy::GlobalWrite};
 use crate::dispatch::{OpError, OpResult, object, required_arg, string_arg};
 use cccc_contracts::{DaemonRequest, GroupState, RunnerKind};
 use cccc_core::{GroupStore, HomeLayout, integration_state, web_model_connectors as store};
-use serde_json::json;
+use serde_json::{Value, json};
 
 pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
     matches!(
         request.op.as_str(),
         "web_model_connector_configure"
             | "web_model_connector_revoke"
+            | "web_model_pairing_validate_replacement"
             | "web_model_pairing_begin"
             | "web_model_pairing_accept"
             | "web_model_pairing_confirm"
@@ -41,12 +42,16 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         let flag = |name: &str| -> Result<bool, OpError> {
             match request.args.get(name) {
                 None => Ok(false),
-                Some(value) => value.as_bool().ok_or_else(|| {
-                    OpError::new("invalid_argument", format!("{name} must be a boolean"))
-                }),
+                Some(serde_json::Value::Bool(value)) => Ok(*value),
+                Some(_) => Err(OpError::new(
+                    "invalid_argument",
+                    format!("{name} must be a boolean"),
+                )),
             }
         };
         let rotate = flag("rotate")?;
+        // Accepted for compatibility with older Web clients; it never changes
+        // the safe default. A mistyped value is still refused.
         let create_only = flag("create_only")?;
         if rotate && create_only {
             return Err(OpError::new(
@@ -55,24 +60,39 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             ));
         }
         if rotate {
-            return object(store::rotate_provider(home, provider).map_err(|error| {
-                if error.to_string() == "connector_unavailable" {
-                    OpError::new("connector_unavailable", "No active connector to rotate")
-                } else {
-                    OpError::io(error)
-                }
-            })?);
+            let confirmation = required_arg(request, "confirmation")?;
+            // execute has already authorized this daemon caller as user.
+            // No request attribution field can override that principal.
+            let rotated_by = format!(
+                "local:{}",
+                string_arg(request, "by").expect("authorized caller")
+            );
+            return object(
+                store::rotate_provider(home, provider, &confirmation, &rotated_by).map_err(
+                    |e| match e.to_string().as_str() {
+                        "rotation_confirmation_stale" => OpError::new(
+                            "rotation_confirmation_stale",
+                            "The connector changed since the rotation was previewed; refresh and confirm again",
+                        ),
+                        "connector_unavailable" => OpError::new(
+                            "connector_unavailable",
+                            "No active connector to rotate",
+                        ),
+                        _ => OpError::io(e),
+                    },
+                )?,
+            );
         }
         return match store::create_provider_if_absent(home, provider).map_err(OpError::io)? {
             Some(created) => object(created),
             None => {
+                // One idempotent success for every non-rotating call: the
+                // existing connector and no credential.
                 let connector = store::load(home)
                     .map_err(OpError::io)?
                     .into_iter()
-                    .find(|item| item["provider"] == provider && item["revoked"] != true)
-                    .ok_or_else(|| {
-                        OpError::new("connector_unavailable", "Connector is unavailable")
-                    })?;
+                    .find(|c| c["provider"] == provider && c["revoked"] != true)
+                    .ok_or_else(|| OpError::new("connector_unavailable", "connector vanished"))?;
                 object(json!({"outcome":"existing","connector":connector}))
             }
         };
@@ -197,12 +217,23 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             .map_err(OpError::io)?;
         return object(json!({"state":"failed","error_code":reason}));
     }
-    let automatic = if request.op == "web_model_pairing_confirm" {
-        store::pairing_for_actor(&connector, &group_id, &actor_id)
-            .is_some_and(|p| p["automatic"] == true)
+    let generation = cccc_core::actors::generation_identity(actor);
+    let binding = store::binding_for_actor(&connector, &group_id, &actor_id, &generation);
+    let pairing = store::pairing_for_actor(&connector, &group_id, &actor_id);
+    let confirming = request.op == "web_model_pairing_confirm";
+    let validating = request.op == "web_model_pairing_validate_replacement";
+    let beginning = request.op == "web_model_pairing_begin" || validating;
+    let replace = request.args.get("replace") == Some(&json!(true));
+    if validating && !replace {
+        return Err(OpError::new(
+            "invalid_argument",
+            "Replacement requires replace: true",
+        ));
+    }
+    let automatic = if confirming {
+        pairing.as_ref().is_some_and(|p| p["automatic"] == true)
     } else {
-        request.op == "web_model_pairing_begin"
-            && request.args.get("automatic") == Some(&json!(true))
+        beginning && request.args.get("automatic") == Some(&json!(true))
     };
     if automatic {
         if !actor.enabled
@@ -214,16 +245,15 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 "Automatic connection requires an enabled Actor in a running Group",
             ));
         }
-        if store::binding_for_actor(
-            &connector,
-            &group_id,
-            &actor_id,
-            &cccc_core::actors::generation_identity(actor),
-        )
-        .is_some_and(|b| {
-            request.op != "web_model_pairing_confirm"
-                || request.args.get("pairing_id") != Some(&b["pairing_id"])
-        }) {
+        // cwf#821: an explicit user re-pair (`replace: true`) may supersede the
+        // existing binding. It is never removed up front: the old binding stays
+        // in force until this pairing's confirm overwrites it, so a failed or
+        // abandoned attempt leaves the working route untouched.
+        if !replace
+            && binding.as_ref().is_some_and(|b| {
+                !confirming || request.args.get("pairing_id") != Some(&b["pairing_id"])
+            })
+        {
             return Err(OpError::new(
                 "already_paired",
                 "Automatic connection cannot replace an existing binding",
@@ -238,40 +268,89 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let runtime = super::runtime_state::actor_state(home, &group_id, &actor_id)?;
     let targets = integration_state::group_get(&groups, &group_id, "web_model_browser_targets")
         .map_err(OpError::io)?;
-    let status = targets[&actor_id]["last_delivery_status"]
-        .as_str()
-        .unwrap_or("");
-    let unresolved = runtime["active_turn_id"]
+    let target = &targets[&actor_id];
+    let active = runtime["active_turn_id"]
         .as_str()
         .is_some_and(|s| !s.is_empty())
-        || runtime["status"] == "working"
-        || matches!(
-            status,
-            "submitting"
-                | "deferred"
-                | "pending_new_chat_bind"
-                | "legacy_recovery_submitting"
-                | "submission_ambiguous"
-                | "submission_ambiguous_completion_pending"
-                | "completion_ambiguous"
-                | "ambiguous"
-                | "completion_conflict"
-                | "legacy_submission_unverified"
-        );
-    let normalize_url = store::conversation_url;
-    let old_url = targets[&actor_id]["url"]
+        || runtime["status"] == "working";
+    let unresolved = active
+        || store::delivery_fenced(target)
+            && !binding
+                .as_ref()
+                .is_some_and(|b| store::abandoned_delivery_matches(b, target));
+    let old_url = target["url"]
         .as_str()
-        .and_then(|u| normalize_url(u).ok());
-    let same_url = string_arg(request, "url")
-        .and_then(|u| normalize_url(&u).ok())
-        .is_some_and(|u| Some(u) == old_url);
+        .filter(|u| store::conversation_identity(u).is_some());
+    let requested_url = string_arg(request, "url");
+    let same_url = requested_url
+        .as_deref()
+        .zip(old_url)
+        .is_some_and(|(url, old)| store::same_conversation(old, url));
+    let already_confirmed = confirming
+        && binding
+            .as_ref()
+            .is_some_and(|b| request.args.get("pairing_id") == Some(&b["pairing_id"]));
+    let requested_recovery = if beginning
+        && (request.args.contains_key("abandon_delivery_id")
+            || request.args.contains_key("expected_binding_revision"))
+    {
+        Some(json!({
+            "delivery_id": required_arg(request, "abandon_delivery_id")?,
+            "binding_revision": required_arg(request, "expected_binding_revision")?,
+        }))
+    } else if confirming && !already_confirmed {
+        pairing
+            .as_ref()
+            .filter(|p| request.args.get("pairing_id") == Some(&p["pairing_id"]))
+            .and_then(|p| p.get("recovery"))
+            .cloned()
+    } else {
+        None
+    };
+    let recovery = requested_recovery
+        .as_ref()
+        .map(|expected| {
+            if !replace || active || same_url {
+                return Err(repair_refused());
+            }
+            if beginning
+                && pairing.as_ref().is_some_and(|pair| {
+                    pair["generation"] == generation
+                        && matches!(
+                            pair["state"].as_str(),
+                            Some("waiting" | "awaiting_confirmation")
+                        )
+                        && pair["expires_at_ms"]
+                            .as_i64()
+                            .is_some_and(|expiry| expiry > chrono::Utc::now().timestamp_millis())
+                })
+            {
+                return Err(OpError::new(
+                    "pairing_in_progress",
+                    "Cancel the current pairing attempt before replacing it",
+                ));
+            }
+            let current = recovery_evidence(
+                home,
+                &group_id,
+                &actor_id,
+                binding.as_ref(),
+                target,
+                expected,
+            )?;
+            if confirming && &current != expected {
+                return Err(repair_refused());
+            }
+            Ok(current)
+        })
+        .transpose()?;
     // Re-pairing the SAME saved conversation restores access without deleting
     // unresolved evidence. A different conversation still requires resolution.
-    if unresolved
-        && (automatic
-            || !(request.op == "web_model_pairing_begin" && old_url.is_some()
-                || request.op == "web_model_pairing_confirm" && same_url))
-    {
+    let stopped_same_chat = !automatic
+        && (beginning && old_url.is_some() && (!replace || requested_url.is_none() || same_url)
+            || confirming && same_url);
+    let explicit_same_chat = replace && !active && same_url && (beginning || confirming);
+    if unresolved && !(stopped_same_chat || explicit_same_chat || recovery.is_some()) {
         return Err(OpError::new(
             "delivery_unresolved",
             if old_url.is_none() {
@@ -281,11 +360,19 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             },
         ));
     }
-    let generation = cccc_core::actors::generation_identity(actor);
     match request.op.as_str() {
+        "web_model_pairing_validate_replacement" => object(json!({"valid":true})),
         "web_model_pairing_begin" => object(
-            store::begin_pairing(home, &id, &group_id, &actor_id, &generation, automatic)
-                .map_err(OpError::io)?,
+            store::begin_pairing_with_recovery(
+                home,
+                &id,
+                &group_id,
+                &actor_id,
+                &generation,
+                automatic,
+                recovery,
+            )
+            .map_err(OpError::io)?,
         ),
         "web_model_pairing_confirm" => {
             let pair = required_arg(request, "pairing_id")?;
@@ -301,6 +388,56 @@ fn execute(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         }
         _ => unreachable!(),
     }
+}
+
+fn repair_refused() -> OpError {
+    OpError::new(
+        "delivery_unresolved",
+        "Replacement requires the current binding and a completed ambiguous delivery. Refresh status before retrying.",
+    )
+}
+
+fn recovery_evidence(
+    home: &HomeLayout,
+    group: &str,
+    actor: &str,
+    binding: Option<&Value>,
+    target: &Value,
+    expected: &Value,
+) -> Result<Value, OpError> {
+    let binding = binding.ok_or_else(repair_refused)?;
+    let revision = expected["binding_revision"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(repair_refused)?;
+    let delivery = expected["delivery_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(repair_refused)?;
+    if binding["revision"] != revision
+        || target["binding_revision"] != revision
+        || target["kind"] != "existing_chat"
+        || target["last_delivery_status"] != "submission_ambiguous"
+        || target["last_delivery_id"] != delivery
+    {
+        return Err(repair_refused());
+    }
+    let turn = target["last_delivery_turn_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(repair_refused)?;
+    let events = serde_json::from_value::<Vec<String>>(target["last_delivery_event_ids"].clone())
+        .ok()
+        .filter(|events| !events.is_empty())
+        .ok_or_else(repair_refused)?;
+    if !super::runtime_completion::committed(home, group, actor, turn, &events)?
+        .is_some_and(|receipt| receipt.status == "done" && receipt.delivery_id == delivery)
+    {
+        return Err(repair_refused());
+    }
+    Ok(
+        json!({"binding_revision":revision,"delivery_id":delivery,"turn_id":turn,"event_ids":events}),
+    )
 }
 
 #[cfg(test)]

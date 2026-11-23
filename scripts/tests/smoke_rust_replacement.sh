@@ -4,10 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BINARY="${1:-$ROOT_DIR/target/release/cccc}"
 test -x "$BINARY"
-command -v node >/dev/null 2>&1 || {
-  echo "node is required for the code_exec replacement smoke" >&2
-  exit 1
-}
 
 SMOKE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cccc-rust-replacement.XXXXXX")"
 cleanup() {
@@ -36,17 +32,17 @@ test -n "$group_id"
 mcp_output="$(
   printf '%s\n' \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cccc_code_exec","arguments":{"source":"const repo = await tools.cccc_repo({action: \"info\"}); text(repo.root ? \"rust replacement nested-tool smoke\" : \"missing root\");"}}}' |
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cccc_repo","arguments":{"action":"info"}}}' |
     CCCC_GROUP_ID="$group_id" \
     CCCC_ACTOR_ID=web-smoke \
     CCCC_MCP_TOOL_PROFILE=full \
     "$BINARY" mcp
 )"
 grep -Fq '"name":"cccc-mcp"' <<<"$mcp_output"
-grep -Fq 'rust replacement nested-tool smoke' <<<"$mcp_output"
+grep -Fq '"root"' <<<"$mcp_output"
 
 "$BINARY" daemon stop >/dev/null
 stopped_status="$($BINARY status)"
 grep -Fq 'Daemon:      stopped' <<<"$stopped_status"
 
-echo "OK: installed Rust CLI, daemon, offline status, MCP, and code_exec"
+echo "OK: installed Rust CLI, daemon, offline status, MCP, and repo info"

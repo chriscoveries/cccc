@@ -178,6 +178,7 @@ pub async fn serve_socket(
     viewer_mode: &str,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) {
+    let _viewer = surfaces.register_viewer(key).await;
     let stream_frames = viewer_mode_uses_frames(viewer_mode, surfaces.vnc_port(key).await.is_ok());
     let initial = state_event(surfaces.info(key).await);
     if socket

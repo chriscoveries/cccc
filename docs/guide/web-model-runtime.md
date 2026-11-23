@@ -47,7 +47,7 @@ Agent windows become viewable as soon as navigation starts, including while the 
 
 The login window opens without waiting for the site's document to finish loading, so slow pages, network errors and verification remain visible and the window stays closable. Browser availability is separate from login and delivery readiness; automatic agent delivery still checks the page before submitting.
 
-MCP tool model: ChatGPT registers a remote MCP schema up front, so the ChatGPT Web Model connector advertises a fixed built-in schema instead of extending that schema with newly discovered capability tools. Explicitly disabling CCCC code mode removes its two code-mode tools; daemon restart timing does not collapse the remaining Web Model schema to the smaller ordinary-actor fallback. Calls are still authorized with the connector-bound agent identity. A Web Model agent cannot bypass that surface by naming an unadvertised tool directly. A group foreman can reach an enabled built-in capability-pack tool through `cccc_capability_use`; a peer cannot use that route to acquire foreman management authority. A peer can still use that route to reach `cccc_automation`, because the daemon authorizes each automation change by the caller's role: a peer manages only reminders addressed to itself.
+MCP tool model: ChatGPT registers a remote MCP schema up front, so the ChatGPT Web Model connector advertises a fixed built-in schema instead of extending that schema with newly discovered capability tools. Daemon restart timing does not collapse the remaining Web Model schema to the smaller ordinary-actor fallback. Calls are still authorized with the connector-bound agent identity. A Web Model agent cannot bypass that surface by naming an unadvertised tool directly. `cccc_capability_use` routes only an explicit read-only allow list for Web Model actors (`cccc_capability_state`, `cccc_repo`, `cccc_presentation`, `cccc_tracked_send`); every other capability-pack tool — actor and group lifecycle, headless, terminal, automation, capability install/enable — is refused for Web Model actors whether they are a peer or a foreman. The daemon refuses actor-management operations outright for cloud-connector calls as a second layer. The Web Model surface is deliberately read-only: workspace inspection (`cccc_repo`), presentation, messaging, file reads under the actor's scope, and capability state remain; command execution, repository edits, patching, code mode, and capability install/enable are not part of it and calls to them are refused.
 
 ### Viewing or changing a working conversation
 
@@ -70,29 +70,88 @@ same section; verification does not start it for you. These operations are indep
 agent editor's Save button. Disconnecting is a separate maintenance action and is
 not required to replace a conversation.
 
+#### Repair a stale binding from the private API
+
+Moving the same conversation into or out of a Project keeps its conversation
+identity. If its connection still needs repair, send one administrator request
+to `POST /api/v1/web-model/pairing` with `action: "connect"`, `replace: true`,
+and the actor's `group_id` and `actor_id`. Supply `conversation_url` to open
+or prepare that actor's owned browser page, or omit it to use the current
+page. A draft, attachment, running response, sign-in or verification may
+require attention in the browser before retrying.
+
+If the saved chat cannot be reviewed and the last ambiguous delivery already
+has a durable completion, the operator can acknowledge that exact delivery in
+the same request. Take `expected_binding_revision` from the fresh private
+browser-session status's `delivery_target.binding_revision` and
+`abandon_delivery_id` from `delivery.last_delivery_id`. For example:
+
+```sh
+curl --config "$CCCC_ADMIN_CURL_CONFIG" --fail-with-body \
+  --json @replacement.json "$CCCC_URL/api/v1/web-model/pairing"
+```
+
+Supply the following in `replacement.json`, with the actual IDs. Use local
+administrator authentication in the curl config.
+
+```json
+{
+  "group_id": "<group>",
+  "actor_id": "<actor>",
+  "action": "connect",
+  "replace": true,
+  "conversation_url": "https://chatgpt.com/g/<project>/c/<conversation>",
+  "expected_binding_revision": "<current revision>",
+  "abandon_delivery_id": "<completed ambiguous delivery>"
+}
+```
+
+An acknowledgement accepts that the old submission's outcome is unknown.
+The old batch is retained in delivery history and is never replayed by repair.
+An active turn or changed delivery is refused. The `waiting` response means
+verification started. The previous binding remains until the new conversation
+is verified. Check the new revision and verify a fresh PONG before sending more
+work. A failed attempt leaves the prior binding and delivery fence available
+for further review.
+
 **Shared login & connector** opens instance settings while retaining the agent's
 unsaved draft. Creating a connector credential only creates its address: it does
 not prove that ChatGPT has added or used it. Shared settings separately show the
 last recorded connector request and the number of verified agent bindings.
 Credential replacement and revocation are under **Manage connector credential**.
 
-Creating is safe to repeat: an existing connector is returned unchanged, without
-its secret or a token URL. **Rotate** remains an explicit maintenance action with
-the existing confirmation dialog. It replaces the credential while preserving
-conversation pairings and Dots state. The old URL stops working; copy the new URL
-and update every external plugin using it.
+Create is safe to repeat: an existing credential is returned unchanged without
+revealing its secret. **Rotate** remains an explicit maintenance action. Its
+confirmation shows the recorded binding count and warns that the old URL stops
+working; update every external plugin that uses it. That count cannot inventory
+external plugin installations. The confirmation is fenced to the listed
+credential generation and bindings: if either changes, refresh and confirm
+again. Rotation preserves existing conversation pairings and Dots state and
+shows the replacement URL once.
 
-For API/IPC callers, a flagless create no longer rotates. Send the boolean
-`rotate=true` explicitly to replace an active credential. Create returns
-`outcome=created` with the secret once, or `outcome=existing` without it; rotation
-returns `outcome=rotated` with the replacement secret once. Existing
-`create_only` callers must accept the successful `existing` response instead of
-expecting `connector_exists`. Non-boolean flags and conflicting `rotate=true`
-and `create_only=true` are refused without changing the connector.
+The API records credential_generation, secret_rotated_at and rotated_by together
+with rotation. The attribution is the daemon's local authorized caller
+(local:user), not a claimed remote human. Older stores have an unrecorded
+generation (0) and no invented rotation timestamp. Wrong-secret attempts remain
+403 and are recorded separately from rotation/call history. That ten-entry
+rejection log coalesces writes per process/connector over five seconds, with no
+timer flush. Pending hits are lost on restart, so count is a lower bound; at is
+write-time, not last-seen time. Detailed rejection/last-rotation UI is separate
+follow-up work.
+
+#### API migration: create_only callers
+
+Keep sending boolean create_only if needed, but handle success with
+outcome=existing and no secret instead of expecting connector_exists. A flagless
+POST no longer rotates. To intentionally rotate, read the list's
+rotation.confirmation and send rotate=true with that confirmation; do not
+combine rotate=true and create_only=true. Creation/rotation disclose a secret
+once; an existing response has secret_available=false and no token URL.
+
 
 ### Conversation pairing and diagnostics
 
-The connector exposes `cccc_pair({"code":"…"})` and `cccc_connector_status({})` before pairing through ChatGPT's normal connector tool invocation. These connector-level tools are not available inside **CCCC's `cccc_code_exec`**; this restriction does not prescribe how ChatGPT internally dispatches connector calls. On normal startup, an enabled agent without a binding or prior attempt automatically connects its conversation. CCCC sends one setup message, receives a unique receipt through MCP, and verifies its assistant-side echo after that exact message in the same owned window before saving the stable conversation URL. Only then does the existing delivery queue send the pending task. No preliminary pairing click, copied code or second CCCC confirmation is needed; any ChatGPT approval remains user-controlled.
+The connector exposes `cccc_pair({"code":"…"})` and `cccc_connector_status({})` before pairing through ChatGPT's normal connector tool invocation. These connector-level tools are not CCCC business tools; this restriction does not prescribe how ChatGPT internally dispatches connector calls. On normal startup, an enabled agent without a binding or prior attempt automatically connects its conversation. CCCC sends one setup message, receives a unique receipt through MCP, and verifies its assistant-side echo after that exact message in the same owned window before saving the stable conversation URL. Only then does the existing delivery queue send the pending task. No preliminary pairing click, copied code or second CCCC confirmation is needed; any ChatGPT approval remains user-controlled.
 
 The pairing code is generated by the selected CCCC instance and sent back only to that instance's connector. `cccc_pair` records a pending link; it does not read workspace files or execute tasks. It is declared as a state-changing tool, while `cccc_connector_status` is read-only. MCP acceptance alone grants no workspace access: after browser receipt verification, subsequent calls use the linked agent's configured permissions. Codes expire after ten minutes and can be accepted by only one host conversation. If ChatGPT blocks or rejects a call, retain its original tool error for diagnosis. A host safety rejection does not establish that connector calls require a different invocation mode, and CCCC does not automatically replay a failed setup.
 
@@ -162,7 +221,7 @@ Authentication: No Auth
 
 Check the custom MCP risk acknowledgement and click `Create`.
 
-Open a GPT-5.x chat, select Developer mode/tools, and enable the CCCC connector. On the first CCCC tool call, ChatGPT may show an app permission approval card. Choose `Always allow` if that option is available and you trust this local CCCC connector; otherwise approve the action manually when ChatGPT asks. CCCC does not automate ChatGPT permission approvals. If CCCC was upgraded after the connector was created, refresh the app/tool list in ChatGPT settings so new tools such as `cccc_code_exec` are visible.
+Open a GPT-5.x chat, select Developer mode/tools, and enable the CCCC connector. On the first CCCC tool call, ChatGPT may show an app permission approval card. Choose `Always allow` if that option is available and you trust this local CCCC connector; otherwise approve the action manually when ChatGPT asks. CCCC does not automate ChatGPT permission approvals. If CCCC was upgraded after the connector was created, refresh the app/tool list in ChatGPT settings so the current tools are visible.
 
 ### 3. Start each agent {#_3-start-each-actor}
 
@@ -203,12 +262,11 @@ For remote-MCP pull mode, prompt the model to use CCCC explicitly:
 
    ```text
    Use the CCCC connector. First call cccc_runtime_wait_next_turn.
-   For multi-step local development, prefer cccc_code_exec and call nested tools
-   through tools.*. Direct tools remain available for simple steps: cccc_repo for
-   read-only workspace inspection/search, cccc_repo_edit or cccc_apply_patch for edits,
-   cccc_exec_command/cccc_write_stdin for commands/tests, cccc_git for
-   status/diff/add/commit, cccc_message_send for visible replies, then
-   cccc_runtime_complete_turn.
+   The Web Model surface is read-only: use cccc_repo for workspace
+   inspection/search, cccc_file for file reads, cccc_message_send for visible
+   replies, then cccc_runtime_complete_turn. Command execution, edits and
+   capability changes are not available; report what you find instead of
+   attempting them.
    Do not use built-in browsing or unrelated tools for CCCC work.
    ```
 
@@ -290,16 +348,13 @@ Expected tools include:
 
 - `cccc_runtime_wait_next_turn`
 - `cccc_runtime_complete_turn`
-- `cccc_code_exec`
-- `cccc_code_wait`
 - `cccc_repo`
-- `cccc_repo_edit`
-- `cccc_apply_patch`
-- `cccc_shell`
-- `cccc_exec_command`
-- `cccc_write_stdin`
-- `cccc_git`
+- `cccc_presentation`
 - `cccc_message_send`
+
+Command execution, repository editing, patching, code mode and capability
+install/enable tools are not in the Web Model surface; calls to them are
+refused.
 
 Then send work to the agent:
 
@@ -332,6 +387,23 @@ metadata does not guarantee acceptance by ChatGPT's safety checks. If a call is
 blocked, report the actual tool error and seek the user's next instruction;
 do not automatically retry through a different tool or claim it succeeded.
 
+### Public file directory
+
+The host confines a Web Model caller's file tools to one directory by setting
+`CCCC_WEB_MODEL_FILE_ROOT` on the CCCC process; the setting is required, and an
+unset or unusable value refuses every confined path rather than falling back to
+the effective workspace. `cccc_file` (`read`, `info`, `blob_path`) and every
+path in a `cccc_file_send` resolve inside that directory: relative paths join
+it, absolute paths must already name a location inside it, and `..` components
+or symlinked spellings that land outside it are refused. Reads open the final
+component without following links, so a symlink swapped in after resolution
+cannot escape. Reads of `state/blobs/...` are exempt from the directory only
+for blobs carried by an attachment on a message the actor sent or that was
+delivered to it; every other blob is refused. `cccc_file_send` never accepts
+`state/blobs/` sources. For sends, place the directory inside the caller's
+effective workspace: the daemon applies its own scope check to the resolved
+files.
+
 Use `cccc_file` with `action="read"` and an active-workspace relative path, or the
 `state/blobs/...` path of an attachment delivered to this Group:
 
@@ -346,19 +418,6 @@ CCCC does not decode, crop, resize, recompress or reorient them. The image limit
 than returning a partial image. Image interpretation, including orientation and
 animated-frame handling, belongs to the selected client/model.
 
-Inside code mode, image reads automatically include the image in the next
-`cccc_code_exec` / `cccc_code_wait` result. JavaScript receives only file metadata;
-base64 transport bytes do not consume the text-output budget or pass through the
-JavaScript bridge. No `image()` helper is needed:
-
-```js
-const file = await tools.cccc_file({action: "read", rel_path: "screenshots/page.png"});
-text(file);
-```
-
-Each code-mode result can include up to **four binary items totaling 20 MiB** before
-base64 encoding. Read fewer/smaller files or call `await yield_control()` before
-reading more. These limits fail explicitly, without silently dropping images.
 Ordinary UTF-8 reads return a bounded text preview (200,000 bytes by default,
 configurable with `max_bytes` up to 5 MiB) and a `truncated` flag. Use
 `cccc_repo(read)` when line continuation or a file hash is needed.
@@ -404,10 +463,8 @@ public download endpoint. No new connector or document helper program is needed.
 Files are identified by their contents, including extensionless Group attachments.
 For PPTX, CCCC checks only ZIP format metadata to distinguish the presentation
 format from other archives; it does not extract slide text, notes, images or
-layout. The original file remains unchanged. The 20 MiB per-file limit applies;
-documents and images share the four-item/20 MiB aggregate code-mode budget.
-Binary files are never truncated. Code mode emits the native resource while
-JavaScript receives metadata, just as with images.
+layout. The original file remains unchanged. The 20 MiB per-file limit applies.
+Binary files are never truncated.
 
 User testing on 2026-09-20 confirmed both routes: ChatGPT read a 17-slide PPTX
 through its native file reader and opened a one-page image-only PDF through its
@@ -429,78 +486,27 @@ locally to compensate.
 
 ## Local command execution
 
-`cccc_shell` and `cccc_exec_command` execute a program and its arguments directly.
-Command strings support shell-style quoting, but `&&`, pipes, redirection, variable
-expansion, and wildcards are not interpreted. The tool names remain unchanged for
-existing connectors. Invoke an installed shell explicitly when needed:
-
-```json
-{"command":"sh -c 'pwd && git status --short | head -5'"}
-```
-
-On Windows, for example:
-
-```json
-{"command":"powershell.exe -NoProfile -Command 'Get-Location; Get-ChildItem'"}
-```
-
-Both tools accept a relative `cwd` inside the Group's active workspace and `env`
-overrides for the child process. `cccc_exec_command` also accepts `workdir` as an
-alias. This constrains the starting directory, not what an authorized local
-program can subsequently access. Commands run with the CCCC host process's OS
-permissions, including access outside the workspace and network access. Agent
-binding authenticates which Group/agent is calling; it does not create a
-filesystem or network sandbox. Use a container, VM, or OS-level isolation when
-that boundary is required. `cccc_shell` defaults to a 60-second timeout
-and retains at most 200,000 bytes per output stream; `max_output_bytes` can raise
-that limit to 1,000,000. Check the exit code and truncation flags before relying
-on command output.
-
-`cccc_exec_command` runs the program in a PTY, so output may contain color escape
-sequences and CRLF line endings. On Unix, this command session defaults `PAGER`,
-`GIT_PAGER`, `GH_PAGER`, and `MANPAGER` to `cat`, overriding inherited values.
-On Windows, only `GIT_PAGER` and `GH_PAGER` default to `cat`; `PAGER` and
-`MANPAGER` remain inherited. Git and GitHub CLI interpret `cat` as disabling the
-pager. Set a value in this call's `env` to use a different pager. An explicit
-`PAGER` also supplies the defaults for the other three unless that call supplies
-their specific variables. For Git, `GIT_PAGER` takes priority over `core.pager`.
-Programs that use other settings may still paginate.
-
-`cccc_exec_command` returns initial output and a `session_id`. `yield_time_ms`
-(default 1,000; 0–30,000) waits for new output or exit without delaying other
-sessions. `cccc_write_stdin` returns only output not previously consumed by that
-session. Its output budget defaults to 200,000 bytes (maximum 1,000,000); a UTF-8
-character may extend the budget by up to three bytes instead of being split.
-Both calls include `status`, `cursor`, `has_more`, `cursor_expired`, `timed_out`
-and `closed`. Continue polling until `closed=true`: an exited command can still
-have unread output pages. Empty output alone does not indicate completion.
-
-`timeout_s` is a **hard command lifetime**, default and maximum 600 seconds,
-and is enforced even without another tool call. Polling does not extend it.
-`terminate=true` stops the owned process tree and returns unread output; it does
-not also submit `chars`. The command retains a bounded 2 MB output window;
-`cursor_expired=true` explicitly reports overwritten unread history. Redirect
-large logs to a workspace file when the whole log is needed. At most 64 sessions
-are retained per host/Home; abandoned results expire ten minutes after the
-command deadline. Commands are not persistent service hosting. Transport failure
-or a cancelled wait does not prove that input was not executed; do not silently
-replay input or start the same command again.
+The Web Model surface has no command-execution tools. `cccc_shell`,
+`cccc_exec_command`, `cccc_write_stdin`, `cccc_git`, `cccc_repo_edit`,
+`cccc_apply_patch`, `cccc_code_exec` and `cccc_code_wait` are not part of it;
+calls to them are refused. Work that needs a local command, an edit, a patch or
+code execution belongs to a native actor or the user, not to a Web Model agent.
+Report findings and proposed changes through CCCC messaging instead.
 
 ### Bounded repository inspection
 
-`cccc_repo` accepts only its declared read-only actions; editing requires
-`cccc_repo_edit` or `cccc_apply_patch`. `path` and `file_path` are aliases across
-reads and edits; supplying both with different values is an error. Move accepts
-`dest_path` or `to_path` (existing `new_path` callers remain supported).
+`cccc_repo` accepts only its declared read-only actions; the Web Model surface
+has no editing tools. `path` and `file_path` are aliases; supplying both with
+different values is an error.
 
 - `read` honors line ranges and `max_bytes` (default 200,000; maximum 1,000,000).
   It streams the file to calculate the whole-original-file hash while retaining
   only the bounded selected range. Text retains the existing LF-separated,
   no-final-LF presentation. `truncated` means the requested range was not fully
   returned; use `next_start_line`. If `partial_last_line=true`, that line is
-  incomplete: reread it with a larger budget rather than advancing past it. For
-  a line exceeding the maximum budget, use a focused shell command. A full-file
-  hash still requires reading the whole file, even when only one line is shown.
+  incomplete: reread it with a larger budget rather than advancing past it. A
+  full-file hash still requires reading the whole file, even when only one line
+  is shown.
 - `search` honors a directory or single-file `path`, `case_sensitive` (false by
   default), `regex`, `include_globs`, `exclude_globs`, `context_lines`, `limit`
   (default 200; maximum 500) and `max_bytes`. Context appears in each hit's
@@ -533,42 +539,16 @@ there is no background index, external `rg` requirement or automatic retry.
 
 ### Scoped editing
 
-`cccc_repo(action="read")` returns a SHA-256 of the **whole original file**, even
-for a line-range read. Supply it as `expected_sha256` for a subsequent exact edit.
-`multi_replace` validates ordered replacements in memory and writes the file once,
-so a rejected later replacement leaves the original untouched. `replace_all` is
-explicit; `expected_replacements` checks the match count. Existing file modes are
-preserved, including executable scripts.
-
-Codex-style `cccc_apply_patch` accepts exact `@@ context` anchors, ordered hunks,
-`*** End of File`, `*** Move to:` and additions in new directories. It preserves
-existing line endings and the final-newline convention. An unanchored hunk must
-match uniquely; an exact unique anchor searches forward for the first matching
-block. No whitespace or punctuation guessing is performed. Move destinations
-must not exist; combine edits to the same path into one section. All sections
-are checked before writing, but multiple files are not one filesystem transaction:
-if an OS write fails, inspect the reported completed paths before retrying.
+The Web Model surface has no editing tools: `cccc_repo_edit`,
+`cccc_apply_patch` and `cccc_code_exec` are refused. `cccc_repo(action="read")`
+still returns a SHA-256 of the **whole original file**, even for a line-range
+read, so a proposed change can name the exact bytes it was computed against.
+Report the intended edit through CCCC messaging for a native actor or the user
+to apply.
 
 After changing connector tool metadata, restart the updated CCCC build, refresh
 the connection in ChatGPT, and verify the tools in a new conversation. Local
 MCP tests alone do not establish ChatGPT's cached metadata or model performance.
-
-`cccc_code_exec` treats JavaScript strings, comments, regular expressions and
-raw template text as data. Node module loading remains unavailable: static
-imports are invalid in the cell function, dynamic imports have no loader, and
-`require` is not exposed. Executable failures are reported when evaluated, like
-other JavaScript errors; effects of earlier nested tool calls are not rolled back.
-
-Code-mode `yield_time_ms` limits the current wait for results, including nested
-tool calls. A slow nested tool keeps running in its cell and its result is
-collected by `cccc_code_wait`; a poll deadline does not cancel or replay it.
-Explicit cell termination, expiry, and host shutdown cancel outstanding nested
-calls. Changes already made are not rolled back.
-
-Failed cells, truncated output, or a missing cell do not establish that earlier
-nested calls had no effect. Check their outcomes before repeating operations; use
-narrower read-only steps to inspect state. Raising the output budget affects later
-output, not text already discarded.
 
 ### Unverified browser delivery and unsent drafts
 
@@ -587,11 +567,8 @@ are also preserved; queued delivery continues once they are sent or cleared.
 - Connector and per-binding activity are best-effort diagnostics. Pairing is authoritative; activity or a successful tool-list request is not proof of a ready agent.
 - Unknown or malformed tool calls return JSON-RPC protocol errors. A known tool that fails execution or policy checks returns an MCP tool result with `isError: true`; the native server includes the daemon's machine-readable `code`, `message`, and non-empty `details` in `structuredContent.error` as well as the text content.
 - Only tools whose declared operation is read-only are annotated with `readOnlyHint: true`. Mixed-action and mutating tools remain unannotated so a client is not encouraged to bypass approval for a write path.
-- The ChatGPT Web Model `tools/list` is intentionally stable for ChatGPT registration. Direct calls remain limited to that advertised surface; hidden built-in capability-pack tools must pass through `cccc_capability_use` and its actor-role checks.
-- ChatGPT Web Model local-power tools are actor-bound. Repository/file APIs validate their paths against the active workspace (or authorized Group blobs). Shell execution and Git subprocesses start in that workspace but retain the host process's OS permissions; scope and identity binding are not an OS sandbox.
-- Local `cccc_shell`, `cccc_git`, and unified-diff `cccc_apply_patch` calls own finite commands. Timeout covers input, output, and process exit; cancelling the call ends its owned process tree. This does not undo changes already made by a command. Use `cccc_exec_command` for foreground work within its declared lifetime, rather than leaving background children behind a completed shell.
-- Shell results follow `max_output_bytes` (default 200,000); Git results retain at most 2,000,000 bytes per output stream and report `stdout_truncated` / `stderr_truncated`. Excess output is drained within the same command deadline instead of accumulating in memory.
-- Local `cccc_exec_command` sessions belong to the CCCC host process, Home, agent and conversation binding. Host shutdown ends those commands; closing a browser tab does not. Cleanup leaves agent/Analyst sessions and other hosts alone.
+- The ChatGPT Web Model `tools/list` is intentionally stable for ChatGPT registration. Direct calls remain limited to that advertised surface; `cccc_capability_use` routes only the read-only allow list above, and every other pack tool is refused for Web Model actors.
+- ChatGPT Web Model local-power tools are actor-bound. Repository and file APIs validate their paths against the active workspace (or authorized Group blobs). The Web Model surface has no shell, Git, editing or code-execution tools; those calls are refused before any host process starts.
 - ChatGPT proactive delivery depends on the shared projected browser session and an active logged-in browser profile.
 - New chats are created and paired explicitly in agent settings before delivery. Browser history is diagnostic only and cannot grant routing authority.
 - GPT-5.x is selected inside ChatGPT. CCCC treats ChatGPT Web Model as one browser-delivery/runtime path, not as a separate provider per model.

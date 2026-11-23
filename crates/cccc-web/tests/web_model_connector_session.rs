@@ -82,6 +82,31 @@ async fn grok_actors_reject_browser_apis_without_launching_a_browser() {
     .expect("json");
     assert_eq!(body["ok"], false);
 }
+/// Web Model file tools reach only `CCCC_WEB_MODEL_FILE_ROOT`, a host-wide
+/// setting read at each call. A test that needs it re-runs itself as a child
+/// process with the setting pointing at a staging directory holding the
+/// sample file; the child runs only that test. Returns true in the parent.
+fn rerun_with_web_file_root(test: &str) -> bool {
+    if std::env::var_os("CCCC_WEB_MODEL_FILE_ROOT").is_some() {
+        return false;
+    }
+    let dir = tempfile::tempdir().expect("web file root");
+    std::fs::write(dir.path().join("sample.txt"), "local fixture content")
+        .expect("web file root sample");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", test, "--test-threads=1", "--nocapture"])
+        .env("CCCC_WEB_MODEL_FILE_ROOT", dir.path())
+        .output()
+        .expect("child test run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{test} with a web file root:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().expect("valid test fixture");
@@ -89,8 +114,16 @@ impl Fixture {
         home.initialize().expect("valid test fixture");
         let groups = GroupStore::new(home.clone()).expect("valid test fixture");
         let group = groups.create("fixture", "").expect("valid test fixture");
-        let root = temp.path().join("repo");
-        std::fs::create_dir(&root).expect("valid test fixture");
+        // A child rerun (rerun_with_web_file_root) makes the web file root
+        // the scope root, so Web Model reads and sends resolve in one place.
+        let root = match std::env::var_os("CCCC_WEB_MODEL_FILE_ROOT") {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => {
+                let root = temp.path().join("repo");
+                std::fs::create_dir(&root).expect("valid test fixture");
+                root
+            }
+        };
         std::fs::write(root.join("sample.txt"), "local fixture content")
             .expect("valid test fixture");
         let mut group = cccc_core::group_scope::attach(
@@ -257,9 +290,12 @@ async fn one_catalog_before_pairing_and_strict_authentication() {
         "cccc_connector_status",
         "cccc_file",
         "cccc_file_send",
-        "cccc_code_exec",
     ] {
         assert!(tools.iter().any(|t| t["name"] == name));
+    }
+    // Host tools are never offered to Web Model connectors.
+    for &name in cccc_core::UNPROFILED_TOOL_NAMES {
+        assert!(!tools.iter().any(|t| t["name"] == name), "{name} offered");
     }
     for (name, read_only) in [
         ("cccc_file", true),
@@ -302,6 +338,9 @@ async fn one_catalog_before_pairing_and_strict_authentication() {
 
 #[tokio::test]
 async fn file_read_and_send_keep_distinct_effects_and_bound_identity() {
+    if rerun_with_web_file_root("file_read_and_send_keep_distinct_effects_and_bound_identity") {
+        return;
+    }
     let f = Fixture::new();
     let _daemon = start_daemon(&f.home).await;
     f.bind("alpha", "chat-a");
@@ -368,19 +407,17 @@ async fn file_read_and_send_keep_distinct_effects_and_bound_identity() {
     let blobs = groups.state_dir(&f.group).expect("state").join("blobs");
     assert!(!blobs.exists() || std::fs::read_dir(&blobs).expect("blobs").next().is_none());
 
+    // Code mode is refused to Web Model actors, so no nested send can run.
     let nested = f.call("cccc_code_exec", json!({
         "source":"await tools.cccc_file({action:'send', path:'sample.txt', to:'user', mode:'send'});",
         "yield_time_ms":10000
     }), meta("chat-a")).await;
-    assert_eq!(
-        nested["result"]["structuredContent"]["status"], "failed",
-        "{nested}"
-    );
+    assert_eq!(nested["result"]["isError"], true, "{nested}");
     assert!(
-        nested["result"]["structuredContent"]["error_text"]
-            .as_str()
-            .expect("nested error")
-            .contains("use cccc_file_send")
+        nested
+            .to_string()
+            .contains("not available to Web Model actors"),
+        "{nested}"
     );
     assert_eq!(std::fs::read(&ledger).expect("ledger bytes"), before);
 
@@ -418,15 +455,22 @@ async fn file_read_and_send_keep_distinct_effects_and_bound_identity() {
         "source":"const sent = await tools.cccc_file_send({path:'sample.txt', to:'user', mode:'send', by:'user', actor_id:'beta'}); text(sent.result.event.by);",
         "yield_time_ms":10000
     }), meta("chat-a")).await;
-    assert_eq!(
-        nested["result"]["structuredContent"]["status"], "completed",
+    assert_eq!(nested["result"]["isError"], true, "{nested}");
+    assert!(
+        nested
+            .to_string()
+            .contains("not available to Web Model actors"),
         "{nested}"
     );
-    assert_eq!(nested["result"]["structuredContent"]["output"], "alpha");
     cccc_mcp::shutdown(&f.home).await;
 }
 #[tokio::test]
 async fn routes_two_conversations_across_refresh_without_exposing_raw_metadata() {
+    if rerun_with_web_file_root(
+        "routes_two_conversations_across_refresh_without_exposing_raw_metadata",
+    ) {
+        return;
+    }
     let f = Fixture::new();
     let _daemon = start_daemon(&f.home).await;
     f.bind("alpha", "chat-a");
@@ -467,6 +511,11 @@ async fn routes_two_conversations_across_refresh_without_exposing_raw_metadata()
 
 #[tokio::test]
 async fn legacy_actor_binding_authorizes_its_conversation_without_changing_identity() {
+    if rerun_with_web_file_root(
+        "legacy_actor_binding_authorizes_its_conversation_without_changing_identity",
+    ) {
+        return;
+    }
     let f = Fixture::new();
     let groups = GroupStore::new(f.home.clone()).expect("groups");
     groups
@@ -683,7 +732,10 @@ async fn pairing_tool_receipt_requires_host_metadata_and_grants_no_business_tool
         .await;
     assert_eq!(code["result"]["isError"], true, "{code}");
     assert!(
-        code.to_string().contains("conversation_not_paired"),
+        code.to_string().contains("conversation_not_paired")
+            || code
+                .to_string()
+                .contains("not available to Web Model actors"),
         "{code}"
     );
 }
@@ -750,6 +802,11 @@ async fn closing_login_does_not_depend_on_actor_lifecycle_or_group_parsing() {
 
 #[tokio::test]
 async fn grok_execution_routes_real_tools_and_nested_management_without_identity_metadata() {
+    if rerun_with_web_file_root(
+        "grok_execution_routes_real_tools_and_nested_management_without_identity_metadata",
+    ) {
+        return;
+    }
     let mut f = Fixture::new();
     let groups = GroupStore::new(f.home.clone()).expect("valid test fixture");
     let group = groups
@@ -881,41 +938,53 @@ async fn grok_execution_routes_real_tools_and_nested_management_without_identity
         read["result"]["structuredContent"]["content"], "local fixture content",
         "{read}"
     );
-    let nested = f.call("cccc_code_exec",json!({"actor_token":tokens[0],"source":"const r=await tools.cccc_file({rel_path:'sample.txt'});text(r);","yield_time_ms":10000}),json!({})).await;
-    assert_eq!(
-        nested["result"]["structuredContent"]["status"], "completed",
-        "{nested}"
-    );
-    assert!(!nested.to_string().contains(&tokens[0]));
-    let stopped = f.call("cccc_code_exec",json!({"actor_token":tokens[0],"source":"text(await tools.cccc_capability_use({tool_name:'cccc_actor',tool_arguments:{action:'stop',actor_id:'beta'}}));","yield_time_ms":10000}),json!({})).await;
-    assert_eq!(
-        stopped["result"]["structuredContent"]["status"], "completed",
-        "{stopped}"
-    );
+    // Code mode, and nested management through it, is refused to Web Model
+    // actors: neither call runs, and beta stays enabled.
+    for source in [
+        "const r=await tools.cccc_file({rel_path:'sample.txt'});text(r);",
+        "text(await tools.cccc_capability_use({tool_name:'cccc_actor',tool_arguments:{action:'stop',actor_id:'beta'}}));",
+    ] {
+        let nested = f
+            .call(
+                "cccc_code_exec",
+                json!({"actor_token":tokens[0],"source":source,"yield_time_ms":10000}),
+                json!({}),
+            )
+            .await;
+        assert_eq!(nested["result"]["isError"], true, "{nested}");
+        assert!(
+            nested
+                .to_string()
+                .contains("not available to Web Model actors"),
+            "{nested}"
+        );
+        assert!(!nested.to_string().contains(&tokens[0]));
+    }
     let doc = groups.load(&f.group).expect("valid test fixture");
-    assert!(
-        doc.actors
-            .iter()
-            .find(|a| a.id == "alpha")
-            .expect("valid test fixture")
-            .enabled
-    );
-    assert!(
-        !doc.actors
-            .iter()
-            .find(|a| a.id == "beta")
-            .expect("valid test fixture")
-            .enabled,
-        "{stopped}"
-    );
-    let denied = f
+    for id in ["alpha", "beta"] {
+        assert!(
+            doc.actors
+                .iter()
+                .find(|a| a.id == id)
+                .expect("valid test fixture")
+                .enabled,
+            "{id} must stay enabled"
+        );
+    }
+    // beta was not stopped (nested management is refused), so its token
+    // still answers for beta alone.
+    let still = f
         .call(
             "cccc_connector_status",
             json!({"actor_token":tokens[1]}),
             json!({}),
         )
         .await;
-    assert_eq!(denied["result"]["isError"], true);
+    assert_ne!(still["result"]["isError"], true, "{still}");
+    assert_eq!(
+        still["result"]["structuredContent"]["actor_id"], "beta",
+        "{still}"
+    );
     let ledger = std::fs::read_to_string(groups.ledger_path(&f.group).expect("valid test fixture"))
         .expect("valid test fixture");
     for token in tokens {
@@ -975,6 +1044,133 @@ async fn connector_list_reports_the_public_base_before_any_connector_exists() {
         configured["connector_base_url"],
         "https://cccc.example.test"
     );
+}
+
+#[tokio::test]
+async fn hark_claims_without_metadata_sends_replies_and_never_replays() {
+    let mut f = Fixture::new();
+    let groups = GroupStore::new(f.home.clone()).expect("groups");
+    let group = groups
+        .mutate(&f.group, |g| {
+            g.actors[0].runtime = ActorRuntime::Hark;
+            g.running = true;
+            g.state = cccc_contracts::GroupState::Active;
+            Ok(g.clone())
+        })
+        .expect("Hark actor");
+    let generation = cccc_core::actors::generation_identity(&group.actors[0]);
+    let created =
+        store::hark::configure(&f.home, &f.group, "alpha", &generation, false).expect("connector");
+    f.connector = created["connector"].clone();
+    f.secret = created["secret"].as_str().expect("secret").into();
+    let mut event = cccc_contracts::Event::new("chat.message", &f.group);
+    event.by = "user".into();
+    event.data = json!({"to":["alpha"],"text":"Hark test task","message_mode":"send"})
+        .as_object()
+        .expect("event")
+        .clone();
+    cccc_core::ledger::append(&groups.ledger_path(&f.group).expect("ledger"), &event)
+        .expect("append");
+    let _daemon = start_daemon(&f.home).await;
+    let poll = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cccc_runtime_wait_next_turn","arguments":{}}});
+    let first = f.request(poll.clone(), Some(&f.secret), false).await.1;
+    assert_eq!(
+        first["result"]["structuredContent"]["status"], "work_available",
+        "{first}"
+    );
+    let claimed = &first["result"]["structuredContent"];
+    let token = claimed["actor_token"]
+        .as_str()
+        .expect("execution credential");
+    let duplicate = f.request(poll.clone(), Some(&f.secret), false).await.1;
+    assert_eq!(
+        duplicate["result"]["structuredContent"]["status"], "turn_in_progress",
+        "{duplicate}"
+    );
+    assert!(duplicate["result"]["structuredContent"]["actor_token"].is_null());
+    for (name, args) in [
+        (
+            "cccc_shell",
+            json!({"actor_token":token,"command":"echo forbidden"}),
+        ),
+        (
+            "cccc_file",
+            json!({"actor_token":token,"rel_path":"sample.txt"}),
+        ),
+        (
+            "cccc_capability_use",
+            json!({"actor_token":token,"tool_name":"cccc_shell","tool_arguments":{"command":"echo forbidden"}}),
+        ),
+        (
+            "cccc_message_send",
+            json!({"actor_token":token,"group_id":"g_other","to":["beta"],"text":"wrong group"}),
+        ),
+    ] {
+        let rejected = f.call(name, args, json!({})).await;
+        assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    }
+    let sent = f.call("cccc_message_send",json!({"actor_token":token,"to":["beta"],"text":"Named actor dispatch","insight":"Delegate this synthetic task to beta.","mode":"send","by":"user","actor_id":"beta"}),json!({})).await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    let replied = f
+        .call(
+            "cccc_message_reply",
+            json!({"actor_token":token,"event_id":event.id,"text":"Hark reply"}),
+            json!({}),
+        )
+        .await;
+    assert_ne!(replied["result"]["isError"], true, "{replied}");
+    let ledger =
+        std::fs::read_to_string(groups.ledger_path(&f.group).expect("ledger")).expect("read");
+    let events = ledger
+        .lines()
+        .map(|s| serde_json::from_str::<Value>(s).expect("event"))
+        .collect::<Vec<_>>();
+    assert!(events.iter().any(|e| e["by"] == "alpha"
+        && e["data"]["to"] == json!(["beta"])
+        && e["data"]["text"] == "Named actor dispatch"));
+    assert!(events.iter().any(|e| e["by"] == "alpha"
+        && e["data"]["reply_to"] == event.id
+        && e["data"]["text"] == "Hark reply"));
+    assert!(!ledger.contains(token));
+    let args = json!({"actor_token":token,"turn_id":claimed["turn"]["turn_id"],"event_ids":claimed["turn"]["event_ids"],"status":"done"});
+    let complete = f
+        .call("cccc_runtime_complete_turn", args.clone(), json!({}))
+        .await;
+    assert_ne!(complete["result"]["isError"], true, "{complete}");
+    let repeat = f.call("cccc_runtime_complete_turn", args, json!({})).await;
+    assert_ne!(repeat["result"]["isError"], true, "{repeat}");
+    let denied = f
+        .call(
+            "cccc_message_send",
+            json!({"actor_token":token,"to":["beta"],"text":"expired"}),
+            json!({}),
+        )
+        .await;
+    assert_eq!(denied["result"]["isError"], true);
+    let old_secret = f.secret.clone();
+    let rotated =
+        store::hark::configure(&f.home, &f.group, "alpha", &generation, true).expect("rotate");
+    f.secret = rotated["secret"].as_str().expect("new secret").into();
+    for secret in ["wrong", old_secret.as_str()] {
+        let (status, body) = f.request(poll.clone(), Some(secret), false).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.to_string().contains("hark_credential_invalid"));
+    }
+    groups
+        .mutate(&f.group, |g| {
+            g.actors[0].enabled = false;
+            Ok(())
+        })
+        .expect("stop");
+    let stopped = f.request(poll.clone(), Some(&f.secret), false).await.1;
+    assert_eq!(
+        stopped["result"]["structuredContent"]["status"], "stopped",
+        "{stopped}"
+    );
+    store::revoke(&f.home, f.connector["connector_id"].as_str().expect("id")).expect("revoke");
+    let (status, body) = f.request(poll, Some(&f.secret), false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.to_string().contains("hark_connector_revoked"));
 }
 
 cccc_daemon::session_owner_test_entry!();

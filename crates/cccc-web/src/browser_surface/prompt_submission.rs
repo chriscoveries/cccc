@@ -8,8 +8,8 @@ use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::BrowserSurfaces;
 use super::navigation::goto_dom_content_loaded;
+use super::{BrowserSurfaces, PairingRefusal};
 
 const COMPOSER_SELECTOR: &str = "[data-cccc-web-model-composer=\"cccc-web-model-composer\"]";
 const COMPOSER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -19,7 +19,19 @@ pub(crate) const SUBMISSION_EVIDENCE_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
 const SEND_STABILITY_INTERVAL: Duration = Duration::from_millis(300);
 const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(10);
-pub(crate) const BOUND_CONVERSATION_ERROR_MARKER: &str = "chatgpt_bound_conversation_unavailable:";
+const BOUND_CONVERSATION_ERROR_MARKER: &str = "chatgpt_bound_conversation_unavailable:";
+
+#[derive(Debug)]
+pub(crate) struct BoundPromptNotReady;
+
+impl std::fmt::Display for BoundPromptNotReady {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .write_str("The bound conversation was no longer ready before the prompt was staged")
+    }
+}
+
+impl std::error::Error for BoundPromptNotReady {}
 
 pub(crate) enum PromptSubmissionOutcome {
     Verified(Value),
@@ -34,6 +46,29 @@ struct ComposerCandidate {
     descriptor: String,
     verification_required: bool,
     login_required: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ReadinessSnapshot {
+    url: String,
+    ready_state: Option<String>,
+    candidate: ComposerCandidate,
+    submission: SubmissionSnapshot,
+    attachments: bool,
+}
+
+fn readiness_inspection_error(
+    error: impl Into<anyhow::Error>,
+    inspect_document: bool,
+    context: &'static str,
+) -> anyhow::Error {
+    let error = error.into();
+    if inspect_document {
+        error.context(context)
+    } else {
+        error
+    }
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -70,9 +105,15 @@ struct SubmissionSnapshot {
     running: bool,
     stop_visible: bool,
     composer_exact: bool,
+    #[serde(skip_serializing)]
+    exact_composer_text: Option<String>,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    staged_draft_sha256: Option<String>,
     composer_contains_prompt: bool,
     composer_chars: usize,
     user_message_count: usize,
+    #[serde(skip_serializing)]
+    thread_loaded: bool,
     send_enabled_count: usize,
 }
 
@@ -127,6 +168,10 @@ impl BrowserSurfaces {
             || !observed.echo_found
             || self.page(key).await?.target_id() != page.target_id()
         {
+            return Ok(None);
+        }
+        // cwf#853: a bubble under the maximum-length banner was refused.
+        if conversation_limit_after_submit(&page).await.is_some() {
             return Ok(None);
         }
         Ok(Some(json!({
@@ -203,21 +248,16 @@ impl BrowserSurfaces {
         if let Some(target) = pairing {
             target.check_before_send(self, key).await?;
         }
+        let bound_chat = has_chatgpt_conversation_route(target_url);
         // Recovery owns one exact draft on the current page, not permission to
         // navigate back and replace whatever is there after a user changes tabs.
-        if expected_staged_draft.is_none() {
-            if has_chatgpt_conversation_route(target_url) {
-                self.align_chatgpt_conversation_target(key, target_url, Duration::from_secs(5))
-                    .await?;
-            } else if !target_url.is_empty() {
-                let current = page.url().await?.unwrap_or_default();
-                if !same_page(&current, target_url) {
-                    goto_dom_content_loaded(&page, target_url).await?;
-                }
+        // Managed ChatGPT delivery already aligns the page before claiming.
+        if expected_staged_draft.is_none() && !bound_chat && !target_url.is_empty() {
+            let current = page.url().await?.unwrap_or_default();
+            if !same_page(&current, target_url) {
+                goto_dom_content_loaded(&page, target_url).await?;
             }
         }
-        dismiss_duplicate_upload_dialog(&page).await?;
-
         // Pairing retries share their explanatory prefix, but each carries a
         // different code. Only the complete setup message identifies this send.
         let needles = if pairing.is_some() {
@@ -226,6 +266,20 @@ impl BrowserSurfaces {
             submission_needles(prompt)
         };
         let existing = inspect_submission(&page, prompt, &needles).await?;
+        if bound_chat && !conversation_target_matches(target_url, &existing.url) {
+            return Err(BoundPromptNotReady.into());
+        }
+        dismiss_duplicate_upload_dialog(&page, bound_chat.then_some(existing.url.as_str())).await?;
+        // cwf#853: never type into a conversation ChatGPT has closed for length.
+        if let Some(limit) = conversation_limit_after_submit(&page).await {
+            self.record_page_state(key, &page).await;
+            if pairing.is_some() {
+                bail!(super::conversation_limit::PAIRING_CONVERSATION_FULL);
+            }
+            return Ok(conversation_limit_outcome(
+                "", "", &existing, &existing, &limit,
+            ));
+        }
         if existing.echo_found && expected_staged_draft.is_none() {
             self.record_page_state(key, &page).await;
             return Ok(PromptSubmissionOutcome::Verified(evidence(
@@ -238,9 +292,25 @@ impl BrowserSurfaces {
             )));
         }
 
-        let composer = wait_for_composer(&page).await?;
+        let composer = if bound_chat {
+            let composer: ComposerCandidate = page
+                .evaluate(format!("({SELECT_COMPOSER_SCRIPT})()"))
+                .await
+                .context(BoundPromptNotReady)?
+                .into_value()
+                .context(BoundPromptNotReady)?;
+            if composer.selector.is_empty() {
+                return Err(BoundPromptNotReady.into());
+            }
+            composer
+        } else {
+            wait_for_composer(&page).await?
+        };
         let staged = inspect_submission(&page, prompt, &needles).await?;
-        let owns_staged_draft = if let Some(expected) = expected_staged_draft {
+        if bound_chat && !conversation_target_matches(target_url, &staged.url) {
+            return Err(BoundPromptNotReady.into());
+        }
+        let owned_draft = if let Some(expected) = expected_staged_draft {
             let previous =
                 inspect_submission(&page, expected, &submission_needles(expected)).await?;
             if !recoverable_staged_draft(target_url, &previous) {
@@ -253,11 +323,11 @@ impl BrowserSurfaces {
                     &previous,
                 )));
             }
-            true
+            previous.exact_composer_text
         } else {
-            false
+            None
         };
-        if !staged.composer_exact && staged.composer_chars > 0 && !owns_staged_draft {
+        if !staged.composer_exact && staged.composer_chars > 0 && owned_draft.is_none() {
             // A previous delivery or a human may own this draft. Never replace
             // it, including if it appeared after the pre-claim readiness check.
             return Ok(PromptSubmissionOutcome::Ambiguous(evidence(
@@ -269,16 +339,38 @@ impl BrowserSurfaces {
                 &staged,
             )));
         }
-        if !staged.composer_exact {
+        let inserted_here = !staged.composer_exact;
+        if inserted_here {
             if let Some(target) = pairing {
                 target.check_before_send(self, key).await?;
             }
-            focus_and_select_composer(&page).await?;
-            page.execute(InsertTextParams::new(prompt))
-                .await
-                .context("insert prompt into visible browser composer")?;
+            if bound_chat {
+                if self.page(key).await?.target_id() != page.target_id()
+                    || !stage_bound_prompt(&page, &staged.url, prompt, owned_draft.as_deref())
+                        .await?
+                {
+                    return Err(BoundPromptNotReady.into());
+                }
+            } else {
+                focus_and_select_composer(&page).await?;
+                page.execute(InsertTextParams::new(prompt))
+                    .await
+                    .context("insert prompt into visible browser composer")?;
+            }
         }
         let mut baseline = wait_for_prompt_staged(&page, prompt, &needles).await?;
+        if bound_chat && !conversation_target_matches(target_url, &baseline.url) {
+            bail!("The bound conversation changed while staging the prompt");
+        }
+        let staged_hash = if inserted_here && pairing.is_none() {
+            baseline
+                .exact_composer_text
+                .as_deref()
+                .map(super::pairing::draft_digest)
+        } else {
+            None
+        };
+        baseline.staged_draft_sha256 = staged_hash.clone();
         if let Some(path) = attachment_path {
             let attachment = attach_compatibility_image(&page, path, delivery_id).await?;
             if let AttachmentOutcome::Deferred(attachment) = attachment {
@@ -299,6 +391,7 @@ impl BrowserSurfaces {
                 return Ok(with_attachment_evidence(outcome, attachment));
             }
             baseline = inspect_submission(&page, prompt, &needles).await?;
+            baseline.staged_draft_sha256 = staged_hash;
             if !baseline.composer_exact {
                 bail!("browser prompt changed while attaching the compatibility image");
             }
@@ -314,6 +407,9 @@ impl BrowserSurfaces {
         // Waiting for controls must not grant permission to send a draft that
         // a human changed in the meantime (or submit a manual send twice).
         let before_send = inspect_submission(&page, prompt, &needles).await?;
+        if bound_chat && !conversation_target_matches(target_url, &before_send.url) {
+            bail!("The bound conversation changed before send activation");
+        }
         if before_send.echo_found || !before_send.composer_exact {
             return Ok(self
                 .classify_deferred_submission(
@@ -388,7 +484,8 @@ impl BrowserSurfaces {
                 )
                 .await),
             SendReadiness::Missing(probe) => {
-                let request_submit = request_submit(&page).await;
+                let request_submit =
+                    request_submit(&page, prompt, &needles, &before_send.url).await;
                 match request_submit {
                     Ok(result) if result.unsafe_state => Ok(self
                         .classify_deferred_submission(
@@ -424,7 +521,7 @@ impl BrowserSurfaces {
                             )
                             .await)
                     }
-                    Ok(_) if probe.running || probe.stop_visible => Ok(self
+                    Ok(_) if bound_chat || probe.running || probe.stop_visible => Ok(self
                         .classify_deferred_submission(
                             key,
                             &page,
@@ -504,7 +601,16 @@ impl BrowserSurfaces {
             }
         };
         self.record_page_state(key, page).await;
-        if observed.echo_found {
+        if let Some(limit) = conversation_limit_after_submit(page).await {
+            return conversation_limit_outcome(
+                attempt.action,
+                attempt.input,
+                attempt.baseline,
+                &observed,
+                &limit,
+            );
+        }
+        if observed.echo_found && receipt_on_bound_chat(attempt.baseline, &observed) {
             return PromptSubmissionOutcome::Verified(evidence(
                 true,
                 attempt.action,
@@ -551,9 +657,22 @@ impl BrowserSurfaces {
         let mut latest = baseline.clone();
         let mut weak_evidence = None;
         loop {
+            // cwf#853: ChatGPT may render the user bubble and then refuse the
+            // turn with its maximum-length banner. An echo is not a receipt
+            // then; report it unverified with a distinct reason.
+            if let Some(limit) = conversation_limit_after_submit(page).await {
+                self.record_page_state(key, page).await;
+                return conversation_limit_outcome(action, input, baseline, &latest, &limit);
+            }
             match inspect_submission(page, prompt, needles).await {
                 Ok(snapshot) => {
-                    if snapshot.echo_found {
+                    if snapshot.echo_found && receipt_on_bound_chat(baseline, &snapshot) {
+                        if let Some(limit) = conversation_limit_after_submit(page).await {
+                            self.record_page_state(key, page).await;
+                            return conversation_limit_outcome(
+                                action, input, baseline, &snapshot, &limit,
+                            );
+                        }
                         self.record_page_state(key, page).await;
                         return PromptSubmissionOutcome::Verified(evidence(
                             true,
@@ -591,7 +710,7 @@ impl BrowserSurfaces {
         ))
     }
 
-    async fn page(&self, key: &str) -> Result<Page> {
+    pub(super) async fn page(&self, key: &str) -> Result<Page> {
         self.sessions
             .lock()
             .await
@@ -609,6 +728,57 @@ impl BrowserSurfaces {
         let observed = page.url().await?.unwrap_or_default();
         self.record_page_state(key, &page).await;
         Ok(observed)
+    }
+
+    pub(crate) async fn navigate_pairing_destination(
+        &self,
+        key: &str,
+        target_id: &str,
+        observed_url: &str,
+        destination: &str,
+        require_composer: bool,
+    ) -> Result<()> {
+        let operation = self.key_operation(key).await;
+        let _operation = operation.lock().await;
+        let page = self.page(key).await?;
+        if page.target_id().as_ref() != target_id {
+            bail!("pairing_target_changed");
+        }
+        let args = json!({"observed":observed_url,"destination":destination,
+            "require_composer":require_composer});
+        // Decide and navigate in the same document task so input arriving
+        // after the earlier readiness probe can still stop the navigation.
+        let refused = page
+            .evaluate(format!(
+                r#"(() => {{
+                    const args = {args};
+                    const observation = {{tab_url: location.href, ready_state: document.readyState}};
+                    const refuse = code => ({{code, observation}});
+                    if (location.href !== args.observed) return refuse('pairing_target_changed');
+                    const candidate = ({SELECT_COMPOSER_SCRIPT})();
+                    const snapshot = ({INSPECT_SUBMISSION_SCRIPT})({{}}, []);
+                    const attachments = snapshot.composer_chars > 0 ? null : ({COMPOSER_ATTACHMENTS_SCRIPT})();
+                    Object.assign(observation, {{composer_present: Boolean(candidate.selector),
+                        composer_chars: snapshot.composer_chars, composer_has_attachments: attachments,
+                        running: snapshot.running, login_required: Boolean(candidate.login_required),
+                        verification_required: Boolean(candidate.verification_required)}});
+                    if (snapshot.composer_chars > 0 || attachments)
+                        return refuse('pairing_composer_occupied');
+                    if (snapshot.running || candidate.login_required || candidate.verification_required
+                        || (args.require_composer && !candidate.selector)
+                        || document.readyState === 'loading')
+                        return refuse('pairing_browser_not_ready');
+                    if (location.href !== args.observed) return refuse('pairing_target_changed');
+                    location.assign(args.destination);
+                    return {{code: '', observation}};
+                }})()"#
+            ))
+            .await?
+            .into_value::<PairingRefusal>()?;
+        if !refused.code.is_empty() {
+            return Err(refused.into());
+        }
+        Ok(())
     }
 
     pub(crate) async fn align_chatgpt_conversation_target(
@@ -690,10 +860,29 @@ impl BrowserSurfaces {
     }
 
     pub(crate) async fn prompt_readiness(&self, key: &str) -> Result<Value> {
+        Ok(self.read_prompt_readiness(key, false).await?.0)
+    }
+
+    pub(crate) async fn pairing_prompt_readiness(&self, key: &str) -> Result<Value> {
+        let (mut readiness, ready_state) = self.read_prompt_readiness(key, true).await?;
+        let composer_present = readiness["input_selector"]
+            .as_str()
+            .map(|selector| !selector.is_empty());
+        // These observations belong to the pairing reply, outside cached readiness.
+        readiness["ready_state"] = json!(ready_state);
+        readiness["composer_present"] = json!(composer_present);
+        Ok(readiness)
+    }
+
+    async fn read_prompt_readiness(
+        &self,
+        key: &str,
+        inspect_document: bool,
+    ) -> Result<(Value, Option<String>)> {
         let page = self.page(key).await?;
-        let readiness = Self::inspect_prompt_readiness(&page).await;
+        let readiness = Self::inspect_prompt_readiness_with_document(&page, inspect_document).await;
         let snapshot = match &readiness {
-            Ok(value) => value.clone(),
+            Ok((value, _)) => value.clone(),
             Err(_) => json!({
                 "ready":false,"login_required":false,"verification_required":false,
                 "state":"inspection_failed","checked_at":cccc_contracts::utc_now(),
@@ -706,36 +895,130 @@ impl BrowserSurfaces {
         readiness
     }
 
-    async fn inspect_prompt_readiness(page: &Page) -> Result<Value> {
-        let url = page.url().await?.unwrap_or_default();
+    pub(super) async fn inspect_prompt_readiness(page: &Page) -> Result<Value> {
+        Ok(Self::inspect_prompt_readiness_with_document(page, false)
+            .await?
+            .0)
+    }
+
+    async fn inspect_prompt_readiness_with_document(
+        page: &Page,
+        inspect_document: bool,
+    ) -> Result<(Value, Option<String>)> {
+        let url = page
+            .url()
+            .await
+            .map_err(|error| {
+                readiness_inspection_error(
+                    error,
+                    inspect_document,
+                    "read browser URL before readiness inspection",
+                )
+            })?
+            .unwrap_or_default();
         // A new window may still be waiting for response headers. It cannot
         // contain a composer, and evaluating JS there can wait for navigation.
         let loading = matches!(url.as_str(), "" | "about:blank");
-        let candidate = if loading {
-            ComposerCandidate::default()
+        let observed = if loading {
+            ReadinessSnapshot::default()
         } else {
-            page.evaluate(format!("({SELECT_COMPOSER_SCRIPT})()"))
-                .await
-                .context("inspect visible browser composer")?
-                .into_value::<ComposerCandidate>()
-                .context("decode visible browser composer")?
+            let messages = super::chatgpt_dom::MESSAGES_SCRIPT;
+            let document_field = if inspect_document {
+                "ready_state: document.readyState, "
+            } else {
+                ""
+            };
+            page.evaluate(format!(
+                r#"(() => {{
+                    const url = location.href;
+                    const candidate = ({SELECT_COMPOSER_SCRIPT})();
+                    const submission = ({INSPECT_SUBMISSION_SCRIPT})({{}}, ({messages})());
+                    const attachments = ({COMPOSER_ATTACHMENTS_SCRIPT})();
+                    return {{url, {document_field}candidate, submission, attachments}};
+                }})()"#,
+            ))
+            .await
+            .context("inspect browser readiness")?
+            .into_value::<ReadinessSnapshot>()
+            .context("decode browser readiness")?
         };
+        let ReadinessSnapshot {
+            url: observed_url,
+            ready_state,
+            candidate,
+            submission: snapshot,
+            attachments,
+        } = observed;
         let ready = !candidate.selector.is_empty();
-        let snapshot = if ready {
-            inspect_submission(page, "", &[]).await?
+        // cwf#821: a page with no composer may be ChatGPT's "Could not load
+        // this conversation" page (often an account-wide 429). Report it
+        // distinctly so delivery can wait and recover instead of stalling.
+        let load_error =
+            if loading || ready || candidate.login_required || candidate.verification_required {
+                None
+            } else {
+                super::load_error::probe_load_error(page)
+                    .await
+                    .ok()
+                    .and_then(|probe| super::load_error::classify_load_error(&probe))
+            };
+        // cwf#853: ChatGPT keeps the composer on a conversation that hit its
+        // maximum length, but refuses every turn. Treat it as not ready so
+        // delivery never claims queued work for a dead conversation.
+        let conversation_limit = if ready {
+            super::conversation_limit::probe_conversation_limit(page)
+                .await
+                .ok()
+                .filter(super::conversation_limit::ConversationLimitProbe::exceeded)
         } else {
-            SubmissionSnapshot::default()
+            None
         };
+        if !loading {
+            let current_url = page
+                .evaluate("location.href")
+                .await
+                .map_err(|error| {
+                    readiness_inspection_error(
+                        error,
+                        inspect_document,
+                        "read browser URL after readiness inspection",
+                    )
+                })?
+                .into_value::<String>()
+                .map_err(|error| {
+                    readiness_inspection_error(
+                        error,
+                        inspect_document,
+                        "decode browser URL after readiness inspection",
+                    )
+                })?;
+            if snapshot.url != observed_url || current_url != observed_url {
+                return Ok((
+                    json!({
+                        "ready":false,"state":"page_changed","tab_url":current_url,
+                        "checked_at":cccc_contracts::utc_now(),
+                        "message":"The conversation changed during inspection. Checking again before delivery."
+                    }),
+                    None,
+                ));
+            }
+        }
+        let conversation_full = conversation_limit.is_some();
+        let ready = ready && !conversation_full;
         let readiness = json!({
             "ready":ready,
             "composer_chars":snapshot.composer_chars,
-            "composer_has_attachments":!loading && composer_has_attachments(page).await?,
+            "composer_has_attachments":attachments,
             "running":snapshot.running,
+            "thread_loaded":snapshot.thread_loaded,
             "login_required":candidate.login_required,
             "verification_required":candidate.verification_required,
             "state":if loading {"loading"} else if candidate.verification_required {"verification_required"}
-                else if candidate.login_required {"sign_in_required"} else if ready {"ready"} else {"page_not_ready"},
-            "tab_url":url,
+                else if candidate.login_required {"sign_in_required"} else if ready {"ready"}
+                else if conversation_full {super::conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE}
+                else {load_error.unwrap_or("page_not_ready")},
+            "conversation_limit":conversation_limit.as_ref().map(super::conversation_limit::ConversationLimitProbe::to_json),
+            "tab_url":if loading { url } else { observed_url },
             "input_selector":candidate.descriptor,
             "checked_at":cccc_contracts::utc_now(),
             "message":if loading {
@@ -744,13 +1027,17 @@ impl BrowserSurfaces {
                 "Complete the website's security verification in this browser. Delivery is waiting."
             } else if ready {
                 "Browser model composer is ready."
+            } else if conversation_full {
+                super::conversation_limit::conversation_limit_message()
             } else if candidate.login_required {
                 "Sign in using the shared ChatGPT browser."
+            } else if let Some(state) = load_error {
+                super::load_error::load_error_message(state)
             } else {
                 "The conversation input is not available yet. Check the page before retrying."
             }
         });
-        Ok(readiness)
+        Ok((readiness, ready_state))
     }
 
     async fn record_prompt_readiness(&self, key: &str, page: &Page, readiness: &Value) {
@@ -760,6 +1047,23 @@ impl BrowserSurfaces {
         };
         if session.page.target_id() != page.target_id() {
             return;
+        }
+        if readiness["state"] != "inspection_failed" {
+            session.renderer_timeouts = 0;
+            session.metadata["renderer_unresponsive"] = Value::Null;
+            session.last_observed_busy = !composer_is_idle(readiness);
+            if session.last_observed_busy {
+                session.idle_since = None;
+            }
+            let occupied = readiness["ready"] == true
+                && readiness["running"] == false
+                && (readiness["composer_chars"].as_u64().unwrap_or(0) > 0
+                    || readiness["composer_has_attachments"] == true);
+            if occupied && session.metadata["composer_occupied_since"].is_null() {
+                session.metadata["composer_occupied_since"] = json!(cccc_contracts::utc_now());
+            } else if !occupied {
+                session.metadata["composer_occupied_since"] = Value::Null;
+            }
         }
         if let Some(url) = readiness["tab_url"].as_str() {
             session.url = url.to_owned();
@@ -786,15 +1090,19 @@ impl BrowserSurfaces {
     }
 }
 
-async fn dismiss_duplicate_upload_dialog(page: &Page) -> Result<()> {
+async fn dismiss_duplicate_upload_dialog(page: &Page, url: Option<&str>) -> Result<()> {
+    let url = json!(url);
     let action = page
-        .evaluate(format!("({DISMISS_DUPLICATE_UPLOAD_DIALOG_SCRIPT})()"))
+        .evaluate(format!(
+            "(() => {{ const url = {url}; return url !== null && location.href !== url ? 'changed' : ({DISMISS_DUPLICATE_UPLOAD_DIALOG_SCRIPT})(); }})()"
+        ))
         .await
         .context("inspect duplicate compatibility image dialog")?
         .into_value::<String>()
         .context("decode duplicate compatibility image dialog state")?;
     match action.as_str() {
         "none" => return Ok(()),
+        "changed" => return Err(BoundPromptNotReady.into()),
         "dismissed" => {}
         _ => bail!("ChatGPT duplicate compatibility image dialog could not be dismissed"),
     }
@@ -919,8 +1227,11 @@ async fn attach_compatibility_image(
 
 // Keep the early recovery inspection and final replacement check identical.
 fn recoverable_staged_draft(target_url: &str, snapshot: &SubmissionSnapshot) -> bool {
-    same_page(&snapshot.url, target_url)
-        && snapshot.user_message_count == 0
+    (if has_chatgpt_conversation_route(target_url) {
+        conversation_target_matches(target_url, &snapshot.url)
+    } else {
+        same_page(&snapshot.url, target_url)
+    }) && snapshot.user_message_count == 0
         && !snapshot.echo_found
         && !snapshot.running
         && !snapshot.stop_visible
@@ -975,6 +1286,38 @@ async fn focus_and_select_composer(page: &Page) -> Result<()> {
         bail!("visible browser composer disappeared before prompt insertion");
     }
     Ok(())
+}
+
+async fn stage_bound_prompt(
+    page: &Page,
+    url: &str,
+    prompt: &str,
+    owned: Option<&str>,
+) -> Result<bool> {
+    let payload = json!({"url":url,"prompt":prompt,"owned":owned});
+    let messages = super::chatgpt_dom::MESSAGES_SCRIPT;
+    let result = page.evaluate(format!(
+        r#"(() => {{
+            const payload = {payload};
+            const ready = () => {{
+                if (location.href !== payload.url || ({COMPOSER_ATTACHMENTS_SCRIPT})()) return false;
+                const observed = ({INSPECT_SUBMISSION_SCRIPT})({{prompt:payload.owned || ''}}, ({messages})());
+                return !observed.running && (payload.owned === null
+                    ? observed.composer_chars === 0
+                    : observed.user_message_count === 0 && observed.exact_composer_text === payload.owned);
+            }};
+            if (!ready() || !({FOCUS_AND_SELECT_SCRIPT})() || !ready()) return 'blocked';
+            return document.execCommand('insertText', false, payload.prompt) ? 'inserted' : 'failed';
+        }})()"#,
+    ))
+    .await
+    .context("stage prompt in bound conversation")?
+    .into_value::<String>()?;
+    match result.as_str() {
+        "inserted" => Ok(true),
+        "blocked" => Ok(false),
+        _ => bail!("Browser could not stage the prompt in the bound conversation"),
+    }
 }
 
 async fn wait_for_prompt_staged(
@@ -1080,8 +1423,23 @@ async fn activate_send_control(
     .context("decode browser send activation")
 }
 
-async fn request_submit(page: &Page) -> Result<RequestSubmitResult> {
-    page.evaluate(format!("({REQUEST_SUBMIT_SCRIPT})()"))
+async fn request_submit(
+    page: &Page,
+    prompt: &str,
+    needles: &[String],
+    url: &str,
+) -> Result<RequestSubmitResult> {
+    let payload = json!({"prompt":prompt,"needles":needles,"url":url});
+    let messages = super::chatgpt_dom::MESSAGES_SCRIPT;
+    page.evaluate(format!(
+        r#"(() => {{
+            const payload = {payload};
+            const state = ({INSPECT_SUBMISSION_SCRIPT})(payload, ({messages})());
+            if (state.url !== payload.url || state.echo_found || !state.composer_exact || state.running)
+                return {{action:'', invoked:false, unsafe_state:true, error:''}};
+            return ({REQUEST_SUBMIT_SCRIPT})();
+        }})()"#,
+    ))
         .await
         .context("request browser composer submission")?
         .into_value::<RequestSubmitResult>()
@@ -1120,6 +1478,11 @@ fn weak_submission_evidence(
     None
 }
 
+fn receipt_on_bound_chat(baseline: &SubmissionSnapshot, observed: &SubmissionSnapshot) -> bool {
+    !has_chatgpt_conversation_route(&baseline.url)
+        || conversation_target_matches(&baseline.url, &observed.url)
+}
+
 fn conversation_route_changed(before: &str, after: &str) -> bool {
     if before == after {
         return false;
@@ -1152,7 +1515,7 @@ pub(crate) fn is_chatgpt_url(value: &str) -> bool {
     reqwest::Url::parse(value).is_ok_and(|url| {
         url.host_str().is_some_and(|host| {
             let host = host.trim_end_matches('.').to_ascii_lowercase();
-            host == "chatgpt.com" || host.ends_with(".chatgpt.com")
+            host == "chatgpt.com" || host.ends_with(".chatgpt.com") || host == "chat.openai.com"
         })
     })
 }
@@ -1216,7 +1579,7 @@ fn conversation_route_id(url: &reqwest::Url) -> Option<String> {
     })
 }
 
-fn chatgpt_conversation_id(url: &reqwest::Url) -> Option<String> {
+pub(super) fn chatgpt_conversation_id(url: &reqwest::Url) -> Option<String> {
     let segments = url.path_segments()?.collect::<Vec<_>>();
     segments
         .windows(2)
@@ -1229,6 +1592,36 @@ pub(super) fn provisional_conversation_id(value: &str) -> bool {
         || value.starts_with("WEB%3A")
         || value.starts_with("LOCAL-CHATGPT:")
         || value.starts_with("LOCAL-CHATGPT%3A")
+}
+
+/// The maximum-length banner, if the page shows it now (cwf#853). Inspection
+/// errors count as "not seen": the caller's own checks still apply.
+async fn conversation_limit_after_submit(
+    page: &Page,
+) -> Option<super::conversation_limit::ConversationLimitProbe> {
+    super::conversation_limit::probe_conversation_limit(page)
+        .await
+        .ok()
+        .filter(super::conversation_limit::ConversationLimitProbe::exceeded)
+}
+
+fn conversation_limit_outcome(
+    action: &str,
+    input: &str,
+    baseline: &SubmissionSnapshot,
+    current: &SubmissionSnapshot,
+    limit: &super::conversation_limit::ConversationLimitProbe,
+) -> PromptSubmissionOutcome {
+    let mut value = evidence(
+        false,
+        action,
+        super::conversation_limit::CONVERSATION_LENGTH_EXCEEDED_STATE,
+        input,
+        baseline,
+        current,
+    );
+    value["conversation_limit"] = limit.to_json();
+    PromptSubmissionOutcome::Ambiguous(value)
 }
 
 fn submission_needles(prompt: &str) -> Vec<String> {
@@ -1283,6 +1676,13 @@ fn with_attachment_evidence(
             PromptSubmissionOutcome::Ambiguous(attach(value))
         }
     }
+}
+
+pub(super) fn composer_is_idle(readiness: &Value) -> bool {
+    readiness["ready"] == true
+        && readiness["running"] == false
+        && readiness["composer_chars"].as_u64() == Some(0)
+        && readiness["composer_has_attachments"] == false
 }
 
 const SELECT_COMPOSER_SCRIPT: &str = r#"() => {
@@ -1524,7 +1924,8 @@ const INSPECT_SUBMISSION_SCRIPT: &str = r#"(payload, messages) => {
     );
     const read = node => normalize(('value' in node) ? node.value : (node.innerText || node.textContent || ''));
     const marked = document.querySelector('[data-cccc-web-model-composer="cccc-web-model-composer"]');
-    const markedText = marked ? read(marked) : '';
+    const rawMarked = marked ? (('value' in marked) ? marked.value : (marked.innerText || marked.textContent || '')) : '';
+    const markedText = normalize(rawMarked);
     const composers = Array.from(new Set([
         ...(marked ? [marked] : []),
         ...document.querySelectorAll('main textarea, main [role="textbox"], main [contenteditable="true"]'),
@@ -1562,8 +1963,10 @@ const INSPECT_SUBMISSION_SCRIPT: &str = r#"(payload, messages) => {
     return {
         url: location.href || '', echo_found: echoFound, running: stopVisible, stop_visible: stopVisible,
         composer_exact: Boolean(markedText && markedText === expected),
+        exact_composer_text: markedText && markedText === expected ? rawMarked : null,
         composer_contains_prompt: composerTexts.some(containsPrompt), composer_chars: markedText.length,
         user_message_count: messageNodes.length,
+        thread_loaded: messages.some(message => message.node.isConnected && visible(message.node)),
         send_enabled_count: safeSend.filter(node => !node.disabled
             && String(node.getAttribute('aria-disabled') || '').toLowerCase() !== 'true').length
     };
@@ -1691,7 +2094,7 @@ mod conversation_target_tests {
         for other in [
             "https://chat.openai.com/c/stable-id",
             "https://chatgpt.com:8443/c/stable-id",
-            "https://user@chatgpt.com/c/stable-id",
+            "https://operator!@chatgpt.com/c/stable-id",
             "http://chatgpt.com/c/stable-id",
             "https://chatgpt.com.example/c/stable-id",
             "https://chatgpt.com/",

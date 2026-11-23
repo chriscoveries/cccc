@@ -287,10 +287,13 @@ fn headless_status(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 fn headless_set_status(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let actor = actor(&group, &actor_id)?;
-    if actor.runtime == cccc_contracts::ActorRuntime::ChatgptDots {
+    if matches!(
+        actor.runtime,
+        cccc_contracts::ActorRuntime::ChatgptDots | cccc_contracts::ActorRuntime::Hark
+    ) {
         return Err(OpError::new(
             "provider_managed_headless",
-            "Dots task status is owned by the daemon",
+            "Native pull task status is owned by the daemon",
         ));
     }
     if super::local_headless::supports(actor) {
@@ -333,6 +336,12 @@ pub(super) fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpRe
         ));
     }
     let actor = actor(&group, &actor_id)?;
+    if actor.runtime == cccc_contracts::ActorRuntime::Hark && request.op != "hark_work_claim" {
+        return Err(OpError::new(
+            "hark_connector_required",
+            "Hark work requires its agent-bound pull connector",
+        ));
+    }
     if actor.runtime == cccc_contracts::ActorRuntime::ChatgptDots && request.op != "dots_work_claim"
     {
         return Err(OpError::new(
@@ -564,6 +573,12 @@ pub(super) fn wait_next_turn(home: &HomeLayout, request: &DaemonRequest) -> OpRe
 fn recover_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let actor = require_web_model_actor(&group, &actor_id)?;
+    if actor.runtime == cccc_contracts::ActorRuntime::Hark {
+        return Err(OpError::new(
+            "hark_explicit_resolution_required",
+            "Hark unfinished work requires explicit user resolution; it is not replayed",
+        ));
+    }
     if actor.runtime == cccc_contracts::ActorRuntime::GrokWebModel {
         return Err(OpError::new(
             "grok_event_required",
@@ -759,6 +774,7 @@ fn complete_turn(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         .is_some_and(|binding| match binding["transport"].as_str() {
             Some("grok_webhook") => binding["grok_turn_id"].as_str() != Some(turn_id.as_str()),
             Some("mcp_events") => binding["dots_turn_id"].as_str() != Some(turn_id.as_str()),
+            Some("hark_pull") => binding["hark_turn_id"].as_str() != Some(turn_id.as_str()),
             _ => false,
         })
     {
@@ -838,6 +854,7 @@ pub(super) fn finish_completion(
         )?;
     }
     super::grok_webhook::completed(home, group, actor_id, completion)?;
+    super::hark_pull::completed(home, group, actor_id, completion)?;
     let runtime = actor_state(home, &group.group_id, actor_id)?;
     let owns_active_projection =
         runtime["active_turn_id"].as_str() == Some(completion.turn_id.as_str());
@@ -858,6 +875,12 @@ pub(super) fn finish_completion(
 fn record_browser_delivery(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let (group, actor_id) = group_actor(home, request)?;
     let actor = require_web_model_actor(&group, &actor_id)?;
+    if actor.runtime == cccc_contracts::ActorRuntime::Hark {
+        return Err(OpError::new(
+            "hark_pull_required",
+            "Hark has no browser delivery",
+        ));
+    }
     if actor.runtime == cccc_contracts::ActorRuntime::GrokWebModel {
         return Err(OpError::new(
             "grok_event_required",
@@ -1148,7 +1171,7 @@ fn default_state(group: &GroupDoc, actor_id: &str) -> Value {
     })
 }
 
-fn set_runtime_status(
+pub(super) fn set_runtime_status(
     home: &HomeLayout,
     group: &GroupDoc,
     actor_id: &str,
@@ -1275,7 +1298,13 @@ pub(super) fn settle_active_turn(
     let targets =
         integration_state::group_get(&store, &group.group_id, "web_model_browser_targets")
             .map_err(OpError::io)?;
-    let fenced = targets[&actor.id]["last_delivery_turn_id"].as_str() == Some(active_turn);
+    let target = &targets[&actor.id];
+    let fenced = target["last_delivery_turn_id"].as_str() == Some(active_turn);
+    let preflight_unsent = fenced
+        && target["last_delivery_status"] == "preflight_deferred"
+        && target["last_submission_evidence"]["submitted"] == false
+        && target["last_submission_evidence"]["submission_evidence"] == "send_not_started"
+        && target["last_delivery_event_ids"] == state["active_event_ids"];
     let event_ids = state["active_event_ids"]
         .as_array()
         .into_iter()
@@ -1288,9 +1317,11 @@ pub(super) fn settle_active_turn(
             continue;
         };
         let outcome = match delivery.as_str() {
-            "claimed" if !fenced => crate::ops::runtime_delivery::DeliveryOutcome::Unsubmitted(
-                "the member's runtime was switched before this was submitted",
-            ),
+            "claimed" if !fenced || preflight_unsent && transport == "web_model_browser" => {
+                crate::ops::runtime_delivery::DeliveryOutcome::Unsubmitted(
+                    "the member's runtime was switched before this was submitted",
+                )
+            }
             "claimed" | "accepted" => crate::ops::runtime_delivery::DeliveryOutcome::Ambiguous(
                 "the member's runtime was switched while this was with its previous owner",
             ),

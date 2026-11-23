@@ -54,7 +54,7 @@ async fn mcp_info(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let secret = connector_secret(&headers, &query)?;
-    store::find_authorized(&state, &connector_id, Some(secret))?;
+    store::find_authorized(&state, &connector_id, Some(secret), "get_probe")?;
     activity::record(
         &state,
         &connector_id,
@@ -74,7 +74,7 @@ async fn mcp_info_token(
     State(state): State<AppState>,
     Path((connector_id, secret)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    store::find_authorized(&state, &connector_id, Some(&secret))?;
+    store::find_authorized(&state, &connector_id, Some(&secret), "get_probe")?;
     activity::record(
         &state,
         &connector_id,
@@ -98,7 +98,7 @@ async fn mcp_with_header(
     Json(body): Json<Value>,
 ) -> Result<Response, ApiError> {
     let secret = connector_secret(&headers, &query)?;
-    let connector = store::find_authorized(&state, &connector_id, Some(secret))?;
+    let connector = store::find_authorized(&state, &connector_id, Some(secret), "post_header")?;
     run_connector_mcp(&state, &connector, body, &headers).await
 }
 
@@ -108,7 +108,8 @@ async fn mcp_with_path_token(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response, ApiError> {
-    let connector = store::find_authorized(&state, &connector_id, Some(&secret))?;
+    let connector =
+        store::find_authorized(&state, &connector_id, Some(&secret), "post_path_token")?;
     run_connector_mcp(&state, &connector, body, &headers).await
 }
 
@@ -152,21 +153,29 @@ async fn run_connector_mcp(
         return Ok(StatusCode::ACCEPTED.into_response());
     }
     let mut bound_route = None;
-    let mut response = if let Some(response) =
-        super::web_model_dots::handle(state, connector, &request).await
+    let mut response = if let Some(response) = super::hark::handle(state, connector, &request).await
     {
+        response
+    } else if let Some(response) = super::web_model_dots::handle(state, connector, &request).await {
         response
     } else if let Some(response) = session::handle(state, connector, &request).await {
         response
     } else if method == "tools/call" {
         match store::resolve(state, connector, &request) {
             Ok(binding) => {
-                if connector["provider"] == "grok_web" || binding["transport"] == "mcp_events" {
+                if connector["provider"] == "grok_web"
+                    || binding["transport"] == "mcp_events"
+                    || binding["transport"] == "hark_pull"
+                {
                     if let Some(arguments) = request["params"]["arguments"].as_object_mut() {
                         arguments.remove("actor_token");
                     }
                 }
-                let response = if binding["transport"] == "mcp_events"
+                let response = if binding["transport"] == "hark_pull"
+                    && tool_name == "cccc_runtime_wait_next_turn"
+                {
+                    super::hark::claim(state, &request, &binding).await
+                } else if binding["transport"] == "mcp_events"
                     && tool_name == "cccc_runtime_wait_next_turn"
                 {
                     super::web_model_dots::claim(state, &request, &binding).await
@@ -193,7 +202,9 @@ async fn run_connector_mcp(
         cccc_mcp::handle_request_for_actor(&state.home, &request, "", "").await
     };
     if method == "tools/list" {
-        if connector["provider"] == "grok_web" {
+        if connector["kind"] == "hark_connector" {
+            super::hark::extend_catalog(&mut response);
+        } else if connector["provider"] == "grok_web" {
             session::extend_grok_catalog(&mut response);
         } else {
             session::extend_catalog(&mut response);

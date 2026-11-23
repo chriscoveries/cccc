@@ -326,6 +326,7 @@ pub fn default_command(runtime: ActorRuntime) -> Vec<String> {
         ActorRuntime::WebModel
         | ActorRuntime::ChatgptDots
         | ActorRuntime::GrokWebModel
+        | ActorRuntime::Hark
         | ActorRuntime::Custom => "",
     };
     command.split_whitespace().map(str::to_owned).collect()
@@ -362,6 +363,7 @@ pub fn detect_runtimes() -> Vec<RuntimeProbe> {
         "web_model",
         "chatgpt_dots",
         "grok_web_model",
+        "hark",
         "custom"
     ]))
     .unwrap_or_default()
@@ -379,6 +381,7 @@ pub fn detect_runtimes() -> Vec<RuntimeProbe> {
                 ActorRuntime::WebModel
                     | ActorRuntime::ChatgptDots
                     | ActorRuntime::GrokWebModel
+                    | ActorRuntime::Hark
                     | ActorRuntime::Custom
             ) || path.is_some();
             (available, path)
@@ -429,6 +432,7 @@ const fn display_name(runtime: ActorRuntime) -> &'static str {
         ActorRuntime::WebModel => "ChatGPT Web Model",
         ActorRuntime::ChatgptDots => "ChatGPT Dots",
         ActorRuntime::GrokWebModel => "Grok Bot Web Model",
+        ActorRuntime::Hark => "Hark (pull)",
         ActorRuntime::Custom => "Custom",
     }
 }

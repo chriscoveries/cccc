@@ -105,27 +105,8 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
         event
     };
     let first = message("claimed before a target fence");
-    let daemon_home = home.clone();
-    let daemon = tokio::spawn(async move { cccc_daemon::run(daemon_home).await });
+    let daemon = crate::test_daemon::TestDaemon::start(&home).await;
     let client = cccc_client::DaemonClient::new(home.clone());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if client
-                .call(&DaemonRequest {
-                    v: 1,
-                    op: "ping".into(),
-                    args: Default::default(),
-                })
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("daemon ready");
     let call = |op: &'static str, extra: Value| {
         let client = client.clone();
         let group_id = group.group_id.clone();
@@ -170,7 +151,12 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
     });
     let session_key = key(&group.group_id, "browser-test");
     surfaces
-        .open(&session_key, &temp.path().join("profile"), &url, 800, 600)
+        .open_shared_actor_fixture(
+            &session_key,
+            &temp.path().join("profile"),
+            &url,
+            &crate::browser_surface::actor_identity(&group.actors[0]),
+        )
         .await
         .expect("browser");
     let page = surfaces
@@ -204,12 +190,38 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
                "browser_delivery":{"state":"ambiguous","detail":"daemon restarted"}}),
     )
     .await;
-    assert!(matches!(
-        deliver_pending(&state, &group.group_id, "browser-test")
+    // Opening a shared actor page starts navigation before its document is ready.
+    let fixture_ready = format!(
+        "location.href === {} && \
+         ['interactive', 'complete'].includes(document.readyState) && \
+         !!document.querySelector('textarea#prompt-textarea') && window.attempts === 0",
+        json!(url)
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !page
+            .evaluate(fixture_ready.as_str())
             .await
-            .expect("recover"),
-        DeliveryOutcome::Ambiguous
-    ));
+            .is_ok_and(|result| result.into_value::<bool>().unwrap_or(false))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("fixture document and composer ready");
+    let outcome = deliver_pending(&state, &group.group_id, "browser-test")
+        .await
+        .expect("recover");
+    let outcome_name = match outcome {
+        DeliveryOutcome::Ambiguous => "Ambiguous",
+        DeliveryOutcome::Deferred(_) => "Deferred",
+        DeliveryOutcome::Idle => "Idle",
+        DeliveryOutcome::Stopped => "Stopped",
+        DeliveryOutcome::Submitted => "Submitted",
+    };
+    assert_eq!(
+        outcome_name, "Ambiguous",
+        "interrupted browser turn recovery"
+    );
     let target = load_target(&state, &group.group_id, "browser-test").expect("target");
     let expected_id = browser_delivery_id("browser-test", turn["turn_id"].as_str().expect("turn"));
     assert_eq!(target["last_delivery_status"], "submission_ambiguous");
@@ -361,18 +373,259 @@ async fn settled_browser_turns_are_reviewed_without_resubmitting_their_drafts() 
         "the completed batch must not be submitted again"
     );
 
+    let fourth = message("send once after the draft clears");
+    // The second composer inspection in this attempt runs after the daemon
+    // claim. Model a human beginning a draft at that point.
+    page.evaluate(
+        r#"() => {
+        const box = document.querySelector('textarea');
+        const original = box.setAttribute.bind(box);
+        let probes = 0;
+        box.setAttribute = (name, value) => {
+            if (name === 'data-cccc-web-model-composer' && ++probes === 2) {
+                box.value = 'Unsent draft';
+                delete box.setAttribute;
+            }
+            original(name, value);
+        };
+    }"#,
+    )
+    .await
+    .expect("draft during claim");
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("preflight"),
+        DeliveryOutcome::Idle
+    ));
+    let held = load_target(&state, &group.group_id, "browser-test").expect("held claim");
+    assert_eq!(held["last_delivery_status"], "preflight_deferred");
+    assert_eq!(held["last_delivery_event_ids"], json!([fourth.id]));
+    assert_eq!(
+        held["last_submission_evidence"]["submission_evidence"],
+        "send_not_started"
+    );
+    for _ in 0..2 {
+        assert!(matches!(
+            deliver_pending(&state, &group.group_id, "browser-test")
+                .await
+                .expect("draft held"),
+            DeliveryOutcome::Idle
+        ));
+        assert_eq!(
+            load_target(&state, &group.group_id, "browser-test").expect("same claim"),
+            held
+        );
+        assert_eq!(
+            call("headless_status", json!({})).await["state"]["active_turn_id"],
+            held["last_delivery_turn_id"]
+        );
+    }
+    assert_eq!(
+        page.evaluate("document.querySelector('textarea').value")
+            .await
+            .expect("draft")
+            .into_value::<String>()
+            .expect("text"),
+        "Unsent draft"
+    );
+    page.evaluate(r#"() => {
+        document.querySelector('textarea').value = '';
+        const banner = document.createElement('div');
+        banner.id = 'conversation-limit';
+        banner.textContent = "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat.";
+        document.body.append(banner);
+    }"#).await.expect("full-chat banner");
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("full chat"),
+        DeliveryOutcome::Idle
+    ));
+    assert_eq!(
+        load_target(&state, &group.group_id, "browser-test").expect("same claim"),
+        held
+    );
+    page.evaluate("document.querySelector('#conversation-limit').remove()")
+        .await
+        .expect("recover page");
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("resume exact claim"),
+        DeliveryOutcome::Submitted
+    ));
+    let delivered = load_target(&state, &group.group_id, "browser-test").expect("delivered");
+    assert_eq!(
+        delivered["last_delivery_turn_id"],
+        held["last_delivery_turn_id"]
+    );
+    assert_eq!(delivered["last_delivery_id"], held["last_delivery_id"]);
+    assert_eq!(
+        page.evaluate("window.attempts")
+            .await
+            .expect("attempts")
+            .into_value::<u32>()
+            .expect("number"),
+        2,
+        "one send for each resumed batch"
+    );
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("queue drained"),
+        DeliveryOutcome::Idle
+    ));
+
+    // A previous delivery can be settled while its staged draft still occupies the composer.
+    let old = message("leave the staged batch in the composer");
+    page.evaluate("document.querySelector('button').disabled = true")
+        .await
+        .expect("disable submit while staging");
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("stage without dispatch"),
+        DeliveryOutcome::Deferred(_)
+    ));
+    let deferred = load_target(&state, &group.group_id, "browser-test").expect("staged attempt");
+    assert_eq!(deferred["last_delivery_event_ids"], json!([old.id]));
+    let delivery_id = required(&deferred, "last_delivery_id").expect("delivery ID");
+    let turn_id = required(&deferred, "last_delivery_turn_id").expect("turn ID");
+    let draft = || async {
+        page.evaluate("document.querySelector('textarea').value")
+            .await
+            .expect("read composer")
+            .into_value::<String>()
+            .expect("composer text")
+    };
+    let staged = draft().await;
+    assert!(staged.contains(&old.id));
+    assert_eq!(
+        deferred["staged_draft"]["sha256"].as_str(),
+        Some(format!("{:x}", Sha256::digest(staged.as_bytes())).as_str())
+    );
+
+    // Settle through the worker's retry-budget completion path without waiting for its timers.
+    let evidence = json!({
+        "submitted": false,
+        "submission_evidence": "deferred_retry_budget_exhausted",
+        "send_not_dispatched": true
+    });
+    assert!(matches!(
+        complete_ambiguous_attempt(
+            &state,
+            &group.group_id,
+            "browser-test",
+            DeliveryAttempt {
+                turn_id,
+                event_ids: deferred["last_delivery_event_ids"].clone(),
+                delivery_id,
+            },
+            evidence,
+            "deferred retry budget exhausted",
+        )
+        .await
+        .expect("settle the unsent attempt"),
+        DeliveryOutcome::Ambiguous
+    ));
+    let old_receipts = || {
+        std::fs::read_to_string(&ledger_path)
+            .expect("ledger")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("ledger event"))
+            .filter(|event| {
+                event["data"]["source_event_id"] == old.id
+                    || event["data"]["turn_id"] == turn_id
+                    || event["data"]["delivery_id"] == delivery_id
+            })
+            .collect::<Vec<_>>()
+    };
+    let settled_receipts = old_receipts();
+    assert!(settled_receipts.iter().any(|event| {
+        event["kind"] == "runtime.delivery" && event["data"]["state"] == "ambiguous"
+    }));
+    assert_eq!(
+        call("headless_status", json!({})).await["state"]["active_turn_id"],
+        ""
+    );
+
+    // Edit only the text, leaving the managed target and the stored proof intact.
+    let edited = staged.replacen("leave the staged batch", "Leave the staged batch", 1);
+    assert_ne!(edited, staged);
+    page.evaluate(format!(
+        r#"(() => {{
+            document.querySelector('button').disabled = false;
+            const box = document.querySelector('textarea');
+            box.value = {};
+            window.laterSubmissions = [];
+            box.form.addEventListener('submit', () => window.laterSubmissions.push(box.value), true);
+        }})()"#,
+        json!(edited)
+    ))
+    .await
+    .expect("edit the draft and track later submissions");
+    let later = message("deliver only this later event");
+    let later_submissions = || async {
+        page.evaluate("window.laterSubmissions")
+            .await
+            .expect("submissions")
+            .into_value::<Vec<String>>()
+            .expect("submitted prompts")
+    };
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("preserve the edit"),
+        DeliveryOutcome::Ambiguous
+    ));
+    assert_eq!(draft().await, edited);
+    assert!(later_submissions().await.is_empty());
+    assert_eq!(
+        call("headless_status", json!({})).await["state"]["active_turn_id"],
+        ""
+    );
+
+    page.evaluate(format!(
+        "document.querySelector('textarea').value={}",
+        json!(staged)
+    ))
+    .await
+    .expect("restore the exact staged text");
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("automatically clear the owned draft"),
+        DeliveryOutcome::Idle
+    ));
+    assert_eq!(draft().await, "");
+    assert!(later_submissions().await.is_empty());
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("deliver the later event"),
+        DeliveryOutcome::Submitted
+    ));
+    assert!(matches!(
+        deliver_pending(&state, &group.group_id, "browser-test")
+            .await
+            .expect("poll the drained queue"),
+        DeliveryOutcome::Idle
+    ));
+    let submitted = later_submissions().await;
+    assert_eq!(submitted.len(), 1);
+    assert!(submitted[0].contains(&later.id));
+    assert!(!submitted[0].contains(&old.id));
+    let later_states =
+        cccc_core::inbox::delivery_states(&home, &group, &["browser-test".into()], &later.id)
+            .expect("later delivery state");
+    assert_eq!(later_states["browser-test"].0, "accepted");
+    assert_eq!(old_receipts(), settled_receipts);
+
     surfaces.close(&session_key).await.expect("close browser");
     let _ = shutdown.send(());
     server.abort();
-    client
-        .call(&DaemonRequest {
-            v: 1,
-            op: "shutdown".into(),
-            args: Default::default(),
-        })
-        .await
-        .expect("stop daemon");
-    daemon.await.expect("daemon task").expect("daemon stopped");
+    daemon.stop().await;
 }
 
 #[tokio::test]
@@ -696,6 +949,56 @@ async fn contended_worker_recovers_manual_send_and_only_delivers_later_work() {
         "fixture must enable delivery: {:?}",
         store.load(&group.group_id).expect("group").running
     );
+    let mut held_turn = None;
+    for probe in [2, 3] {
+        // The second inspection runs after the claim. The third selects the
+        // composer for staging after the worker's preflight succeeded.
+        page.evaluate(format!(
+            r#"(() => {{
+            const box = document.querySelector('textarea');
+            const original = box.setAttribute.bind(box);
+            let probes = 0;
+            box.setAttribute = (name, value) => {{
+                if (name === 'data-cccc-web-model-composer' && ++probes === {probe}) {{
+                    history.replaceState(null, '', '/c/unrelated-fixture');
+                    delete box.setAttribute;
+                }}
+                original(name, value);
+            }};
+        }})()"#
+        ))
+        .await
+        .expect("switch chats during inspection");
+        assert!(matches!(
+            deliver_pending(&state, &group.group_id, "browser-test")
+                .await
+                .expect("hold changed chat"),
+            DeliveryOutcome::Idle
+        ));
+        let held = load_target(&state, &group.group_id, "browser-test").expect("held target");
+        assert_eq!(held["last_delivery_status"], "preflight_deferred");
+        assert_eq!(held["last_delivery_event_ids"], json!([first.id]));
+        assert_eq!(
+            held["last_submission_evidence"]["submission_evidence"],
+            "send_not_started"
+        );
+        let turn = held["last_delivery_turn_id"].clone();
+        assert!(!turn.as_str().expect("claimed turn ID").is_empty());
+        assert_eq!(*held_turn.get_or_insert(turn.clone()), turn);
+        assert_eq!(
+            page.evaluate(
+                "[location.pathname, document.querySelector('textarea').value, window.attempts]"
+            )
+            .await
+            .expect("wrong chat")
+            .into_value::<Value>()
+            .expect("page state"),
+            json!(["/c/unrelated-fixture", "", 0])
+        );
+        page.evaluate("history.replaceState(null,'','/g/g-p-fixture/c/recovery-fixture')")
+            .await
+            .expect("restore bound chat through Project alias");
+    }
     let initial_state = state.clone();
     let initial_group = group.group_id.clone();
     let initial = tokio::spawn(async move {
@@ -729,12 +1032,8 @@ async fn contended_worker_recovers_manual_send_and_only_delivers_later_work() {
     });
     // Ledger/status wake-ups during the live submission must not orphan it.
     for _ in 0..8 {
-        super::super::web_model_supervisor::ensure_running_actor(
-            &state,
-            Some(&group.group_id),
-            true,
-        )
-        .await;
+        super::super::web_model_supervisor::ensure_running_actor(&state, Some(&group.group_id))
+            .await;
     }
     tokio::time::timeout(std::time::Duration::from_secs(15),async {
         loop {
@@ -757,6 +1056,10 @@ async fn contended_worker_recovers_manual_send_and_only_delivers_later_work() {
     );
     initial.await.expect("initial task");
     let ambiguous = load_target(&state, &group.group_id, "browser-test").expect("target");
+    assert_eq!(
+        ambiguous["last_delivery_turn_id"],
+        held_turn.expect("deferred turn")
+    );
     assert!(
         !recover_verified_ambiguous_submission(&state, &group.group_id, "browser-test", &ambiguous)
             .await
@@ -875,9 +1178,37 @@ async fn contended_worker_recovers_manual_send_and_only_delivers_later_work() {
             .expect("text"),
         "A new human draft"
     );
-    page.evaluate("document.querySelector('textarea').value=''")
-        .await
-        .expect("human clears own draft");
+    // A failed setup can leave its exact draft in the bound conversation.
+    // Only the candidate for this actor has authority to identify it.
+    let binding =
+        super::super::web_model_connector_store::for_actor(&state, &group.group_id, "browser-test")
+            .expect("binding");
+    let connector = binding["connector_id"].as_str().expect("connector");
+    let pairing = cccc_core::web_model_connectors::begin_pairing(
+        &state.home,
+        connector,
+        &group.group_id,
+        "browser-test",
+        "fixture-generation",
+        false,
+    )
+    .expect("start setup");
+    cccc_core::web_model_connectors::fail_pairing(
+        &state.home,
+        connector,
+        &group.group_id,
+        "browser-test",
+        pairing["pairing_id"].as_str().expect("candidate"),
+        "pairing_interrupted",
+    )
+    .expect("terminal setup");
+    let stale = crate::browser_surface::pairing_prompt(pairing["code"].as_str().expect("code"));
+    page.evaluate(format!(
+        "document.querySelector('textarea').value={}",
+        json!(stale)
+    ))
+    .await
+    .expect("put terminal setup in composer");
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             if page
@@ -1635,4 +1966,569 @@ async fn a_stopping_web_records_claimed_work_and_claims_no_more() {
         .expect("stop daemon");
     daemon.await.expect("daemon task").expect("daemon stopped");
     server.abort();
+}
+
+const RECOVERY_ACTOR: &str = "browser-test";
+
+struct RecoveryFixture {
+    _home: tempfile::TempDir,
+    state: AppState,
+    group: cccc_core::GroupDoc,
+}
+
+impl RecoveryFixture {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let home = HomeLayout::from_path(directory.path().join("home")).expect("home");
+        home.initialize().expect("initialize");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("page recovery", "").expect("group");
+        group.running = true;
+        let mut actor = Actor::new(RECOVERY_ACTOR);
+        actor.runtime = ActorRuntime::WebModel;
+        actor.normalize_runtime_constraints();
+        actor.generation = "fixture-generation".into();
+        actor
+            .env
+            .insert("CCCC_WEB_MODEL_DELIVERY_MODE".into(), "browser".into());
+        group.actors.push(actor);
+        group.extra.insert(
+            super::super::web_model_browser::TARGETS_KEY.into(),
+            json!({}),
+        );
+        store.save(&group).expect("save");
+        let (_, _, _, state) = crate::app_with_shutdown(
+            home,
+            tokio::sync::broadcast::channel(1).0,
+            crate::WebMode::Normal,
+            None,
+            crate::LiveBinding {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            "managed-page-recovery".into(),
+        );
+        Self {
+            _home: directory,
+            state,
+            group,
+        }
+    }
+
+    fn queue(&self) -> Event {
+        let store = GroupStore::new(self.state.home.clone()).expect("store");
+        let mut event = Event::new("chat.message", &self.group.group_id);
+        event.by = "user".into();
+        event.data.insert("message_mode".into(), json!("send"));
+        event.data.insert("to".into(), json!([RECOVERY_ACTOR]));
+        event
+            .data
+            .insert("text".into(), json!("Queued while the browser was closed"));
+        ledger::append(
+            &store.ledger_path(&self.group.group_id).expect("ledger"),
+            &event,
+        )
+        .expect("message");
+        event
+    }
+
+    async fn open(&self, url: &str) -> String {
+        let group = &self.group.group_id;
+        super::login_tests::pair_fixture(&self.state, group, url);
+        let actor = &self.group.actors[0];
+        let profile = super::super::web_model_shared_browser::profile(&self.state, "chatgpt_web");
+        let session_key = key(group, RECOVERY_ACTOR);
+        self.state
+            .browser_surfaces
+            .open_shared_actor_fixture(
+                &session_key,
+                &profile,
+                url,
+                &crate::browser_surface::actor_identity(actor),
+            )
+            .await
+            .expect("managed browser page");
+        self.wait_for_page(&session_key, url).await;
+        session_key
+    }
+
+    async fn wait_for_page(&self, key: &str, url: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if self
+                    .state
+                    .browser_surfaces
+                    .prompt_readiness(key)
+                    .await
+                    .is_ok_and(|state| state["tab_url"] == url && state["state"] != "loading")
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("fixture page loads");
+    }
+}
+
+async fn local_recovery_server(router: Router) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listen");
+    let url = format!("http://{}/", listener.local_addr().expect("address"));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve");
+    });
+    (url, server)
+}
+
+#[tokio::test]
+async fn closed_idle_and_unresponsive_pages_reopen_only_on_their_own_managed_target() {
+    use super::super::web_model_supervisor::reopen_on_demand;
+    use std::time::Duration;
+
+    if crate::system_browser_path().is_none() {
+        return;
+    }
+    let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
+    let (url, server) = local_recovery_server(Router::new().route("/", get(|| async {
+        Html(r#"<textarea id="prompt-textarea" style="width:500px;height:120px"></textarea>
+        <button aria-label="Stop generating">Stop</button><script>document.hasFocus=()=>false;</script>"#)
+    }))).await;
+    let fixture = RecoveryFixture::new();
+    let state = &fixture.state;
+    let group = &fixture.group.group_id;
+    let session_key = fixture.open(&url).await;
+    let surfaces = &state.browser_surfaces;
+    let profile = super::super::web_model_shared_browser::profile(state, "chatgpt_web");
+    let sibling = surfaces
+        .open_shared_actor_fixture("test-sibling", &profile, &url, "sibling")
+        .await
+        .expect("sibling");
+    let initial = surfaces.info(&session_key).await;
+    let initial_target = initial["target_id"].as_str().expect("target");
+    assert!(
+        !surfaces
+            .consider_actor_idle_close(&session_key, initial_target, true, Duration::ZERO)
+            .await
+            .expect("busy page protected")
+    );
+    let page = surfaces
+        .sessions
+        .lock()
+        .await
+        .get(&session_key)
+        .expect("session")
+        .page
+        .clone();
+    page.evaluate("document.querySelector('button').remove()")
+        .await
+        .expect("finish response");
+    assert!(
+        surfaces
+            .consider_actor_idle_close(&session_key, initial_target, true, Duration::ZERO)
+            .await
+            .expect("idle page closes")
+    );
+    let retired = surfaces.info(&session_key).await;
+    assert_eq!(retired["closed_reason"], "idle");
+    assert!(!reopen_on_demand(state, group, RECOVERY_ACTOR, &retired).await);
+    assert_eq!(surfaces.info(&session_key).await["active"], false);
+
+    fixture.queue();
+    assert!(reopen_on_demand(state, group, RECOVERY_ACTOR, &retired).await);
+    fixture.wait_for_page(&session_key, &url).await;
+    let first_reopened = surfaces.info(&session_key).await;
+    let first_reopened_id = first_reopened["target_id"].as_str().expect("new target");
+    assert_ne!(first_reopened_id, initial_target);
+    assert_ne!(first_reopened["target_id"], sibling["target_id"]);
+    let page = surfaces
+        .sessions
+        .lock()
+        .await
+        .get(&session_key)
+        .expect("session")
+        .page
+        .clone();
+    page.evaluate("document.querySelector('button').remove()")
+        .await
+        .expect("finish response");
+    surfaces
+        .prompt_readiness(&session_key)
+        .await
+        .expect("last healthy observation");
+    for expected in [false, false, true] {
+        assert_eq!(
+            surfaces
+                .actor_probe_timed_out(&session_key, first_reopened_id, true)
+                .await
+                .expect("renderer timeout"),
+            expected
+        );
+    }
+    let retired = surfaces.info(&session_key).await;
+    assert_eq!(retired["closed_reason"], "renderer_unresponsive");
+    assert!(reopen_on_demand(state, group, RECOVERY_ACTOR, &retired).await);
+    assert_ne!(
+        surfaces.info(&session_key).await["target_id"],
+        first_reopened["target_id"]
+    );
+    assert_eq!(
+        surfaces.info("test-sibling").await["target_id"],
+        sibling["target_id"]
+    );
+    surfaces.shutdown_all().await.expect("close shared browser");
+    server.abort();
+}
+
+#[tokio::test]
+async fn renderer_loss_reopens_the_bound_chat_and_delivers_once() {
+    use chromiumoxide::cdp::browser_protocol::{
+        inspector::{EnableParams, EventTargetCrashed},
+        page::CrashParams,
+    };
+    use futures_util::StreamExt;
+    use std::time::Duration;
+
+    if crate::system_browser_path().is_none() {
+        return;
+    }
+    let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
+    let (base, server) = local_recovery_server(
+        Router::new()
+            .route("/", get(|| async { Html("<p>Neighboring tab</p>") }))
+            .route("/c/renderer-recovery", get(|| async {
+                Html(r#"<main><form onsubmit="event.preventDefault();window.attempts++;const t=document.querySelector('textarea');const a=document.createElement('article');a.dataset.messageAuthorRole='user';a.textContent=t.value;document.querySelector('main').append(a);t.value=''"><textarea id="prompt-textarea" style="width:500px;height:120px"></textarea><button type="submit">Send</button></form></main><script>window.attempts=0</script>"#)
+            })),
+    )
+    .await;
+    let url = format!("{base}c/renderer-recovery");
+    let fixture = RecoveryFixture::new();
+    let state = &fixture.state;
+    let group = &fixture.group.group_id;
+    let daemon = crate::test_daemon::TestDaemon::start(&state.home).await;
+    let session_key = fixture.open(&url).await;
+    let surfaces = &state.browser_surfaces;
+    assert_eq!(
+        surfaces
+            .prompt_readiness(&session_key)
+            .await
+            .expect("healthy composer")["ready"],
+        true
+    );
+    let binding = || {
+        super::super::web_model_connector_store::for_actor(state, group, RECOVERY_ACTOR)
+            .expect("saved binding")
+    };
+    let revision = binding()["revision"].clone();
+    let profile = super::super::web_model_shared_browser::profile(state, "chatgpt_web");
+    let sibling_url = base.replacen("127.0.0.1", "localhost", 1);
+    let sibling = surfaces
+        .open_shared_actor_fixture("renderer-loss-sibling", &profile, &sibling_url, "sibling")
+        .await
+        .expect("neighboring page");
+    fixture
+        .wait_for_page("renderer-loss-sibling", &sibling_url)
+        .await;
+    let initial = surfaces.info(&session_key).await;
+    let page = surfaces.sessions.lock().await[&session_key].page.clone();
+    let mut crashes = page
+        .event_listener::<EventTargetCrashed>()
+        .await
+        .expect("crash events");
+    page.execute(EnableParams::default())
+        .await
+        .expect("enable crash events");
+    // Crash the renderer for this tab in the fixture browser. Chrome leaves the
+    // target registered, so this exercises readiness instead of target removal.
+    let crash = tokio::spawn(async move { page.execute(CrashParams::default()).await });
+    tokio::time::timeout(Duration::from_secs(10), crashes.next())
+        .await
+        .expect("renderer crash notification timed out")
+        .expect("renderer crashed");
+    crash.abort();
+    let listed = surfaces.info(&session_key).await;
+    assert_eq!(
+        listed["active"], true,
+        "crashed target must still be listed"
+    );
+    assert_eq!(listed["target_id"], initial["target_id"]);
+    let queued = fixture.queue();
+
+    for _ in 0..2 {
+        assert!(matches!(
+            deliver_pending(state, group, RECOVERY_ACTOR)
+                .await
+                .expect("inspect crashed page"),
+            DeliveryOutcome::Idle
+        ));
+        let waiting = surfaces.info(&session_key).await;
+        assert_eq!(waiting["target_id"], initial["target_id"]);
+        assert_eq!(
+            waiting["metadata"]["prompt_readiness"]["state"],
+            "inspection_failed"
+        );
+    }
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("retire crashed page"),
+        DeliveryOutcome::Idle
+    ));
+    let retired = surfaces.info(&session_key).await;
+    assert_eq!(retired["closed_reason"], "renderer_unresponsive");
+    assert!(
+        super::super::web_model_supervisor::reopen_on_demand(
+            state,
+            group,
+            RECOVERY_ACTOR,
+            &retired
+        )
+        .await
+    );
+    fixture.wait_for_page(&session_key, &url).await;
+    assert_ne!(
+        surfaces.info(&session_key).await["target_id"],
+        initial["target_id"]
+    );
+    assert_eq!(binding()["url"], url);
+    assert_eq!(binding()["revision"], revision);
+    assert_eq!(
+        surfaces.info("renderer-loss-sibling").await["target_id"],
+        sibling["target_id"]
+    );
+    fixture
+        .wait_for_page("renderer-loss-sibling", &sibling_url)
+        .await;
+
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("deliver queued event"),
+        DeliveryOutcome::Submitted
+    ));
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("check for replay"),
+        DeliveryOutcome::Idle
+    ));
+    let page = surfaces.sessions.lock().await[&session_key].page.clone();
+    assert_eq!(
+        page.evaluate("window.attempts")
+            .await
+            .expect("attempts")
+            .into_value::<u32>()
+            .expect("count"),
+        1
+    );
+    let target = load_target(state, group, RECOVERY_ACTOR).expect("settled target");
+    assert_eq!(target["last_delivery_status"], "submitted");
+    assert_eq!(target["last_delivery_event_ids"], json!([queued.id]));
+    let store = GroupStore::new(state.home.clone()).expect("store");
+    let events =
+        std::fs::read_to_string(store.ledger_path(group).expect("ledger path")).expect("ledger");
+    let settlements = events
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("ledger event"))
+        .filter(|event| {
+            event["kind"] == "runtime.delivery"
+                && event["data"]["source_event_id"] == queued.id
+                && event["data"]["state"] == "accepted"
+        })
+        .count();
+    assert_eq!(settlements, 1);
+    surfaces
+        .shutdown_all()
+        .await
+        .expect("close fixture browser");
+    server.abort();
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn load_error_is_retried_before_ambiguous_review_and_exhausts_visibly() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    if crate::system_browser_path().is_none() {
+        return;
+    }
+    let _chrome_guard = crate::browser_surface::chrome_test_guard().await;
+    let visits = Arc::new(AtomicUsize::new(0));
+    let visits_on_page = Arc::clone(&visits);
+    let healthy = Arc::new(AtomicBool::new(false));
+    let healthy_on_page = Arc::clone(&healthy);
+    let (url, server) = local_recovery_server(Router::new().route("/", get(move || {
+        let visits = Arc::clone(&visits_on_page);
+        let healthy = Arc::clone(&healthy_on_page);
+        async move {
+            use axum::response::IntoResponse;
+            visits.fetch_add(1, Ordering::Relaxed);
+            if healthy.load(Ordering::Relaxed) {
+                return Html(r#"<article data-message-author-role="user">Earlier message</article>
+                    <textarea id="prompt-textarea" style="width:500px;height:120px"></textarea>"#)
+                    .into_response();
+            }
+            (axum::http::StatusCode::TOO_MANY_REQUESTS, [("Retry-After", "85")],
+                Html("<main>Could not load this ChatGPT conversation<button>Try again</button></main>"))
+                .into_response()
+        }
+    }))).await;
+    let fixture = RecoveryFixture::new();
+    let state = &fixture.state;
+    let group = &fixture.group.group_id;
+    let session_key = fixture.open(&url).await;
+    fixture.queue();
+    update_target(
+        state,
+        group,
+        RECOVERY_ACTOR,
+        json!({
+            "last_delivery_status":"submission_ambiguous","last_delivery_id":"prior"
+        }),
+    )
+    .expect("existing fence");
+    let binding =
+        load_target(state, group, RECOVERY_ACTOR).expect("bound")["binding_revision"].clone();
+
+    let page = state
+        .browser_surfaces
+        .sessions
+        .lock()
+        .await
+        .get(&session_key)
+        .expect("page")
+        .page
+        .clone();
+    page.evaluate(
+        r#"() => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.id = 'held-file';
+        const upload = new DataTransfer();
+        upload.items.add(new File(['draft'], 'draft.txt'));
+        input.files = upload.files;
+        document.body.append(input);
+        const stop = document.createElement('button');
+        stop.id = 'running-reply';
+        stop.setAttribute('aria-label', 'Stop generating');
+        stop.textContent = 'Stop';
+        document.body.append(stop);
+    }"#,
+    )
+    .await
+    .expect("staged file while provider stops");
+    let readiness = state
+        .browser_surfaces
+        .prompt_readiness(&session_key)
+        .await
+        .expect("load error");
+    assert_eq!(readiness["ready"], false);
+    assert_eq!(readiness["composer_has_attachments"], true);
+    assert_eq!(readiness["running"], true);
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("record episode"),
+        DeliveryOutcome::Idle
+    ));
+    let mut due =
+        load_target(state, group, RECOVERY_ACTOR).expect("target")["load_recovery"].clone();
+    due["next_reload_at_ms"] = json!(0);
+    update_target(state, group, RECOVERY_ACTOR, json!({"load_recovery":due})).expect("due retry");
+    for blocker in ["#running-reply", "#held-file"] {
+        assert!(matches!(
+            deliver_pending(state, group, RECOVERY_ACTOR)
+                .await
+                .expect("busy error page"),
+            DeliveryOutcome::Idle
+        ));
+        assert_eq!(visits.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            load_target(state, group, RECOVERY_ACTOR).expect("target")["load_recovery"]["reload_attempts"],
+            0,
+            "a blocked retry must not spend its budget"
+        );
+        page.evaluate(format!(
+            "document.querySelector({}).remove()",
+            json!(blocker)
+        ))
+        .await
+        .expect("operator clears obstruction");
+    }
+
+    for attempts in 1..=3 {
+        assert!(matches!(
+            deliver_pending(state, group, RECOVERY_ACTOR)
+                .await
+                .expect("load error"),
+            DeliveryOutcome::Idle
+        ));
+        let target = load_target(state, group, RECOVERY_ACTOR).expect("target");
+        assert_eq!(target["binding_revision"], binding);
+        assert_eq!(target["last_delivery_status"], "submission_ambiguous");
+        assert_eq!(target["load_recovery"]["reload_attempts"], attempts);
+        if attempts < 3 {
+            let mut due = target["load_recovery"].clone();
+            due["next_reload_at_ms"] = json!(0);
+            update_target(state, group, RECOVERY_ACTOR, json!({"load_recovery":due}))
+                .expect("advance retry clock without sleeping");
+        } else {
+            assert!(target["load_recovery"]["next_reload_at_ms"].is_null());
+        }
+    }
+    let attempted = visits.load(Ordering::Relaxed);
+    assert_eq!(attempted, 4);
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("exhausted"),
+        DeliveryOutcome::Idle
+    ));
+    assert_eq!(visits.load(Ordering::Relaxed), attempted);
+    let health = super::super::web_model_browser::payload(state, group, RECOVERY_ACTOR, false)
+        .await
+        .expect("health")
+        .0["result"]["health_snapshot"]
+        .clone();
+    assert_eq!(health["browser"]["state"], "load_recovery_failed");
+    assert!(health["delivery"]["oldest_undelivered_at"].is_string());
+
+    // An operator reopens the conversation after the provider is healthy.
+    healthy.store(true, Ordering::Relaxed);
+    page.reload().await.expect("operator reload");
+    assert!(matches!(
+        deliver_pending(state, group, RECOVERY_ACTOR)
+            .await
+            .expect("healthy page"),
+        DeliveryOutcome::Ambiguous
+    ));
+    assert!(
+        load_target(state, group, RECOVERY_ACTOR).expect("new target")["load_recovery"].is_null()
+    );
+    state
+        .browser_surfaces
+        .close(&session_key)
+        .await
+        .expect("close");
+    state
+        .browser_surfaces
+        .shutdown_all()
+        .await
+        .expect("close shared browser");
+    server.abort();
+}
+
+#[test]
+fn a_reopened_chat_with_a_composer_still_requires_bound_thread_evidence() {
+    let target = json!({"kind":"existing_chat","url":"https://chatgpt.com/c/thread"});
+    let mut readiness =
+        json!({"ready":true,"running":false,"tab_url":"https://chatgpt.com/c/thread"});
+    assert!(!ready_to_claim(&target, &readiness));
+    readiness["thread_loaded"] = json!(true);
+    readiness["tab_url"] = json!("https://chatgpt.com/g/g-p-project/c/thread");
+    assert!(ready_to_claim(&target, &readiness));
+    readiness["tab_url"] = json!("https://chatgpt.com/c/other");
+    assert!(!ready_to_claim(&target, &readiness));
 }

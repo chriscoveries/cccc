@@ -22,6 +22,7 @@ mod group_space;
 mod group_space_provider;
 mod group_workspace;
 mod groups;
+mod hark;
 mod headless;
 mod headless_store;
 mod im;
@@ -71,7 +72,11 @@ mod web_model_delivery;
 mod web_model_delivery_completion;
 mod web_model_delivery_state;
 mod web_model_dots;
+mod web_model_instance;
 mod web_model_pairing;
+mod web_model_reconcile;
+mod web_model_reopen;
+mod web_model_rotation;
 mod web_model_shared_browser;
 mod web_model_supervisor;
 
@@ -119,6 +124,7 @@ pub fn router() -> Router<AppState> {
         .merge(web_model_connectors::routes())
         .merge(web_model_dots::routes())
         .merge(grok_webhook::routes())
+        .merge(hark::routes())
         .merge(web_model_browser::routes())
         .merge(web_model_pairing::routes())
         .merge(web_model_shared_browser::routes())
