@@ -206,6 +206,18 @@ pub(super) fn apply_resolved(
     start(home, group, actor).map(Some)
 }
 
+/// The environment a PTY launch resolves for `actor`, profile and secrets
+/// included, for read-only checks that must see what the child sees. `None`
+/// when the Actor's profile or secrets cannot be resolved; callers fail open.
+pub(crate) fn launch_environment(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let actor = environment::resolve_launch_actor(home, group, actor).ok()?;
+    Some(environment::launch_env(home, group, &actor))
+}
+
 fn external_lifecycle(kind: &str) -> Result<Option<SessionStatus>, OpError> {
     if matches!(kind, "actor.restart" | "actor.new_session") {
         return Err(OpError::new(

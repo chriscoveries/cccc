@@ -248,6 +248,23 @@ pub(super) fn process_batch_tracked(
     let current_actor = status.launch.map_or(current_actor.clone(), |launch| {
         actor_runtime::as_launched(&current_actor, launch)
     });
+    // agy's first-run wizard reads the terminal before a conversation exists,
+    // so text written to it is consumed as navigation and lost. Only an
+    // explicit unfinished onboarding blocks; the file is re-read every batch,
+    // so finishing the wizard needs no restart.
+    if current_actor.runtime == ActorRuntime::Antigravity
+        && actor_runtime::launch_environment(&job.home, &current_group, &current_actor)
+            .is_some_and(|env| {
+                cccc_core::runtime_mcp::first_run_setup_pending(&status.cwd, &env)
+            })
+    {
+        return BatchOutcome::Terminal(
+            "Antigravity first-run setup is not finished in this Actor's home directory. \
+             Finish it in the Actor's terminal, or run `agy` there once and restart the Actor, \
+             then send again."
+                .into(),
+        );
+    }
     #[cfg(unix)]
     if crate::session_owner::enabled(&job.home) {
         return process_owned_pty_batch(

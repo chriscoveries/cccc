@@ -10,6 +10,15 @@ pub fn ensure(
     environment: &BTreeMap<String, String>,
     add: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<PathBuf> {
+    let home = user_home(cwd, environment)
+        .ok_or_else(|| io::Error::other("Antigravity MCP setup requires a user home directory"))?;
+    let path = home.join(".gemini/config/mcp_config.json");
+    let configured = ensure_entry(cwd, &path, add)?;
+    disable_feedback_survey(&home.join(".gemini/antigravity-cli/settings.json"))?;
+    Ok(configured)
+}
+
+fn user_home(cwd: &Path, environment: &BTreeMap<String, String>) -> Option<PathBuf> {
     let effective: BTreeMap<String, String> = cccc_runtime::unicode_environment()
         .chain(environment.iter().map(|(k, v)| (k.clone(), v.clone())))
         .collect();
@@ -20,18 +29,27 @@ pub fn ensure(
     };
     let home = keys
         .iter()
-        .find_map(|key| effective.get(*key).filter(|value| !value.is_empty()))
-        .ok_or_else(|| io::Error::other("Antigravity MCP setup requires a user home directory"))?;
+        .find_map(|key| effective.get(*key).filter(|value| !value.is_empty()))?;
     let home = Path::new(home);
-    let home = if home.is_absolute() {
+    Some(if home.is_absolute() {
         home.to_owned()
     } else {
         cwd.join(home)
+    })
+}
+
+/// agy's first-run wizard reads the terminal before a conversation exists, so
+/// text written to it is consumed as navigation and lost. Only an explicit
+/// `false` counts as pending: a missing or unreadable file never blocks.
+pub fn first_run_setup_pending(cwd: &Path, environment: &BTreeMap<String, String>) -> bool {
+    let Some(home) = user_home(cwd, environment) else {
+        return false;
     };
-    let path = home.join(".gemini/config/mcp_config.json");
-    let configured = ensure_entry(cwd, &path, add)?;
-    disable_feedback_survey(&home.join(".gemini/antigravity-cli/settings.json"))?;
-    Ok(configured)
+    std::fs::read(home.join(".gemini/antigravity-cli/cache/onboarding.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|state| state.get("onboardingComplete").and_then(Value::as_bool))
+        == Some(false)
 }
 
 fn ensure_entry(

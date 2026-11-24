@@ -295,6 +295,16 @@ fn exercise_startup(prompt: &str, slow_start: bool, pending_acp: Option<ActorRun
     let mut group = store.create("startup", "").expect("group");
     let mut actor = Actor::new("agy");
     actor.runtime = pending_acp.unwrap_or(ActorRuntime::Antigravity);
+    // The fixture provider HOME already completed agy first-run onboarding;
+    // a fresh HOME would show the wizard that owns terminal input.
+    let provider_home = temp.path().join("provider-home");
+    let onboarding = provider_home.join(".gemini/antigravity-cli/cache/onboarding.json");
+    std::fs::create_dir_all(onboarding.parent().expect("onboarding dir")).expect("provider home");
+    std::fs::write(&onboarding, "{\"onboardingComplete\":true}").expect("onboarding file");
+    actor.env.insert(
+        "HOME".into(),
+        provider_home.to_string_lossy().into_owned(),
+    );
     group.actors.push(actor.clone());
     store.save(&group).expect("save");
     let script = temp.path().join("terminal.py");
@@ -462,6 +472,219 @@ while True:
         if let Err(error) = result {
             std::panic::resume_unwind(error);
         }
+    }
+}
+
+/// A fresh Antigravity provider HOME shows a first-run wizard that owns
+/// terminal input, recorded as `onboardingComplete: false`. Delivery must
+/// settle Failed with the remedy — never accept text the conversation cannot
+/// see — and proceed once onboarding completes.
+#[test]
+fn antigravity_delivery_fails_until_first_run_onboarding_completes() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let mut group = store.create("onboarding gate", "").expect("group");
+    let provider_home = temp.path().join("provider-home");
+    let onboarding = provider_home
+        .join(".gemini/antigravity-cli/cache/onboarding.json");
+    std::fs::create_dir_all(onboarding.parent().expect("onboarding dir")).expect("dirs");
+    std::fs::write(&onboarding, r#"{"onboardingComplete":false}"#).expect("onboarding");
+    let mut actor = Actor::new("agy");
+    actor.runtime = ActorRuntime::Antigravity;
+    actor.env.insert(
+        "HOME".into(),
+        provider_home.to_string_lossy().into_owned(),
+    );
+    group.actors.push(actor.clone());
+    store.save(&group).expect("save");
+    let script = temp.path().join("terminal.py");
+    std::fs::write(temp.path().join("prompt.ansi"), "agy prompt\r\n> ").expect("prompt frame");
+    std::fs::write(
+        &script,
+        r#"
+import os,sys,tty,pathlib,json
+root=pathlib.Path(sys.argv[1]);tty.setraw(0)
+os.write(1,b'\x1b[?2004h'+(root/'prompt.ansi').read_bytes())
+(root/'ready').touch()
+buf=b''
+while True:
+ data=os.read(0,65536)
+ if not data:break
+ buf+=data
+ while b'\r' in buf:
+  text,buf=buf.split(b'\r',1)
+  if not text:continue
+  with (root/'received').open('a') as f:f.write(json.dumps(text.decode())+'\n')
+"#,
+    )
+    .expect("write fixture");
+    let terminal = cccc_runtime::start(cccc_runtime::LaunchSpec {
+        group_id: group.group_id.clone(),
+        actor_id: actor.id.clone(),
+        runner: RunnerKind::Pty,
+        command: vec![
+            "python3".into(),
+            script.to_string_lossy().into_owned(),
+            temp.path().to_string_lossy().into_owned(),
+        ],
+        cwd: temp.path().to_path_buf(),
+        env: BTreeMap::new(),
+        cols: 120,
+        rows: 40,
+    })
+    .expect("start fixture");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for(|| temp.path().join("ready").exists());
+        let cancelled = AtomicBool::new(false);
+        let job = |text: &str| {
+            let mut event = Event::new("chat.message", &group.group_id);
+            event.by = "user".into();
+            event.data = serde_json::json!({"to":["agy"],"text":text,"message_mode":"send"})
+                .as_object()
+                .expect("event data")
+                .clone();
+            DeliveryJob {
+                home: home.clone(),
+                group: group.clone(),
+                actor: actor.clone(),
+                event,
+                claimed: true,
+                transport: "pty",
+            }
+        };
+        let first = job("FIRST_TASK");
+        let reason = match process_batch(
+            &mut vec![first.clone()],
+            &mut String::new(),
+            &cancelled,
+        ) {
+            super::BatchOutcome::Terminal(reason) => reason,
+            other => panic!("fresh onboarding must fail the delivery, got {other:?}"),
+        };
+        assert!(
+            reason.contains("first-run") && reason.contains("agy"),
+            "reason names the one-time interactive run: {reason}"
+        );
+        // The delivery worker settles Terminal batches Failed; mirror that
+        // settlement and prove the message is not silently accepted.
+        crate::ops::actor_delivery::fail_jobs(std::slice::from_ref(&first), &reason);
+        assert_eq!(
+            crate::ops::runtime_delivery::latest_state(
+                &home,
+                &group.group_id,
+                &actor.id,
+                &first.event.id
+            )
+            .expect("delivery state")
+            .expect("settled delivery"),
+            ("failed".into(), "pty".into())
+        );
+        assert!(
+            !temp.path().join("received").exists(),
+            "nothing may be written to the terminal while onboarding is pending"
+        );
+
+        // Completing first-run setup flips onboarding.json and the next
+        // delivery reaches the terminal.
+        std::fs::write(&onboarding, r#"{"onboardingComplete":true}"#).expect("onboarding");
+        let second = job("SECOND_TASK");
+        assert!(matches!(
+            process_batch(&mut vec![second], &mut String::new(), &cancelled),
+            super::BatchOutcome::Delivered
+        ));
+        wait_for(|| {
+            std::fs::read_to_string(temp.path().join("received"))
+                .is_ok_and(|text| text.contains("SECOND_TASK"))
+        });
+    }));
+    cccc_runtime::stop(&group.group_id, &actor.id).expect("stop fixture");
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
+/// The onboarding gate is specific to the native Antigravity TUI: another
+/// PTY runtime with the same fresh HOME delivers normally.
+#[test]
+fn non_antigravity_delivery_ignores_first_run_onboarding_state() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let mut group = store.create("other runtime", "").expect("group");
+    let provider_home = temp.path().join("provider-home");
+    std::fs::create_dir_all(&provider_home).expect("provider home");
+    let mut actor = Actor::new("worker");
+    actor.runtime = ActorRuntime::Custom;
+    actor.env.insert(
+        "HOME".into(),
+        provider_home.to_string_lossy().into_owned(),
+    );
+    group.actors.push(actor.clone());
+    store.save(&group).expect("save");
+    let script = temp.path().join("terminal.py");
+    std::fs::write(temp.path().join("prompt.ansi"), "custom prompt\r\n> ").expect("prompt frame");
+    std::fs::write(
+        &script,
+        r#"
+import os,sys,tty,pathlib,json
+root=pathlib.Path(sys.argv[1]);tty.setraw(0)
+os.write(1,b'\x1b[?2004h'+(root/'prompt.ansi').read_bytes())
+(root/'ready').touch()
+buf=b''
+while True:
+ data=os.read(0,65536)
+ if not data:break
+ buf+=data
+ while b'\n' in buf or b'\r' in buf:
+  text,buf=buf.split(b'\n',1) if b'\n' in buf else buf.split(b'\r',1)
+  if not text:continue
+  with (root/'received').open('a') as f:f.write(json.dumps(text.decode())+'\n')
+"#,
+    )
+    .expect("write fixture");
+    let terminal = cccc_runtime::start(cccc_runtime::LaunchSpec {
+        group_id: group.group_id.clone(),
+        actor_id: actor.id.clone(),
+        runner: RunnerKind::Pty,
+        command: vec![
+            "python3".into(),
+            script.to_string_lossy().into_owned(),
+            temp.path().to_string_lossy().into_owned(),
+        ],
+        cwd: temp.path().to_path_buf(),
+        env: BTreeMap::new(),
+        cols: 120,
+        rows: 40,
+    })
+    .expect("start fixture");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for(|| temp.path().join("ready").exists());
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "user".into();
+        event.data = serde_json::json!({"to":["worker"],"text":"TASK","message_mode":"send"})
+            .as_object()
+            .expect("event data")
+            .clone();
+        assert!(matches!(
+            process_batch(
+                &mut vec![DeliveryJob {
+                    home: home.clone(),
+                    group: group.clone(),
+                    actor: actor.clone(),
+                    event,
+                    claimed: true,
+                    transport: "pty",
+                }],
+                &mut String::new(),
+                &AtomicBool::new(false),
+            ),
+            super::BatchOutcome::Delivered
+        ));
+    }));
+    cccc_runtime::stop(&group.group_id, &actor.id).expect("stop fixture");
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
     }
 }
 

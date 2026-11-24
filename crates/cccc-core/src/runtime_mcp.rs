@@ -8,7 +8,7 @@ pub use kimi::ensure as ensure_kimi;
 mod cursor;
 pub use cursor::ensure as ensure_cursor;
 mod antigravity;
-pub use antigravity::ensure as ensure_antigravity;
+pub use antigravity::{ensure as ensure_antigravity, first_run_setup_pending};
 mod grok;
 pub use grok::ensure as ensure_grok;
 

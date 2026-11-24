@@ -237,6 +237,45 @@ fn effective_entry_must_keep_bootstrap_available_and_inherit_actor_context() {
 }
 
 #[test]
+fn first_run_setup_pending_only_on_an_explicit_false() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let env = environment(temp.path());
+    let cwd = temp.path().join("project");
+    let onboarding = temp
+        .path()
+        .join(".gemini/antigravity-cli/cache/onboarding.json");
+
+    // No file: an agy that never writes one is not locked out.
+    assert!(!first_run_setup_pending(&cwd, &env));
+
+    // The body agy writes while the first-run wizard is up.
+    write(
+        &onboarding,
+        &json!({
+            "consumerOnboardingComplete": false,
+            "enterpriseOnboardingComplete": false,
+            "onboardingComplete": false
+        }),
+    );
+    assert!(first_run_setup_pending(&cwd, &env));
+
+    // After the wizard completes, the same file flips to true.
+    write(
+        &onboarding,
+        &json!({
+            "consumerOnboardingComplete": true,
+            "enterpriseOnboardingComplete": true,
+            "onboardingComplete": true
+        }),
+    );
+    assert!(!first_run_setup_pending(&cwd, &env));
+
+    // A truncated or otherwise unreadable file never blocks.
+    std::fs::write(&onboarding, b"{\"onboardingComplete\":fal").expect("truncated");
+    assert!(!first_run_setup_pending(&cwd, &env));
+}
+
+#[test]
 fn concurrent_instances_do_not_race_native_registration() {
     use std::sync::{
         Arc, Barrier,
