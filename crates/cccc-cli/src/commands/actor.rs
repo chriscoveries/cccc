@@ -27,21 +27,22 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             env: raw_env,
             scope,
             submit,
+            enabled,
             group_id,
             by,
         } => {
             let command = parse_command(&command)?;
             let scope = canonical_scope_key(&scope)?;
-            call(
-                client,
-                "actor_add",
-                json!({
-                    "group_id":group(home,group_id)?,"actor_id":actor_id,"title":title,
-                    "model_label":model_label,"runtime":runtime,"runtime_mode":runtime_mode,"command":command,"env":env(raw_env)?,
-                    "default_scope_key":scope,"submit":submit,"by":by
-                }),
-            )
-            .await?
+            let mut patch = json!({
+                "group_id":group(home,group_id)?,"actor_id":actor_id,"title":title,
+                "model_label":model_label,"runtime":runtime,"runtime_mode":runtime_mode,"command":command,"env":env(raw_env)?,
+                "default_scope_key":scope,"submit":submit,"by":by
+            });
+            // The daemon owns the enabled default; send the key only when asked.
+            if let Some(enabled) = enabled {
+                patch["enabled"] = json!(enabled);
+            }
+            call(client, "actor_add", patch).await?
         }
         ActorAction::Remove(target) => lifecycle(client, home, "actor_remove", target).await?,
         ActorAction::Start(target) => lifecycle(client, home, "actor_start", target).await?,

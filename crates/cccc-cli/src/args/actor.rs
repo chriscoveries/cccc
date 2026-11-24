@@ -42,6 +42,9 @@ pub enum ActorAction {
         /// Terminal submission: enter, newline or none.
         #[arg(long, default_value = "enter")]
         submit: String,
+        /// Enable or disable this agent; a disabled agent does not start on delivery.
+        #[arg(long)]
+        enabled: Option<bool>,
         /// Target Group ID; omit to use the current Group.
         #[arg(long = "group")]
         group_id: Option<String>,

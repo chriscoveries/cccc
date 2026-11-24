@@ -1470,6 +1470,51 @@ fn peer_insight_gate_validates_before_persisting_and_exempts_user_only_messages(
 }
 
 #[test]
+fn actor_add_enabled_false_creates_a_disabled_actor() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");
+    let created = call(
+        &home,
+        "group_create",
+        json!({"title":"disabled-add-test","by":"user"}),
+    );
+    let group_id = created.result["group"]["group_id"]
+        .as_str()
+        .expect("group id")
+        .to_owned();
+
+    let added = call(
+        &home,
+        "actor_add",
+        json!({
+            "group_id":group_id,"actor_id":"peer1","enabled":false,"by":"user"
+        }),
+    );
+    assert_eq!(added.result["actor"]["enabled"], false);
+
+    let listed = call(
+        &home,
+        "actor_list",
+        json!({"group_id":group_id,"by":"user"}),
+    );
+    let actor = listed.result["actors"]
+        .as_array()
+        .expect("actors")
+        .iter()
+        .find(|actor| actor["id"] == "peer1")
+        .expect("peer1");
+    assert_eq!(actor["enabled"], false);
+
+    // Omitting the flag keeps the enabled default.
+    let enabled = call(
+        &home,
+        "actor_add",
+        json!({"group_id":group_id,"actor_id":"peer2","by":"user"}),
+    );
+    assert_eq!(enabled.result["actor"]["enabled"], true);
+}
+
+#[test]
 fn cross_group_peer_insight_gate_precedes_both_ledger_writes() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = HomeLayout::from_path(temp.path().join("rust-home")).expect("home");

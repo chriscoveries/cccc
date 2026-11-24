@@ -685,6 +685,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_actor_add_enabled() {
+        let cli = Cli::try_parse_from(["cccc", "actor", "add", "peer1", "--enabled", "false"])
+            .expect("actor add");
+        let Some(CommandKind::Actor(ActorArgs {
+            action: ActorAction::Add { enabled, .. },
+        })) = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(enabled, Some(false));
+
+        let cli = Cli::try_parse_from(["cccc", "actor", "add", "peer1"]).expect("actor add");
+        let Some(CommandKind::Actor(ActorArgs {
+            action: ActorAction::Add { enabled, .. },
+        })) = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(enabled, None);
+    }
+
+    #[test]
     fn runtime_switch_refuses_options_its_target_would_ignore() {
         let parse = |args: &[&str]| {
             Cli::try_parse_from(["cccc", "actor", "switch", "x"].iter().chain(args).copied())
