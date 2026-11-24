@@ -12,6 +12,8 @@ use cccc_contracts::{Actor, ActorRuntime};
 use cccc_core::{GroupDoc, HomeLayout};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// Reason recorded on deliveries settled Failed while first-run setup is
 /// incomplete. Names the one-time interactive `agy` run that completes it.
@@ -76,6 +78,92 @@ fn onboarding_complete(home_dir: &Path) -> bool {
 /// evidence that onboarding is unfinished.
 pub(super) fn setup_required(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> bool {
     effective_home(home, group, actor).is_some_and(|home_dir| !onboarding_complete(&home_dir))
+}
+
+/// What the delivery worker should do while first-run setup is unresolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Gate {
+    /// Onboarding is complete (or cannot be proven incomplete): deliver.
+    Proceed,
+    /// The wizard visibly owns the terminal: an operator may be completing it
+    /// right now, so hold the delivery for a later attempt.
+    Defer,
+    /// Setup is incomplete and no wizard is on screen: settle Failed.
+    Fail,
+}
+
+/// Text the `agy` first-run wizard shows while it owns the terminal. These
+/// strings come from the wizard's own screens; the completed prompt shows
+/// none of them.
+const WIZARD_MARKERS: &[&str] = &[
+    "Choose your color scheme",
+    "Terms of Service & Data Use",
+    "Welcome to the",
+];
+
+/// How long one delivery attempt watches for the wizard before deciding the
+/// terminal is not showing it. Covers `agy` startup before the wizard draws.
+const WIZARD_WAIT: Duration = Duration::from_secs(10);
+const SCREEN_POLL: Duration = Duration::from_millis(200);
+const SCREEN_HISTORY_BYTES: usize = 256 * 1024;
+
+/// The gate for a running native `agy` PTY. While `onboarding.json` still
+/// reports first-run setup pending, the delivery waits only as long as the
+/// wizard is actually on screen — an operator stepping through it inline is
+/// not failed. Once the wizard is gone (or never appeared within the startup
+/// window) the delivery settles Failed with [`REQUIRED_REASON`].
+pub(super) fn delivery_gate(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    cancelled: &AtomicBool,
+) -> Gate {
+    gate_with_wait(home, group, actor, cancelled, WIZARD_WAIT)
+}
+
+fn gate_with_wait(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor: &Actor,
+    cancelled: &AtomicBool,
+    wait: Duration,
+) -> Gate {
+    if !setup_required(home, group, actor) {
+        return Gate::Proceed;
+    }
+    let deadline = Instant::now() + wait;
+    loop {
+        // The operator can finish the wizard while this attempt watches.
+        if !setup_required(home, group, actor) {
+            return Gate::Proceed;
+        }
+        if let Some(text) = screen_text(home, &group.group_id, &actor.id)
+            && wizard_visible(&text)
+        {
+            return Gate::Defer;
+        }
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Gate::Fail;
+        }
+        std::thread::sleep(SCREEN_POLL);
+    }
+}
+
+/// Rendered visible text of the actor's retained terminal output.
+fn screen_text(home: &HomeLayout, group_id: &str, actor_id: &str) -> Option<String> {
+    let page = super::terminal_history_source::retained(
+        home,
+        group_id,
+        actor_id,
+        SCREEN_HISTORY_BYTES,
+    )
+    .ok()?;
+    let text = super::terminal_text::render(&page.data, true);
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn wizard_visible(text: &str) -> bool {
+    WIZARD_MARKERS.iter().any(|marker| text.contains(marker))
 }
 
 #[cfg(test)]
@@ -185,5 +273,112 @@ mod tests {
         let (_, group) = group_with_actor(&cccc_home, actor);
 
         assert!(!gates_native_pty(&group.actors[0]));
+    }
+
+    #[test]
+    fn wizard_markers_match_only_first_run_screens() {
+        assert!(wizard_visible(
+            "Welcome to the \nAntigravity CLI\nChoose your color scheme:"
+        ));
+        assert!(wizard_visible("Terms of Service & Data Use"));
+        assert!(!wizard_visible("agy prompt\n> "));
+        assert!(!wizard_visible("Gemini 4 Argon low\nauto"));
+    }
+
+    /// A live PTY showing the wizard defers; the same pending onboarding with
+    /// an ordinary prompt fails once the startup window closes.
+    #[cfg(unix)]
+    fn gate_fixture(
+        screen: &str,
+    ) -> (tempfile::TempDir, HomeLayout, GroupDoc, Actor, PathBuf) {
+        use cccc_contracts::RunnerKind;
+        use std::collections::BTreeMap;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cccc_home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+        let provider_home = temp.path().join("provider");
+        std::fs::create_dir_all(&provider_home).expect("provider home");
+        let (_, group) = group_with_actor(&cccc_home, actor_with_home(&provider_home));
+        let script = temp.path().join("screen.py");
+        std::fs::write(
+            &script,
+            "import sys,tty,time\ntty.setraw(0)\nsys.stdout.write(sys.argv[1])\nsys.stdout.flush()\ntime.sleep(60)\n",
+        )
+        .expect("fixture script");
+        cccc_runtime::start(cccc_runtime::LaunchSpec {
+            group_id: group.group_id.clone(),
+            actor_id: "agy".into(),
+            runner: RunnerKind::Pty,
+            command: vec![
+                "python3".into(),
+                script.to_string_lossy().into_owned(),
+                screen.to_owned(),
+            ],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            cols: 120,
+            rows: 40,
+        })
+        .expect("start fixture");
+        // The PTY needs a moment to record its first frame.
+        std::thread::sleep(Duration::from_millis(300));
+        let actor = group.actors[0].clone();
+        (temp, cccc_home, group, actor, provider_home)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wizard_on_screen_defers_pending_onboarding() {
+        let (_temp, home, group, actor, provider_home) = gate_fixture(
+            "\u{1b}[?2004h\u{1b}[2J\u{1b}[HWelcome to the \nAntigravity CLI\nChoose your color scheme:",
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_eq!(
+                gate_with_wait(
+                    &home,
+                    &group,
+                    &actor,
+                    &AtomicBool::new(false),
+                    Duration::from_secs(2)
+                ),
+                Gate::Defer,
+                "the visible wizard holds the delivery"
+            );
+            // Completing setup while the wizard text is still on screen lets
+            // the next attempt through: onboarding.json is authoritative.
+            write_onboarding(&provider_home, true);
+            assert_eq!(
+                gate_with_wait(
+                    &home,
+                    &group,
+                    &actor,
+                    &AtomicBool::new(false),
+                    Duration::from_millis(100)
+                ),
+                Gate::Proceed
+            );
+        }));
+        cccc_runtime::stop(&group.group_id, &actor.id).expect("stop fixture");
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_onboarding_without_the_wizard_fails() {
+        let (_temp, home, group, actor, _provider_home) =
+            gate_fixture("\u{1b}[?2004h\u{1b}[2J\u{1b}[Hagy prompt\n> ");
+        assert_eq!(
+            gate_with_wait(
+                &home,
+                &group,
+                &actor,
+                &AtomicBool::new(false),
+                Duration::from_millis(500)
+            ),
+            Gate::Fail,
+            "no wizard on screen means the delivery cannot wait forever"
+        );
+        cccc_runtime::stop(&group.group_id, &actor.id).expect("stop fixture");
     }
 }

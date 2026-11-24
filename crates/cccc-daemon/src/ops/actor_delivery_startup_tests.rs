@@ -602,6 +602,131 @@ while True:
     }
 }
 
+/// While the first-run wizard visibly owns the terminal, delivery waits for
+/// the operator finishing it instead of failing; once onboarding.json flips,
+/// the held work is delivered.
+#[test]
+fn antigravity_delivery_waits_while_the_onboarding_wizard_is_on_screen() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let mut group = store.create("wizard gate", "").expect("group");
+    let provider_home = temp.path().join("provider-home");
+    std::fs::create_dir_all(&provider_home).expect("provider home");
+    let mut actor = Actor::new("agy");
+    actor.runtime = ActorRuntime::Antigravity;
+    actor.env.insert(
+        "HOME".into(),
+        provider_home.to_string_lossy().into_owned(),
+    );
+    group.actors.push(actor.clone());
+    store.save(&group).expect("save");
+    let script = temp.path().join("terminal.py");
+    std::fs::write(
+        temp.path().join("prompt.ansi"),
+        "Welcome to the \nAntigravity CLI\nChoose your color scheme:",
+    )
+    .expect("prompt frame");
+    std::fs::write(
+        &script,
+        r#"
+import os,sys,tty,pathlib,json
+root=pathlib.Path(sys.argv[1]);tty.setraw(0)
+os.write(1,b'\x1b[?2004h'+(root/'prompt.ansi').read_bytes())
+(root/'ready').touch()
+buf=b''
+while True:
+ data=os.read(0,65536)
+ if not data:break
+ buf+=data
+ while b'\r' in buf:
+  text,buf=buf.split(b'\r',1)
+  if not text:continue
+  with (root/'received').open('a') as f:f.write(json.dumps(text.decode())+'\n')
+"#,
+    )
+    .expect("write fixture");
+    let terminal = cccc_runtime::start(cccc_runtime::LaunchSpec {
+        group_id: group.group_id.clone(),
+        actor_id: actor.id.clone(),
+        runner: RunnerKind::Pty,
+        command: vec![
+            "python3".into(),
+            script.to_string_lossy().into_owned(),
+            temp.path().to_string_lossy().into_owned(),
+        ],
+        cwd: temp.path().to_path_buf(),
+        env: BTreeMap::new(),
+        cols: 120,
+        rows: 40,
+    })
+    .expect("start fixture");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for(|| temp.path().join("ready").exists());
+        let cancelled = AtomicBool::new(false);
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "user".into();
+        event.data = serde_json::json!({"to":["agy"],"text":"TASK","message_mode":"send"})
+            .as_object()
+            .expect("event data")
+            .clone();
+        let outcome = process_batch(
+            &mut vec![DeliveryJob {
+                home: home.clone(),
+                group: group.clone(),
+                actor: actor.clone(),
+                event,
+                claimed: true,
+                transport: "pty",
+            }],
+            &mut String::new(),
+            &cancelled,
+        );
+        assert!(
+            matches!(outcome, super::BatchOutcome::Retry),
+            "the visible wizard holds the delivery: {outcome:?}"
+        );
+        assert!(
+            !temp.path().join("received").exists(),
+            "nothing may be written while the wizard owns the terminal"
+        );
+
+        // The operator finishes onboarding; the next attempt delivers.
+        let onboarding = provider_home.join(".gemini/antigravity-cli/cache/onboarding.json");
+        std::fs::create_dir_all(onboarding.parent().expect("onboarding dir")).expect("dirs");
+        std::fs::write(&onboarding, "{\"onboardingComplete\":true}").expect("onboarding file");
+        let mut event = Event::new("chat.message", &group.group_id);
+        event.by = "user".into();
+        event.data = serde_json::json!({"to":["agy"],"text":"TASK","message_mode":"send"})
+            .as_object()
+            .expect("event data")
+            .clone();
+        assert!(matches!(
+            process_batch(
+                &mut vec![DeliveryJob {
+                    home: home.clone(),
+                    group: group.clone(),
+                    actor: actor.clone(),
+                    event,
+                    claimed: true,
+                    transport: "pty",
+                }],
+                &mut String::new(),
+                &cancelled,
+            ),
+            super::BatchOutcome::Delivered
+        ));
+        wait_for(|| {
+            std::fs::read_to_string(temp.path().join("received"))
+                .is_ok_and(|text| text.contains("TASK"))
+        });
+    }));
+    cccc_runtime::stop(&group.group_id, &actor.id).expect("stop fixture");
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
 /// The onboarding gate is specific to the native Antigravity TUI: another
 /// PTY runtime with the same fresh HOME delivers normally.
 #[test]

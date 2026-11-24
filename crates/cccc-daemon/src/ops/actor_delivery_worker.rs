@@ -249,19 +249,25 @@ pub(super) fn process_batch_tracked(
         actor_runtime::as_launched(&current_actor, launch)
     });
     // A fresh Antigravity HOME runs a first-run wizard that owns terminal
-    // input: text pasted while it is up never reaches the conversation. Settle
-    // the delivery Failed with the remedy instead of accepting text the
-    // provider cannot see.
-    if super::antigravity_onboarding::gates_native_pty(&current_actor)
-        && super::antigravity_onboarding::setup_required(
+    // input: text pasted while it is up never reaches the conversation. While
+    // the wizard is on screen the delivery waits for the operator finishing
+    // it; otherwise it settles Failed with the remedy instead of accepting
+    // text the provider cannot see.
+    if super::antigravity_onboarding::gates_native_pty(&current_actor) {
+        match super::antigravity_onboarding::delivery_gate(
             &job.home,
             &current_group,
             &current_actor,
-        )
-    {
-        return BatchOutcome::Terminal(
-            super::antigravity_onboarding::REQUIRED_REASON.to_owned(),
-        );
+            cancelled,
+        ) {
+            super::antigravity_onboarding::Gate::Proceed => {}
+            super::antigravity_onboarding::Gate::Defer => return BatchOutcome::Retry,
+            super::antigravity_onboarding::Gate::Fail => {
+                return BatchOutcome::Terminal(
+                    super::antigravity_onboarding::REQUIRED_REASON.to_owned(),
+                );
+            }
+        }
     }
     #[cfg(unix)]
     if crate::session_owner::enabled(&job.home) {
