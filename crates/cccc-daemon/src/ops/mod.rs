@@ -15,6 +15,7 @@ mod actor_saga;
 mod actor_secrets;
 mod actor_switch;
 mod actors;
+mod antigravity_onboarding;
 mod assistants;
 mod automation_config;
 mod automation_manage;

@@ -248,6 +248,21 @@ pub(super) fn process_batch_tracked(
     let current_actor = status.launch.map_or(current_actor.clone(), |launch| {
         actor_runtime::as_launched(&current_actor, launch)
     });
+    // A fresh Antigravity HOME runs a first-run wizard that owns terminal
+    // input: text pasted while it is up never reaches the conversation. Settle
+    // the delivery Failed with the remedy instead of accepting text the
+    // provider cannot see.
+    if super::antigravity_onboarding::gates_native_pty(&current_actor)
+        && super::antigravity_onboarding::setup_required(
+            &job.home,
+            &current_group,
+            &current_actor,
+        )
+    {
+        return BatchOutcome::Terminal(
+            super::antigravity_onboarding::REQUIRED_REASON.to_owned(),
+        );
+    }
     #[cfg(unix)]
     if crate::session_owner::enabled(&job.home) {
         return process_owned_pty_batch(
