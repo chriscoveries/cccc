@@ -249,21 +249,29 @@ pub(super) fn process_batch_tracked(
         actor_runtime::as_launched(&current_actor, launch)
     });
     // agy's first-run wizard reads the terminal before a conversation exists,
-    // so text written to it is consumed as navigation and lost. Only an
-    // explicit unfinished onboarding blocks; the file is re-read every batch,
-    // so finishing the wizard needs no restart.
-    if current_actor.runtime == ActorRuntime::Antigravity
-        && actor_runtime::launch_environment(&job.home, &current_group, &current_actor)
-            .is_some_and(|env| {
-                cccc_core::runtime_mcp::first_run_setup_pending(&status.cwd, &env)
-            })
-    {
-        return BatchOutcome::Terminal(
-            "Antigravity first-run setup is not finished in this Actor's home directory. \
-             Finish it in the Actor's terminal, or run `agy` there once and restart the Actor, \
-             then send again."
-                .into(),
-        );
+    // so text written to it is consumed as navigation and lost. An explicit
+    // unfinished onboarding fails fast with the remedy; the file is re-read
+    // every batch, so finishing the wizard needs no restart.
+    if current_actor.runtime == ActorRuntime::Antigravity {
+        let setup = actor_runtime::launch_environment(&job.home, &current_group, &current_actor)
+            .map(|env| cccc_core::runtime_mcp::first_run_setup_complete(&status.cwd, &env));
+        if matches!(setup, Some(Some(false))) {
+            return BatchOutcome::Terminal(
+                "Antigravity first-run setup is not finished in this Actor's home directory. \
+                 Finish it in the Actor's terminal, or run `agy` there once and restart the Actor, \
+                 then send again."
+                    .into(),
+            );
+        }
+        // When the onboarding file cannot decide (an agy that never writes it,
+        // or a HOME the gate cannot resolve), the wizard's own pages are the
+        // signal: they own terminal input, so hold the delivery until the
+        // screen moves on. A file that says complete is trusted as-is.
+        if !matches!(setup, Some(Some(true)))
+            && antigravity_wizard_up(&current_group.group_id, &current_actor.id)
+        {
+            return BatchOutcome::Retry;
+        }
     }
     #[cfg(unix)]
     if crate::session_owner::enabled(&job.home) {
@@ -382,6 +390,26 @@ pub(super) fn process_batch_tracked(
             BatchOutcome::Delivered
         }
     }
+}
+
+/// Page titles of agy's first-run wizard, from 1.5.16 terminal captures.
+/// While one is on the retained screen the wizard owns terminal input.
+const ANTIGRAVITY_WIZARD_MARKERS: [&str; 3] = [
+    "Welcome to Antigravity CLI",
+    "Choose your color scheme",
+    "Terms of Service",
+];
+
+/// True while the actor's retained terminal shows a first-run wizard page.
+/// An unreadable history never defers: the gate fails open like the file check.
+fn antigravity_wizard_up(group_id: &str, actor_id: &str) -> bool {
+    let Ok(page) = cccc_runtime::retained_history_tail(group_id, actor_id, 256 * 1024) else {
+        return false;
+    };
+    let screen = super::terminal_text::render(&page.data, false);
+    ANTIGRAVITY_WIZARD_MARKERS
+        .iter()
+        .any(|marker| screen.contains(marker))
 }
 
 #[cfg(unix)]

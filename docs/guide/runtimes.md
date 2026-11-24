@@ -900,6 +900,14 @@ first-use setup before sending tasks; paste mode can also be enabled during
 these dialogs and does not prove that the conversation is ready. CCCC does not
 add an application-level readiness handshake to the native TUI.
 
+A fresh provider `HOME` first runs `agy`'s own onboarding wizard, which reads
+the terminal as navigation. While `cache/onboarding.json` records
+`"onboardingComplete": false`, CCCC settles the delivery Failed with the
+remedy instead of pasting into the wizard; complete the wizard once in the
+Actor's own terminal — or use ACP mode, whose managed session never shows it —
+and the next delivery proceeds. When the file cannot decide, CCCC also defers
+delivery while a wizard page is visible on the terminal.
+
 Previously accepted or uncertain deliveries are not automatically replayed.
 For a failed or uncertain delivery, check the terminal before using the existing
 retry action; an uncertain handoff requires explicit retry confirmation.

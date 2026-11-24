@@ -39,17 +39,25 @@ fn user_home(cwd: &Path, environment: &BTreeMap<String, String>) -> Option<PathB
 }
 
 /// agy's first-run wizard reads the terminal before a conversation exists, so
-/// text written to it is consumed as navigation and lost. Only an explicit
-/// `false` counts as pending: a missing or unreadable file never blocks.
-pub fn first_run_setup_pending(cwd: &Path, environment: &BTreeMap<String, String>) -> bool {
-    let Some(home) = user_home(cwd, environment) else {
-        return false;
-    };
+/// text written to it is consumed as navigation and lost. `Some(false)` is an
+/// explicit unfinished onboarding; `Some(true)` a finished one; `None` means
+/// the state cannot be read (no home, missing or unreadable file) and must
+/// never block.
+pub fn first_run_setup_complete(
+    cwd: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Option<bool> {
+    let home = user_home(cwd, environment)?;
     std::fs::read(home.join(".gemini/antigravity-cli/cache/onboarding.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .and_then(|state| state.get("onboardingComplete").and_then(Value::as_bool))
-        == Some(false)
+}
+
+/// Only an explicit `false` counts as pending: a missing or unreadable file
+/// never blocks.
+pub fn first_run_setup_pending(cwd: &Path, environment: &BTreeMap<String, String>) -> bool {
+    first_run_setup_complete(cwd, environment) == Some(false)
 }
 
 fn ensure_entry(

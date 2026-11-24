@@ -301,10 +301,9 @@ fn exercise_startup(prompt: &str, slow_start: bool, pending_acp: Option<ActorRun
     let onboarding = provider_home.join(".gemini/antigravity-cli/cache/onboarding.json");
     std::fs::create_dir_all(onboarding.parent().expect("onboarding dir")).expect("provider home");
     std::fs::write(&onboarding, "{\"onboardingComplete\":true}").expect("onboarding file");
-    actor.env.insert(
-        "HOME".into(),
-        provider_home.to_string_lossy().into_owned(),
-    );
+    actor
+        .env
+        .insert("HOME".into(), provider_home.to_string_lossy().into_owned());
     group.actors.push(actor.clone());
     store.save(&group).expect("save");
     let script = temp.path().join("terminal.py");
@@ -486,16 +485,14 @@ fn antigravity_delivery_fails_until_first_run_onboarding_completes() {
     let store = GroupStore::new(home.clone()).expect("store");
     let mut group = store.create("onboarding gate", "").expect("group");
     let provider_home = temp.path().join("provider-home");
-    let onboarding = provider_home
-        .join(".gemini/antigravity-cli/cache/onboarding.json");
+    let onboarding = provider_home.join(".gemini/antigravity-cli/cache/onboarding.json");
     std::fs::create_dir_all(onboarding.parent().expect("onboarding dir")).expect("dirs");
     std::fs::write(&onboarding, r#"{"onboardingComplete":false}"#).expect("onboarding");
     let mut actor = Actor::new("agy");
     actor.runtime = ActorRuntime::Antigravity;
-    actor.env.insert(
-        "HOME".into(),
-        provider_home.to_string_lossy().into_owned(),
-    );
+    actor
+        .env
+        .insert("HOME".into(), provider_home.to_string_lossy().into_owned());
     group.actors.push(actor.clone());
     store.save(&group).expect("save");
     let script = temp.path().join("terminal.py");
@@ -519,7 +516,7 @@ while True:
 "#,
     )
     .expect("write fixture");
-    let terminal = cccc_runtime::start(cccc_runtime::LaunchSpec {
+    let _terminal = cccc_runtime::start(cccc_runtime::LaunchSpec {
         group_id: group.group_id.clone(),
         actor_id: actor.id.clone(),
         runner: RunnerKind::Pty,
@@ -554,11 +551,7 @@ while True:
             }
         };
         let first = job("FIRST_TASK");
-        let reason = match process_batch(
-            &mut vec![first.clone()],
-            &mut String::new(),
-            &cancelled,
-        ) {
+        let reason = match process_batch(&mut vec![first.clone()], &mut String::new(), &cancelled) {
             super::BatchOutcome::Terminal(reason) => reason,
             other => panic!("fresh onboarding must fail the delivery, got {other:?}"),
         };
@@ -616,10 +609,9 @@ fn non_antigravity_delivery_ignores_first_run_onboarding_state() {
     std::fs::create_dir_all(&provider_home).expect("provider home");
     let mut actor = Actor::new("worker");
     actor.runtime = ActorRuntime::Custom;
-    actor.env.insert(
-        "HOME".into(),
-        provider_home.to_string_lossy().into_owned(),
-    );
+    actor
+        .env
+        .insert("HOME".into(), provider_home.to_string_lossy().into_owned());
     group.actors.push(actor.clone());
     store.save(&group).expect("save");
     let script = temp.path().join("terminal.py");
@@ -643,7 +635,7 @@ while True:
 "#,
     )
     .expect("write fixture");
-    let terminal = cccc_runtime::start(cccc_runtime::LaunchSpec {
+    let _terminal = cccc_runtime::start(cccc_runtime::LaunchSpec {
         group_id: group.group_id.clone(),
         actor_id: actor.id.clone(),
         runner: RunnerKind::Pty,
@@ -681,6 +673,114 @@ while True:
             ),
             super::BatchOutcome::Delivered
         ));
+    }));
+    cccc_runtime::stop(&group.group_id, &actor.id).expect("stop fixture");
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
+/// When the onboarding file cannot decide, the wizard's own page on the
+/// retained screen defers the delivery instead of writing into it.
+#[test]
+fn antigravity_wizard_screen_defers_delivery_until_onboarding_is_known_complete() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let home = HomeLayout::from_path(temp.path().join("home")).expect("home");
+    let store = GroupStore::new(home.clone()).expect("store");
+    let mut group = store.create("wizard screen", "").expect("group");
+    let provider_home = temp.path().join("provider-home");
+    std::fs::create_dir_all(&provider_home).expect("provider home");
+    let mut actor = Actor::new("agy");
+    actor.runtime = ActorRuntime::Antigravity;
+    actor
+        .env
+        .insert("HOME".into(), provider_home.to_string_lossy().into_owned());
+    group.actors.push(actor.clone());
+    store.save(&group).expect("save");
+    let script = temp.path().join("terminal.py");
+    std::fs::write(
+        temp.path().join("prompt.ansi"),
+        "Welcome to Antigravity CLI\r\n> ",
+    )
+    .expect("prompt frame");
+    std::fs::write(
+        &script,
+        r#"
+import os,sys,tty,pathlib,json
+root=pathlib.Path(sys.argv[1]);tty.setraw(0)
+os.write(1,b'\x1b[?2004h'+(root/'prompt.ansi').read_bytes())
+(root/'ready').touch()
+buf=b''
+while True:
+ data=os.read(0,65536)
+ if not data:break
+ buf+=data
+ while b'\r' in buf:
+  text,buf=buf.split(b'\r',1)
+  if not text:continue
+  with (root/'received').open('a') as f:f.write(json.dumps(text.decode())+'\n')
+"#,
+    )
+    .expect("write fixture");
+    cccc_runtime::start(cccc_runtime::LaunchSpec {
+        group_id: group.group_id.clone(),
+        actor_id: actor.id.clone(),
+        runner: RunnerKind::Pty,
+        command: vec![
+            "python3".into(),
+            script.to_string_lossy().into_owned(),
+            temp.path().to_string_lossy().into_owned(),
+        ],
+        cwd: temp.path().to_path_buf(),
+        env: BTreeMap::new(),
+        cols: 120,
+        rows: 40,
+    })
+    .expect("start fixture");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for(|| temp.path().join("ready").exists());
+        let cancelled = AtomicBool::new(false);
+        let job = |text: &str| {
+            let mut event = Event::new("chat.message", &group.group_id);
+            event.by = "user".into();
+            event.data = serde_json::json!({"to":["agy"],"text":text,"message_mode":"send"})
+                .as_object()
+                .expect("event data")
+                .clone();
+            DeliveryJob {
+                home: home.clone(),
+                group: group.clone(),
+                actor: actor.clone(),
+                event,
+                claimed: true,
+                transport: "pty",
+            }
+        };
+        assert!(matches!(
+            process_batch(&mut vec![job("FIRST_TASK")], &mut String::new(), &cancelled),
+            super::BatchOutcome::Retry
+        ));
+        assert!(
+            !temp.path().join("received").exists(),
+            "a visible wizard page must defer the delivery, not receive it"
+        );
+        // Once the file records completion the wizard check is skipped and the
+        // delivery proceeds.
+        let onboarding = provider_home.join(".gemini/antigravity-cli/cache/onboarding.json");
+        std::fs::create_dir_all(onboarding.parent().expect("onboarding dir")).expect("dirs");
+        std::fs::write(&onboarding, r#"{"onboardingComplete":true}"#).expect("onboarding");
+        assert!(matches!(
+            process_batch(
+                &mut vec![job("SECOND_TASK")],
+                &mut String::new(),
+                &cancelled
+            ),
+            super::BatchOutcome::Delivered
+        ));
+        wait_for(|| {
+            std::fs::read_to_string(temp.path().join("received"))
+                .is_ok_and(|text| text.contains("SECOND_TASK"))
+        });
     }));
     cccc_runtime::stop(&group.group_id, &actor.id).expect("stop fixture");
     if let Err(error) = result {
