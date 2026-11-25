@@ -199,6 +199,29 @@ fn actor_rename_checkpoint_respects_new_session_and_later_forward_receipts() {
 }
 
 #[test]
+fn actor_rename_checkpoint_leaves_unrelated_primary_receipts_out_of_acp_recovery() {
+    let fixture = Fixture::new();
+    let other_transport = json!({"actor_id":OLD,"provider_session_id":ORIGINAL,"runtime":"pi"});
+    fs::write_json(&fixture.primary(OLD), &other_transport).expect("non-ACP primary");
+    fixture.rename();
+    let saved: Checkpoint = fs::read_json(&fixture.checkpoint()).expect("checkpoint");
+    assert!(saved.primary.is_none());
+    fixture.legacy_record(true);
+    let (identity, parts) = fixture.identity(NEW);
+    fixture
+        .recover(&Fixture::environment(NEW))
+        .expect("eligible recovery")
+        .record(&fixture.acp(NEW), &identity, &parts, ORIGINAL, true)
+        .expect("recover ACP");
+    let mut expected = other_transport;
+    expected["actor_id"] = json!(NEW);
+    assert_eq!(
+        fs::read_json::<Value>(&fixture.primary(NEW)).expect("non-ACP primary"),
+        expected
+    );
+}
+
+#[test]
 fn actor_rename_checkpoint_requires_matching_launch_and_actor_generation() {
     let fixture = Fixture::new();
     fixture.rename();

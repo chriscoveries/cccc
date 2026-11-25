@@ -41,10 +41,18 @@ pub(in crate::ops) fn checkpoint(
         if receipts.is_empty() {
             return Ok(());
         }
+        let primary = read_optional::<Value>(&path(home, group, old)?)?.filter(|primary| {
+            primary["actor_id"] == old
+                && primary["runtime"]
+                    .as_str()
+                    .and_then(|runtime| receipts.get(runtime))
+                    .and_then(provider_id)
+                    .is_some_and(|id| primary["provider_session_id"] == id)
+        });
         let saved = Checkpoint {
             rename: event.clone(),
             receipts,
-            primary: read_optional(&path(home, group, old)?)?,
+            primary,
         };
         fs::write_secret_json(&file, &saved)?;
     }
