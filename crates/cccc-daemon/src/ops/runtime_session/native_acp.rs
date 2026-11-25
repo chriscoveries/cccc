@@ -6,6 +6,10 @@ use cccc_core::codex_voice_settings::LaunchParts;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub(in crate::ops) mod rename;
+
+const RENAME_AWARE: &str = "actor_rename_aware";
+
 pub(crate) struct PromptReceipt {
     path: PathBuf,
     id_field: &'static str,
@@ -97,17 +101,29 @@ pub(crate) fn prepare(
         return Ok(None);
     }
     let value: Value = cccc_core::fs::read_json(path)?;
-    if value["v"] != 1 || !replaced::identity_resumes(&value, identity, parts) {
+    resumable_id(&value, identity, parts)
+}
+
+fn resumable_id(
+    value: &Value,
+    identity: &Value,
+    parts: &LaunchParts,
+) -> std::io::Result<Option<String>> {
+    if value["v"] != 1 || !replaced::identity_resumes(value, identity, parts) {
         return Ok(None);
     }
     let attempted = value["attempted"]
         .as_bool()
         .ok_or_else(|| std::io::Error::other("Invalid ACP attempt receipt; use New Session"))?;
-    let id = value["provider_session_id"]
-        .as_str()
-        .filter(|id| super::super::codex_voice_analyst::valid_native_acp_id(id))
+    let id = provider_id(value)
         .ok_or_else(|| std::io::Error::other("Invalid ACP session receipt; use New Session"))?;
     Ok(attempted.then(|| id.to_owned()))
+}
+
+fn provider_id(value: &Value) -> Option<&str> {
+    value["provider_session_id"]
+        .as_str()
+        .filter(|id| super::super::codex_voice_analyst::valid_native_acp_id(id))
 }
 
 /// `parts` goes beside `identity`, never inside it: `prepare` matches the
@@ -119,10 +135,19 @@ pub(crate) fn record(
     id: &str,
     resumed: bool,
 ) -> std::io::Result<()> {
-    replaced::write_recorded(
-        path,
-        json!({"v":1,"identity":identity,"launch_parts":parts,"provider_session_id":id,"attempted":resumed,"updated_at":utc_now()}),
-    )
+    replaced::write_recorded(path, receipt(identity, parts, id, resumed))
+}
+
+fn receipt(identity: &Value, parts: &LaunchParts, id: &str, resumed: bool) -> Value {
+    json!({
+        "v": 1,
+        "identity": identity,
+        "launch_parts": parts,
+        "provider_session_id": id,
+        "attempted": resumed,
+        "updated_at": utc_now(),
+        RENAME_AWARE: true,
+    })
 }
 
 pub(super) const RUNTIMES: [ActorRuntime; 8] = [

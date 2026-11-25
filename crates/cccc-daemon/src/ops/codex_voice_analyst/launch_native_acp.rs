@@ -1,3 +1,4 @@
+use super::super::runtime_session::native_acp as receipts;
 use super::*;
 use serde_json::json;
 
@@ -32,11 +33,7 @@ impl AnalystSession {
         } else {
             command.clone()
         };
-        let (identity, launch_parts) = super::super::runtime_session::native_acp::launch(
-            &binding.root,
-            &identity_command,
-            &env,
-        );
+        let (identity, launch_parts) = receipts::launch(&binding.root, &identity_command, &env);
         let identity_environment = env.clone();
         let cccc = super::super::codex_mcp::configure_actor_cli(&mut env);
         #[cfg(test)]
@@ -58,12 +55,25 @@ impl AnalystSession {
         );
         add_voice_mcp_origin(&mut mcp, &env, purpose);
         let receipt_path = actor
-            .map(|(g, a)| {
-                super::super::runtime_session::native_acp::receipt_path(home, g, a, runtime)
-            })
+            .map(|(group, actor)| receipts::receipt_path(home, group, actor, runtime))
             .transpose()?;
-        let resume = if let (Some(path), Some((group, actor))) = (&receipt_path, actor) {
-            let prepare = super::super::runtime_session::native_acp::prepare;
+        let recovery = if let Some((group, actor)) = actor {
+            receipts::rename::recover_legacy(
+                home,
+                group,
+                actor,
+                runtime,
+                &binding.root,
+                &identity_command,
+                &identity_environment,
+            )?
+        } else {
+            None
+        };
+        let resume = if let Some(recovery) = &recovery {
+            Some(recovery.session_id.clone())
+        } else if let (Some(path), Some((group, actor))) = (&receipt_path, actor) {
+            let prepare = receipts::prepare;
             let mut saved = prepare(path, &identity, &launch_parts)?;
             if saved.is_none() && path.is_file() {
                 for previous in super::super::runtime_session::renamed_environments(
@@ -72,11 +82,8 @@ impl AnalystSession {
                     actor,
                     &identity_environment,
                 )? {
-                    let (identity, parts) = super::super::runtime_session::native_acp::launch(
-                        &binding.root,
-                        &identity_command,
-                        &previous,
-                    );
+                    let (identity, parts) =
+                        receipts::launch(&binding.root, &identity_command, &previous);
                     saved = prepare(path, &identity, &parts)?;
                     if saved.is_some() {
                         break;
@@ -182,28 +189,20 @@ impl AnalystSession {
         };
         if purpose != SessionPurpose::VoiceSecretary {
             let receipt = if let Some(path) = receipt_path {
-                if let Err(error) = super::super::runtime_session::native_acp::record(
-                    &path,
-                    &identity,
-                    &launch_parts,
-                    &id,
-                    resumed,
-                ) {
+                let recorded = match recovery {
+                    Some(recovery) => {
+                        recovery.record(&path, &identity, &launch_parts, &id, resumed)
+                    }
+                    None => receipts::record(&path, &identity, &launch_parts, &id, resumed),
+                };
+                if let Err(error) = recorded {
                     protocol.close().await;
                     process.stop()?;
                     return Err(error);
                 }
-                super::super::runtime_session::native_acp::PromptReceipt::actor(
-                    path,
-                    id.clone(),
-                    resumed,
-                )
+                receipts::PromptReceipt::actor(path, id.clone(), resumed)
             } else {
-                super::super::runtime_session::native_acp::PromptReceipt::voice(
-                    home,
-                    id.clone(),
-                    resumed,
-                )
+                receipts::PromptReceipt::voice(home, id.clone(), resumed)
             };
             protocol.set_prompt_receipt(receipt);
         }

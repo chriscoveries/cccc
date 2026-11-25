@@ -134,6 +134,14 @@ pub(super) fn rename(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             "durable rename intent does not match this actor",
         ));
     }
+    super::runtime_session::native_acp::rename::checkpoint(
+        home,
+        &group_id,
+        &intent.old,
+        &intent.new,
+        &intent.event,
+    )
+    .map_err(pending_error)?;
     actor_rename_state::complete(home, &group_id, &intent.old, &intent.new)
         .map_err(pending_error)?;
     match ledger::find_event(&path, &intent.event.id).map_err(pending_error)? {
