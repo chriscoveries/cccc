@@ -44,7 +44,7 @@ pub(super) fn lock_and_check(
             && ["assignee", "handoff_to"].iter().any(|field| {
                 task.get(*field)
                     .and_then(Value::as_str)
-                    .is_some_and(&matches_actor)
+                    .is_some_and(matches_actor)
             })
     }) {
         return Err(OpError::new(
