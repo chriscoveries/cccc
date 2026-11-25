@@ -414,32 +414,30 @@ fn exact_message_history_is_visible_generation_scoped_and_non_consuming() {
         json!({"group_id":group_id,"actor_id":"peer2","by":"user"}),
     );
     let body = "quoted \"message\" 界😀\n".repeat(1_000);
-    let old = call(
-        &home,
-        "send",
-        json!({"group_id":group_id,"by":"user","to":["peer1"],"text":body,"message_mode":"request_reply"}),
-    );
-    let private = call(
-        &home,
-        "send",
-        json!({"group_id":group_id,"by":"user","to":["peer2"],"text":"other Actor only","message_mode":"send"}),
-    );
     let store = GroupStore::new(home.clone()).expect("store");
     let path = store.ledger_path(&group_id).expect("ledger");
-    for _ in 0..110 {
-        let mut newer = Event::new("chat.message", &group_id);
-        newer.by = "user".into();
-        newer.data = json!({"to":["peer1"],"text":"newer","message_mode":"send"})
+    // Historical fixtures should not enqueue a delivery that can write to the
+    // ledger concurrently with the exact read under test.
+    let append = |to: &str, text: &str, mode: &str| {
+        let mut event = Event::new("chat.message", &group_id);
+        event.by = "user".into();
+        event.data = json!({"to":[to],"text":text,"message_mode":mode})
             .as_object()
             .expect("data")
             .clone();
-        ledger::append(&path, &newer).expect("newer event");
+        ledger::append(&path, &event).expect("fixture event");
+        event
+    };
+    let old = append("peer1", &body, "request_reply");
+    let private = append("peer2", "other Actor only", "send");
+    for _ in 0..110 {
+        append("peer1", "newer", "send");
     }
     let before = std::fs::read(&path).expect("ledger before read");
     let exact = call(
         &home,
         "message_history",
-        json!({"group_id":group_id,"actor_id":"peer1","by":"peer1","event_id":old.result["event"]["id"]}),
+        json!({"group_id":group_id,"actor_id":"peer1","by":"peer1","event_id":old.id}),
     );
     assert_eq!(exact.result["messages"].as_array().map(Vec::len), Some(1));
     assert_eq!(exact.result["messages"][0]["data"]["text"], body);
@@ -450,7 +448,10 @@ fn exact_message_history_is_visible_generation_scoped_and_non_consuming() {
             .contains(&body)
     );
     assert_eq!(exact.result["has_more"], false);
-    assert_eq!(std::fs::read(&path).expect("ledger after read"), before);
+    assert!(
+        std::fs::read(&path).expect("ledger after read") == before,
+        "exact history changed the ledger bytes"
+    );
     let notice = call(
         &home,
         "system_notify",
@@ -471,7 +472,7 @@ fn exact_message_history_is_visible_generation_scoped_and_non_consuming() {
             .expect("notice text")
             .contains("Complete system guidance")
     );
-    for event_id in [private.result["event"]["id"].clone(), json!("missing")] {
+    for event_id in [json!(private.id), json!("missing")] {
         let denied = call_raw(
             &home,
             "message_history",
@@ -482,7 +483,7 @@ fn exact_message_history_is_visible_generation_scoped_and_non_consuming() {
     let conflict = call_raw(
         &home,
         "message_history",
-        json!({"group_id":group_id,"actor_id":"peer1","by":"peer1","event_id":old.result["event"]["id"],"limit":1}),
+        json!({"group_id":group_id,"actor_id":"peer1","by":"peer1","event_id":old.id,"limit":1}),
     );
     assert_eq!(
         conflict.error.expect("exclusive exact lookup").code,
@@ -501,7 +502,7 @@ fn exact_message_history_is_visible_generation_scoped_and_non_consuming() {
     let stale = call_raw(
         &home,
         "message_history",
-        json!({"group_id":group_id,"actor_id":"peer1","by":"peer1","event_id":old.result["event"]["id"]}),
+        json!({"group_id":group_id,"actor_id":"peer1","by":"peer1","event_id":old.id}),
     );
     assert_eq!(stale.error.expect("old generation").code, "event_not_found");
 }
