@@ -104,7 +104,7 @@ pub(in crate::ops) fn reconcile_mcp_binding(
     let Some(locator) = checkpoint.mcp_locator.as_deref() else {
         return Ok(());
     };
-    if rename_source(home, group, actor, checkpoint)?.is_none() {
+    if rename_source(home, group, actor, &checkpoint.rename)?.is_none() {
         return Ok(());
     }
     let Some((duplicate, binding)) =
@@ -176,7 +176,7 @@ pub(in crate::ops) fn recover_legacy(
     let Some(member) = actors::find(&group, actor) else {
         return Ok(None);
     };
-    let Some(old) = rename_source(home, &group, member, &saved)? else {
+    let Some(old) = rename_source(home, &group, member, &saved.rename)? else {
         return Ok(None);
     };
     let runtime_name = runtime_name(runtime);
@@ -259,9 +259,8 @@ fn rename_source<'a>(
     home: &HomeLayout,
     group: &GroupDoc,
     actor: &Actor,
-    saved: &'a Checkpoint,
+    event: &'a Event,
 ) -> io::Result<Option<&'a str>> {
-    let event = &saved.rename;
     let Some(old) = event.data.get("old_actor_id").and_then(Value::as_str) else {
         return Ok(None);
     };
