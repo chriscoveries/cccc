@@ -187,7 +187,7 @@ pub fn rename(group: &mut GroupDoc, old: &str, new: &str) -> io::Result<Actor> {
     }
     group.actor_aliases.insert(old.to_owned(), new.to_owned());
     for key in [
-        WEB_MODEL_TARGETS_KEY,
+        WEB_MODEL_BROWSER_TARGETS_KEY,
         WEB_MODEL_DELIVERY_PREFERENCES_KEY,
         RUNTIME_STATES_KEY,
     ] {
