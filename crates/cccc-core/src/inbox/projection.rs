@@ -83,6 +83,7 @@ fn routing(group: &GroupDoc) -> Value {
                 &actor.internal_kind
             ))
             .collect::<Vec<_>>(),
+        &group.actor_aliases,
         crate::automation::delivery_timing_value(group, "mail_notice_repeat_seconds", 0),
     ))
 }
@@ -128,7 +129,8 @@ impl Projection {
     }
     fn note(&mut self, event: &Event, location: Location) {
         for (actor, mailbox) in &mut self.boxes {
-            if actor_add_id(event) == Some(actor.as_str())
+            if actor_add_id(event)
+                .is_some_and(|id| canonical_actor_id(&self.group, id) == actor.as_str())
                 || self.cursors.get(actor) == Some(&event.id)
             {
                 mailbox.page.clear();

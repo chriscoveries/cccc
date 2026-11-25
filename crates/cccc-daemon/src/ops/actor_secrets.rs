@@ -292,6 +292,29 @@ fn save_unlocked(path: &std::path::Path, values: &BTreeMap<String, String>) -> i
     }
 }
 
+/// Access an existing secret file by its normal path and locks without
+/// exposing the contents in the rename record or changing its permissions.
+pub(super) fn with_actor_rename_paths<T>(
+    home: &HomeLayout,
+    group_id: &str,
+    old: &str,
+    new: &str,
+    operation: impl FnOnce(&std::path::Path, &std::path::Path) -> io::Result<T>,
+) -> io::Result<T> {
+    let io_error = |error: OpError| io::Error::other(error.message);
+    migrate_legacy(home, group_id).map_err(io_error)?;
+    let old_path = path(home, group_id, old).map_err(io_error)?;
+    let new_path = path(home, group_id, new).map_err(io_error)?;
+    let (first, second) = if old_path < new_path {
+        (&old_path, &new_path)
+    } else {
+        (&new_path, &old_path)
+    };
+    with_exclusive_lock(&lock_path(first), || {
+        with_exclusive_lock(&lock_path(second), || operation(&old_path, &new_path))
+    })
+}
+
 fn lock_path(path: &std::path::Path) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(".lock");

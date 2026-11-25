@@ -61,7 +61,7 @@ impl LedgerIndex {
             {
                 self.relays.insert(source_id.to_owned(), position);
             }
-            index_actor_generation(event, position, &mut self.actor_generations);
+            crate::inbox::note_actor_generation(event, position, &mut self.actor_generations);
         }
     }
 
@@ -86,33 +86,12 @@ impl LedgerIndex {
         {
             self.relays.insert(source_id.to_owned(), position);
         }
-        index_actor_generation(&event, position, &mut self.actor_generations);
+        crate::inbox::note_actor_generation(&event, position, &mut self.actor_generations);
         self.estimated_bytes = self
             .estimated_bytes
             .saturating_add(estimate_event_bytes(&event));
         self.events.push(event);
         self.revisions = next_revisions;
-    }
-}
-
-fn index_actor_generation(
-    event: &Event,
-    position: usize,
-    actor_generations: &mut HashMap<String, usize>,
-) {
-    if event.kind != "actor.add" {
-        return;
-    }
-    if let Some(actor_id) = event
-        .data
-        .get("actor")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|actor| actor.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|actor_id| !actor_id.is_empty())
-    {
-        actor_generations.insert(actor_id.to_owned(), position);
     }
 }
 

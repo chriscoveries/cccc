@@ -33,6 +33,7 @@ impl AnalystSession {
             &identity_command,
             &environment,
         )?;
+        let identity_environment = environment.clone();
         let cccc = super::super::codex_mcp::configure_actor_cli(&mut environment);
         #[cfg(test)]
         let cccc = cccc.or_else(|| environment.remove("PI_FIXTURE_CLI").map(PathBuf::from));
@@ -96,13 +97,28 @@ impl AnalystSession {
         let receipt_path = actor
             .map(|(g, a)| super::super::runtime_session::pi::receipt_path(home, g, a))
             .transpose()?;
-        let restored = if let Some(path) = &receipt_path {
-            super::super::runtime_session::pi::prepare(
-                path,
-                &identity,
-                launch_parts.as_ref(),
-                &sessions,
-            )?
+        let restored = if let (Some(path), Some((group, actor))) = (&receipt_path, actor) {
+            let prepare = super::super::runtime_session::pi::prepare;
+            let mut restored = prepare(path, &identity, launch_parts.as_ref(), &sessions)?;
+            if restored.is_none() && path.is_file() {
+                for previous in super::super::runtime_session::renamed_environments(
+                    home,
+                    group,
+                    actor,
+                    &identity_environment,
+                )? {
+                    let (identity, parts) = super::super::runtime_session::pi::launch(
+                        &binding.root,
+                        &identity_command,
+                        &previous,
+                    )?;
+                    restored = prepare(path, &identity, parts.as_ref(), &sessions)?;
+                    if restored.is_some() {
+                        break;
+                    }
+                }
+            }
+            restored
         } else if let Some(id) = resume {
             Some(super::super::runtime_session::pi::Resume {
                 file: Some(super::super::runtime_session::pi::locate(&sessions, &id)?),

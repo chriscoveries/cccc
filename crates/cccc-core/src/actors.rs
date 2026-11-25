@@ -125,6 +125,82 @@ pub fn find<'a>(group: &'a GroupDoc, actor_id: &str) -> Option<&'a Actor> {
     group.actors.iter().find(|actor| actor.id == actor_id)
 }
 
+/// Resolve a former address without conferring the current actor's authority.
+pub fn canonical_actor_id<'a>(group: &'a GroupDoc, actor_id: &'a str) -> &'a str {
+    group
+        .actor_aliases
+        .get(actor_id)
+        .map_or(actor_id, String::as_str)
+}
+
+pub fn actor_aliases<'a>(group: &'a GroupDoc, canonical: &'a str) -> impl Iterator<Item = &'a str> {
+    group
+        .actor_aliases
+        .iter()
+        .filter_map(move |(old, current)| (current == canonical).then_some(old.as_str()))
+}
+
+fn actor_id_reserved(group: &GroupDoc, id: &str) -> bool {
+    group.actor_aliases.contains_key(id) || group.actor_aliases.values().any(|new| new == id)
+}
+
+pub fn validate_rename_id(value: &str) -> io::Result<String> {
+    if !value.split('-').all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+    }) || value == "voice-secretary"
+    {
+        return Err(io::Error::other(
+            "new actor id must use lowercase ASCII letters, digits and single hyphens",
+        ));
+    }
+    validate_actor_id(value)
+}
+
+pub fn validate_rename_target(group: &GroupDoc, new: &str) -> io::Result<()> {
+    validate_rename_id(new)?;
+    if find(group, new).is_some() || actor_id_reserved(group, new) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "new actor id is occupied or reserved",
+        ));
+    }
+    Ok(())
+}
+
+pub fn rename(group: &mut GroupDoc, old: &str, new: &str) -> io::Result<Actor> {
+    validate_rename_target(group, new)?;
+    let actor = group
+        .actors
+        .iter_mut()
+        .find(|actor| actor.id == old)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "actor not found"))?;
+    actor.id = new.to_owned();
+    actor.updated_at = utc_now();
+    let mut renamed = actor.clone();
+    for canonical in group.actor_aliases.values_mut() {
+        if canonical == old {
+            *canonical = new.to_owned();
+        }
+    }
+    group.actor_aliases.insert(old.to_owned(), new.to_owned());
+    for key in [
+        WEB_MODEL_TARGETS_KEY,
+        WEB_MODEL_DELIVERY_PREFERENCES_KEY,
+        RUNTIME_STATES_KEY,
+    ] {
+        if let Some(map) = group.extra.get_mut(key).and_then(Value::as_object_mut)
+            && let Some(value) = map.remove(old)
+        {
+            map.insert(new.to_owned(), value);
+        }
+    }
+    renamed.role = effective_role(group, new);
+    Ok(renamed)
+}
+
 /// The original creation time identifies Actors that predate persisted UUIDs.
 /// Reads, browser ownership and pairing must agree without changing that
 /// identity midway through a live Actor's work.
@@ -189,7 +265,7 @@ pub fn add(group: &mut GroupDoc, mut actor: Actor) -> io::Result<Actor> {
         .validate(actor.runtime)
         .map_err(io::Error::other)?;
     actor.normalize_runtime_constraints();
-    if find(group, &actor.id).is_some() {
+    if find(group, &actor.id).is_some() || actor_id_reserved(group, &actor.id) {
         return Err(io::Error::other(format!(
             "actor already exists: {}",
             actor.id
@@ -342,11 +418,17 @@ pub fn resolve_recipients(group: &GroupDoc, tokens: &[String]) -> io::Result<Vec
         if token.starts_with('@') && !matches!(token, "@all" | "@peers" | "@foreman" | "@user") {
             token = token.trim_start_matches('@');
         }
+        let canonical_token = canonical_actor_id(group, token);
         let canonical = match token {
             "" => continue,
             "@all" | "@peers" | "@foreman" => token.to_owned(),
             "user" | "@user" => "user".into(),
-            _ if actors.iter().any(|actor| actor.id == token) => token.into(),
+            _ if actors.iter().any(|actor| actor.id == canonical_token) => canonical_token.into(),
+            _ if group.actor_aliases.contains_key(token) => {
+                return Err(io::Error::other(format!(
+                    "inactive recipient alias: {token}"
+                )));
+            }
             _ => {
                 let matches: Vec<_> = actors
                     .iter()

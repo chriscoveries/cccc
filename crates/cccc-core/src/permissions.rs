@@ -9,6 +9,7 @@ pub enum ActorAction {
     List,
     Add,
     Remove,
+    Rename,
     Update,
     Start,
     Stop,
@@ -48,6 +49,9 @@ pub fn require_actor(
         (Some(ActorRole::Peer), ActorAction::Stop | ActorAction::Remove) if target == who => Ok(()),
         (Some(_), ActorAction::Update) => Err(io::Error::other(
             "actor.update is restricted to user-facing ports",
+        )),
+        (Some(_), ActorAction::Rename) => Err(io::Error::other(
+            "actor.rename is restricted to user-facing ports",
         )),
         (Some(_), _) => Err(io::Error::other(format!("permission denied: {who}"))),
         (None, _) => Err(io::Error::other(format!("unknown actor: {who}"))),

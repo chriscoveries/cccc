@@ -680,6 +680,35 @@ mod tests {
     }
 
     #[test]
+    fn parses_actor_rename_with_an_explicit_group() {
+        let cli = Cli::try_parse_from([
+            "cccc",
+            "actor",
+            "rename",
+            "old-lane",
+            "new-lane",
+            "--group",
+            "g_example",
+        ])
+        .expect("actor rename");
+        let Some(CommandKind::Actor(ActorArgs {
+            action:
+                ActorAction::Rename {
+                    old,
+                    new,
+                    group_id,
+                    by,
+                },
+        })) = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!((old.as_str(), new.as_str()), ("old-lane", "new-lane"));
+        assert_eq!(group_id.as_deref(), Some("g_example"));
+        assert_eq!(by, "user");
+    }
+
+    #[test]
     fn runtime_switch_refuses_options_its_target_would_ignore() {
         let parse = |args: &[&str]| {
             Cli::try_parse_from(["cccc", "actor", "switch", "x"].iter().chain(args).copied())

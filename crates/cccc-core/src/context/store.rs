@@ -108,8 +108,76 @@ impl ContextStore {
         })
     }
 
+    /// Validate the task board before committing a stopped Actor rename.
+    pub fn validate_actor_rename(&self, group_id: &str, old: &str, new: &str) -> io::Result<()> {
+        let document = self.load(group_id)?;
+        validate_actor_rename(&document, old, new, false)
+    }
+
+    /// Move current Actor references. An interrupted write can retry the same
+    /// operation: references already moved are left alone.
+    pub fn rename_actor_refs(&self, group_id: &str, old: &str, new: &str) -> io::Result<()> {
+        let paths = self.paths(group_id)?;
+        with_exclusive_lock(&paths.lock_file, || {
+            migrate_legacy_json(&paths)?;
+            let before = yaml_storage::load(&paths)?;
+            validate_actor_rename(&before, old, new, true)?;
+            let mut after = before.clone();
+            for task in &mut after.tasks {
+                for field in ["assignee", "handoff_to"] {
+                    if task.get(field).and_then(Value::as_str) == Some(old) {
+                        task.insert(field.into(), new.into());
+                        task.insert("updated_at".into(), cccc_contracts::utc_now().into());
+                    }
+                }
+            }
+            if let Some(state) = after.agent_states.remove(old) {
+                after.agent_states.insert(new.into(), state);
+            }
+            if after == before {
+                return Ok(());
+            }
+            super::task_revision::advance(&before.tasks, &mut after.tasks)?;
+            yaml_storage::persist_diff(&paths, &before, &after)?;
+            Ok(())
+        })
+    }
+
     fn paths(&self, group_id: &str) -> io::Result<ContextPaths> {
         let groups = GroupStore::new(self.home.clone())?;
         Ok(ContextPaths::new(&groups.group_dir(group_id)?))
     }
+}
+
+fn validate_actor_rename(
+    document: &ContextDoc,
+    old: &str,
+    new: &str,
+    recovering: bool,
+) -> io::Result<()> {
+    let busy = document.tasks.iter().any(|task| {
+        task.get("status").and_then(Value::as_str) == Some("active")
+            && ["assignee", "handoff_to"]
+                .into_iter()
+                .any(|field| task.get(field).and_then(Value::as_str) == Some(old))
+    });
+    if busy {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "actor holds an active task",
+        ));
+    }
+    if (!recovering || document.agent_states.contains_key(old))
+        && document.agent_states.get(new).is_some_and(|state| {
+            state.iter().any(|(key, value)| {
+                key != "updated_at" && !value.as_object().is_some_and(Map::is_empty)
+            })
+        })
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "destination actor has retained agent state",
+        ));
+    }
+    Ok(())
 }

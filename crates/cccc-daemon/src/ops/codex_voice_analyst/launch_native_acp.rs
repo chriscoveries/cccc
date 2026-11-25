@@ -37,6 +37,7 @@ impl AnalystSession {
             &identity_command,
             &env,
         );
+        let identity_environment = env.clone();
         let cccc = super::super::codex_mcp::configure_actor_cli(&mut env);
         #[cfg(test)]
         let cccc = cccc.or_else(|| env.remove("ACP_FIXTURE_CLI").map(PathBuf::from));
@@ -61,8 +62,28 @@ impl AnalystSession {
                 super::super::runtime_session::native_acp::receipt_path(home, g, a, runtime)
             })
             .transpose()?;
-        let resume = if let Some(path) = &receipt_path {
-            super::super::runtime_session::native_acp::prepare(path, &identity, &launch_parts)?
+        let resume = if let (Some(path), Some((group, actor))) = (&receipt_path, actor) {
+            let prepare = super::super::runtime_session::native_acp::prepare;
+            let mut saved = prepare(path, &identity, &launch_parts)?;
+            if saved.is_none() && path.is_file() {
+                for previous in super::super::runtime_session::renamed_environments(
+                    home,
+                    group,
+                    actor,
+                    &identity_environment,
+                )? {
+                    let (identity, parts) = super::super::runtime_session::native_acp::launch(
+                        &binding.root,
+                        &identity_command,
+                        &previous,
+                    );
+                    saved = prepare(path, &identity, &parts)?;
+                    if saved.is_some() {
+                        break;
+                    }
+                }
+            }
+            saved
         } else {
             resume
         };

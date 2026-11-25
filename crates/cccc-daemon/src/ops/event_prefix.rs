@@ -4,7 +4,7 @@
 //! whose ID starts with it. A full ID behaves exactly as before.
 
 use cccc_contracts::{DaemonRequest, Event};
-use cccc_core::{GroupDoc, HomeLayout, ledger};
+use cccc_core::{GroupDoc, HomeLayout, actors, ledger};
 
 use crate::dispatch::{OpError, string_arg};
 
@@ -24,8 +24,12 @@ pub(super) fn is_prefix(raw: &str) -> bool {
 /// An actor can read the messages it sent and the events delivered to it.
 /// This is the visibility of an exact read.
 pub(super) fn readable_by(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
-    (event.kind == "chat.message" && event.by == actor_id)
+    let actor_id = actors::canonical_actor_id(group, actor_id);
+    (event.kind == "chat.message" && actors::canonical_actor_id(group, &event.by) == actor_id)
         || super::actor_delivery::event_targets_actor(group, event, actor_id)
+        || (event.kind == "system.notify"
+            && actors::actor_aliases(group, actor_id)
+                .any(|alias| super::actor_delivery::event_targets_actor(group, event, alias)))
 }
 
 /// The one event in `events[from..]` that `readable` accepts and whose ID
@@ -72,8 +76,7 @@ pub(super) fn full_reply_target(
         return Ok(None);
     };
     let group = super::messaging::load(home, request)?;
-    let Some(author) =
-        string_arg(request, "by").filter(|by| cccc_core::actors::find(&group, by).is_some())
+    let Some(author) = string_arg(request, "by").filter(|by| actors::find(&group, by).is_some())
     else {
         return Ok(None);
     };

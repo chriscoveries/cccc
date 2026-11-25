@@ -24,10 +24,34 @@ pub fn binding_file(
     actor_created_at: &str,
 ) -> io::Result<PathBuf> {
     let state = GroupStore::new(home.clone())?.state_dir(&group.group_id)?;
-    let identity =
-        serde_json::to_vec(&(&group.generation, actor_id, actor_created_at)).map_err(invalid)?;
-    let name = format!("{:x}.json", Sha256::digest(identity));
-    Ok(state.join("mcp-bindings").join(name))
+    let locator = |id: &str| -> io::Result<PathBuf> {
+        let identity =
+            serde_json::to_vec(&(&group.generation, id, actor_created_at)).map_err(invalid)?;
+        let name = format!("{:x}.json", Sha256::digest(identity));
+        Ok(state.join("mcp-bindings").join(name))
+    };
+    let current = locator(actor_id)?;
+    let mut previous = None;
+    for alias in crate::actors::actor_aliases(group, actor_id) {
+        let path = locator(alias)?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if previous.is_none() && metadata.is_file() => previous = Some(path),
+            Ok(_) => return Err(invalid("ambiguous or invalid renamed Actor MCP locator")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if let Some(previous) = previous {
+        // A provider can still be holding the original locator from the
+        // saved conversation. Publish the next launch at that same path.
+        match std::fs::symlink_metadata(&current) {
+            Ok(_) => Err(invalid("ambiguous renamed Actor MCP locator")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(previous),
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(current)
+    }
 }
 
 /// Removal happens after the Actor removal commits; Stop retains the locator

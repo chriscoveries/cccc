@@ -5,7 +5,7 @@
 use cccc_contracts::reply_question::{self, Answer, FieldError, Stored};
 use cccc_contracts::{DaemonRequest, Event, utc_now};
 use cccc_core::user_requests::{self, PageError};
-use cccc_core::{HomeLayout, actors, ledger, unattended, voice_notifications};
+use cccc_core::{GroupDoc, HomeLayout, actors, ledger, unattended, voice_notifications};
 use serde_json::{Map, Value, json};
 
 use super::messaging::InPlace;
@@ -117,7 +117,7 @@ fn record_answer(home: &HomeLayout, request: &DaemonRequest, via_chet: bool) -> 
                 if (!via_chet
                     || (user_requests::is_chet_answer(&existing)
                         && actors::has_current_chet_provenance(&group, &existing)))
-                    && same_answer(&existing, &state.target, &answer) =>
+                    && same_answer(&group, &existing, &state.target, &answer) =>
             {
                 object(json!({"event": existing, "message_mode": "send", "duplicate": true}))
             }
@@ -268,10 +268,17 @@ fn record_answer(home: &HomeLayout, request: &DaemonRequest, via_chet: bool) -> 
 /// replying to `request`, in the form `answer` takes there.
 /// A valid question is answered with a stored `answer`, which only this
 /// operation writes; any other request with the user's words alone.
-fn same_answer(existing: &Event, request: &Event, answer: &Answer) -> bool {
+fn same_answer(group: &GroupDoc, existing: &Event, request: &Event, answer: &Answer) -> bool {
     let data = &existing.data;
+    let recipient = actors::canonical_actor_id(group, &request.by);
+    let addressed_to_requester = data
+        .get("to")
+        .and_then(Value::as_array)
+        .is_some_and(|to| {
+            matches!(to.as_slice(), [Value::String(id)] if actors::canonical_actor_id(group, id) == recipient)
+        });
     if data.get("reply_to").and_then(Value::as_str) != Some(request.id.as_str())
-        || data.get("to") != Some(&json!([request.by]))
+        || !addressed_to_requester
         || data.get("message_mode").and_then(Value::as_str) != Some("send")
     {
         return false;

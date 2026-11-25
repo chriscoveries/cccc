@@ -200,7 +200,9 @@ impl StatusSnapshot<'_> {
                 .unwrap_or(events.len());
             let tail_events = events.get(scan_start..).unwrap_or_default();
             let (delivery_statuses, reply_positions, cancellation_positions) =
-                collect_message_outcomes_from(tail_events, scan_start);
+                collect_message_outcomes_from(tail_events, scan_start, |id| {
+                    actors::canonical_actor_id(&group, id).to_owned()
+                });
             let connect_receipts = tail_events.iter().filter(|event| event.kind == "chat.cross_group_receipt" && event.by == "system" && event.data.get("transport").and_then(Value::as_str) == Some("connect")).filter_map(|event| {
                 let source = event.data.get("source_event_id")?.as_str()?;
                 Some((source.to_owned(), json!({"state":event.data.get("status"), "error":event.data.get("error"), "remote_event_id":event.data.get("remote_event_id")})))
@@ -365,7 +367,7 @@ impl StatusSnapshot<'_> {
 
     fn actor_recipients(&self, event: &Event) -> Vec<String> {
         actors::visible(&self.group)
-            .filter(|actor| actor.id != event.by)
+            .filter(|actor| actor.id != actors::canonical_actor_id(&self.group, &event.by))
             .filter(|actor| {
                 inbox::actor_generation_contains(
                     self.actor_generations,
@@ -451,8 +453,13 @@ impl StatusSnapshot<'_> {
                 Requester::Unknown
             };
         }
-        let registered = self.actor_generations.get(&event.by).copied();
-        let Some(actor) = self.group.actors.iter().find(|actor| actor.id == event.by) else {
+        let sender = actors::canonical_actor_id(&self.group, &event.by);
+        let registered = self
+            .actor_generations
+            .get(sender)
+            .or_else(|| self.actor_generations.get(&event.by))
+            .copied();
+        let Some(actor) = actors::find(&self.group, sender) else {
             // Without a relay field, a sender the ledger never registered is
             // unproven rather than from elsewhere.
             return if registered.is_some() {
@@ -474,7 +481,7 @@ impl StatusSnapshot<'_> {
             .and_then(|actor| serde_json::from_value::<cccc_contracts::Actor>(actor.clone()).ok());
         match recorded {
             Some(recorded)
-                if recorded.id == actor.id
+                if actors::canonical_actor_id(&self.group, &recorded.id) == actor.id
                     && actors::generation_identity(&recorded)
                         == actors::generation_identity(actor) =>
             {
@@ -498,12 +505,13 @@ impl StatusSnapshot<'_> {
 fn collect_message_outcomes(
     events: &[Event],
 ) -> (DeliveryStatuses, ReplyPositions, CancellationPositions) {
-    collect_message_outcomes_from(events, 0)
+    collect_message_outcomes_from(events, 0, str::to_owned)
 }
 
 fn collect_message_outcomes_from(
     events: &[Event],
     start_position: usize,
+    canonicalize: impl Fn(&str) -> String,
 ) -> (DeliveryStatuses, ReplyPositions, CancellationPositions) {
     let mut deliveries = DeliveryStatuses::new();
     let mut replies = HashMap::<String, HashMap<String, usize>>::new();
@@ -529,7 +537,7 @@ fn collect_message_outcomes_from(
                         .map(|message| {
                             connect_reply_author(&message.source.instance_id, &message.sender)
                         })
-                        .unwrap_or_else(|| event.by.clone())
+                        .unwrap_or_else(|| canonicalize(&event.by))
                 };
                 replies
                     .entry(source_event_id.to_owned())
@@ -576,7 +584,7 @@ fn collect_message_outcomes_from(
             deliveries
                 .entry(source_event_id.to_owned())
                 .or_default()
-                .insert(actor_id.to_owned(), record);
+                .insert(canonicalize(actor_id), record);
         }
     }
     (deliveries, replies, cancellations)

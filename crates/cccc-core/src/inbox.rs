@@ -8,7 +8,7 @@ use std::io;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 
-use crate::actors::{effective_role, find};
+use crate::actors::{canonical_actor_id, effective_role, find};
 use crate::fs::{read_json, with_exclusive_lock, write_json};
 use crate::ledger;
 use crate::{GroupDoc, GroupStore, HomeLayout};
@@ -16,6 +16,9 @@ use crate::{GroupDoc, GroupStore, HomeLayout};
 mod deliveries;
 mod notices;
 pub(crate) mod projection;
+mod rename;
+
+pub use rename::{rename_actor_cursor, validate_actor_cursor_rename};
 
 const MAIL_CURSOR_SCHEMA: u64 = 1;
 const PENDING_READ_SCHEMA: u64 = 1;
@@ -374,14 +377,23 @@ pub fn is_mail_for_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> boo
 }
 
 pub fn is_for_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
-    if event.by == actor_id || !matches!(event.kind.as_str(), "chat.message" | "system.notify") {
+    let actor_id = canonical_actor_id(group, actor_id);
+    if canonical_actor_id(group, &event.by) == actor_id
+        || !matches!(event.kind.as_str(), "chat.message" | "system.notify")
+    {
         return false;
     }
     let to: Vec<_> = event
         .data
         .get("to")
         .and_then(|value| value.as_array())
-        .map(|items| items.iter().filter_map(|item| item.as_str()).collect())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|target| canonical_actor_id(group, target))
+                .collect()
+        })
         .unwrap_or_default();
     let internal = find(group, actor_id).is_some_and(|actor| actor.internal_kind.is_some());
     if event.kind == "system.notify" {
@@ -399,7 +411,7 @@ pub fn is_for_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
                 .filter(|target| !target.is_empty())
         });
         if let Some(target) = direct_target {
-            return target == actor_id;
+            return canonical_actor_id(group, target) == actor_id;
         }
         if internal {
             return to.contains(&actor_id);
@@ -420,11 +432,27 @@ pub fn is_for_actor(group: &GroupDoc, event: &Event, actor_id: &str) -> bool {
 pub fn actor_generation_positions(events: &[Event]) -> HashMap<String, usize> {
     let mut positions = HashMap::new();
     for (index, event) in events.iter().enumerate() {
-        if let Some(actor_id) = actor_add_id(event) {
-            positions.insert(actor_id.to_owned(), index);
-        }
+        note_actor_generation(event, index, &mut positions);
     }
     positions
+}
+
+pub(crate) fn note_actor_generation(
+    event: &Event,
+    index: usize,
+    positions: &mut HashMap<String, usize>,
+) {
+    if let Some(actor_id) = actor_add_id(event) {
+        positions.insert(actor_id.to_owned(), index);
+    } else if event.kind == "actor.rename"
+        && let (Some(old), Some(new)) = (
+            event.data.get("old_actor_id").and_then(Value::as_str),
+            event.data.get("new_actor_id").and_then(Value::as_str),
+        )
+        && let Some(generation) = positions.get(old).copied()
+    {
+        positions.insert(new.to_owned(), generation);
+    }
 }
 
 fn actor_add_id(event: &Event) -> Option<&str> {

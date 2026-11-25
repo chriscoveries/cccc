@@ -51,6 +51,19 @@ pub enum ActorAction {
     },
     /// Remove an agent from the Group.
     Remove(ActorTarget),
+    /// Rename a stopped agent, retaining its conversation and old address.
+    Rename {
+        /// Current agent ID.
+        old: String,
+        /// New agent ID using lowercase letters, digits and single hyphens.
+        new: String,
+        /// Target Group ID; omit to use the current Group.
+        #[arg(long = "group")]
+        group_id: Option<String>,
+        /// Author identity.
+        #[arg(long, default_value = "user")]
+        by: String,
+    },
     /// Start a managed agent, or restore native Group access.
     Start(ActorTarget),
     /// Stop a managed agent, or pause native Group access.

@@ -42,6 +42,7 @@ mod web_binding_tests {
             ActorAction::Add,
             ActorAction::Update,
             ActorAction::Remove,
+            ActorAction::Rename,
             ActorAction::Start,
             ActorAction::Stop,
             ActorAction::Restart,
@@ -85,6 +86,7 @@ pub(super) fn resolve_operation(request: &DaemonRequest) -> Option<Operation> {
         "actor_add" => Operation::new(Write, add),
         "actor_update" => Operation::new(Write, update),
         "actor_remove" => Operation::new(Write, remove),
+        "actor_rename" => Operation::new(Write, super::actor_rename::rename),
         "actor_start" => Operation::new(Write, |home, request| {
             lifecycle(home, request, "actor.start")
         }),
@@ -588,7 +590,7 @@ fn actor_process_running(group: &GroupDoc, actor: &Actor) -> bool {
     actor_runtime::actor_is_running(group, actor)
 }
 
-fn observe_actor_process_running(
+pub(super) fn observe_actor_process_running(
     home: &HomeLayout,
     group: &GroupDoc,
     actor: &Actor,
@@ -1513,7 +1515,7 @@ fn load(home: &HomeLayout, request: &DaemonRequest) -> Result<GroupDoc, OpError>
         .map_err(OpError::not_found)
 }
 
-fn authorize(
+pub(super) fn authorize(
     group: &GroupDoc,
     request: &DaemonRequest,
     action: ActorAction,

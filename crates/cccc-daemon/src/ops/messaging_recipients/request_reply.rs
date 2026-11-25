@@ -75,6 +75,7 @@ mod tests {
             active_scope_key: String::new(),
             scopes: Vec::new(),
             actors: vec![Actor::new("lead"), Actor::new("peer")],
+            actor_aliases: Default::default(),
             automation: Map::new(),
             extra: Map::new(),
         }

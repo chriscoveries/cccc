@@ -4,7 +4,7 @@ use super::operation::{
 };
 use cccc_contracts::message_args::{self, MessageWrite};
 use cccc_contracts::{DaemonRequest, Event};
-use cccc_core::{GroupDoc, HomeLayout};
+use cccc_core::{GroupDoc, HomeLayout, actors::canonical_actor_id};
 use serde_json::{Map, Value, json};
 
 use crate::dispatch::{OpError, OpResult, object, required_arg, store, string_arg};
@@ -381,7 +381,7 @@ fn verify_chet_reply_recipient(
         return Ok(());
     };
     let target = find_event(home, &group.group_id, reply_to)?;
-    let sender = target.by.as_str();
+    let sender = canonical_actor_id(group, &target.by);
     if target.kind != "chat.message"
         || matches!(
             sender,
@@ -404,7 +404,7 @@ fn verify_chet_reply_recipient(
                 cccc_core::actors::effective_role(group, sender)
                     == Some(cccc_contracts::ActorRole::Foreman)
             }
-            value => value == sender,
+            value => canonical_actor_id(group, value) == sender,
         });
     if !reaches_sender {
         return Ok(());
@@ -718,7 +718,7 @@ fn preflight_upload_reply(home: &HomeLayout, request: &DaemonRequest) -> OpResul
     if recipient_tokens(&forwarded.args).is_empty() && !service_reply {
         forwarded.args.insert(
             "to".into(),
-            json!(default_reply_recipients(&group, &by, &target)),
+            json!(default_reply_recipients(home, &group, &by, &target)?),
         );
     }
     let routed = routed_reply_recipients(&forwarded.args);
@@ -884,7 +884,7 @@ fn reply(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     if recipient_tokens(&forwarded.args).is_empty() && !service_reply {
         forwarded.args.insert(
             "to".into(),
-            json!(default_reply_recipients(&group, &by, &target)),
+            json!(default_reply_recipients(home, &group, &by, &target)?),
         );
     }
     // A reply aimed at a `src_group::actor` token (the default recipients of a
@@ -1109,7 +1109,7 @@ fn reply_request_cancel(home: &HomeLayout, request: &DaemonRequest) -> OpResult 
         ));
     }
     let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
-    if by != "user" && by != source.by {
+    if by != "user" && by != current_reply_sender(home, &group, &source)? {
         return Err(OpError::new(
             "permission_denied",
             "only the source sender or user may cancel a reply request",
@@ -1170,7 +1170,7 @@ fn message_deliver(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         ));
     }
     let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
-    if by != "user" && by != source.by {
+    if by != "user" && by != current_reply_sender(home, &group, &source)? {
         return Err(OpError::new(
             "permission_denied",
             "only the source sender or user may request delivery",
@@ -1206,6 +1206,7 @@ fn message_deliver(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| OpError::new("invalid_actor_ids", "actor_ids must contain strings"))?;
+        let actor_id = canonical_actor_id(&group, actor_id);
         if requested
             .iter()
             .any(|existing: &cccc_contracts::Actor| existing.id == actor_id)
@@ -1331,27 +1332,53 @@ fn recipient_tokens(args: &Map<String, Value>) -> Vec<String> {
         .collect()
 }
 
-fn default_reply_recipients(group: &GroupDoc, by: &str, target: &Event) -> Vec<String> {
+fn default_reply_recipients(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    by: &str,
+    target: &Event,
+) -> Result<Vec<String>, OpError> {
     if follows_chet_answer(group, by, target) {
-        return if by == "user" {
+        return Ok(if by == "user" {
             recipient_tokens(&target.data)
         } else {
             vec!["user".into()]
-        };
+        });
     }
-    let original_by = target.by.trim();
-    if !original_by.is_empty() && original_by != by {
-        return vec![if original_by == "@user" {
+    let sender = current_reply_sender(home, group, target)?;
+    if !sender.is_empty() && sender != by {
+        return Ok(vec![if sender == "@user" {
             "user".into()
         } else {
-            original_by.into()
-        }];
+            sender.into()
+        }]);
     }
     let original_to = recipient_tokens(&target.data);
     if !original_to.is_empty() {
-        return original_to;
+        return Ok(original_to);
     }
-    vec![super::messaging_recipients::default_recipient(group).into()]
+    Ok(vec![
+        super::messaging_recipients::default_recipient(group).into(),
+    ])
+}
+
+fn current_reply_sender<'a>(
+    home: &HomeLayout,
+    group: &'a GroupDoc,
+    target: &'a Event,
+) -> Result<&'a str, OpError> {
+    let original = target.by.trim();
+    let sender = canonical_actor_id(group, original);
+    if sender != original
+        && super::messaging_status::requester_for_event(home, &group.group_id, target)?
+            == super::messaging_status::Requester::Unavailable
+    {
+        return Err(OpError::new(
+            "requester_unavailable",
+            "The actor that sent this message was removed or replaced",
+        ));
+    }
+    Ok(sender)
 }
 
 fn follows_chet_answer(group: &GroupDoc, by: &str, target: &Event) -> bool {

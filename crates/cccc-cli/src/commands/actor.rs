@@ -44,6 +44,21 @@ pub async fn run(client: &DaemonClient, home: &HomeLayout, args: ActorArgs) -> R
             .await?
         }
         ActorAction::Remove(target) => lifecycle(client, home, "actor_remove", target).await?,
+        ActorAction::Rename {
+            old,
+            new,
+            group_id,
+            by,
+        } => {
+            call(
+                client,
+                "actor_rename",
+                json!({
+                    "group_id":group(home,group_id)?,"actor_id":old,"new_actor_id":new,"by":by
+                }),
+            )
+            .await?
+        }
         ActorAction::Start(target) => lifecycle(client, home, "actor_start", target).await?,
         ActorAction::Stop(target) => lifecycle(client, home, "actor_stop", target).await?,
         ActorAction::Restart(target) => lifecycle(client, home, "actor_restart", target).await?,

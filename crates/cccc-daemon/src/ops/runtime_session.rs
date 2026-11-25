@@ -351,6 +351,44 @@ fn path(home: &HomeLayout, group_id: &str, actor_id: &str) -> std::io::Result<Pa
         .join(format!("{actor_id}.json")))
 }
 
+pub(super) fn actor_rename_receipt_paths(
+    home: &HomeLayout,
+    group: &str,
+    actor: &str,
+) -> std::io::Result<Vec<PathBuf>> {
+    let mut paths = vec![
+        path(home, group, actor)?,
+        antigravity::receipt_path(home, group, actor)?,
+    ];
+    for runtime in native_acp::RUNTIMES {
+        paths.push(native_acp::receipt_path(home, group, actor, runtime)?);
+    }
+    Ok(paths)
+}
+
+/// Candidate identities for saved sessions whose provider fingerprint
+/// included the CCCC Actor ID before that Actor was renamed. The current
+/// launch still uses the current ID. Only an exact old identity (or the
+/// provider's existing PATH-only tolerance) may reuse a conversation.
+pub(super) fn renamed_environments(
+    home: &HomeLayout,
+    group: &str,
+    actor: &str,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> std::io::Result<Vec<std::collections::BTreeMap<String, String>>> {
+    if environment.get("CCCC_ACTOR_ID").map(String::as_str) != Some(actor) {
+        return Ok(Vec::new());
+    }
+    let group = GroupStore::new(home.clone())?.load(group)?;
+    Ok(cccc_core::actors::actor_aliases(&group, actor)
+        .map(|alias| {
+            let mut old_environment = environment.clone();
+            old_environment.insert("CCCC_ACTOR_ID".into(), alias.into());
+            old_environment
+        })
+        .collect())
+}
+
 fn command_fingerprint(command: &[String]) -> String {
     let raw = serde_json::to_vec(&json!({"argv":command})).unwrap_or_default();
     format!("{:x}", Sha256::digest(raw))

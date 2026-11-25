@@ -125,17 +125,19 @@ pub(crate) fn record(
     )
 }
 
+pub(super) const RUNTIMES: [ActorRuntime; 8] = [
+    ActorRuntime::Copilot,
+    ActorRuntime::Devin,
+    ActorRuntime::Cursor,
+    ActorRuntime::Kimi,
+    ActorRuntime::Auggie,
+    ActorRuntime::Kiro,
+    ActorRuntime::Hermes,
+    ActorRuntime::Droid,
+];
+
 pub(crate) fn retire_all(home: &HomeLayout, group: &str, actor: &str) -> std::io::Result<()> {
-    for runtime in [
-        ActorRuntime::Copilot,
-        ActorRuntime::Devin,
-        ActorRuntime::Cursor,
-        ActorRuntime::Kimi,
-        ActorRuntime::Auggie,
-        ActorRuntime::Kiro,
-        ActorRuntime::Hermes,
-        ActorRuntime::Droid,
-    ] {
+    for runtime in RUNTIMES {
         match std::fs::remove_file(receipt_path(home, group, actor, runtime)?) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

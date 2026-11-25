@@ -79,13 +79,25 @@ pub fn prepare_managed(
     let (identity, parts) = launch_identity(base_command, environment, cwd)?;
     let saved_identity = string(&document, "identity_fingerprint");
     let cold_only = saved_identity != identity;
-    if cold_only
-        && (saved_identity.is_empty()
-            || !parts.is_some_and(|parts| {
-                super::replaced::only_launch_path_changed(&Value::Object(document.clone()), &parts)
-            }))
-    {
-        return Ok(None);
+    let saved = Value::Object(document.clone());
+    let matches = |identity: &str, parts: Option<&LaunchParts>| {
+        saved_identity == identity
+            || (!saved_identity.is_empty()
+                && parts
+                    .is_some_and(|parts| super::replaced::only_launch_path_changed(&saved, parts)))
+    };
+    if !matches(&identity, parts.as_ref()) {
+        let mut renamed = false;
+        for previous in super::renamed_environments(home, group_id, actor_id, environment)? {
+            let (identity, parts) = launch_identity(base_command, &previous, cwd)?;
+            if matches(&identity, parts.as_ref()) {
+                renamed = true;
+                break;
+            }
+        }
+        if !renamed {
+            return Ok(None);
+        }
     }
     let session_id = string(&document, "provider_session_id");
     if !valid_session_id(&session_id) {

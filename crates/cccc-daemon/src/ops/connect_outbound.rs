@@ -432,6 +432,7 @@ fn recipient_snapshot(
         state: cccc_contracts::GroupState::Active,
         active_scope_key: String::new(),
         scopes: vec![],
+        actor_aliases: Default::default(),
         automation: Default::default(),
         extra: Default::default(),
         actors: target

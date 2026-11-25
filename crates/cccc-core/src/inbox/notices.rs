@@ -297,6 +297,7 @@ impl NoticeState {
             }
         }
         if let Some(actor) = actor_add_id(event) {
+            let actor = canonical_actor_id(group, actor);
             self.generations.insert(actor.to_owned(), position);
             self.awaiting_mail.remove(actor);
         }
@@ -312,7 +313,8 @@ impl NoticeState {
         match event.kind.as_str() {
             "actor.start" | "actor.restart" | "actor.new_session" => {
                 if let Some(id) = event.data.get("actor_id").and_then(Value::as_str) {
-                    self.actor_resumes.insert(id.to_owned(), event.ts.clone());
+                    self.actor_resumes
+                        .insert(canonical_actor_id(group, id).to_owned(), event.ts.clone());
                 }
             }
             "mail.read" => {
@@ -320,6 +322,7 @@ impl NoticeState {
                     event.data.get("actor_id").and_then(Value::as_str),
                     event.data.get("event_id").and_then(Value::as_str),
                 ) {
+                    let actor = canonical_actor_id(group, actor);
                     self.mail_reads
                         .entry(actor.to_owned())
                         .or_default()
@@ -339,10 +342,11 @@ impl NoticeState {
             }
             "chat.message" => {
                 if let Some(id) = event.data.get("reply_to").and_then(Value::as_str) {
+                    let by = canonical_actor_id(group, &event.by);
                     self.replies
-                        .entry((id.to_owned(), event.by.clone()))
+                        .entry((id.to_owned(), by.to_owned()))
                         .or_insert(position);
-                    self.refresh_mail(id, &event.by);
+                    self.refresh_mail(id, by);
                 }
                 let broadcast = event
                     .data
@@ -392,6 +396,7 @@ impl NoticeState {
                     event.data.get("actor_id").and_then(Value::as_str),
                     event.data.get("state").and_then(Value::as_str),
                 ) {
+                    let actor = canonical_actor_id(group, actor);
                     self.deliveries.insert(
                         (id.to_owned(), actor.to_owned()),
                         (state.to_owned(), event.ts.clone(), position),
@@ -414,6 +419,7 @@ impl NoticeState {
                     .and_then(Value::as_str)
                     .or_else(|| event.data.get("target_actor_id").and_then(Value::as_str))
                     .unwrap_or_default();
+                let actor = canonical_actor_id(group, actor);
                 let created = context
                     .and_then(|v| v.get("actor_created_at"))
                     .and_then(Value::as_str)

@@ -83,7 +83,8 @@ impl DeliveryState {
             self.positions.entry(event.id.clone()).or_insert(position);
         }
         if let Some(actor) = actor_add_id(event) {
-            self.generations.insert(actor.to_owned(), position);
+            self.generations
+                .insert(canonical_actor_id(group, actor).to_owned(), position);
         }
         if source {
             if self.actors.is_empty() {
@@ -105,10 +106,13 @@ impl DeliveryState {
                 .iter()
                 .enumerate()
                 .filter(|(_, actor)| {
-                    event.by != actor.id
+                    canonical_actor_id(group, &event.by) != actor.id
                         && if targeted_notice {
-                            event.data.get("target_actor_id").and_then(Value::as_str)
-                                == Some(actor.id.as_str())
+                            event
+                                .data
+                                .get("target_actor_id")
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| canonical_actor_id(group, id) == actor.id)
                         } else {
                             is_for_actor(group, event, &actor.id)
                         }
@@ -137,7 +141,7 @@ impl DeliveryState {
                 event.data.get("event_id").and_then(Value::as_str),
             ) {
                 self.reads
-                    .entry(actor.to_owned())
+                    .entry(canonical_actor_id(group, actor).to_owned())
                     .or_default()
                     .push((position, target.to_owned()));
             }
@@ -149,7 +153,10 @@ impl DeliveryState {
         {
             // latest_state/claim historically include pre-readd delivery facts.
             // pending() applies the actor generation boundary separately.
-            let states = self.latest.entry(actor.to_owned()).or_default();
+            let states = self
+                .latest
+                .entry(canonical_actor_id(group, actor).to_owned())
+                .or_default();
             let pending = event
                 .data
                 .get("state")

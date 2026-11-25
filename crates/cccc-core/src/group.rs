@@ -1,6 +1,7 @@
 use cccc_contracts::{Actor, GroupState, utc_now};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -19,6 +20,8 @@ pub struct Scope {
     #[serde(default)]
     pub git_remote: String,
 }
+
+pub const ACTOR_RENAME_PENDING: &str = "actor_rename_pending";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GroupDoc {
@@ -42,6 +45,9 @@ pub struct GroupDoc {
     pub scopes: Vec<Scope>,
     #[serde(default)]
     pub actors: Vec<Actor>,
+    /// Former IDs are reserved permanently and point directly to the current ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub actor_aliases: BTreeMap<String, String>,
     #[serde(default)]
     pub automation: Map<String, Value>,
     #[serde(flatten)]
@@ -100,6 +106,7 @@ impl GroupStore {
             active_scope_key: String::new(),
             scopes: Vec::new(),
             actors: Vec::new(),
+            actor_aliases: BTreeMap::new(),
             automation: Map::new(),
             extra: Map::new(),
         };
@@ -136,6 +143,18 @@ impl GroupStore {
     }
 
     pub fn load(&self, group_id: &str) -> io::Result<GroupDoc> {
+        let group = self.load_for_actor_rename(group_id)?;
+        if group.extra.contains_key(ACTOR_RENAME_PENDING) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "an actor rename is pending; retry the same actor rename",
+            ));
+        }
+        Ok(group)
+    }
+
+    /// Load the fenced group to finish a journaled actor rename.
+    pub fn load_for_actor_rename(&self, group_id: &str) -> io::Result<GroupDoc> {
         let mut group: GroupDoc = read_yaml(&self.group_dir(group_id)?.join("group.yaml"))?;
         for actor in &mut group.actors {
             actor.normalize_runtime_constraints();
@@ -146,6 +165,11 @@ impl GroupStore {
     pub fn save(&self, group: &GroupDoc) -> io::Result<()> {
         validate_group_id(&group.group_id)?;
         with_exclusive_lock(&self.group_lock_path(&group.group_id)?, || {
+            if let Err(error) = self.load(&group.group_id)
+                && error.kind() == io::ErrorKind::WouldBlock
+            {
+                return Err(error);
+            }
             self.save_unlocked(group)
         })
     }
@@ -216,6 +240,20 @@ impl GroupStore {
     ) -> io::Result<T> {
         with_exclusive_lock(&self.group_lock_path(group_id)?, || {
             let mut group = self.load(group_id)?;
+            let result = change(&mut group)?;
+            self.save_unlocked(&group)?;
+            Ok(result)
+        })
+    }
+
+    /// Mutate the fenced document as part of actor rename or recovery.
+    pub fn mutate_for_actor_rename<T>(
+        &self,
+        group_id: &str,
+        change: impl FnOnce(&mut GroupDoc) -> io::Result<T>,
+    ) -> io::Result<T> {
+        with_exclusive_lock(&self.group_lock_path(group_id)?, || {
+            let mut group = self.load_for_actor_rename(group_id)?;
             let result = change(&mut group)?;
             self.save_unlocked(&group)?;
             Ok(result)

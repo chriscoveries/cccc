@@ -1,6 +1,6 @@
 use cccc_contracts::{DaemonRequest, Event};
-use cccc_core::permissions;
 use cccc_core::{GroupDoc, HomeLayout, inbox, ledger};
+use cccc_core::{actors::canonical_actor_id, permissions};
 use serde_json::{Value, json};
 
 use crate::dispatch::{OpError, OpResult, object, required_arg, string_arg};
@@ -35,22 +35,24 @@ pub fn summary(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 pub fn peek(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group = load(home, request)?;
     let actor_id = required_arg(request, "actor_id")?;
-    require_actor_inbox(&actor_id)?;
-    authorize(&group, request, &actor_id)?;
+    let actor_id = canonical_actor_id(&group, &actor_id);
+    require_actor_inbox(actor_id)?;
+    authorize(&group, request, actor_id)?;
     let messages =
-        inbox::list_unread(home, &group, &actor_id, limit(request)?).map_err(OpError::io)?;
-    let cursor = peek_cursor_value(home, &group.group_id, &actor_id)?;
+        inbox::list_unread(home, &group, actor_id, limit(request)?).map_err(OpError::io)?;
+    let cursor = peek_cursor_value(home, &group.group_id, actor_id)?;
     object(json!({"messages":messages,"cursor":cursor}))
 }
 
 pub fn read(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group = load(home, request)?;
     let actor_id = required_arg(request, "actor_id")?;
-    require_actor_inbox(&actor_id)?;
-    authorize(&group, request, &actor_id)?;
+    let actor_id = canonical_actor_id(&group, &actor_id);
+    require_actor_inbox(actor_id)?;
+    authorize(&group, request, actor_id)?;
     let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
-    let consumed = inbox::consume_unread(home, &group, &actor_id, &by, limit(request)?)
-        .map_err(OpError::io)?;
+    let consumed =
+        inbox::consume_unread(home, &group, actor_id, &by, limit(request)?).map_err(OpError::io)?;
     object(json!({
         "messages":consumed.messages,
         "cursor":{
@@ -65,12 +67,9 @@ pub fn read(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
 pub fn history(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let group = load(home, request)?;
     let actor_id = required_arg(request, "actor_id")?;
-    permissions::require_history(
-        &group,
-        &string_arg(request, "by").unwrap_or_else(|| "user".into()),
-        &actor_id,
-    )
-    .map_err(OpError::invalid)?;
+    let actor_id = canonical_actor_id(&group, &actor_id);
+    let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
+    permissions::require_history(&group, &by, actor_id).map_err(OpError::invalid)?;
     let with_obligation_status = match request.args.get("with_obligation_status") {
         None => false,
         Some(Value::Bool(value)) => *value,
@@ -90,7 +89,7 @@ pub fn history(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         return history_event(
             home,
             &group,
-            &actor_id,
+            actor_id,
             &event_id,
             request,
             with_obligation_status,
@@ -112,6 +111,7 @@ pub fn history(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         .unwrap_or_default()
         .to_lowercase();
     let sender = string_arg(request, "sender").unwrap_or_default();
+    let sender = canonical_actor_id(&group, &sender);
     let before = string_arg(request, "before_event_id").unwrap_or_default();
     let limit = history_limit(request)?;
     let path = crate::dispatch::store(home)?
@@ -121,12 +121,13 @@ pub fn history(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         let generation = if actor_id == "user" {
             0
         } else {
-            generations.get(&actor_id).copied().unwrap_or(0)
+            generations.get(actor_id).copied().unwrap_or(0)
         };
         let events = &events[generation..];
         let visible = |event: &Event| {
             event.kind == "chat.message"
-                && (event.by == actor_id || inbox::is_for_actor(&group, event, &actor_id))
+                && (canonical_actor_id(&group, &event.by) == actor_id
+                    || inbox::is_for_actor(&group, event, actor_id))
         };
         // The anchor is the oldest visible message with that ID, as before. The
         // page walks back from it, or from the newest event, and stops one match
@@ -154,7 +155,7 @@ pub fn history(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             if mode != "all" && event_mode != mode {
                 continue;
             }
-            if !sender.is_empty() && event.by != sender {
+            if !sender.is_empty() && canonical_actor_id(&group, &event.by) != sender {
                 continue;
             }
             if !query.is_empty() {
@@ -280,8 +281,8 @@ fn history_event(
         {
             let user = string_arg(request, "by").is_none_or(|by| by == "user");
             if !user {
-                if event.by != actor_id {
-                    obligations.retain(|id, _| id == actor_id);
+                if canonical_actor_id(group, &event.by) != actor_id {
+                    obligations.retain(|id, _| canonical_actor_id(group, id) == actor_id);
                 }
                 for status in obligations.values_mut() {
                     if let Some(fields) = status.as_object_mut() {
@@ -329,12 +330,8 @@ fn peek_cursor_value(home: &HomeLayout, group_id: &str, actor_id: &str) -> Resul
 }
 
 fn authorize(group: &GroupDoc, request: &DaemonRequest, actor_id: &str) -> Result<(), OpError> {
-    permissions::require_inbox(
-        group,
-        &string_arg(request, "by").unwrap_or_else(|| "user".into()),
-        actor_id,
-    )
-    .map_err(OpError::invalid)
+    let by = string_arg(request, "by").unwrap_or_else(|| "user".into());
+    permissions::require_inbox(group, &by, actor_id).map_err(OpError::invalid)
 }
 
 fn require_actor_inbox(actor_id: &str) -> Result<(), OpError> {
@@ -363,6 +360,154 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(Map::new),
         }
+    }
+
+    #[test]
+    fn renamed_actor_keeps_mail_history_and_reply_targets_without_predecessor_access() {
+        let temp = tempfile::tempdir().expect("home");
+        let home = HomeLayout::from_path(temp.path()).expect("layout");
+        let store = GroupStore::new(home.clone()).expect("store");
+        let mut group = store.create("rename fixture", "").expect("group");
+        for id in ["lead", "old-member", "other"] {
+            actors::add(&mut group, Actor::new(id)).expect("actor");
+        }
+        let path = store.ledger_path(&group.group_id).expect("ledger");
+        let add_event = |kind: &str, by: &str, data: Value| {
+            let mut event = Event::new(kind, &group.group_id);
+            event.by = by.into();
+            event.data = data.as_object().expect("data").clone();
+            ledger::append(&path, &event).expect("append");
+            event
+        };
+        let predecessor = add_event(
+            "chat.message",
+            "old-member",
+            json!({"to":["user"],"text":"predecessor","message_mode":"send"}),
+        );
+        let mut current = group.actors[1].clone();
+        add_event("actor.add", "user", json!({"actor":current}));
+        let sent = add_event(
+            "chat.message",
+            "old-member",
+            json!({"to":["user"],"text":"original","message_mode":"send"}),
+        );
+        let incoming = add_event(
+            "chat.message",
+            "lead",
+            json!({"to":["old-member"],"text":"unread message","message_mode":"mail"}),
+        );
+        let requested = add_event(
+            "chat.message",
+            "old-member",
+            json!({"to":["user"],"text":"please answer","message_mode":"request_reply"}),
+        );
+        current.id = "new-member".into();
+        group.actors[1] = current;
+        group
+            .actor_aliases
+            .insert("old-member".into(), "new-member".into());
+        store.save(&group).expect("save renamed group");
+        add_event(
+            "actor.rename",
+            "user",
+            json!({"old_actor_id":"old-member","new_actor_id":"new-member"}),
+        );
+
+        let call = |op: &str, mut args: Value| {
+            args["group_id"] = json!(group.group_id);
+            let request = DaemonRequest {
+                v: 1,
+                op: op.into(),
+                args: args.as_object().expect("args").clone(),
+            };
+            crate::ops::messaging::resolve_operation(&request)
+                .expect("operation")
+                .execute(&home, &request)
+        };
+        let alias_history = call(
+            "message_history",
+            json!({"actor_id":"old-member","by":"new-member","sender":"new-member"}),
+        )
+        .expect("history under alias");
+        assert_eq!(alias_history["messages"], json!([requested, sent]));
+        assert!(
+            call(
+                "message_history",
+                json!({"actor_id":"new-member","by":"other","event_id":sent.id}),
+            )
+            .is_err()
+        );
+        assert!(
+            call(
+                "message_history",
+                json!({"actor_id":"new-member","by":"new-member","event_id":predecessor.id}),
+            )
+            .is_err()
+        );
+
+        assert!(
+            call(
+                "inbox_peek",
+                json!({"actor_id":"new-member","by":"old-member"}),
+            )
+            .is_err()
+        );
+        let unread = call(
+            "inbox_peek",
+            json!({"actor_id":"old-member","by":"new-member"}),
+        )
+        .expect("unread Mail under alias");
+        assert_eq!(unread["messages"], json!([incoming]));
+        let redirected = call(
+            "send",
+            json!({"by":"user","to":["old-member"],"text":"new mail","message_mode":"mail"}),
+        )
+        .expect("send to old ID");
+        assert_eq!(redirected["event"]["data"]["to"], json!(["new-member"]));
+
+        let reply = call(
+            "reply",
+            json!({"by":"user","reply_to":sent.id,"text":"reply to original","message_mode":"mail"}),
+        )
+        .expect("reply to old sender");
+        assert_eq!(reply["event"]["data"]["to"], json!(["new-member"]));
+        assert_eq!(reply["event"]["data"]["reply_to"], sent.id);
+        let refused = call(
+            "reply",
+            json!({"by":"user","reply_to":predecessor.id,"text":"reply","message_mode":"mail"}),
+        )
+        .expect_err("a predecessor does not own the alias");
+        assert_eq!(refused.code, "requester_unavailable");
+
+        let answer = json!({
+            "source_event_id":requested.id,"client_id":"same-answer",
+            "answer":{"v":1,"text":"answer after rename"},
+        });
+        let first_answer = call("reply_request_answer", answer.clone()).expect("answer");
+        assert_eq!(first_answer["event"]["data"]["to"], json!(["new-member"]));
+        let replay = call("reply_request_answer", answer).expect("replay answer");
+        assert_eq!(replay["duplicate"], true);
+        assert_eq!(replay["event"]["id"], first_answer["event"]["id"]);
+
+        let own_thread = call(
+            "reply",
+            json!({"by":"new-member","reply_to":&sent.id[..8],"text":"follow up"}),
+        )
+        .expect("resolve and continue an old outgoing thread");
+        assert_eq!(own_thread["event"]["data"]["to"], json!(["user"]));
+        assert_eq!(own_thread["event"]["data"]["reply_to"], sent.id);
+        let search = call(
+            "ledger_search",
+            json!({"by_any":["old-member"],"to":"user"}),
+        )
+        .expect("ledger alias search");
+        assert!(
+            search["events"]
+                .as_array()
+                .expect("events")
+                .iter()
+                .any(|event| event["id"] == own_thread["event"]["id"])
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use cccc_contracts::{DaemonRequest, Event};
-use cccc_core::{HomeLayout, ledger};
+use cccc_core::{GroupDoc, HomeLayout, actors::canonical_actor_id, ledger};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
@@ -11,14 +11,16 @@ pub fn tail(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
         return object(json!({"events":[],"has_more":false,"count":0}));
     }
     let kind = kind(request, "all");
-    let path = ledger_path(home, request)?;
+    let group = super::messaging::load(home, request)?;
+    let path = ledger_path(home, &group)?;
     let (events, has_more) =
         ledger::tail_filtered(&path, limit, kind.filter()).map_err(OpError::io)?;
     result(home, request, Page { events, has_more })
 }
 
 pub fn search(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
-    let path = ledger_path(home, request)?;
+    let group = super::messaging::load(home, request)?;
+    let path = ledger_path(home, &group)?;
     let query = Query {
         kind: kind(request, "all"),
         text: string_arg(request, "q").unwrap_or_default(),
@@ -37,14 +39,17 @@ pub fn search(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
             "since_ts must not be later than until_ts",
         ));
     }
-    let page = ledger::inspect(&path, |events, positions| page(events, positions, query))
-        .map_err(OpError::io)??;
+    let page = ledger::inspect(&path, |events, positions| {
+        page(&group, events, positions, query)
+    })
+    .map_err(OpError::io)??;
     result(home, request, page)
 }
 
 pub fn window(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     let center_id = required_arg(request, "center")?;
-    let path = ledger_path(home, request)?;
+    let group = super::messaging::load(home, request)?;
+    let path = ledger_path(home, &group)?;
     let kind = kind(request, "chat");
     let before_limit = integer(request, "before", 30).min(200);
     let after_limit = integer(request, "after", 30).min(200);
@@ -64,6 +69,7 @@ pub fn window(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 ));
             }
             let before = page(
+                &group,
                 events,
                 positions,
                 Query {
@@ -74,6 +80,7 @@ pub fn window(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
                 },
             )?;
             let after = page(
+                &group,
                 events,
                 positions,
                 Query {
@@ -148,6 +155,7 @@ struct Page {
 }
 
 fn page(
+    group: &GroupDoc,
     events: &[Event],
     positions: &HashMap<String, usize>,
     query: Query,
@@ -157,18 +165,30 @@ fn page(
     let end = cursor(events, positions, query.before.as_deref())?.unwrap_or(events.len());
     let range = events.get(start.min(end)..end).unwrap_or_default();
     let text = query.text.to_lowercase();
+    let by = canonical_actor_id(group, &query.by);
+    let by_any: HashSet<_> = query
+        .by_any
+        .iter()
+        .map(|by| canonical_actor_id(group, by))
+        .collect();
+    let recipient = query
+        .recipient
+        .as_deref()
+        .map(|id| canonical_actor_id(group, id));
     let matches_query = |event: &&Event| {
+        let author = canonical_actor_id(group, &event.by);
         matches_kind(event, query.kind)
-            && (query.by.is_empty() || event.by == query.by)
-            && (query.by_any.is_empty() || query.by_any.contains(&event.by))
-            && query.recipient.as_ref().is_none_or(|recipient| {
+            && (by.is_empty() || author == by)
+            && (by_any.is_empty() || by_any.contains(author))
+            && recipient.is_none_or(|recipient| {
                 event
                     .data
                     .get("to")
                     .and_then(Value::as_array)
                     .is_some_and(|to| {
                         to.iter()
-                            .any(|value| value.as_str() == Some(recipient.as_str()))
+                            .filter_map(Value::as_str)
+                            .any(|id| canonical_actor_id(group, id) == recipient)
                     })
             })
             && matches_time(event, query.since, query.until)
@@ -312,8 +332,7 @@ fn matches_kind(event: &Event, kind: Kind) -> bool {
     }
 }
 
-fn ledger_path(home: &HomeLayout, request: &DaemonRequest) -> Result<std::path::PathBuf, OpError> {
-    let group = super::messaging::load(home, request)?;
+fn ledger_path(home: &HomeLayout, group: &GroupDoc) -> Result<std::path::PathBuf, OpError> {
     store(home)?
         .ledger_path(&group.group_id)
         .map_err(OpError::io)
