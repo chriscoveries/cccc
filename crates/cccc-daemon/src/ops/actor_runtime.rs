@@ -242,6 +242,8 @@ fn start_local_headless(home: &HomeLayout, group: &GroupDoc, actor: &Actor) -> R
         .map_err(|message| OpError::new("runtime_shutting_down", message))?;
     #[cfg(unix)]
     if crate::session_owner::enabled(home) {
+        super::runtime_session::native_acp::rename::reconcile_mcp_binding(home, group, &actor)
+            .map_err(OpError::io)?;
         return crate::session_owner::launch_managed(home, group, &actor).map_err(launch_error);
     }
     super::local_headless::start(home, group, &actor).map_err(launch_error)

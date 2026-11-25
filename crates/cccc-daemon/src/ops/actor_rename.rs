@@ -136,7 +136,7 @@ pub(super) fn rename(home: &HomeLayout, request: &DaemonRequest) -> OpResult {
     }
     super::runtime_session::native_acp::rename::checkpoint(
         home,
-        &group_id,
+        &group,
         &intent.old,
         &intent.new,
         &intent.event,

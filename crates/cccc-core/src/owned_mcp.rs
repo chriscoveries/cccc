@@ -23,6 +23,51 @@ pub fn binding_file(
     actor_id: &str,
     actor_created_at: &str,
 ) -> io::Result<PathBuf> {
+    let (current, previous) = locator_paths(home, group, actor_id, actor_created_at)?;
+    if let Some(previous) = previous {
+        // A provider can still be holding the original locator from the
+        // saved conversation. Publish the next launch at that same path.
+        match std::fs::symlink_metadata(&current) {
+            Ok(_) => Err(invalid("ambiguous renamed Actor MCP locator")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(previous),
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(current)
+    }
+}
+
+/// Inspect the sole duplicate left by an old daemon that used the new ID.
+/// The caller must establish switchback provenance before using this pair.
+pub fn legacy_rename_duplicate(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor_id: &str,
+    actor_created_at: &str,
+    original_filename: &str,
+) -> io::Result<Option<(PathBuf, Binding)>> {
+    let (current, previous) = locator_paths(home, group, actor_id, actor_created_at)?;
+    let Some(previous) = previous.filter(|path| {
+        path.file_name().and_then(std::ffi::OsStr::to_str) == Some(original_filename)
+    }) else {
+        return Ok(None);
+    };
+    match Binding::read_file(&current) {
+        Ok(duplicate) => {
+            Binding::read_file(&previous)?;
+            Ok(Some((current, duplicate)))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn locator_paths(
+    home: &HomeLayout,
+    group: &GroupDoc,
+    actor_id: &str,
+    actor_created_at: &str,
+) -> io::Result<(PathBuf, Option<PathBuf>)> {
     let state = GroupStore::new(home.clone())?.state_dir(&group.group_id)?;
     let locator = |id: &str| -> io::Result<PathBuf> {
         let identity =
@@ -41,17 +86,7 @@ pub fn binding_file(
             Err(error) => return Err(error),
         }
     }
-    if let Some(previous) = previous {
-        // A provider can still be holding the original locator from the
-        // saved conversation. Publish the next launch at that same path.
-        match std::fs::symlink_metadata(&current) {
-            Ok(_) => Err(invalid("ambiguous renamed Actor MCP locator")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(previous),
-            Err(error) => Err(error),
-        }
-    } else {
-        Ok(current)
-    }
+    Ok((current, previous))
 }
 
 /// Removal happens after the Actor removal commits; Stop retains the locator
